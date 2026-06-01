@@ -87,6 +87,30 @@ pub struct GaleraCluster {
     /// True for clusters WolfStack provisioned (vs adopted existing).
     #[serde(default)]
     pub provisioned: bool,
+    /// MaxScale proxies WolfStack provisioned in front of this cluster. Kept here
+    /// (not in `nodes`) because a proxy is NOT a Galera member — status, recovery
+    /// and the gcomm member list must never treat it as one.
+    #[serde(default)]
+    pub proxies: Vec<MaxScaleProxy>,
+}
+
+/// A MaxScale proxy provisioned in front of a Galera cluster. The readwritesplit
+/// listener is the single endpoint apps point at; MaxScale routes writes to the
+/// primary and spreads reads across the synced members.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaxScaleProxy {
+    /// WolfStack host node id that runs the proxy container.
+    #[serde(default)]
+    pub node_id: String,
+    /// Proxy container name on that host (always LXC).
+    pub container: String,
+    /// Address apps reach the proxy on (its WolfNet IP).
+    pub address: String,
+    /// readwritesplit listener port (the endpoint apps connect to).
+    #[serde(default = "default_mysql_port")]
+    pub listener_port: u16,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -696,6 +720,7 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
         db_password_enc: String::new(),
         created_at: chrono::Utc::now().to_rfc3339(),
         provisioned: true,
+        proxies: Vec::new(),
     }, Some(&p.root_password))?;
 
     // 2. Install MariaDB + Galera on each node (after its init settles).
@@ -754,6 +779,407 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
 
     logln(log, "All nodes joined — cluster is up.");
     Ok(saved)
+}
+
+// ── Grow an existing cluster (add nodes) ─────────────────────────────
+
+/// Body for POST /api/galera/clusters/{id}/add-nodes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddNodesRequest {
+    /// New container names to create + join (built on the cluster's owner host).
+    pub container_names: Vec<String>,
+    #[serde(default = "default_distro")]
+    pub distribution: String,
+    #[serde(default = "default_release")]
+    pub release: String,
+}
+
+/// Add new MariaDB+Galera nodes to an EXISTING cluster. The new LXC containers
+/// are created on THIS host (the cluster's owner — the frontend routes here),
+/// installed, configured to join the live cluster, then started so each requests
+/// an SST and copies the full dataset (users + grants included) from a synced
+/// donor. We NEVER bootstrap — the cluster is already primary. The existing LXC
+/// nodes' gcomm seed list is rewritten (no restart) to include the newcomers so
+/// a later cold recovery can find them. Returns the updated cluster.
+pub fn add_nodes(cluster: &GaleraCluster, p: &AddNodesRequest, log: &Sender<String>, ctx: &GaleraOpCtx) -> Result<GaleraCluster, String> {
+    let names: Vec<String> = p.container_names.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if names.is_empty() {
+        return Err("name at least one new node".into());
+    }
+    if cluster.nodes.is_empty() {
+        return Err("this cluster has no existing nodes to join — build a cluster instead".into());
+    }
+    if cluster.nodes.len() + names.len() > 9 {
+        return Err(format!("a cluster is capped at 9 nodes ({} existing + {} new exceeds it)", cluster.nodes.len(), names.len()));
+    }
+    let _ = install_cmd(&p.distribution)?; // validate distro up front
+    // Reject names that collide with an existing node, a proxy, OR each other.
+    let existing: HashSet<&str> = cluster.nodes.iter().map(|n| n.container.as_str())
+        .chain(cluster.proxies.iter().map(|x| x.container.as_str()))
+        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    for cname in &names {
+        safe_token(cname)?;
+        if existing.contains(cname.as_str()) {
+            return Err(format!("'{}' already exists in this cluster", cname));
+        }
+        if !seen.insert(cname.clone()) {
+            return Err(format!("duplicate new node name '{}'", cname));
+        }
+    }
+
+    // 1. Create + start each new container on this host, give it a WolfNet IP.
+    let mut new_nodes: Vec<GaleraNode> = Vec::new();
+    for cname in &names {
+        logln(log, format!("[{}] creating container…", cname));
+        crate::containers::lxc_create(cname, &p.distribution, &p.release, "amd64", None, None)?;
+        crate::containers::lxc_start(cname)?;
+        let ip = crate::containers::next_available_wolfnet_ip()
+            .ok_or("no free WolfNet IP available for the new node")?;
+        logln(log, format!("[{}] attaching WolfNet IP {}…", cname, ip));
+        let _ = crate::containers::lxc_attach_wolfnet(cname, &ip);
+        new_nodes.push(GaleraNode { node_id: ctx.self_id.clone(), container: cname.clone(), kind: "lxc".into(), address: ip, port: 3306, node_name: cname.clone() });
+    }
+
+    // Persist the new nodes NOW (status "unreachable" until they SST) so they
+    // appear immediately and survive a mid-join failure — same as provision.
+    let mut updated = cluster.clone();
+    updated.nodes.extend(new_nodes.iter().cloned());
+    logln(log, format!("Registered {} new node(s) on '{}'.", new_nodes.len(), cluster.name));
+    let saved = upsert_cluster(updated, None)?;
+
+    // 2. Install MariaDB + Galera on each new node, then stop it (it starts as a
+    //    joiner below — bootstrapping a second primary would split the cluster).
+    let install = install_cmd(&p.distribution)?;
+    for n in &new_nodes {
+        logln(log, format!("[{}] waiting for container to be ready…", n.container));
+        wait_container_ready(&n.container);
+        logln(log, format!("[{}] installing MariaDB + Galera…", n.container));
+        run_install(&n.container, install, log)?;
+        let _ = svc("lxc", &n.container, "stop");
+    }
+
+    // 3. Full member list = existing + new. New nodes get the complete gcomm so
+    //    they can seed off any member.
+    let gcomm = saved.nodes.iter().map(|n| n.address.as_str()).collect::<Vec<_>>().join(",");
+    let cnf_path = galera_cnf_path(&p.distribution);
+    for n in &new_nodes {
+        let provider = detect_galera_provider(&n.container, &p.distribution);
+        let cnf = galera_cnf(&provider, &saved.name, &gcomm, &n.address, &n.node_name, &saved.sst_method);
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(cnf.as_bytes());
+        lxc_exec(&n.container, &format!("mkdir -p \"$(dirname {path})\" && printf %s '{b64}' | base64 -d > {path}", path = cnf_path, b64 = b64))?;
+    }
+
+    // 4. Point the existing nodes' seed lists at the full membership so a future
+    //    cold recovery (which can bootstrap any node) can locate the newcomers.
+    //    Best-effort: a transiently-unreachable peer must not fail the add — the
+    //    new nodes already joined off the live members. LXC only; a Docker node's
+    //    config is image-managed, so we note it and skip.
+    for n in &cluster.nodes {
+        if n.kind == "docker" {
+            logln(log, format!("[{}] Docker node — update its gcomm wherever it's managed (skipped).", n.container));
+            continue;
+        }
+        let host = locate_host(ctx, &n.kind, &n.container, &n.node_id).unwrap_or_else(|_| n.node_id.clone());
+        match set_gcomm(ctx, &host, &n.kind, &n.container, &gcomm) {
+            Ok(()) => logln(log, format!("[{}] seed list updated to {} members.", n.container, saved.nodes.len())),
+            Err(e) => logln(log, format!("[{}] couldn't update seed list ({}); it stays usable while a current member is up.", n.container, e)),
+        }
+    }
+
+    // 5. Start each new node — it requests an SST from a synced donor, copying
+    //    the WHOLE dataset, so the first sync can take a while on a large cluster.
+    //    Best-effort start: if `systemctl start` reports failure (e.g. the SST
+    //    outran the unit's start timeout) the transfer is still running and the
+    //    node is already registered, so we surface it and let the dashboard track
+    //    it to Synced rather than aborting a half-finished add.
+    for n in &new_nodes {
+        logln(log, format!("[{}] joining cluster (SST — copies the full dataset, may take a while)…", n.container));
+        if let Err(e) = svc("lxc", &n.container, "start") {
+            logln(log, format!("[{}] start reported '{}' — if the dataset is large the SST is still running; watch the dashboard until it shows Synced.", n.container, e));
+        }
+    }
+
+    logln(log, format!("{} node(s) added to '{}' — they appear as joining until the SST completes.", new_nodes.len(), saved.name));
+    Ok(saved)
+}
+
+/// Rewrite the `wsrep_cluster_address` seed list in a node's Galera config IN
+/// PLACE — replace only that one line, leave everything else untouched. Used
+/// when growing a cluster so existing nodes learn the newcomers. Takes effect
+/// on the node's next MariaDB restart; we deliberately do NOT restart here.
+pub fn set_gcomm_local(kind: &str, container: &str, gcomm: &str) -> Result<(), String> {
+    safe_token(container)?;
+    // gcomm is a comma-separated address list (IPv4/IPv6/hostnames-as-IPs here):
+    // only hex digits + . : , — nothing that could escape the shell or awk.
+    if gcomm.is_empty() || !gcomm.chars().all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | ':' | ',')) {
+        return Err("invalid gcomm member list".into());
+    }
+    let new_line = format!("wsrep_cluster_address=\"gcomm://{}\"", gcomm);
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(new_line.as_bytes());
+    // Find the file that declares wsrep_cluster_address and replace that line.
+    // The replacement is base64'd then awk-substituted as a literal (-v), so the
+    // member list never reaches `sh -c` raw and no regex metachar is interpreted.
+    let script = format!(
+        "f=$(grep -rlsE '^[[:space:]]*wsrep_cluster_address' /etc/mysql /etc/my.cnf /etc/my.cnf.d 2>/dev/null | head -1); \
+         if [ -z \"$f\" ]; then echo 'no galera config file declaring wsrep_cluster_address found'; exit 1; fi; \
+         line=$(printf %s '{b64}' | base64 -d); \
+         awk -v repl=\"$line\" '/^[[:space:]]*wsrep_cluster_address[[:space:]]*=/{{print repl; next}} {{print}}' \"$f\" > \"$f.wstmp\" && mv \"$f.wstmp\" \"$f\"",
+        b64 = b64);
+    cexec(kind, container, &script).map(|_| ())
+}
+
+/// POST the gcomm rewrite to a peer host's local endpoint (the cluster owner
+/// calls this for members that live on other hosts).
+fn set_gcomm_remote(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, gcomm: &str) -> Result<(), String> {
+    let target = ctx.nodes.iter().find(|n| n.id == host)
+        .ok_or_else(|| format!("host '{}' is not a node in this cluster", host))?;
+    let path = format!("/api/galera/local/gcomm/{}/{}", kind, container);
+    let urls = crate::api::build_node_urls(&target.address, target.port, &path);
+    let secret = ctx.cluster_secret.clone();
+    let body = serde_json::json!({ "gcomm": gcomm });
+    ctx.rt.block_on(async move {
+        let mut last = format!("could not reach host '{}'", host);
+        for url in &urls {
+            match crate::api::API_HTTP_CLIENT.post(url)
+                .header("X-WolfStack-Secret", &secret)
+                .timeout(std::time::Duration::from_secs(20))
+                .json(&body)
+                .send().await
+            {
+                Ok(resp) => {
+                    let ok = resp.status().is_success();
+                    let v: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if ok { return Ok(()); }
+                    last = v.get("error").and_then(|e| e.as_str()).unwrap_or("remote error").to_string();
+                }
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(last)
+    })
+}
+
+/// Rewrite a node's gcomm seed list, host-aware (local fast-path for self).
+fn set_gcomm(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, gcomm: &str) -> Result<(), String> {
+    if host.is_empty() || host == ctx.self_id {
+        set_gcomm_local(kind, container, gcomm)
+    } else {
+        set_gcomm_remote(ctx, host, kind, container, gcomm)
+    }
+}
+
+// ── MaxScale proxy provisioning ──────────────────────────────────────
+
+/// Body for POST /api/galera/clusters/{id}/maxscale.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MaxScaleRequest {
+    /// Container name for the proxy (created as LXC on the cluster owner host).
+    pub container_name: String,
+    #[serde(default = "default_distro")]
+    pub distribution: String,
+    #[serde(default = "default_release")]
+    pub release: String,
+    /// MaxScale's own DB user (monitor + service auth). Created on the cluster.
+    #[serde(default = "default_maxscale_user")]
+    pub proxy_user: String,
+    pub proxy_password: String,
+    /// readwritesplit listener port apps connect to.
+    #[serde(default = "default_mysql_port")]
+    pub listener_port: u16,
+}
+fn default_maxscale_user() -> String { "maxscale".into() }
+
+/// MaxScale package install per distro. The MariaDB repo-setup script URL is the
+/// official one from MariaDB's MaxScale install guide
+/// (mariadb.com/docs/maxscale … installation-guide). MaxScale ships only for
+/// Debian/Ubuntu + RHEL/Rocky — Alpine/Arch have no official package, so we
+/// refuse rather than half-install something that won't run.
+fn maxscale_install_cmd(distro: &str) -> Result<&'static str, String> {
+    Ok(match distro_family(distro) {
+        "deb" => "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y curl ca-certificates && curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | bash && apt-get update -y && apt-get install -y maxscale",
+        "rhel" => "curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | bash && (dnf install -y maxscale || yum install -y maxscale)",
+        other => return Err(format!(
+            "MaxScale has no official package for '{}' — build the proxy on a Debian/Ubuntu or RHEL/Rocky base.", other)),
+    })
+}
+
+/// Render /etc/maxscale.cnf for a Galera cluster: a [serverN] per member, a
+/// galeramon monitor, a readwritesplit service, and its listener. `servers` is
+/// (label, address, port) tuples. Values come from validated names + IPs; the
+/// password is charset-restricted (see `valid_proxy_secret`) so it's INI/SQL-safe.
+fn maxscale_cnf(servers: &[(String, String, u16)], user: &str, password: &str, listener_port: u16) -> String {
+    let mut s = String::from("[maxscale]\nthreads=auto\n\n");
+    for (label, addr, port) in servers {
+        s.push_str(&format!("[{label}]\ntype=server\naddress={addr}\nport={port}\n\n", label = label, addr = addr, port = port));
+    }
+    let list = servers.iter().map(|(l, _, _)| l.as_str()).collect::<Vec<_>>().join(",");
+    // galeramon elects one synced member as the write master; readwritesplit
+    // sends writes there and balances reads across the rest.
+    s.push_str(&format!(
+        "[Galera-Monitor]\ntype=monitor\nmodule=galeramon\nservers={list}\nuser={user}\npassword={pw}\n\n",
+        list = list, user = user, pw = password));
+    s.push_str(&format!(
+        "[Read-Write-Service]\ntype=service\nrouter=readwritesplit\nservers={list}\nuser={user}\npassword={pw}\n\n",
+        list = list, user = user, pw = password));
+    s.push_str(&format!(
+        "[Read-Write-Listener]\ntype=listener\nservice=Read-Write-Service\naddress=0.0.0.0\nport={port}\n",
+        port = listener_port));
+    s
+}
+
+/// A password that's safe to drop into BOTH a maxscale.cnf value AND a SQL
+/// string literal without escaping surprises: no quotes, backslash, whitespace,
+/// or INI comment chars. Restrictive on purpose — this is a fresh user we mint.
+fn valid_proxy_secret(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | '%' | '+' | '=' | '!' | '~'))
+}
+
+/// Create MaxScale's combined monitor+service user on the cluster, over a normal
+/// SQL connection to the first reachable member (Galera replicates it to all).
+/// Privileges verified against MariaDB's MaxScale docs: SELECT on mysql.* +
+/// SHOW DATABASES for service auth; REPLICATION CLIENT (accepted on every
+/// MariaDB version we provision/adopt) + PROCESS for galeramon.
+fn maxscale_create_user(cluster: &GaleraCluster, ctx: &GaleraOpCtx, user: &str, password: &str) -> Result<(), String> {
+    let pw = dec_secret(&cluster.db_password_enc);
+    let admin = cluster.db_user.clone();
+    let nodes = cluster.nodes.clone();
+    let stmts = vec![
+        format!("CREATE USER IF NOT EXISTS '{u}'@'%' IDENTIFIED BY '{p}'", u = user, p = password),
+        format!("ALTER USER '{u}'@'%' IDENTIFIED BY '{p}'", u = user, p = password),
+        format!("GRANT SELECT ON mysql.* TO '{u}'@'%'", u = user),
+        format!("GRANT SHOW DATABASES, PROCESS, REPLICATION CLIENT ON *.* TO '{u}'@'%'", u = user),
+        "FLUSH PRIVILEGES".to_string(),
+    ];
+    ctx.rt.block_on(async move {
+        let mut last = "no reachable cluster member to create the MaxScale user on".to_string();
+        for n in &nodes {
+            let params = crate::mysql_editor::ConnParams {
+                host: n.address.clone(), port: n.port, user: admin.clone(),
+                password: pw.clone(), database: None,
+                db_type: crate::mysql_editor::DbType::default(),
+            };
+            // Probe this member first; skip unreachable ones.
+            if crate::mysql_editor::execute_query(&params, "", "SELECT 1").await.is_err() {
+                last = format!("[{}] unreachable", n.container);
+                continue;
+            }
+            for s in &stmts {
+                if let Err(e) = crate::mysql_editor::execute_query(&params, "", s).await {
+                    return Err(format!("[{}] {}", n.container, e));
+                }
+            }
+            return Ok(());
+        }
+        Err(last)
+    })
+}
+
+/// Provision a MaxScale proxy in front of an existing cluster: create the proxy
+/// user on the cluster, build an LXC container on THIS host (the owner), install
+/// MaxScale, write a cluster-specific /etc/maxscale.cnf, and start it. Records
+/// the proxy on the cluster (NOT as a Galera member). Returns the updated cluster.
+pub fn provision_maxscale(cluster: &GaleraCluster, p: &MaxScaleRequest, log: &Sender<String>, ctx: &GaleraOpCtx) -> Result<GaleraCluster, String> {
+    let cname = p.container_name.trim().to_string();
+    safe_token(&cname)?;
+    safe_token(&p.proxy_user)?;
+    if !valid_proxy_secret(&p.proxy_password) {
+        return Err("proxy password must be 1–128 chars from letters, digits and . _ - @ % + = ! ~ (no quotes or spaces)".into());
+    }
+    if cluster.nodes.is_empty() {
+        return Err("this cluster has no nodes to proxy".into());
+    }
+    if cluster.nodes.iter().any(|n| n.container == cname) || cluster.proxies.iter().any(|x| x.container == cname) {
+        return Err(format!("'{}' already exists in this cluster", cname));
+    }
+    let install = maxscale_install_cmd(&p.distribution)?; // validate distro up front
+
+    // 1. Mint the proxy user on the cluster FIRST so MaxScale can authenticate
+    //    the moment it starts.
+    logln(log, "Creating the MaxScale proxy user on the cluster…");
+    maxscale_create_user(cluster, ctx, &p.proxy_user, &p.proxy_password)?;
+    logln(log, format!("Proxy user '{}' created (replicated to every node).", p.proxy_user));
+
+    // 2. Create + start the proxy container on this host, give it a WolfNet IP.
+    logln(log, format!("[{}] creating proxy container…", cname));
+    crate::containers::lxc_create(&cname, &p.distribution, &p.release, "amd64", None, None)?;
+    crate::containers::lxc_start(&cname)?;
+    let ip = crate::containers::next_available_wolfnet_ip()
+        .ok_or("no free WolfNet IP available for the proxy")?;
+    logln(log, format!("[{}] attaching WolfNet IP {}…", cname, ip));
+    let _ = crate::containers::lxc_attach_wolfnet(&cname, &ip);
+
+    // Record the proxy NOW so a mid-install failure doesn't strand it untracked.
+    let mut updated = cluster.clone();
+    updated.proxies.push(MaxScaleProxy {
+        node_id: ctx.self_id.clone(),
+        container: cname.clone(),
+        address: ip.clone(),
+        listener_port: p.listener_port,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+    let saved = upsert_cluster(updated, None)?;
+
+    // 3. Install MaxScale (MariaDB repo + package).
+    logln(log, format!("[{}] waiting for container to be ready…", cname));
+    wait_container_ready(&cname);
+    logln(log, format!("[{}] installing MaxScale…", cname));
+    run_install(&cname, install, log)?;
+
+    // 4. Write /etc/maxscale.cnf for this cluster's members.
+    let servers: Vec<(String, String, u16)> = saved.nodes.iter().enumerate()
+        .map(|(i, n)| (format!("server{}", i + 1), n.address.clone(), n.port))
+        .collect();
+    let cnf = maxscale_cnf(&servers, &p.proxy_user, &p.proxy_password, p.listener_port);
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(cnf.as_bytes());
+    lxc_exec(&cname, &format!("printf %s '{b64}' | base64 -d > /etc/maxscale.cnf", b64 = b64))?;
+
+    // 5. Enable + start MaxScale. The proxy base is always systemd (we reject
+    //    Alpine/Arch above), so verify it actually came up — stream the restart
+    //    and fail loudly if the service isn't active, rather than reporting
+    //    "ready" for a proxy that silently crashed on a bad config.
+    logln(log, format!("[{}] starting MaxScale…", cname));
+    let _ = lxc_exec(&cname, "systemctl enable maxscale >/dev/null 2>&1 || true"); // boot-persist (best-effort)
+    cexec_streamed("lxc", &cname, "systemctl restart maxscale && sleep 1 && systemctl is-active maxscale", log)
+        .map_err(|e| format!(
+            "MaxScale didn't start in '{}' ({}). Console in and run 'maxscale --config-check -f /etc/maxscale.cnf' to see why.",
+            cname, e))?;
+
+    logln(log, format!(
+        "MaxScale ready — point apps at {}:{}. It routes writes to the elected primary and balances reads across synced members.",
+        ip, p.listener_port));
+    Ok(saved)
+}
+
+/// Remove a MaxScale proxy from a cluster: best-effort stop its MaxScale service
+/// (when the container is on THIS host), then drop the tracking entry. The
+/// container's filesystem is left intact — the operator can delete the (stopped)
+/// container from the Containers view. Returns the updated cluster.
+pub fn remove_proxy(cluster_id: &str, container: &str) -> Result<GaleraCluster, String> {
+    safe_token(container)?;
+    // Stop MaxScale if this proxy container lives on this host (the owner runs
+    // this op). A proxy holds no data, so leaving the stopped container is safe.
+    if container_exists_local("lxc", container) {
+        let _ = cexec("lxc", container, "systemctl stop maxscale 2>/dev/null || true");
+    }
+    let _io = GALERA_IO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = load_config();
+    let updated = {
+        let c = cfg.clusters.iter_mut().find(|c| c.id == cluster_id)
+            .ok_or_else(|| format!("cluster '{}' not found", cluster_id))?;
+        let before = c.proxies.len();
+        c.proxies.retain(|x| x.container != container);
+        if c.proxies.len() == before {
+            return Err(format!("proxy '{}' is not registered on this cluster", container));
+        }
+        c.clone()
+    };
+    save_config(&cfg)?;
+    Ok(updated)
 }
 
 // ── Lifecycle + evidence-based recovery (host-aware) ─────────────────
@@ -1157,6 +1583,7 @@ pub fn adopt_cluster(
         db_password_enc: String::new(),
         created_at: chrono::Utc::now().to_rfc3339(),
         provisioned: false,
+        proxies: Vec::new(),
     };
     let pw = if db_password.is_empty() { None } else { Some(db_password) };
     upsert_cluster(cluster, pw)

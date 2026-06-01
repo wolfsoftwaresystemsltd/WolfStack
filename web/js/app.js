@@ -63238,8 +63238,8 @@ async function galeraLoadClusters() {
     (galeraState.clusters || []).forEach(c => {
         fetch(galeraNodeBase(galeraClusterOwner(c), 'clusters/' + encodeURIComponent(c.id) + '/status'))
             .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
-            .then(st => { if (myGen === galeraState.gen) { galeraState.statuses[c.id] = st; galeraPushHistory(st); galeraRender(); } })
-            .catch(e => { if (myGen === galeraState.gen) { galeraState.statusErrors[c.id] = (e && e.message) || 'unreachable'; galeraRender(); } });
+            .then(st => { if (myGen === galeraState.gen) { galeraState.statuses[c.id] = st; galeraState.statusErrors[c.id] = ''; galeraPushHistory(st); galeraUpdateLive(c.id); } })
+            .catch(e => { if (myGen === galeraState.gen) { galeraState.statusErrors[c.id] = (e && e.message) || 'unreachable'; galeraUpdateLive(c.id); } });
     });
 }
 
@@ -63337,19 +63337,59 @@ function galeraDrawMetricChart(canvasId, legendId, seriesByNode, fmt) {
     });
 }
 
-// Redraw every cluster's metric grid from accumulated history.
-function galeraDrawCharts() {
-    (galeraState.clusters || []).forEach(c => {
-        GALERA_METRICS.forEach(m => {
-            const seriesByNode = {};
-            (c.nodes || []).forEach(n => {
-                const h = (galeraState.history || {})[c.id + '|' + n.container];
-                if (!h) return;
-                seriesByNode[n.container] = (m.kind === 'rate') ? galeraRateSeries(h[m.src], h.t) : (h[m.key] || []);
-            });
-            galeraDrawMetricChart('galera-chart-' + c.id + '-' + m.key, 'galera-legend-' + c.id + '-' + m.key, seriesByNode, m.fmt);
+// Redraw one cluster's metric grid from accumulated history.
+function galeraDrawClusterCharts(c) {
+    GALERA_METRICS.forEach(m => {
+        const seriesByNode = {};
+        (c.nodes || []).forEach(n => {
+            const h = (galeraState.history || {})[c.id + '|' + n.container];
+            if (!h) return;
+            seriesByNode[n.container] = (m.kind === 'rate') ? galeraRateSeries(h[m.src], h.t) : (h[m.key] || []);
         });
+        galeraDrawMetricChart('galera-chart-' + c.id + '-' + m.key, 'galera-legend-' + c.id + '-' + m.key, seriesByNode, m.fmt);
     });
+}
+
+// Redraw every cluster's metric grid.
+function galeraDrawCharts() {
+    (galeraState.clusters || []).forEach(galeraDrawClusterCharts);
+}
+
+// The cluster's health badge HTML (status-dependent).
+function galeraBadgeHtml(st, statusErr) {
+    if (!st && statusErr) return `<span title="${escapeAttr(statusErr)}" style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#6b728022;color:#9ca3af;">status unavailable</span>`;
+    if (!st) return `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#6b728022;color:#9ca3af;">checking…</span>`;
+    if (st.split_brain) return `<span title="Reachable nodes disagree on cluster identity or size" style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:700;background:#ef444422;color:#ef4444;">⚠ SPLIT-BRAIN</span>`;
+    if (st.healthy) return `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#22c55e22;color:#22c55e;">● healthy</span>`;
+    return `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#f59e0b22;color:#f59e0b;">degraded</span>`;
+}
+
+// The cluster's summary line HTML (status-dependent).
+function galeraSummaryHtml(st, statusErr) {
+    return st ? escapeHtml(st.summary || '')
+        : (statusErr ? `<span style="color:var(--danger);">Couldn't reach the owning host for status: ${escapeHtml(statusErr)}</span>`
+                     : 'Querying node status…');
+}
+
+// Update a cluster card's status-dependent bits IN PLACE (badge, summary,
+// per-node cells) + redraw its charts — no innerHTML rebuild, so no flashing.
+function galeraUpdateLive(cid) {
+    const c = (galeraState.clusters || []).find(x => x.id === cid);
+    if (!c) return;
+    const st = galeraState.statuses[cid];
+    const statusErr = galeraState.statusErrors[cid];
+    const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+    set('gbadge-' + cid, galeraBadgeHtml(st, statusErr));
+    set('gsum-' + cid, galeraSummaryHtml(st, statusErr));
+    const byC = {};
+    if (st && Array.isArray(st.nodes)) st.nodes.forEach(ns => { byC[ns.container] = ns; });
+    (c.nodes || []).forEach(n => {
+        const ns = byC[n.container];
+        set('gst-' + cid + '-' + n.container, galeraNodeStateBadge(ns));
+        set('gcl-' + cid + '-' + n.container, escapeHtml(ns && ns.reachable ? (ns.cluster_status || '—') : '—'));
+        set('gsz-' + cid + '-' + n.container, escapeHtml(ns && ns.reachable ? String(ns.cluster_size) : '—'));
+    });
+    galeraDrawClusterCharts(c);
 }
 
 // Lightweight periodic status refresh (keeps status live + grows the charts)
@@ -63360,8 +63400,8 @@ function galeraRefreshStatus() {
     (galeraState.clusters || []).forEach(c => {
         fetch(galeraNodeBase(galeraClusterOwner(c), 'clusters/' + encodeURIComponent(c.id) + '/status'))
             .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
-            .then(st => { if (galeraState.gen === myGen && currentPage === 'galera-cluster') { galeraState.statuses[c.id] = st; galeraState.statusErrors[c.id] = ''; galeraPushHistory(st); galeraRender(); } })
-            .catch(e => { if (galeraState.gen === myGen && currentPage === 'galera-cluster') { galeraState.statusErrors[c.id] = (e && e.message) || 'unreachable'; galeraRender(); } });
+            .then(st => { if (galeraState.gen === myGen && currentPage === 'galera-cluster') { galeraState.statuses[c.id] = st; galeraState.statusErrors[c.id] = ''; galeraPushHistory(st); galeraUpdateLive(c.id); } })
+            .catch(e => { if (galeraState.gen === myGen && currentPage === 'galera-cluster') { galeraState.statusErrors[c.id] = (e && e.message) || 'unreachable'; galeraUpdateLive(c.id); } });
     });
 }
 
@@ -63388,18 +63428,7 @@ function galeraClusterCardHtml(c) {
     const st = galeraState.statuses[c.id];
     const statusErr = galeraState.statusErrors[c.id];
     const nodeCount = (c.nodes || []).length;
-    let badge;
-    if (!st && statusErr) {
-        badge = `<span title="${escapeAttr(statusErr)}" style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#6b728022;color:#9ca3af;">status unavailable</span>`;
-    } else if (!st) {
-        badge = `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#6b728022;color:#9ca3af;">checking…</span>`;
-    } else if (st.split_brain) {
-        badge = `<span title="Reachable nodes disagree on cluster identity or size" style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:700;background:#ef444422;color:#ef4444;">⚠ SPLIT-BRAIN</span>`;
-    } else if (st.healthy) {
-        badge = `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#22c55e22;color:#22c55e;">● healthy</span>`;
-    } else {
-        badge = `<span style="display:inline-block;padding:2px 9px;border-radius:4px;font-size:11px;font-weight:600;background:#f59e0b22;color:#f59e0b;">degraded</span>`;
-    }
+    const badge = galeraBadgeHtml(st, statusErr);
 
     const statusById = {};
     if (st && Array.isArray(st.nodes)) st.nodes.forEach(ns => { statusById[ns.container] = ns; });
@@ -63420,9 +63449,9 @@ function galeraClusterCardHtml(c) {
             <td style="padding:6px 8px;font-family:var(--font-mono,monospace);font-size:12px;">${escapeHtml(n.container)}</td>
             <td style="padding:6px 8px;font-family:var(--font-mono,monospace);font-size:12px;color:var(--text-muted);">${escapeHtml(n.address)}:${escapeHtml(String(n.port || 3306))}</td>
             <td style="padding:6px 8px;font-size:12px;color:var(--text-muted);" title="Host that runs this container (updates automatically if it's migrated)">${escapeHtml(hostLabel)}</td>
-            <td style="padding:6px 8px;">${galeraNodeStateBadge(ns)}</td>
-            <td style="padding:6px 8px;font-size:12px;">${escapeHtml(String(prim))}</td>
-            <td style="padding:6px 8px;font-size:12px;text-align:center;">${escapeHtml(String(size))}</td>
+            <td id="gst-${c.id}-${n.container}" style="padding:6px 8px;">${galeraNodeStateBadge(ns)}</td>
+            <td id="gcl-${c.id}-${n.container}" style="padding:6px 8px;font-size:12px;">${escapeHtml(String(prim))}</td>
+            <td id="gsz-${c.id}-${n.container}" style="padding:6px 8px;font-size:12px;text-align:center;">${escapeHtml(String(size))}</td>
             <td style="padding:6px 8px;text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" title="Open a terminal on ${escapeAttr(n.container)} (run mariadb there to reach the database)" data-galera-act="console" data-cid="${cid}" data-cont="${cont}" data-kind="${escapeAttr(n.kind || 'lxc')}" data-host="${escapeAttr(n.node_id || '')}" style="padding:2px 8px;font-size:11px;border-color:var(--accent,#3b82f6);color:var(--accent,#60a5fa);"><span class="ws-icon-clean-wrap" data-icon="terminal"></span> Console</button>
                 ${act('Start', 'start')}
@@ -63432,9 +63461,7 @@ function galeraClusterCardHtml(c) {
         </tr>`;
     }).join('');
 
-    const summary = st ? escapeHtml(st.summary || '')
-        : (statusErr ? `<span style="color:var(--danger);">Couldn't reach the owning host for status: ${escapeHtml(statusErr)}</span>`
-                     : 'Querying node status…');
+    const summary = galeraSummaryHtml(st, statusErr);
     const splitWarn = st && st.split_brain
         ? `<div role="alert" style="margin:10px 0;padding:8px 12px;border:1px solid #ef4444;border-radius:6px;background:#ef444411;color:#fca5a5;font-size:12px;">
              Split-brain detected — the cluster has fractured into separate components. Use <b>Recover</b> to stop every node, find the most up-to-date one, and rebuild around it. WolfStack will refuse to bootstrap a node whose position is unknown.
@@ -63455,22 +63482,45 @@ function galeraClusterCardHtml(c) {
             </div>
         </div>`;
 
+    // MaxScale proxies provisioned for this cluster (NOT Galera members).
+    const proxies = c.proxies || [];
+    const proxiesHtml = proxies.length ? `
+        <div style="margin-top:14px;">
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;">MaxScale proxies</div>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+                ${proxies.map(px => {
+                    const pcont = escapeAttr(px.container);
+                    return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;">
+                        <span style="font-family:var(--font-mono,monospace);font-weight:600;">${escapeHtml(px.container)}</span>
+                        <span style="color:var(--text-muted);">apps connect to <b style="font-family:var(--font-mono,monospace);color:var(--text-primary);">${escapeHtml(px.address)}:${escapeHtml(String(px.listener_port || 3306))}</b></span>
+                        <span style="font-size:10px;color:var(--text-muted);">${escapeHtml(px.node_id ? galeraHostName(px.node_id) : '')}</span>
+                        <span style="margin-left:auto;display:flex;gap:6px;">
+                            <button class="btn btn-sm" title="Open a terminal on ${pcont}" data-galera-act="console" data-cid="${escapeAttr(c.id)}" data-cont="${pcont}" data-kind="lxc" data-host="${escapeAttr(px.node_id || '')}" style="padding:2px 8px;font-size:11px;border-color:var(--accent,#3b82f6);color:var(--accent,#60a5fa);"><span class="ws-icon-clean-wrap" data-icon="terminal"></span> Console</button>
+                            <button class="btn btn-sm" title="Stop and remove this proxy" data-galera-act="rmproxy" data-cid="${escapeAttr(c.id)}" data-cont="${pcont}" style="padding:2px 8px;font-size:11px;border-color:var(--danger);color:var(--danger);">Remove</button>
+                        </span>
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>` : '';
+
     return `<div class="card" style="margin-bottom:16px;">
         <div class="card-body">
             <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
                 <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                     <h3 style="margin:0;font-size:16px;">${escapeHtml(c.name)}</h3>
-                    ${badge}
+                    <span id="gbadge-${c.id}">${badge}</span>
                     <span style="font-size:11px;color:var(--text-muted);">${nodeCount} node${nodeCount === 1 ? '' : 's'} · SST ${escapeHtml(c.sst_method || 'mariabackup')} · ${c.provisioned ? 'provisioned' : 'adopted'}</span>
                 </div>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
                     <button class="btn btn-sm" data-galera-act="refresh" title="Refresh status">↻</button>
+                    <button class="btn btn-sm" data-galera-act="addnode" data-cid="${escapeAttr(c.id)}" title="Add more MariaDB+Galera nodes to this cluster">+ Add node</button>
+                    <button class="btn btn-sm" data-galera-act="maxscale" data-cid="${escapeAttr(c.id)}" title="Provision a MaxScale proxy pre-configured for this cluster">+ MaxScale</button>
                     <button class="btn btn-sm" data-galera-act="analyze" data-cid="${escapeAttr(c.id)}" title="Check cache, threads and other settings against this cluster's resources">Analyze</button>
                     <button class="btn btn-sm" data-galera-act="recover" data-cid="${escapeAttr(c.id)}" style="border-color:#f59e0b;color:#f59e0b;">Recover</button>
                     <button class="btn btn-sm" data-galera-act="forget" data-cid="${escapeAttr(c.id)}" title="Forget this cluster (does not destroy containers)" style="border-color:var(--danger);color:var(--danger);">Forget</button>
                 </div>
             </div>
-            <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">${summary}</div>
+            <div id="gsum-${c.id}" style="font-size:12px;color:var(--text-muted);margin-top:6px;">${summary}</div>
             ${splitWarn}
             <div style="overflow-x:auto;margin-top:10px;">
                 <table style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -63487,6 +63537,7 @@ function galeraClusterCardHtml(c) {
                 </table>
             </div>
             ${(c.nodes && c.nodes.length) ? metricsGrid : ''}
+            ${proxiesHtml}
         </div>
     </div>`;
 }
@@ -63538,6 +63589,9 @@ function galeraBindDelegation() {
         else if (act === 'forget') galeraDelete(cid);
         else if (act === 'refresh') galeraLoadClusters();
         else if (act === 'analyze') galeraAnalyze(cid);
+        else if (act === 'addnode') galeraAddNodesOpen(cid);
+        else if (act === 'maxscale') galeraMaxScaleOpen(cid);
+        else if (act === 'rmproxy') galeraRemoveProxy(cid, btn.getAttribute('data-cont') || '');
         else if (act === 'console') galeraOpenConsole(btn.getAttribute('data-cont') || '', btn.getAttribute('data-kind') || 'lxc', btn.getAttribute('data-host') || '');
     });
 }
@@ -63702,6 +63756,189 @@ function galeraCreateSubmit() {
     };
     galeraCloseModal();
     galeraStreamJob('Building “' + name + '”', galeraNodeBase(host, 'provision'), body);
+}
+
+// ── Add nodes to an existing cluster ─────────────────────────────────
+
+let _ganRow = 0;
+function galeraAddNodeRow(name) {
+    const w = document.getElementById('gan-rows'); if (!w) return;
+    const idx = _ganRow++;
+    w.insertAdjacentHTML('beforeend', `<div class="gan-node-row" data-idx="${idx}" style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">
+        <input class="form-control gan-cname" value="${escapeAttr(name || '')}" placeholder="container name" style="font-size:12px;">
+        <button class="btn btn-sm" onclick="galeraAddNodeRemoveRow(${idx})" title="Remove" style="padding:4px 10px;">×</button>
+    </div>`);
+}
+function galeraAddNodeRemoveRow(idx) { const r = document.querySelector(`.gan-node-row[data-idx="${idx}"]`); if (r) r.remove(); }
+
+function galeraAddNodesOpen(cid) {
+    const c = (galeraState.clusters || []).find(x => x.id === cid);
+    if (!c) return;
+    _ganRow = 0;
+    const ownerHost = galeraHostName(galeraClusterOwner(c));
+    const existing = (c.nodes || []).length;
+    const html = `
+        <input type="hidden" id="gan-cid" value="${escapeAttr(cid)}">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.5;">
+            New nodes are built on <b>${escapeHtml(ownerHost)}</b> (this cluster's home host), installed, then joined to
+            <b>${escapeHtml(c.name)}</b> by SST — each copies the full dataset from a synced member. To place a node on
+            different hardware, build it here then migrate the container. Cluster has ${existing} node${existing === 1 ? '' : 's'} now (max 9).
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;">
+            <label>Distribution
+                <select id="gan-distro" class="form-control" style="margin-top:4px;" onchange="galeraAddNodeDistroChanged()">
+                    <option value="debian">Debian</option>
+                    <option value="ubuntu">Ubuntu</option>
+                    <option value="rocky">Rocky / RHEL</option>
+                    <option value="alpine">Alpine</option>
+                </select>
+            </label>
+            <label>Release
+                <input id="gan-release" class="form-control" value="bookworm" style="margin-top:4px;">
+            </label>
+        </div>
+        <div style="margin-top:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-size:12px;color:var(--text-muted);">New containers to add</span>
+                <button class="btn btn-sm" onclick="galeraAddNodeRow()" style="padding:2px 10px;">+ Add node</button>
+            </div>
+            <div id="gan-rows"></div>
+        </div>
+        <div id="gan-error" role="alert" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+            <button class="btn btn-sm" onclick="galeraCloseModal()">Cancel</button>
+            <button class="btn btn-primary btn-sm" onclick="galeraAddNodesSubmit()">Add to cluster</button>
+        </div>`;
+    galeraOpenModal('Add nodes to ' + c.name, html, 560);
+    galeraAddNodeRow('galera-' + (existing + 1));
+}
+
+function galeraAddNodeDistroChanged() {
+    const d = (document.getElementById('gan-distro') || {}).value;
+    const rel = { debian: 'bookworm', ubuntu: 'noble', rocky: '9', alpine: '3.20' }[d] || '';
+    const el = document.getElementById('gan-release'); if (el) el.value = rel;
+}
+
+function galeraAddNodesSubmit() {
+    const cid = (document.getElementById('gan-cid') || {}).value || '';
+    const c = (galeraState.clusters || []).find(x => x.id === cid);
+    const err = document.getElementById('gan-error');
+    const fail = m => { if (err) { err.textContent = m; err.style.display = 'block'; } };
+    if (!c) return fail('Cluster not found — refresh and retry.');
+    const distro = document.getElementById('gan-distro').value;
+    const release = (document.getElementById('gan-release').value || '').trim();
+    const nameOk = /^[A-Za-z0-9._-]+$/;
+    const names = [];
+    document.querySelectorAll('.gan-cname').forEach(i => { const v = (i.value || '').trim(); if (v) names.push(v); });
+    if (!names.length) return fail('Name at least one new node.');
+    for (const n of names) if (!nameOk.test(n)) return fail(`Container name "${n}" may only contain letters, digits, - _ .`);
+    if (new Set(names).size !== names.length) return fail('New container names must be unique.');
+    const existingNames = new Set([...(c.nodes || []).map(n => n.container), ...(c.proxies || []).map(x => x.container)]);
+    for (const n of names) if (existingNames.has(n)) return fail(`"${n}" already exists in this cluster.`);
+    if ((c.nodes || []).length + names.length > 9) return fail('A cluster is capped at 9 nodes.');
+    if (!release) return fail('Release is required.');
+    galeraCloseModal();
+    galeraStreamJob('Adding nodes to “' + c.name + '”', galeraOwnerBase(cid, 'clusters/' + encodeURIComponent(cid) + '/add-nodes'),
+        { container_names: names, distribution: distro, release: release });
+}
+
+// ── Provision a MaxScale proxy ───────────────────────────────────────
+
+function galeraMaxScaleOpen(cid) {
+    const c = (galeraState.clusters || []).find(x => x.id === cid);
+    if (!c) return;
+    const ownerHost = galeraHostName(galeraClusterOwner(c));
+    const members = (c.nodes || []).length;
+    const suggested = (c.name || 'galera').replace(/[^A-Za-z0-9._-]/g, '-') + '-maxscale';
+    const html = `
+        <input type="hidden" id="gmx-cid" value="${escapeAttr(cid)}">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.5;">
+            Builds a MaxScale proxy container on <b>${escapeHtml(ownerHost)}</b>, pre-configured for <b>${escapeHtml(c.name)}</b>:
+            a galeramon monitor over all ${members} member${members === 1 ? '' : 's'} and a read/write-split router. Apps point at
+            the proxy; writes go to the elected primary, reads spread across the synced members.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px;">
+            <label style="grid-column:1/-1;">Proxy container name
+                <input id="gmx-name" class="form-control" value="${escapeAttr(suggested)}" style="margin-top:4px;">
+            </label>
+            <label>Distribution
+                <select id="gmx-distro" class="form-control" style="margin-top:4px;" onchange="galeraMaxScaleDistroChanged()">
+                    <option value="debian">Debian</option>
+                    <option value="ubuntu">Ubuntu</option>
+                    <option value="rocky">Rocky / RHEL</option>
+                </select>
+            </label>
+            <label>Release
+                <input id="gmx-release" class="form-control" value="bookworm" style="margin-top:4px;">
+            </label>
+            <label>Proxy DB user
+                <input id="gmx-user" class="form-control" value="maxscale" style="margin-top:4px;">
+            </label>
+            <label>Proxy DB password
+                <input id="gmx-pw" type="password" class="form-control" style="margin-top:4px;" autocomplete="new-password">
+            </label>
+            <label>Listener port
+                <input id="gmx-port" type="number" class="form-control" value="3306" min="1" max="65535" style="margin-top:4px;">
+            </label>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
+            MaxScale only ships for Debian/Ubuntu and RHEL/Rocky bases. The proxy user is created on the cluster (for monitoring +
+            auth) — it is not your application login. Password chars: letters, digits and . _ - @ % + = ! ~
+        </div>
+        <div id="gmx-error" role="alert" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+            <button class="btn btn-sm" onclick="galeraCloseModal()">Cancel</button>
+            <button class="btn btn-primary btn-sm" onclick="galeraMaxScaleSubmit()">Create MaxScale</button>
+        </div>`;
+    galeraOpenModal('Create MaxScale proxy for ' + c.name, html, 580);
+}
+
+function galeraMaxScaleDistroChanged() {
+    const d = (document.getElementById('gmx-distro') || {}).value;
+    const rel = { debian: 'bookworm', ubuntu: 'noble', rocky: '9' }[d] || '';
+    const el = document.getElementById('gmx-release'); if (el) el.value = rel;
+}
+
+function galeraMaxScaleSubmit() {
+    const cid = (document.getElementById('gmx-cid') || {}).value || '';
+    const c = (galeraState.clusters || []).find(x => x.id === cid);
+    const err = document.getElementById('gmx-error');
+    const fail = m => { if (err) { err.textContent = m; err.style.display = 'block'; } };
+    if (!c) return fail('Cluster not found — refresh and retry.');
+    const name = (document.getElementById('gmx-name').value || '').trim();
+    const distro = document.getElementById('gmx-distro').value;
+    const release = (document.getElementById('gmx-release').value || '').trim();
+    const user = (document.getElementById('gmx-user').value || 'maxscale').trim();
+    const pw = document.getElementById('gmx-pw').value || '';
+    const port = parseInt(document.getElementById('gmx-port').value, 10);
+    const nameOk = /^[A-Za-z0-9._-]+$/;
+    const pwOk = /^[A-Za-z0-9._@%+=!~-]{1,128}$/;
+    if (!nameOk.test(name)) return fail('Proxy container name may only contain letters, digits, - _ .');
+    if ((c.nodes || []).some(n => n.container === name) || (c.proxies || []).some(x => x.container === name)) return fail('That name already exists in this cluster.');
+    if (!nameOk.test(user)) return fail('Proxy user may only contain letters, digits, - _ .');
+    if (!pwOk.test(pw)) return fail('Password must be 1–128 chars from letters, digits and . _ - @ % + = ! ~');
+    if (!release) return fail('Release is required.');
+    if (!(port >= 1 && port <= 65535)) return fail('Listener port must be 1–65535.');
+    galeraCloseModal();
+    galeraStreamJob('Creating MaxScale for “' + c.name + '”', galeraOwnerBase(cid, 'clusters/' + encodeURIComponent(cid) + '/maxscale'),
+        { container_name: name, distribution: distro, release: release, proxy_user: user, proxy_password: pw, listener_port: port });
+}
+
+async function galeraRemoveProxy(cid, container) {
+    if (!container) return;
+    const ok = await showConfirm(
+        `Remove MaxScale proxy “${container}”?\n\nThis stops MaxScale and removes it from WolfStack. The container is left stopped — delete it from the Containers view if you no longer need it. The cluster and its data are untouched.`,
+        'Remove proxy');
+    if (!ok) return;
+    try {
+        const r = await fetch(galeraOwnerBase(cid, 'clusters/' + encodeURIComponent(cid) + '/proxies/' + encodeURIComponent(container)), { method: 'DELETE' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+        showToast('Proxy removed', 'success');
+        galeraLoadClusters();
+    } catch (e) {
+        showToast('Remove failed: ' + ((e && e.message) || e), 'error', 0);
+    }
 }
 
 // ── Adopt from a container picker ────────────────────────────────────

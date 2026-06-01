@@ -14949,6 +14949,78 @@ pub async fn galera_local_node_op(req: HttpRequest, state: web::Data<AppState>, 
     }
 }
 
+/// POST /api/galera/clusters/{id}/add-nodes — grow an existing cluster with new
+/// MariaDB+Galera nodes built on the cluster's owner host, joined via SST. SSE.
+pub async fn galera_add_nodes_stream(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<crate::galera::AddNodesRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    let cluster = match crate::galera::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": format!("cluster '{}' not found", id) })),
+    };
+    let p = body.into_inner();
+    let ctx = galera_op_ctx(&state);
+    galera_stream_job(move |tx| {
+        let _ = tx.send(format!("Adding {} node(s) to '{}'…", p.container_names.len(), cluster.name));
+        match crate::galera::add_nodes(&cluster, &p, &tx, &ctx) {
+            Ok(c) => { let _ = tx.send(format!("RESULT:OK:'{}' now has {} node(s).", c.name, c.nodes.len())); }
+            Err(e) => { let _ = tx.send(format!("RESULT:ERR:{}", e)); }
+        }
+    })
+}
+
+/// POST /api/galera/clusters/{id}/maxscale — provision a MaxScale proxy
+/// pre-configured for this cluster (galeramon + readwritesplit). SSE.
+pub async fn galera_maxscale_stream(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<crate::galera::MaxScaleRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    let cluster = match crate::galera::get_cluster(&id) {
+        Some(c) => c,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": format!("cluster '{}' not found", id) })),
+    };
+    let p = body.into_inner();
+    let ctx = galera_op_ctx(&state);
+    galera_stream_job(move |tx| {
+        let _ = tx.send(format!("Provisioning MaxScale proxy '{}' for '{}'…", p.container_name, cluster.name));
+        match crate::galera::provision_maxscale(&cluster, &p, &tx, &ctx) {
+            Ok(c) => { let _ = tx.send(format!("RESULT:OK:MaxScale proxy is up for '{}'.", c.name)); }
+            Err(e) => { let _ = tx.send(format!("RESULT:ERR:{}", e)); }
+        }
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct GaleraGcommReq { pub gcomm: String }
+
+/// POST /api/galera/local/gcomm/{kind}/{container} — rewrite a node's gcomm seed
+/// list on THIS host. The cluster owner calls this on peer hosts (over the
+/// inter-node channel) when growing a cluster. Accepts a session OR the secret.
+pub async fn galera_local_set_gcomm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<GaleraGcommReq>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let (kind, container) = path.into_inner();
+    if !matches!(kind.as_str(), "lxc" | "docker") {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("unknown container kind '{}'", kind) }));
+    }
+    let gcomm = body.into_inner().gcomm;
+    match web::block(move || crate::galera::set_gcomm_local(&kind, &container, &gcomm)).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// DELETE /api/galera/clusters/{id}/proxies/{container} — stop + forget a
+/// MaxScale proxy (leaves the stopped container for the operator to delete).
+pub async fn galera_remove_proxy(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let (id, container) = path.into_inner();
+    match web::block(move || crate::galera::remove_proxy(&id, &container)).await {
+        Ok(Ok(_)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
 /// GET /api/galera/clusters/{id}/analyze — per-node tuning analysis (advisory).
 pub async fn galera_analyze(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
@@ -32753,11 +32825,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/galera/clusters/{id}/status", web::get().to(galera_status))
         .route("/api/galera/provision", web::post().to(galera_provision_stream))
         .route("/api/galera/clusters/{id}/recover", web::post().to(galera_recover_stream))
+        .route("/api/galera/clusters/{id}/add-nodes", web::post().to(galera_add_nodes_stream))
+        .route("/api/galera/clusters/{id}/maxscale", web::post().to(galera_maxscale_stream))
+        .route("/api/galera/clusters/{id}/proxies/{container}", web::delete().to(galera_remove_proxy))
         .route("/api/galera/clusters/{id}/nodes/{container}/{action}", web::post().to(galera_node_action))
         .route("/api/galera/clusters/{id}/analyze", web::get().to(galera_analyze))
         .route("/api/galera/clusters/{id}/tune", web::post().to(galera_apply_tuning))
-        // Static `tuning` segment registered BEFORE the {kind}/{op} catch-all.
+        // Static `tuning`/`gcomm` segments registered BEFORE the {kind}/{op} catch-all.
         .route("/api/galera/local/tuning/{kind}/{container}", web::post().to(galera_local_tuning))
+        .route("/api/galera/local/gcomm/{kind}/{container}", web::post().to(galera_local_set_gcomm))
         .route("/api/galera/local/{kind}/{op}/{container}", web::post().to(galera_local_node_op))
         // PBS (Proxmox Backup Server) — must be before {id} routes
         .route("/api/backups/pbs/status", web::get().to(pbs_status))
