@@ -63142,14 +63142,19 @@ function galeraClusterNodes() {
 }
 
 function galeraHostName(id) {
-    const n = (Array.isArray(allNodes) ? allNodes : []).find(x => x.id === id);
+    // Match the locally-assigned key OR the peer's stable self_id — a Galera
+    // node's stored node_id may be either (adopt stamps the portable self_id).
+    const n = (Array.isArray(allNodes) ? allNodes : []).find(x => x.id === id || x.self_id === id);
     return n ? (n.hostname || n.id) : (id || 'this host');
 }
 
 // Route a galera API call to a SPECIFIC host. Proxy path is WITHOUT the /api/
 // prefix; local API when it's self or the host isn't in allNodes yet.
 function galeraNodeBase(hostId, path) {
-    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === hostId);
+    // Match either the browser's local key OR the stable self_id — host pickers
+    // now send self_ids so a build/op routes correctly from any node. The
+    // node-proxy resolves a self_id via get_node, so passing it through works.
+    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === hostId || n.self_id === hostId);
     if (!hostId || !node || node.is_self) return '/api/galera/' + path;
     return `/api/nodes/${encodeURIComponent(hostId)}/proxy/galera/${path}`;
 }
@@ -63602,7 +63607,7 @@ function galeraBindDelegation() {
 function galeraOpenConsole(container, kind, host) {
     if (!container) return;
     let url = '/console.html?type=' + encodeURIComponent(kind || 'lxc') + '&name=' + encodeURIComponent(container);
-    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === host);
+    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === host || n.self_id === host);
     if (host && node && !node.is_self) url += '&node_id=' + encodeURIComponent(host);
     window.open(url, 'galera_sql_' + container.replace(/[^a-zA-Z0-9_.-]/g, '_'), 'width=980,height=620,menubar=no,toolbar=no');
     showToast('Terminal opened on ' + container + ' — run:  mariadb -u root -p', 'info', 8000);
@@ -63651,18 +63656,26 @@ function galeraPrimaryHost() {
 
 // ── Create (provision) wizard ────────────────────────────────────────
 
-function galeraCreateHostOptions() {
-    return galeraClusterNodes().map(n =>
-        `<option value="${escapeAttr(n.id)}">${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this host)' : ''}</option>`
-    ).join('') || `<option value="">no hosts in this cluster</option>`;
+// Host <option> list for the create wizard. Values are the STABLE self_id
+// (falling back to the local key for the self node, whose key already is its
+// self_id) so per-node placement resolves on whichever host orchestrates.
+function galeraCreateHostOptions(selected) {
+    return galeraClusterNodes().map(n => {
+        const val = n.self_id || n.id;
+        const sel = (selected && selected === val) ? ' selected' : '';
+        return `<option value="${escapeAttr(val)}"${sel}>${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this host)' : ''}</option>`;
+    }).join('') || `<option value="">no hosts in this cluster</option>`;
 }
 
 let _gcNodeRow = 0;
 function galeraCreateAddRow(name) {
     const w = document.getElementById('gc-rows'); if (!w) return;
     const idx = _gcNodeRow++;
+    // New rows default their host to the current home host.
+    const home = (document.getElementById('gc-host') || {}).value || '';
     w.insertAdjacentHTML('beforeend', `<div class="gc-node-row" data-idx="${idx}" style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">
-        <input class="form-control gc-cname" value="${escapeAttr(name || '')}" placeholder="container name" style="font-size:12px;">
+        <input class="form-control gc-cname" value="${escapeAttr(name || '')}" placeholder="container name" style="font-size:12px;flex:1;">
+        <select class="form-control gc-chost" title="Host this node runs on (build here, migrate later if you like)" style="font-size:12px;flex:1;">${galeraCreateHostOptions(home)}</select>
         <button class="btn btn-sm" onclick="galeraCreateRemoveRow(${idx})" title="Remove" style="padding:4px 10px;">×</button>
     </div>`);
 }
@@ -63677,8 +63690,8 @@ function galeraCreateOpen() {
             <label style="grid-column:1/-1;">Cluster name
                 <input id="gc-name" class="form-control" placeholder="my-galera" style="margin-top:4px;">
             </label>
-            <label>Build on host
-                <select id="gc-host" class="form-control" style="margin-top:4px;">${galeraCreateHostOptions()}</select>
+            <label>Home host <span style="color:var(--text-muted);font-weight:400;font-size:11px;">(stores + orchestrates)</span>
+                <select id="gc-host" class="form-control" style="margin-top:4px;">${galeraCreateHostOptions(galeraPrimaryHost())}</select>
             </label>
             <label>Distribution
                 <select id="gc-distro" class="form-control" style="margin-top:4px;" onchange="galeraDistroChanged()">
@@ -63703,13 +63716,13 @@ function galeraCreateOpen() {
         </div>
         <div style="margin-top:12px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                <span style="font-size:12px;color:var(--text-muted);">Containers to create — name each node</span>
+                <span style="font-size:12px;color:var(--text-muted);">Nodes — name each and pick the host it runs on</span>
                 <button class="btn btn-sm" onclick="galeraCreateAddRow()" style="padding:2px 10px;">+ Add node</button>
             </div>
             <div id="gc-rows"></div>
         </div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">
-            Creates LXC containers on the chosen host, installs MariaDB + Galera, bootstraps the first and joins the rest. To spread nodes across hosts for hardware HA, build here then migrate — or adopt containers you already run on any host.
+            Each node is built as an LXC container on its chosen host (spread them across hosts for hardware HA), wired onto WolfNet, installed with MariaDB + Galera; the first is bootstrapped and the rest join by SST. The cluster definition lives on the home host.
         </div>
         <div id="gc-error" role="alert" style="display:none;color:var(--danger);font-size:12px;margin-top:10px;"></div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
@@ -63740,22 +63753,31 @@ function galeraCreateSubmit() {
     const err = document.getElementById('gc-error');
     const fail = m => { if (err) { err.textContent = m; err.style.display = 'block'; } };
     const nameOk = /^[A-Za-z0-9._-]+$/;
+    // Pair each node's name with the host it runs on (one .gc-node-row each).
     const names = [];
-    document.querySelectorAll('.gc-cname').forEach(i => { const v = (i.value || '').trim(); if (v) names.push(v); });
+    const chosts = [];
+    document.querySelectorAll('.gc-node-row').forEach(row => {
+        const nm = (row.querySelector('.gc-cname')?.value || '').trim();
+        if (!nm) return;
+        names.push(nm);
+        chosts.push((row.querySelector('.gc-chost')?.value || '').trim());
+    });
     if (!name) return fail('Cluster name is required.');
     if (!nameOk.test(name)) return fail('Cluster name may only contain letters, digits, - _ .');
-    if (!host) return fail('Pick a host to build on.');
+    if (!host) return fail('Pick a home host.');
     if (names.length < 1 || names.length > 9) return fail('A cluster needs between 1 and 9 nodes.');
     for (const n of names) if (!nameOk.test(n)) return fail(`Container name "${n}" may only contain letters, digits, - _ .`);
     if (new Set(names).size !== names.length) return fail('Container names must be unique.');
+    if (chosts.some(h => !h)) return fail('Every node needs a host.');
     if (!release) return fail('Release is required.');
     if (!pw) return fail('A root password is required.');
     const body = {
-        cluster_name: name, cluster: galeraState.cluster, container_names: names, node_count: names.length,
+        cluster_name: name, cluster: galeraState.cluster, container_names: names, container_hosts: chosts, node_count: names.length,
         distribution: distro, release: release, root_password: pw, sst_method: sst, node_id: host,
     };
     galeraCloseModal();
-    galeraStreamJob('Building “' + name + '”', galeraNodeBase(host, 'provision'), body);
+    const spread = new Set(chosts).size;
+    galeraStreamJob('Building “' + name + '”' + (spread > 1 ? ' across ' + spread + ' hosts' : ''), galeraNodeBase(host, 'provision'), body);
 }
 
 // ── Add nodes to an existing cluster ─────────────────────────────────
@@ -64035,10 +64057,18 @@ async function galeraAdoptSubmit() {
     const nameOk = /^[A-Za-z0-9._-]+$/;
     if (!name) return fail('Cluster name is required.');
     if (!nameOk.test(name)) return fail('Cluster name may only contain letters, digits, - _ .');
+    // Send each container's host as its STABLE self_id (not the browser's
+    // local node-{uuid} key), so the host that runs adopt — which may not share
+    // this browser's key namespace — can still resolve where each container
+    // lives. self_id is the same on every host; the local key is not.
+    const stableHostId = (hid) => {
+        const n = (Array.isArray(allNodes) ? allNodes : []).find(x => x.id === hid || x.self_id === hid);
+        return (n && n.self_id) ? n.self_id : hid;
+    };
     const nodes = [];
     document.querySelectorAll('.ga-pick:checked').forEach(cb => {
         const it = _galeraAdoptInv[parseInt(cb.getAttribute('data-idx'), 10)];
-        if (it) nodes.push({ node_id: it.node_id, container: it.name, kind: it.kind });
+        if (it) nodes.push({ node_id: stableHostId(it.node_id), container: it.name, kind: it.kind });
     });
     if (!nodes.length) return fail('Tick at least one container.');
     const payload = { cluster_name: name, cluster: galeraState.cluster, db_user: user, db_password: pw, sst_method: 'mariabackup', nodes };

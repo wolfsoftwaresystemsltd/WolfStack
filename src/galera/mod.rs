@@ -476,6 +476,13 @@ pub struct ProvisionRequest {
     /// drive node_count); otherwise `{name_prefix}-{i}` is generated.
     #[serde(default)]
     pub container_names: Vec<String>,
+    /// Per-node target host (WolfStack node self_id), parallel to
+    /// `container_names`. An entry that's empty or absent falls back to
+    /// `node_id` (the home host) — so an all-on-one-host build needs none of
+    /// these and behaves exactly as before. Lets a cluster be spread across
+    /// different WolfStack hosts for hardware HA at create time.
+    #[serde(default)]
+    pub container_hosts: Vec<String>,
     #[serde(default = "default_distro")]
     pub distribution: String,
     #[serde(default = "default_release")]
@@ -665,10 +672,14 @@ fn run_install(container: &str, install: &str, log: &Sender<String>) -> Result<(
     Err(last)
 }
 
-/// Provision a brand-new Galera cluster: N LXC containers on THIS host, each
-/// with MariaDB+Galera installed and configured, bootstrapped in order.
-/// Returns the persisted cluster on success.
-pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<GaleraCluster, String> {
+/// Provision a brand-new Galera cluster. Each node's container is built on ITS
+/// chosen WolfStack host (`container_hosts[i]`, defaulting to the home host
+/// `node_id`), so a cluster can be spread across hosts for hardware HA. The
+/// orchestration runs on the home host (where the definition is stored): it
+/// allocates every WolfNet IP up front, builds each node on its host (locally
+/// or via the build primitive on a peer), then bootstraps the first and joins
+/// the rest. Returns the persisted cluster on success.
+pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>, ctx: &GaleraOpCtx) -> Result<GaleraCluster, String> {
     // Explicit names (from the create wizard) win and set the count; otherwise
     // generate `{prefix}-{i}`.
     let names: Vec<String> = if !p.container_names.is_empty() {
@@ -684,36 +695,48 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
         return Err("a root password is required".into());
     }
     safe_token(&p.cluster_name)?;
+    for cname in &names { safe_token(cname)?; }
     let _ = install_cmd(&p.distribution)?; // validate distro up front
+
+    // Per-node target host: container_hosts[i] when present + non-empty, else the
+    // home host. Empty/absent everywhere → all on the home host (old behaviour).
+    let hosts: Vec<String> = (0..names.len()).map(|i| {
+        p.container_hosts.get(i).map(|h| h.trim().to_string()).filter(|h| !h.is_empty())
+            .unwrap_or_else(|| p.node_id.clone())
+    }).collect();
+
+    // Reserve every WolfNet IP in one batch on this host so the addresses are
+    // distinct across the whole cluster (see next_available_wolfnet_ips). These
+    // come from THIS host's view (config peers + poll route cache + local
+    // containers); a peer's brand-new, not-yet-polled container could in theory
+    // overlap, so we log the picks for the operator to eyeball.
+    let ips = crate::containers::next_available_wolfnet_ips(names.len())
+        .ok_or_else(|| format!("not enough free WolfNet IPs for {} node(s)", names.len()))?;
+    logln(log, format!("Reserved {} WolfNet address(es): {}.", ips.len(), ips.join(", ")));
 
     // Stable id minted before any container exists, so a failed final upsert
     // can't strand a live cluster under a fresh id on retry.
     let cluster_id = uuid::Uuid::new_v4().to_string();
+    let nodes: Vec<GaleraNode> = names.iter().enumerate().map(|(i, cname)| GaleraNode {
+        node_id: hosts[i].clone(),
+        container: cname.clone(),
+        kind: "lxc".into(),
+        address: ips[i].clone(),
+        port: 3306,
+        node_name: cname.clone(),
+    }).collect();
 
-    // 1. Create + start each container, give it a cluster-reachable WolfNet IP.
-    let mut nodes: Vec<GaleraNode> = Vec::new();
-    for cname in &names {
-        safe_token(cname)?;
-        logln(log, format!("[{}] creating container…", cname));
-        crate::containers::lxc_create(cname, &p.distribution, &p.release, "amd64", None, None)?;
-        crate::containers::lxc_start(cname)?;
-        let ip = crate::containers::next_available_wolfnet_ip()
-            .ok_or("no free WolfNet IP available for the new node")?;
-        logln(log, format!("[{}] attaching WolfNet IP {}…", cname, ip));
-        let _ = crate::containers::lxc_attach_wolfnet(cname, &ip);
-        nodes.push(GaleraNode { node_id: p.node_id.clone(), container: cname.clone(), kind: "lxc".into(), address: ip, port: 3306, node_name: cname.clone() });
-    }
-
-    // Persist the definition NOW — before the long install — so the cluster
+    // Persist the definition NOW — before any container work — so the cluster
     // appears in the list immediately and survives the operator closing the
     // progress window or a mid-build failure (they can watch it, retry, or
     // forget it). Status shows "unreachable" until MariaDB is actually up.
-    logln(log, format!("Registered '{}' — building {} node(s)…", p.cluster_name, nodes.len()));
+    let spread = hosts.iter().collect::<HashSet<_>>().len();
+    logln(log, format!("Registered '{}' — building {} node(s) across {} host(s)…", p.cluster_name, nodes.len(), spread));
     let saved = upsert_cluster(GaleraCluster {
         id: cluster_id,
         name: p.cluster_name.clone(),
         cluster: p.cluster.clone(),
-        owner_node: String::new(), // filled by upsert_cluster = this (build) node
+        owner_node: String::new(), // filled by upsert_cluster = this (home) node
         nodes: nodes.clone(),
         sst_method: p.sst_method.clone(),
         db_user: "root".into(),
@@ -723,62 +746,194 @@ pub fn provision_cluster(p: &ProvisionRequest, log: &Sender<String>) -> Result<G
         proxies: Vec::new(),
     }, Some(&p.root_password))?;
 
-    // 2. Install MariaDB + Galera on each node (after its init settles).
-    let install = install_cmd(&p.distribution)?;
+    // 1. Build each node's container ON ITS HOST (create + WolfNet IP + install).
     for n in &nodes {
-        logln(log, format!("[{}] waiting for container to be ready…", n.container));
-        wait_container_ready(&n.container);
-        logln(log, format!("[{}] installing MariaDB + Galera…", n.container));
-        run_install(&n.container, install, log)?;
-        let _ = svc("lxc", &n.container, "stop"); // configure offline; bootstrap explicitly below
+        if ctx.is_self_host(&n.node_id) {
+            logln(log, format!("[{}] creating container…", n.container));
+            build_node_local(&n.container, &p.distribution, &p.release, &n.address, log)?;
+        } else {
+            logln(log, format!("[{}] building on {}…", n.container, host_label(ctx, &n.node_id)));
+            build_node_remote(ctx, &n.node_id, &n.container, &p.distribution, &p.release, &n.address, log)
+                .map_err(|e| format!("[{}] build on {} failed: {}", n.container, host_label(ctx, &n.node_id), e))?;
+            logln(log, format!("[{}] built on {}.", n.container, host_label(ctx, &n.node_id)));
+        }
     }
 
-    // 3. Write the Galera config on each node (full gcomm member list). The
-    //    provider path is read from disk per node — see detect_galera_provider.
+    // 2. Config + bootstrap the first node (new primary + root password), then
+    //    join the rest one at a time so each SSTs cleanly from a Synced donor.
+    //    Every node gets the SAME full gcomm member list.
     let gcomm = nodes.iter().map(|n| n.address.as_str()).collect::<Vec<_>>().join(",");
-    let cnf_path = galera_cnf_path(&p.distribution);
-    for n in &nodes {
-        let provider = detect_galera_provider(&n.container, &p.distribution);
-        let cnf = galera_cnf(&provider, &p.cluster_name, &gcomm, &n.address, &n.node_name, &p.sst_method);
-        // base64 the file to avoid any shell-quoting hazard with the content.
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(cnf.as_bytes());
-        lxc_exec(&n.container, &format!("mkdir -p \"$(dirname {path})\" && printf %s '{b64}' | base64 -d > {path}", path = cnf_path, b64 = b64))?;
-    }
-
-    // 4. Bootstrap the first node (new primary component), then join the rest
-    //    one at a time so each SSTs cleanly from a Synced donor.
-    let first = &nodes[0];
-    logln(log, format!("[{}] bootstrapping new cluster…", first.container));
-    lxc_exec(&first.container, "sed -i 's/^safe_to_bootstrap:.*/safe_to_bootstrap: 1/' /var/lib/mysql/grastate.dat 2>/dev/null || true")?;
-    lxc_exec(&first.container, "galera_new_cluster 2>/dev/null || (systemctl set-environment _WSREP_NEW_CLUSTER='--wsrep-new-cluster' >/dev/null 2>&1; systemctl start mariadb)")?;
-
-    // 5. Set the root password + allow it over TCP (so WolfStack can query
-    //    status) on the bootstrap node — replicates to the rest via Galera.
-    //    The password is SQL-escaped (\\ and ' doubled) and the whole script is
-    //    base64-piped into mysql's STDIN, so the password never touches `sh -c`:
-    //    a value like `$(id)` or a backtick can't reach the shell.
-    let pw_sql = p.root_password.replace('\\', "\\\\").replace('\'', "''");
-    let sql = format!(
-        "ALTER USER 'root'@'localhost' IDENTIFIED BY '{pw}'; \
-         CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{pw}'; \
-         GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION; FLUSH PRIVILEGES;",
-        pw = pw_sql
-    );
-    let sql_b64 = {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD.encode(sql.as_bytes())
-    };
-    lxc_exec(&first.container, &format!("printf %s '{}' | base64 -d | mysql", sql_b64))?;
-
-    // 6. Join the remaining nodes in order.
+    launch_node(ctx, &nodes[0], p, &gcomm, "bootstrap", log)?;
     for n in nodes.iter().skip(1) {
-        logln(log, format!("[{}] joining cluster (SST)…", n.container));
-        svc("lxc", &n.container, "start")?;
+        launch_node(ctx, n, p, &gcomm, "join", log)?;
     }
 
     logln(log, "All nodes joined — cluster is up.");
     Ok(saved)
+}
+
+/// Display name (hostname) for a host id, for the progress log.
+fn host_label(ctx: &GaleraOpCtx, host: &str) -> String {
+    ctx.resolve_host(host)
+        .map(|n| n.hostname.clone())
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| host.to_string())
+}
+
+/// Create + start an LXC container, attach the GIVEN WolfNet IP, install
+/// MariaDB+Galera, and stop it (configured offline; launched explicitly later).
+/// Factored from provision so the exact same steps run locally or on a peer host.
+fn build_node_local(container: &str, distribution: &str, release: &str, address: &str, log: &Sender<String>) -> Result<(), String> {
+    safe_token(container)?;
+    crate::containers::lxc_create(container, distribution, release, "amd64", None, None)?;
+    crate::containers::lxc_start(container)?;
+    logln(log, format!("[{}] attaching WolfNet IP {}…", container, address));
+    let _ = crate::containers::lxc_attach_wolfnet(container, address);
+    logln(log, format!("[{}] waiting for container to be ready…", container));
+    wait_container_ready(container);
+    logln(log, format!("[{}] installing MariaDB + Galera…", container));
+    let install = install_cmd(distribution)?;
+    run_install(container, install, log)?;
+    let _ = svc("lxc", container, "stop"); // configure offline; launched explicitly
+    Ok(())
+}
+
+/// Write the Galera config on a built node, then EITHER bootstrap it (new
+/// primary component + set the root password, which replicates to the rest via
+/// Galera) or start it to join via SST. `role` is "bootstrap" or "join".
+/// Factored from provision so the exact same steps run locally or on a peer.
+#[allow(clippy::too_many_arguments)]
+fn launch_node_local(container: &str, distribution: &str, cluster_name: &str, gcomm: &str, node_address: &str, node_name: &str, sst_method: &str, role: &str, root_password: &str, log: &Sender<String>) -> Result<(), String> {
+    safe_token(container)?;
+    // Guard the role explicitly: anything but "bootstrap"/"join" would silently
+    // take the join branch. Reject it — a peer call with role="bootstrap" must
+    // never be aimed at an already-running container (that would split a cluster).
+    if role != "bootstrap" && role != "join" {
+        return Err(format!("invalid launch role '{}' (expected bootstrap or join)", role));
+    }
+    // Provider path is read from disk per node — see detect_galera_provider.
+    let provider = detect_galera_provider(container, distribution);
+    let cnf = galera_cnf(&provider, cluster_name, gcomm, node_address, node_name, sst_method);
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(cnf.as_bytes());
+    let cnf_path = galera_cnf_path(distribution);
+    // base64 the file to avoid any shell-quoting hazard with the content.
+    lxc_exec(container, &format!("mkdir -p \"$(dirname {path})\" && printf %s '{b64}' | base64 -d > {path}", path = cnf_path, b64 = b64))?;
+    if role == "bootstrap" {
+        logln(log, format!("[{}] bootstrapping new cluster…", container));
+        lxc_exec(container, "sed -i 's/^safe_to_bootstrap:.*/safe_to_bootstrap: 1/' /var/lib/mysql/grastate.dat 2>/dev/null || true")?;
+        lxc_exec(container, "galera_new_cluster 2>/dev/null || (systemctl set-environment _WSREP_NEW_CLUSTER='--wsrep-new-cluster' >/dev/null 2>&1; systemctl start mariadb)")?;
+        // Root password + TCP grant. SQL-escaped (\\ and ' doubled) and the whole
+        // script is base64-piped into mysql's STDIN, so the password never
+        // touches `sh -c`: a value like `$(id)` or a backtick can't reach the shell.
+        let pw_sql = root_password.replace('\\', "\\\\").replace('\'', "''");
+        let sql = format!(
+            "ALTER USER 'root'@'localhost' IDENTIFIED BY '{pw}'; \
+             CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '{pw}'; \
+             GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION; FLUSH PRIVILEGES;",
+            pw = pw_sql);
+        let sql_b64 = base64::engine::general_purpose::STANDARD.encode(sql.as_bytes());
+        lxc_exec(container, &format!("printf %s '{}' | base64 -d | mysql", sql_b64))?;
+    } else {
+        logln(log, format!("[{}] joining cluster (SST)…", container));
+        svc("lxc", container, "start")?;
+    }
+    Ok(())
+}
+
+/// Build primitive entry point (the cluster's home host calls this on a peer to
+/// build a node that lives there). Peer-side progress is not streamed back, so
+/// the throwaway log channel is fine — the orchestrator reports milestones.
+pub fn local_build_node(container: &str, distribution: &str, release: &str, address: &str) -> Result<(), String> {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    build_node_local(container, distribution, release, address, &tx)
+}
+
+/// Launch primitive entry point (home host → peer, for a node living there).
+#[allow(clippy::too_many_arguments)]
+pub fn local_launch_node(container: &str, distribution: &str, cluster_name: &str, gcomm: &str, node_address: &str, node_name: &str, sst_method: &str, role: &str, root_password: &str) -> Result<(), String> {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    launch_node_local(container, distribution, cluster_name, gcomm, node_address, node_name, sst_method, role, root_password, &tx)
+}
+
+/// Build a node's container on a peer host via its build primitive. Install can
+/// take a while, so the timeout is generous.
+fn build_node_remote(ctx: &GaleraOpCtx, host: &str, container: &str, distribution: &str, release: &str, address: &str, log: &Sender<String>) -> Result<(), String> {
+    let target = ctx.resolve_host(host).ok_or_else(|| format!("host '{}' is not a node in this cluster", host))?;
+    let path = format!("/api/galera/local/build/{}", container);
+    let urls = crate::api::build_node_urls(&target.address, target.port, &path);
+    let body = serde_json::json!({ "distribution": distribution, "release": release, "address": address });
+    post_to_peer(ctx, &urls, &body, 1800, host, log, &format!("installing on {}", container))
+}
+
+/// Configure + launch (bootstrap or join) a node on a peer host via its launch
+/// primitive.
+#[allow(clippy::too_many_arguments)]
+fn launch_node_remote(ctx: &GaleraOpCtx, host: &str, container: &str, distribution: &str, cluster_name: &str, gcomm: &str, node_address: &str, node_name: &str, sst_method: &str, role: &str, root_password: &str, log: &Sender<String>) -> Result<(), String> {
+    let target = ctx.resolve_host(host).ok_or_else(|| format!("host '{}' is not a node in this cluster", host))?;
+    let path = format!("/api/galera/local/launch/{}", container);
+    let urls = crate::api::build_node_urls(&target.address, target.port, &path);
+    let body = serde_json::json!({
+        "distribution": distribution, "cluster_name": cluster_name, "gcomm": gcomm,
+        "node_address": node_address, "node_name": node_name, "sst_method": sst_method,
+        "role": role, "root_password": root_password,
+    });
+    post_to_peer(ctx, &urls, &body, 1800, host, log, &format!("launching {}", container))
+}
+
+/// Dispatch a node's configure+launch to its host — local fast-path or peer
+/// primitive. The root password only rides along for the bootstrap node.
+fn launch_node(ctx: &GaleraOpCtx, n: &GaleraNode, p: &ProvisionRequest, gcomm: &str, role: &str, log: &Sender<String>) -> Result<(), String> {
+    let pw = if role == "bootstrap" { p.root_password.as_str() } else { "" };
+    if ctx.is_self_host(&n.node_id) {
+        launch_node_local(&n.container, &p.distribution, &p.cluster_name, gcomm, &n.address, &n.node_name, &p.sst_method, role, pw, log)
+    } else {
+        let verb = if role == "bootstrap" { "bootstrapping" } else { "joining (SST)" };
+        logln(log, format!("[{}] {} on {}…", n.container, verb, host_label(ctx, &n.node_id)));
+        launch_node_remote(ctx, &n.node_id, &n.container, &p.distribution, &p.cluster_name, gcomm, &n.address, &n.node_name, &p.sst_method, role, pw, log)
+            .map_err(|e| format!("[{}] launch on {} failed: {}", n.container, host_label(ctx, &n.node_id), e))
+    }
+}
+
+/// POST a JSON body to a peer host's local galera primitive, trying the URL
+/// fallback list, authenticated with the cluster secret. Ok on 2xx, else the
+/// peer's error string. Shared by the build + launch dispatchers. A remote
+/// build/launch is a single blocking request with no streamed output, so we
+/// emit a heartbeat line every 20s while it runs — that keeps the operator's
+/// SSE progress stream from going idle (and being closed by a proxy) during a
+/// multi-minute install.
+#[allow(clippy::too_many_arguments)]
+fn post_to_peer(ctx: &GaleraOpCtx, urls: &[String], body: &serde_json::Value, timeout_secs: u64, host: &str, log: &Sender<String>, label: &str) -> Result<(), String> {
+    let secret = ctx.cluster_secret.clone();
+    ctx.rt.block_on(async move {
+        let mut last = format!("could not reach host '{}'", host);
+        for url in urls {
+            let req = crate::api::API_HTTP_CLIENT.post(url)
+                .header("X-WolfStack-Secret", &secret)
+                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .json(body)
+                .send();
+            tokio::pin!(req);
+            let mut beat = tokio::time::interval(std::time::Duration::from_secs(20));
+            beat.tick().await; // first tick fires immediately — consume it
+            let resp = loop {
+                tokio::select! {
+                    r = &mut req => break r,
+                    _ = beat.tick() => { let _ = log.send(format!("  …{}", label)); }
+                }
+            };
+            match resp {
+                Ok(resp) => {
+                    let ok = resp.status().is_success();
+                    let v: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if ok { return Ok(()); }
+                    last = v.get("error").and_then(|e| e.as_str()).unwrap_or("remote error").to_string();
+                }
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(last)
+    })
 }
 
 // ── Grow an existing cluster (add nodes) ─────────────────────────────
@@ -934,7 +1089,7 @@ pub fn set_gcomm_local(kind: &str, container: &str, gcomm: &str) -> Result<(), S
 /// POST the gcomm rewrite to a peer host's local endpoint (the cluster owner
 /// calls this for members that live on other hosts).
 fn set_gcomm_remote(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, gcomm: &str) -> Result<(), String> {
-    let target = ctx.nodes.iter().find(|n| n.id == host)
+    let target = ctx.resolve_host(host)
         .ok_or_else(|| format!("host '{}' is not a node in this cluster", host))?;
     let path = format!("/api/galera/local/gcomm/{}/{}", kind, container);
     let urls = crate::api::build_node_urls(&target.address, target.port, &path);
@@ -964,7 +1119,7 @@ fn set_gcomm_remote(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, 
 
 /// Rewrite a node's gcomm seed list, host-aware (local fast-path for self).
 fn set_gcomm(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, gcomm: &str) -> Result<(), String> {
-    if host.is_empty() || host == ctx.self_id {
+    if ctx.is_self_host(host) {
         set_gcomm_local(kind, container, gcomm)
     } else {
         set_gcomm_remote(ctx, host, kind, container, gcomm)
@@ -1241,6 +1396,28 @@ pub struct GaleraOpCtx {
     pub rt: tokio::runtime::Handle,
 }
 
+impl GaleraOpCtx {
+    /// Resolve a host reference to its cluster Node, matching EITHER the
+    /// locally-assigned `node-{uuid}` key OR the peer's stable `self_id`. The
+    /// two are different namespaces: each host mints its own random key for a
+    /// peer (`add_server_full`), so a key is only meaningful on the host that
+    /// minted it, whereas `self_id` (the peer's `/etc/wolfstack/node_id`) is the
+    /// same everywhere. Cross-host calls (e.g. adopting a cluster whose nodes
+    /// sit on other hosts) arrive with the self_id — a strict `n.id == host`
+    /// match silently dropped them. Mirrors `ClusterState::get_node`.
+    fn resolve_host(&self, host: &str) -> Option<&crate::agent::Node> {
+        self.nodes.iter().find(|n| n.id == host || n.self_id.as_deref() == Some(host))
+    }
+
+    /// True when `host` denotes THIS node — empty, the self_id, or the self
+    /// node's locally-assigned key (so either namespace routes locally).
+    fn is_self_host(&self, host: &str) -> bool {
+        host.is_empty()
+            || host == self.self_id
+            || self.nodes.iter().any(|n| n.is_self && (n.id == host || n.self_id.as_deref() == Some(host)))
+    }
+}
+
 /// Read the last-committed seqno from a node's grastate.dat. Returns -1 when
 /// unknown (file missing, or the node crashed mid-transaction = `-1`).
 fn node_seqno(kind: &str, container: &str) -> i64 {
@@ -1350,7 +1527,7 @@ pub fn local_node_op(kind: &str, container: &str, op: NodeOp) -> Result<String, 
 /// primitive, authenticated with the cluster secret. Tries the standard URL
 /// fallback list (HTTPS / WolfNet / HTTP).
 fn remote_op(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, op: NodeOp) -> Result<String, String> {
-    let target = ctx.nodes.iter().find(|n| n.id == host)
+    let target = ctx.resolve_host(host)
         .ok_or_else(|| format!("host '{}' is not a node in this cluster", host))?;
     let path = format!("/api/galera/local/{}/{}/{}", kind, op.as_str(), container);
     let urls = crate::api::build_node_urls(&target.address, target.port, &path);
@@ -1380,7 +1557,7 @@ fn remote_op(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, op: Nod
 
 /// Run a node op against `host` — local fast-path when it's this node.
 fn run_op(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, op: NodeOp) -> Result<String, String> {
-    if host.is_empty() || host == ctx.self_id {
+    if ctx.is_self_host(host) {
         local_node_op(kind, container, op)
     } else {
         remote_op(ctx, host, kind, container, op)
@@ -1390,7 +1567,7 @@ fn run_op(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, op: NodeOp
 /// Does `host` currently run `container`? Local check for self, `Exists` probe
 /// for a peer. Unreachable peers answer "no" (skip), not an error.
 fn exists_on_host(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str) -> bool {
-    if host.is_empty() || host == ctx.self_id {
+    if ctx.is_self_host(host) {
         return container_exists_local(kind, container);
     }
     remote_op(ctx, host, kind, container, NodeOp::Exists)
@@ -1858,7 +2035,7 @@ pub fn write_tuning_local(kind: &str, container: &str, key: &str, value: &str) -
 pub fn persist_tuning_cluster(cluster: &GaleraCluster, key: &str, value: &str, ctx: &GaleraOpCtx) -> Vec<(String, Result<(), String>)> {
     cluster.nodes.iter().map(|n| {
         let host = locate_host(ctx, &n.kind, &n.container, &n.node_id).unwrap_or_else(|_| n.node_id.clone());
-        let r = if host.is_empty() || host == ctx.self_id {
+        let r = if ctx.is_self_host(&host) {
             write_tuning_local(&n.kind, &n.container, key, value)
         } else {
             persist_tuning_remote(ctx, &host, &n.kind, &n.container, key, value)
@@ -1869,7 +2046,7 @@ pub fn persist_tuning_cluster(cluster: &GaleraCluster, key: &str, value: &str, c
 
 /// POST the tuning write to a peer host's local endpoint.
 fn persist_tuning_remote(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, key: &str, value: &str) -> Result<(), String> {
-    let target = ctx.nodes.iter().find(|n| n.id == host)
+    let target = ctx.resolve_host(host)
         .ok_or_else(|| format!("host '{}' is not a node in this cluster", host))?;
     let path = format!("/api/galera/local/tuning/{}/{}", kind, container);
     let urls = crate::api::build_node_urls(&target.address, target.port, &path);

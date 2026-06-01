@@ -14870,13 +14870,61 @@ where
 pub async fn galera_provision_stream(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::galera::ProvisionRequest>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
     let p = body.into_inner();
+    let ctx = galera_op_ctx(&state);
     galera_stream_job(move |tx| {
-        let _ = tx.send(format!("Provisioning {}-node Galera cluster '{}'…", p.node_count, p.cluster_name));
-        match crate::galera::provision_cluster(&p, &tx) {
+        let n = if p.container_names.is_empty() { p.node_count } else { p.container_names.len() };
+        let _ = tx.send(format!("Provisioning {}-node Galera cluster '{}'…", n, p.cluster_name));
+        match crate::galera::provision_cluster(&p, &tx, &ctx) {
             Ok(c) => { let _ = tx.send(format!("RESULT:OK:Cluster '{}' provisioned with {} node(s).", c.name, c.nodes.len())); }
             Err(e) => { let _ = tx.send(format!("RESULT:ERR:{}", e)); }
         }
     })
+}
+
+#[derive(serde::Deserialize)]
+pub struct GaleraBuildReq { pub distribution: String, pub release: String, pub address: String }
+
+/// POST /api/galera/local/build/{container} — build a Galera node container on
+/// THIS host (create + attach the given WolfNet IP + install MariaDB+Galera).
+/// The cluster's home host calls this on peers when a node lives there.
+pub async fn galera_local_build(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<GaleraBuildReq>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = path.into_inner();
+    let b = body.into_inner();
+    match web::block(move || crate::galera::local_build_node(&container, &b.distribution, &b.release, &b.address)).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct GaleraLaunchReq {
+    pub distribution: String,
+    pub cluster_name: String,
+    pub gcomm: String,
+    pub node_address: String,
+    pub node_name: String,
+    pub sst_method: String,
+    pub role: String,
+    #[serde(default)]
+    pub root_password: String,
+}
+
+/// POST /api/galera/local/launch/{container} — write the Galera config on a
+/// built node on THIS host and bootstrap or join it. Home host → peer primitive.
+pub async fn galera_local_launch(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<GaleraLaunchReq>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let container = path.into_inner();
+    let b = body.into_inner();
+    match web::block(move || crate::galera::local_launch_node(
+        &container, &b.distribution, &b.cluster_name, &b.gcomm, &b.node_address,
+        &b.node_name, &b.sst_method, &b.role, &b.root_password,
+    )).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
 }
 
 /// Build the runtime context galera ops need to route per-node work to the host
@@ -32831,9 +32879,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/galera/clusters/{id}/nodes/{container}/{action}", web::post().to(galera_node_action))
         .route("/api/galera/clusters/{id}/analyze", web::get().to(galera_analyze))
         .route("/api/galera/clusters/{id}/tune", web::post().to(galera_apply_tuning))
-        // Static `tuning`/`gcomm` segments registered BEFORE the {kind}/{op} catch-all.
+        // Static `tuning`/`gcomm`/`build`/`launch` segments registered BEFORE the {kind}/{op} catch-all.
         .route("/api/galera/local/tuning/{kind}/{container}", web::post().to(galera_local_tuning))
         .route("/api/galera/local/gcomm/{kind}/{container}", web::post().to(galera_local_set_gcomm))
+        .route("/api/galera/local/build/{container}", web::post().to(galera_local_build))
+        .route("/api/galera/local/launch/{container}", web::post().to(galera_local_launch))
         .route("/api/galera/local/{kind}/{op}/{container}", web::post().to(galera_local_node_op))
         // PBS (Proxmox Backup Server) — must be before {id} routes
         .route("/api/backups/pbs/status", web::get().to(pbs_status))

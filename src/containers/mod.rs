@@ -6770,7 +6770,12 @@ pub fn lxc_set_network_link(container: &str, link: &str) -> Result<String, Strin
 }
 
 /// Find the next available WolfNet IP not in use by any LXC container
-pub fn next_available_wolfnet_ip() -> Option<String> {
+/// The set of WolfNet IPs already in use, cluster-wide as far as this node can
+/// see (config peers, live interfaces, local containers/VMs/Docker, WolfRun
+/// service VIPs + instances on any node, IP mappings, and the poll route cache
+/// which carries remote-node container IPs). Shared by the single- and N-IP
+/// allocators so they apply identical exclusion rules.
+fn wolfnet_used_ip_set() -> Option<(String, std::collections::HashSet<String>)> {
     let prefix = wolfnet_subnet_prefix()?;
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -6923,6 +6928,11 @@ pub fn next_available_wolfnet_ip() -> Option<String> {
         }
     }
 
+    Some((prefix, used))
+}
+
+pub fn next_available_wolfnet_ip() -> Option<String> {
+    let (prefix, used) = wolfnet_used_ip_set()?;
     // Find next available in the WolfNet /24 range
     for i in 2..=254u8 {
         let candidate = format!("{}.{}", prefix, i);
@@ -6931,6 +6941,25 @@ pub fn next_available_wolfnet_ip() -> Option<String> {
         }
     }
 
+    None
+}
+
+/// Allocate `n` DISTINCT free WolfNet IPs in a single pass over the used set.
+/// Used when one host provisions containers that will live on several hosts
+/// (e.g. a cross-host Galera cluster): the per-call allocator would re-hand the
+/// same lowest free address until each container's IP propagates, so we reserve
+/// the whole batch at once. Returns None if fewer than `n` are free.
+pub fn next_available_wolfnet_ips(n: usize) -> Option<Vec<String>> {
+    if n == 0 { return Some(Vec::new()); }
+    let (prefix, used) = wolfnet_used_ip_set()?;
+    let mut out = Vec::with_capacity(n);
+    for i in 2..=254u8 {
+        let candidate = format!("{}.{}", prefix, i);
+        if !used.contains(&candidate) {
+            out.push(candidate);
+            if out.len() == n { return Some(out); }
+        }
+    }
     None
 }
 
