@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.12.12: Galera grow + MaxScale proxy; fix metrics-dashboard flicker** _(2026-06-01 — [`4310aa5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4310aa5178e5d54aa45d22c3831bb6c2b84d813d))_
 - **v24.12.11: Galera Metrics dashboard (GMD-style), connections, multi-cluster-safe** _(2026-06-01 — [`b4f737b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b4f737b17068606a4f13ce410e734b8f8f8f4170))_
 - **v24.12.10: Galera nodes — clearer "Console" terminal button, single replication line** _(2026-05-31 — [`0edc575`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0edc5758e8f5b45d2c22f796e849f23912457341))_
 - **v24.12.9: fix Galera "owning host 404" — route ops to where the config actually lives** _(2026-05-31 — [`c1de1e3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c1de1e3ad58a6d8cc874e51de1e88cdd657602c8))_
