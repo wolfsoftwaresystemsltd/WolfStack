@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.12.14: cross-host Galera create + fix cross-host adopt** _(2026-06-01 — [`099f5fb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/099f5fbe1ca82340804d8baa8e7ac82b7f3b54b8))_
 - **v24.12.13: MaxScale proxy — root login + client + clearer dialog** _(2026-06-01 — [`9f187ac`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9f187ac9ec9c5009670ec0415eb273c313949e60))_
 - **v24.12.12: Galera grow + MaxScale proxy; fix metrics-dashboard flicker** _(2026-06-01 — [`4310aa5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4310aa5178e5d54aa45d22c3831bb6c2b84d813d))_
 - **v24.12.11: Galera Metrics dashboard (GMD-style), connections, multi-cluster-safe** _(2026-06-01 — [`b4f737b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b4f737b17068606a4f13ce410e734b8f8f8f4170))_
