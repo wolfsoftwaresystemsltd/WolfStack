@@ -63245,6 +63245,18 @@ async function galeraLoadClusters() {
 
 // Append the latest per-node replication metrics to a rolling history (capped),
 // so the sparklines build up over successive status refreshes.
+// The metrics dashboard — one time-series panel per metric, a line per node.
+// `gauge` metrics plot the stored value; `rate` metrics derive per-second from
+// a cumulative counter (`src`).
+const GALERA_METRICS = [
+    { key: 'fcp',       title: 'Flow Control Pause %',  kind: 'gauge',                fmt: v => v.toFixed(0) + '%' },
+    { key: 'recvq',     title: 'Replication Queue',     kind: 'gauge',                fmt: v => Math.round(v).toString() },
+    { key: 'txns',      title: 'Transactions / sec',    kind: 'rate', src: 'received', fmt: v => v.toFixed(1) },
+    { key: 'conns',     title: 'Connections',           kind: 'gauge',                fmt: v => Math.round(v).toString() },
+    { key: 'size',      title: 'Cluster Size',          kind: 'gauge',                fmt: v => Math.round(v).toString() },
+    { key: 'conflicts', title: 'Write Conflicts / sec', kind: 'rate', src: 'cfail',   fmt: v => v.toFixed(2) },
+];
+
 function galeraPushHistory(st) {
     if (!st || !Array.isArray(st.nodes)) return;
     galeraState.history = galeraState.history || {};
@@ -63253,46 +63265,89 @@ function galeraPushHistory(st) {
         // Key by cluster id + container so two clusters with a same-named node
         // don't share a history bucket.
         const key = st.cluster_id + '|' + ns.container;
-        const h = galeraState.history[key] = galeraState.history[key] || { recvq: [], sendq: [] };
+        const h = galeraState.history[key] = galeraState.history[key]
+            || { t: [], fcp: [], recvq: [], conns: [], size: [], received: [], cfail: [] };
         const up = ns.reachable;
+        h.t.push(Date.now());
+        h.fcp.push(up ? (ns.flow_control_paused || 0) * 100 : 0);
         h.recvq.push(up ? (ns.recv_queue_avg || 0) : 0);
-        h.sendq.push(up ? (ns.send_queue_avg || 0) : 0);
-        [h.recvq, h.sendq].forEach(a => { while (a.length > CAP) a.shift(); });
+        h.conns.push(up ? (ns.threads_connected || 0) : 0);
+        h.size.push(up ? (ns.cluster_size || 0) : 0);
+        h.received.push(up ? (ns.received || 0) : 0);
+        h.cfail.push(up ? (ns.cert_failures || 0) : 0);
+        Object.keys(h).forEach(k => { while (h[k].length > CAP) h[k].shift(); });
     });
 }
 
-// Draw N series (each {series, color}) into a sparkline canvas, shared Y-scale.
-function galeraDrawSpark(canvas, lines) {
-    if (!canvas || !canvas.getContext) return;
-    const ctx = canvas.getContext('2d');
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-    let max = 1;
-    lines.forEach(l => (l.series || []).forEach(v => { if (v > max) max = v; }));
-    lines.forEach(l => {
-        const s = l.series || [];
-        if (s.length < 2) return;
-        ctx.beginPath();
-        s.forEach((v, i) => {
-            const x = (i / (s.length - 1)) * (w - 2) + 1;
-            const y = h - 1 - (v / max) * (h - 2);
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        });
-        ctx.strokeStyle = l.color; ctx.lineWidth = 1.5; ctx.stroke();
+// Per-second rate from a cumulative counter array + matching timestamps.
+// Negatives (counter reset on restart) clamp to 0.
+function galeraRateSeries(counter, t) {
+    const out = [0];
+    for (let i = 1; i < (counter || []).length; i++) {
+        const dt = ((t[i] - t[i - 1]) || 12000) / 1000;
+        const dv = counter[i] - counter[i - 1];
+        out.push(dv >= 0 && dt > 0 ? dv / dt : 0);
+    }
+    return out;
+}
+
+// Draw one metric panel: auto-scaled Y axis, gridlines, time axis, a filled
+// line per node, legend with the latest value. Uses the app's chart scaffolding.
+function galeraDrawMetricChart(canvasId, legendId, seriesByNode, fmt) {
+    const setup = setupCanvas(canvasId);
+    if (!setup) return;
+    const { ctx, rect } = setup;
+    const padding = { top: 12, right: 10, bottom: 22, left: 46 };
+    const w = rect.width - padding.left - padding.right;
+    const h = rect.height - padding.top - padding.bottom;
+    if (w <= 0 || h <= 0) return;
+    let max = 0, len = 0;
+    Object.values(seriesByNode).forEach(s => { (s || []).forEach(v => { if (v > max) max = v; }); if ((s || []).length > len) len = s.length; });
+    if (max <= 0) max = 1;
+    drawGrid(ctx, padding, w, h);
+    drawYLabels(ctx, padding, h, [fmt(max), fmt(max * 0.75), fmt(max * 0.5), fmt(max * 0.25), fmt(0)]);
+    if (len >= 2) {
+        ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.font = '10px Inter, sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        for (let i = 0; i <= 4; i++) {
+            const frac = i / 4, x = padding.left + frac * w;
+            const secsAgo = Math.round(len * 12 * (1 - frac)); // ~12s sample interval
+            ctx.fillText(secsAgo >= 60 ? '-' + Math.round(secsAgo / 60) + 'm' : '-' + secsAgo + 's', x, padding.top + h + 5);
+        }
+    }
+    const colors = ['#22c55e', '#f59e0b', '#3b82f6', '#8b5cf6', '#ec4899', '#ef4444'];
+    const legend = document.getElementById(legendId); if (legend) legend.innerHTML = '';
+    let ci = 0;
+    Object.keys(seriesByNode).forEach(node => {
+        const arr = seriesByNode[node] || [];
+        const color = colors[ci % colors.length]; ci++;
+        if (arr.length >= 2) {
+            ctx.beginPath();
+            arr.forEach((v, idx) => {
+                const x = padding.left + (idx / (arr.length - 1)) * w;
+                const y = padding.top + h - (v / max) * h;
+                if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.stroke();
+            ctx.lineTo(padding.left + w, padding.top + h); ctx.lineTo(padding.left, padding.top + h); ctx.closePath();
+            ctx.fillStyle = color + '18'; ctx.fill();
+        }
+        const cur = arr.length ? arr[arr.length - 1] : 0;
+        if (legend) legend.innerHTML += `<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);"><span style="width:8px;height:8px;border-radius:2px;background:${color};"></span>${escapeHtml(node)} <b style="color:${color};">${escapeHtml(fmt(cur))}</b></span>`;
     });
 }
 
-// Redraw every node's replication sparkline from accumulated history.
-function galeraDrawSparklines() {
+// Redraw every cluster's metric grid from accumulated history.
+function galeraDrawCharts() {
     (galeraState.clusters || []).forEach(c => {
-        (c.nodes || []).forEach(n => {
-            const cv = document.getElementById('galera-spark-' + c.id + '-' + n.container);
-            const hist = (galeraState.history || {})[c.id + '|' + n.container];
-            if (cv && hist) {
-                // One clean line: the apply (recv) queue — the key "is this node
-                // keeping up with replication" signal.
-                galeraDrawSpark(cv, [{ series: hist.recvq, color: '#60a5fa' }]);
-            }
+        GALERA_METRICS.forEach(m => {
+            const seriesByNode = {};
+            (c.nodes || []).forEach(n => {
+                const h = (galeraState.history || {})[c.id + '|' + n.container];
+                if (!h) return;
+                seriesByNode[n.container] = (m.kind === 'rate') ? galeraRateSeries(h[m.src], h.t) : (h[m.key] || []);
+            });
+            galeraDrawMetricChart('galera-chart-' + c.id + '-' + m.key, 'galera-legend-' + c.id + '-' + m.key, seriesByNode, m.fmt);
         });
     });
 }
@@ -63368,9 +63423,6 @@ function galeraClusterCardHtml(c) {
             <td style="padding:6px 8px;">${galeraNodeStateBadge(ns)}</td>
             <td style="padding:6px 8px;font-size:12px;">${escapeHtml(String(prim))}</td>
             <td style="padding:6px 8px;font-size:12px;text-align:center;">${escapeHtml(String(size))}</td>
-            <td style="padding:6px 8px;white-space:nowrap;">
-                <canvas id="galera-spark-${c.id}-${n.container}" width="84" height="24" title="replication apply (recv) queue, average over time — rising means this node is falling behind" style="vertical-align:middle;"></canvas>
-            </td>
             <td style="padding:6px 8px;text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" title="Open a terminal on ${escapeAttr(n.container)} (run mariadb there to reach the database)" data-galera-act="console" data-cid="${cid}" data-cont="${cont}" data-kind="${escapeAttr(n.kind || 'lxc')}" data-host="${escapeAttr(n.node_id || '')}" style="padding:2px 8px;font-size:11px;border-color:var(--accent,#3b82f6);color:var(--accent,#60a5fa);"><span class="ws-icon-clean-wrap" data-icon="terminal"></span> Console</button>
                 ${act('Start', 'start')}
@@ -63387,6 +63439,21 @@ function galeraClusterCardHtml(c) {
         ? `<div role="alert" style="margin:10px 0;padding:8px 12px;border:1px solid #ef4444;border-radius:6px;background:#ef444411;color:#fca5a5;font-size:12px;">
              Split-brain detected — the cluster has fractured into separate components. Use <b>Recover</b> to stop every node, find the most up-to-date one, and rebuild around it. WolfStack will refuse to bootstrap a node whose position is unknown.
            </div>` : '';
+
+    // Galera Metrics grid — one time-series panel per metric, a line per node.
+    const connMax = (st && Array.isArray(st.nodes)) ? Math.max(0, ...st.nodes.map(n => n.max_connections || 0)) : 0;
+    const metricsGrid = `
+        <div style="margin-top:14px;">
+            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;">Galera Metrics</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;">
+                ${GALERA_METRICS.map(m => `
+                    <div style="border:1px solid var(--border);border-radius:8px;padding:10px;">
+                        <div style="font-size:12px;font-weight:600;margin-bottom:6px;">${escapeHtml(m.title)}${m.key === 'conns' && connMax ? ` <span style="font-weight:400;color:var(--text-muted);font-size:10px;">/ ${connMax} max</span>` : ''}</div>
+                        <div style="width:100%;height:120px;"><canvas id="galera-chart-${c.id}-${m.key}"></canvas></div>
+                        <div id="galera-legend-${c.id}-${m.key}" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;"></div>
+                    </div>`).join('')}
+            </div>
+        </div>`;
 
     return `<div class="card" style="margin-bottom:16px;">
         <div class="card-body">
@@ -63414,12 +63481,12 @@ function galeraClusterCardHtml(c) {
                         <th style="padding:4px 8px;">State</th>
                         <th style="padding:4px 8px;">Cluster</th>
                         <th style="padding:4px 8px;text-align:center;">Size</th>
-                        <th style="padding:4px 8px;">Replication</th>
                         <th style="padding:4px 8px;text-align:right;">Lifecycle</th>
                     </tr></thead>
-                    <tbody>${rows || `<tr><td colspan="8" style="padding:10px;color:var(--text-muted);">No nodes registered.</td></tr>`}</tbody>
+                    <tbody>${rows || `<tr><td colspan="7" style="padding:10px;color:var(--text-muted);">No nodes registered.</td></tr>`}</tbody>
                 </table>
             </div>
+            ${(c.nodes && c.nodes.length) ? metricsGrid : ''}
         </div>
     </div>`;
 }
@@ -63449,7 +63516,7 @@ function galeraRender() {
     }
     content.innerHTML = html;
     galeraBindDelegation();
-    galeraDrawSparklines();
+    galeraDrawCharts();
     // `data-icon` placeholders are hydrated automatically by the global
     // observeForDataIcons MutationObserver — no manual pass needed.
 }

@@ -620,16 +620,19 @@ mod tests {
 
         let mut older = ok_gateway("ops");
         older.updated_at = "2026-01-01T00:00:00Z".into();
-        store.upsert(older);
+        store.upsert(older); // NB: upsert re-stamps updated_at = now
 
         let mut newer = ok_gateway("ops");
-        newer.updated_at = "2026-06-01T00:00:00Z".into();
+        // Far future so it's unambiguously newer than upsert's now-stamp —
+        // a near-term date here silently decays into the past and the merge
+        // (correctly) keeps the now-stamped local copy, failing the test.
+        newer.updated_at = "2099-06-01T00:00:00Z".into();
         newer.options.readonly = true; // distinguishing change
 
         let changed = store.merge_from_peer(vec![newer]);
         assert!(changed);
         let stored = store.get("g1").unwrap();
-        assert_eq!(stored.updated_at, "2026-06-01T00:00:00Z");
+        assert_eq!(stored.updated_at, "2099-06-01T00:00:00Z");
         assert!(stored.options.readonly, "newer payload should win");
     }
 

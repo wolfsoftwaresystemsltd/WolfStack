@@ -229,6 +229,14 @@ pub struct NodeStatus {
     /// wsrep_flow_control_paused — fraction of time (0..1) the cluster was
     /// paused by THIS node's flow control. High = this node throttles the rest.
     pub flow_control_paused: f64,
+    /// wsrep_received — total write-sets received (counter → txns/sec via deltas).
+    pub received: i64,
+    /// wsrep_local_cert_failures — total certification conflicts (counter → /sec).
+    pub cert_failures: i64,
+    /// Threads_connected — current open connections (gauge).
+    pub threads_connected: i64,
+    /// @@max_connections — the connection ceiling (so the UI can warn near it).
+    pub max_connections: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -307,6 +315,10 @@ async fn node_status(n: &GaleraNode, user: &str, password: &str) -> NodeStatus {
         recv_queue_avg: 0.0,
         send_queue_avg: 0.0,
         flow_control_paused: 0.0,
+        received: 0,
+        cert_failures: 0,
+        threads_connected: 0,
+        max_connections: 0,
     };
     let params = crate::mysql_editor::ConnParams {
         host: n.address.clone(),
@@ -316,7 +328,9 @@ async fn node_status(n: &GaleraNode, user: &str, password: &str) -> NodeStatus {
         database: None,
         db_type: crate::mysql_editor::DbType::default(),
     };
-    match crate::mysql_editor::execute_query(&params, "", "SHOW GLOBAL STATUS LIKE 'wsrep_%'").await {
+    // Full status (not just wsrep_%) so we also get Threads_connected + the
+    // wsrep counters the metrics dashboard charts.
+    match crate::mysql_editor::execute_query(&params, "", "SHOW GLOBAL STATUS").await {
         Ok(v) => {
             st.reachable = true;
             let m = wsrep_map(&v);
@@ -327,9 +341,17 @@ async fn node_status(n: &GaleraNode, user: &str, password: &str) -> NodeStatus {
             st.cluster_uuid = m.get("wsrep_cluster_state_uuid").cloned().unwrap_or_default();
             st.connected = m.get("wsrep_connected").map(|s| s.eq_ignore_ascii_case("ON")).unwrap_or(false);
             let f = |k: &str| m.get(k).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let i = |k: &str| m.get(k).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
             st.recv_queue_avg = f("wsrep_local_recv_queue_avg");
             st.send_queue_avg = f("wsrep_local_send_queue_avg");
             st.flow_control_paused = f("wsrep_flow_control_paused");
+            st.received = i("wsrep_received");
+            st.cert_failures = i("wsrep_local_cert_failures");
+            st.threads_connected = i("Threads_connected");
+            // The connection ceiling is a variable, not a status — one cheap query.
+            if let Ok(mv) = crate::mysql_editor::execute_query(&params, "", "SHOW VARIABLES LIKE 'max_connections'").await {
+                st.max_connections = wsrep_map(&mv).get("max_connections").and_then(|s| s.parse().ok()).unwrap_or(0);
+            }
         }
         Err(e) => st.error = e,
     }
