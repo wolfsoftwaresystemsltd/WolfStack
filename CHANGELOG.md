@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.12.13: MaxScale proxy — root login + client + clearer dialog** _(2026-06-01 — [`9f187ac`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9f187ac9ec9c5009670ec0415eb273c313949e60))_
 - **v24.12.12: Galera grow + MaxScale proxy; fix metrics-dashboard flicker** _(2026-06-01 — [`4310aa5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4310aa5178e5d54aa45d22c3831bb6c2b84d813d))_
 - **v24.12.11: Galera Metrics dashboard (GMD-style), connections, multi-cluster-safe** _(2026-06-01 — [`b4f737b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b4f737b17068606a4f13ce410e734b8f8f8f4170))_
 - **v24.12.10: Galera nodes — clearer "Console" terminal button, single replication line** _(2026-05-31 — [`0edc575`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0edc5758e8f5b45d2c22f796e849f23912457341))_
