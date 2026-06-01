@@ -63208,7 +63208,7 @@ async function galeraLoadClusters() {
     // Aggregate Galera definitions across every host in this WS cluster (each
     // cluster lives on the host it was built/adopted on).
     const hosts = galeraClusterNodes();
-    const targets = hosts.length ? hosts.map(h => h.id) : [''];
+    const targets = Array.from(new Set([''].concat(hosts.map(h => h.id)))); // always include the local node so browser-owned (adopted-here) clusters show
     try {
         const scope = 'clusters?cluster=' + encodeURIComponent(galeraState.cluster);
         const lists = await Promise.all(targets.map(id =>
@@ -64076,7 +64076,10 @@ async function galeraAdoptSubmit() {
     if (!nodes.length) return fail('Tick at least one container.');
     const payload = { cluster_name: name, cluster: galeraState.cluster, db_user: user, db_password: pw, sst_method: 'mariabackup', nodes };
     try {
-        const r = await fetch(galeraNodeBase(galeraPrimaryHost(), 'adopt'), {
+        // Adopt runs on THIS (browser) node — it loaded the inventory, so it can
+        // reach every picked container's host and probe-locate them. Routing to a
+        // different primary host could land on one that hasn't polled some peer.
+        const r = await fetch('/api/galera/adopt', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
         });
         const d = await r.json().catch(() => ({}));
@@ -64373,7 +64376,7 @@ async function wsLoadClusters() {
     wsState.statusErrors = {};
     wsRender();
     const hosts = wsClusterNodes();
-    const targets = hosts.length ? hosts.map(h => h.id) : [''];
+    const targets = Array.from(new Set([''].concat(hosts.map(h => h.id)))); // always include the local node so browser-owned (adopted-here) clusters show
     try {
         const scope = 'clusters?cluster=' + encodeURIComponent(wsState.cluster);
         const lists = await Promise.all(targets.map(id =>
@@ -64832,7 +64835,9 @@ async function wsAdoptSubmit() {
     if (!nodes.length) return fail('Tick at least one container.');
     const payload = { cluster_name: name, cluster: wsState.cluster, cluster_port: cport, api_port: aport, proxy_port: pport, nodes };
     try {
-        const r = await fetch(wsNodeBase(wsPrimaryHost(), 'adopt'), {
+        // Adopt runs on THIS (browser) node — it loaded the inventory, so it can
+        // reach + probe-locate every picked container's host.
+        const r = await fetch('/api/wolfscale/adopt', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
         });
         const d = await r.json().catch(() => ({}));

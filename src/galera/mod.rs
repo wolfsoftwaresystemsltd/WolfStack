@@ -1731,12 +1731,11 @@ pub fn adopt_cluster(
     for p in picks {
         safe_token(&p.container)?;
         let kind = if p.kind == "docker" { "docker" } else { "lxc" };
-        // Trust the picker's host, but fall back to discovery if it's blank.
-        let host = if p.node_id.is_empty() {
-            locate_host(ctx, kind, &p.container, "")?
-        } else {
-            p.node_id.clone()
-        };
+        // ALWAYS locate the container by probing every cluster host (the picker's
+        // host is only a hint). Probing routes by each host's own local key, so
+        // it resolves even when the picked id is a peer self_id this node hasn't
+        // directly polled — the case that broke cross-host adopt in a large mesh.
+        let host = locate_host(ctx, kind, &p.container, &p.node_id)?;
         let addr = run_op(ctx, &host, kind, &p.container, NodeOp::Address)
             .map_err(|e| format!("[{}] couldn't resolve address: {}", p.container, e))?;
         let addr = addr.trim().to_string();

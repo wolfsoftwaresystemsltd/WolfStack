@@ -900,11 +900,9 @@ pub fn adopt_cluster(
     let mut nodes: Vec<WolfScaleNode> = Vec::with_capacity(picks.len());
     for p in picks {
         safe_token(&p.container)?;
-        let host = if p.node_id.is_empty() {
-            locate_host(ctx, &p.container, "")?
-        } else {
-            p.node_id.clone()
-        };
+        // Always probe-locate (picked id is just a hint) so a peer self_id this
+        // node hasn't directly polled still resolves — routing is by local key.
+        let host = locate_host(ctx, &p.container, &p.node_id)?;
         let addr = run_op(ctx, &host, &p.container, NodeOp::Address)
             .map_err(|e| format!("[{}] couldn't resolve address: {}", p.container, e))?
             .trim().to_string();
