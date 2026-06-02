@@ -23171,7 +23171,7 @@ async function migrateLxcContainer(name) {
                 The container will experience downtime during migration.
             </div>
             <div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:10px 12px;margin-bottom:16px;color:var(--warning);font-size:0.85em;">
-                Note: After migration you may need to update the container's network settings (IP address, gateway, DNS) on the destination node to match the new network.
+                In-cluster moves keep the container exactly as-is — same IP, MAC and WolfNet address. Only a cross-cluster (external) migration lands on a different network, where you may need to update IP / gateway / DNS afterwards.
             </div>
             <div style="display:flex;flex-direction:column;gap:12px;">
                 <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Migrate to</label>

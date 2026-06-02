@@ -9387,6 +9387,58 @@ pub fn lxc_clone_snapshot(container: &str, new_name: &str) -> Result<String, Str
     }
 }
 
+/// Read a container's stored WolfNet IP marker, if any. A migrate uses
+/// this to carry the *exact* WolfNet identity to the destination instead
+/// of allocating a fresh one (a move keeps everything as-is).
+pub fn lxc_get_wolfnet_ip(container: &str) -> Option<String> {
+    let base = lxc_base_dir(container);
+    std::fs::read_to_string(format!("{}/{}/.wolfnet/ip", base, container))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Write the WolfNet IP marker directly, without reallocating or touching
+/// the bridge IP — used by a migrate to restore the source's exact IP on
+/// the destination. (lxc_attach_wolfnet would also reassign a bridge IP;
+/// a move must not.)
+pub fn lxc_set_wolfnet_marker(container: &str, ip: &str) {
+    let base = lxc_base_dir(container);
+    let dir = format!("{}/{}/.wolfnet", base, container);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(format!("{}/ip", dir), ip);
+}
+
+/// Minimal fixup for a MOVE (not a clone): rewrite only the host-specific
+/// rootfs path (and hostname, if the container was renamed). MAC, bridge
+/// IP, WolfNet IP and every other setting are left exactly as the source
+/// had them — a move stops the source, so there is no identity conflict
+/// to avoid. Contrast with `lxc_clone_fixup_ip`, which reassigns a fresh
+/// MAC + IP precisely because the original keeps existing.
+pub fn lxc_migrate_fixup(new_name: &str) {
+    let base = lxc_base_dir(new_name);
+    let config_path = format!("{}/{}/config", base, new_name);
+    if let Ok(config) = std::fs::read_to_string(&config_path) {
+        let correct_rootfs = format!("dir:{}/{}/rootfs", base, new_name);
+        let updated: Vec<String> = config.lines().map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("lxc.rootfs.path") {
+                return format!("lxc.rootfs.path = {}", correct_rootfs);
+            }
+            if trimmed.starts_with("lxc.uts.name") {
+                return format!("lxc.uts.name = {}", new_name);
+            }
+            line.to_string()
+        }).collect();
+        let _ = std::fs::write(&config_path, updated.join("\n"));
+    }
+    // Mark setup done so lxc_post_start_setup doesn't reassign a bridge IP
+    // at first boot — the carried rootfs already holds the original network
+    // config, and the WolfNet marker (restored separately) holds the IP.
+    let marker = format!("{}/{}/.wolfstack_setup_done", base, new_name);
+    let _ = std::fs::write(&marker, "migrated");
+}
+
 pub fn lxc_clone_fixup_ip(new_name: &str) {
     let new_last = find_free_bridge_ip();
     let new_ip = format!("10.0.3.{}", new_last);

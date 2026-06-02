@@ -9319,6 +9319,10 @@ pub async fn lxc_migrate(
         let client = &*API_HTTP_CLIENT;
         let file_name = archive_path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let meta_json = serde_json::to_string(&meta).unwrap_or_default();
+        // Carry the source's exact WolfNet IP so the destination keeps it —
+        // a move reproduces the container as-is (the source is stopped, so
+        // there is no IP conflict).
+        let src_wolfnet_ip = containers::lxc_get_wolfnet_ip(&name);
         let mut last_err: Option<String> = None;
         // A connect failure means nothing was sent (safe to restart the
         // source). A timeout or any other error is ambiguous — the target
@@ -9327,13 +9331,17 @@ pub async fn lxc_migrate(
         let mut saw_ambiguous = false;
 
         for import_url in &import_urls {
-            let form = reqwest::multipart::Form::new()
+            let mut form = reqwest::multipart::Form::new()
                 .text("new_name", new_name.clone())
                 .text("storage", storage_val.clone())
                 .text("meta", meta_json.clone())
                 .text("start", "1")
+                .text("preserve_identity", "1")
                 .part("archive", reqwest::multipart::Part::bytes(archive_bytes.clone())
                     .file_name(file_name.clone()));
+            if let Some(ip) = src_wolfnet_ip.clone() {
+                form = form.text("wolfnet_ip", ip);
+            }
 
             match client.post(import_url)
                 .timeout(std::time::Duration::from_secs(3600))
@@ -9490,6 +9498,7 @@ async fn lxc_import_endpoint_inner(
     let mut archive_format = String::new(); // "vzdump" or "tar.gz"
     let mut lxc_config: Option<String> = None;   // source config, for a bootable standalone import
     let mut start_after_import = false;          // migrate sets this to boot + verify the destination
+    let mut preserve_identity = false;           // migrate (a move) sets this to keep IP/MAC/WolfNet as-is
 
     use futures::StreamExt;
     while let Some(item) = payload.next().await {
@@ -9544,6 +9553,14 @@ async fn lxc_import_endpoint_inner(
                 let s = String::from_utf8_lossy(&buf).trim().to_ascii_lowercase();
                 start_after_import = s == "1" || s == "true" || s == "yes";
             }
+            "preserve_identity" => {
+                let mut buf = Vec::new();
+                while let Some(chunk) = field.next().await {
+                    if let Ok(data) = chunk { buf.extend_from_slice(&data); }
+                }
+                let s = String::from_utf8_lossy(&buf).trim().to_ascii_lowercase();
+                preserve_identity = s == "1" || s == "true" || s == "yes";
+            }
             "archive" => {
                 // Use UUID filename — pick extension based on source archive format
                 let ext = if archive_format == "vzdump" { "tar.zst" } else { "tar.gz" };
@@ -9590,19 +9607,27 @@ async fn lxc_import_endpoint_inner(
         let outcome = containers::lxc_import(&archive_str, &nn, storage_c.as_deref(), carried.as_deref())?;
         let _ = std::fs::remove_file(&archive_str);
 
-        // Remove duplicated wolfnet IP from the template (both standalone and Proxmox)
-        let wolfnet_marker = format!("{}/{}/.wolfnet", containers::lxc_base_dir(&nn), nn);
-        let _ = std::fs::remove_dir_all(&wolfnet_marker);
-
-        // Rewrite rootfs.path/hostname/networking for this host. On a carried
-        // config this just re-points host-specific keys; on a synthesised one
-        // it finishes off the hwaddr + IPv4.
-        containers::lxc_clone_fixup_ip(&nn);
-
-        // Allocate a fresh wolfnet IP — use the pre-allocated one if provided
-        let ip_to_use = pre_ip.or_else(containers::next_available_wolfnet_ip);
-        if let Some(ip) = ip_to_use {
-            let _ = containers::lxc_attach_wolfnet(&nn, &ip);
+        if preserve_identity {
+            // MOVE: reproduce the container exactly. Only the host rootfs
+            // path changes; MAC, bridge IP and WolfNet IP are kept as the
+            // source had them (the source is stopped, so nothing collides).
+            containers::lxc_migrate_fixup(&nn);
+            if let Some(ip) = pre_ip.as_deref() {
+                containers::lxc_set_wolfnet_marker(&nn, ip);
+            }
+        } else {
+            // CLONE / restore / cross-cluster: the original still exists, so
+            // give this copy a fresh identity to avoid IP/MAC collisions.
+            let wolfnet_marker = format!("{}/{}/.wolfnet", containers::lxc_base_dir(&nn), nn);
+            let _ = std::fs::remove_dir_all(&wolfnet_marker);
+            // Rewrite rootfs.path/hostname/networking for this host. On a
+            // carried config this re-points host-specific keys; on a
+            // synthesised one it finishes off the hwaddr + IPv4.
+            containers::lxc_clone_fixup_ip(&nn);
+            let ip_to_use = pre_ip.or_else(containers::next_available_wolfnet_ip);
+            if let Some(ip) = ip_to_use {
+                let _ = containers::lxc_attach_wolfnet(&nn, &ip);
+            }
         }
 
         // When the caller is a migrate orchestrator it asks us to boot the
