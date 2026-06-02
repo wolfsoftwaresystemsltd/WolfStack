@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.13.1: fix cross-host adopt — probe-locate instead of trusting the picked id** _(2026-06-01 — [`dda1cf6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dda1cf6434c355a418d5e5fea69547926a48f3a7))_
 - **v24.13.0: WolfScale cluster builder** _(2026-06-01 — [`042c455`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/042c4558eaa288dd0ca12a9f8ec7b28ac717df8f))_
 - **v24.12.14: cross-host Galera create + fix cross-host adopt** _(2026-06-01 — [`099f5fb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/099f5fbe1ca82340804d8baa8e7ac82b7f3b54b8))_
 - **v24.12.13: MaxScale proxy — root login + client + clearer dialog** _(2026-06-01 — [`9f187ac`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9f187ac9ec9c5009670ec0415eb273c313949e60))_
