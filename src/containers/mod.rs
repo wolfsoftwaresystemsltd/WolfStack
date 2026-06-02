@@ -5410,6 +5410,24 @@ fn lxc_post_start_setup(container: &str) {
 }
 
 /// Stop an LXC container
+/// True if the container is currently RUNNING on this host. The migrate
+/// orchestrator records this before stopping the source so a rollback
+/// only restarts a container that had actually been running.
+pub fn lxc_is_running(container: &str) -> bool {
+    if is_proxmox() {
+        return Command::new("pct").args(["status", container]).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("running"))
+            .unwrap_or(false);
+    }
+    let base = lxc_base_dir(container);
+    let mut args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+    args.extend_from_slice(&["-n", container, "-sH"]);
+    Command::new("lxc-info").args(&args).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_uppercase().contains("RUNNING"))
+        .unwrap_or(false)
+}
+
 pub fn lxc_stop(container: &str) -> Result<String, String> {
     if is_proxmox() {
         run_lxc_cmd(&["pct", "stop", container])
@@ -7817,6 +7835,13 @@ pub struct ContainerExportMeta {
     pub cpu_cores: Option<u32>,
     pub source_type: String, // "proxmox" or "standalone"
     pub archive_format: String, // "vzdump" or "tar.gz"
+    /// The source container's full LXC config file, carried alongside the
+    /// rootfs so a standalone import can reconstruct a *bootable* config
+    /// (arch, idmap, apparmor, cgroup mounts, resource limits) instead of
+    /// the old 3-line stub that left systemd containers in ABORTING.
+    /// None for Proxmox sources — their config travels inside the vzdump.
+    #[serde(default)]
+    pub lxc_config: Option<String>,
 }
 
 /// Export an LXC container to an archive file
@@ -7842,7 +7867,10 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
         let stdout = String::from_utf8_lossy(&output.stdout);
         let archive_path = find_vzdump_archive(&stdout, export_dir, container)?;
 
-        // Extract metadata from pct config
+        // Extract metadata from pct config. Proxmox carries the container
+        // config inside the vzdump (etc/vzdump/pct.conf), so we leave
+        // lxc_config None — the standalone-import path synthesises one if
+        // it ever receives a vzdump on a non-Proxmox target.
         let meta = extract_pve_container_meta(container)?;
 
         Ok((archive_path, meta))
@@ -7875,6 +7903,11 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
             return Err(format!("tar failed: {}", stderr.trim()));
         }
 
+        // Carry the source container's LXC config so the destination can
+        // rebuild a bootable config rather than the old minimal stub. The
+        // config lives one level up from the rootfs (container_dir/config).
+        let lxc_config = std::fs::read_to_string(format!("{}/config", container_dir)).ok();
+
         let meta = ContainerExportMeta {
             name: container.to_string(),
             distribution: "unknown".to_string(),
@@ -7884,6 +7917,7 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
             cpu_cores: None,
             source_type: "standalone".to_string(),
             archive_format: "tar.gz".to_string(),
+            lxc_config,
         };
 
 
@@ -7964,11 +7998,118 @@ fn extract_pve_container_meta(vmid: &str) -> Result<ContainerExportMeta, String>
         cpu_cores,
         source_type: "proxmox".to_string(),
         archive_format: "vzdump".to_string(),
+        lxc_config: None,
     })
 }
 
-/// Import an LXC container from an archive file
-pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> Result<String, String> {
+/// Result of importing an LXC container: a human-readable message plus
+/// the identifier the caller uses to start it. Proxmox addresses
+/// containers by VMID, standalone LXC by name — so a migrate orchestrator
+/// can't assume which to pass to `lxc_start`; this carries the right one.
+pub struct LxcImportOutcome {
+    pub message: String,
+    pub start_id: String,
+}
+
+/// True if the rootfs boots with systemd as PID 1 (Debian Bookworm+,
+/// Ubuntu, Fedora, Rocky, Alma, openSUSE, Arch — everything bar Alpine
+/// and Void). Such inits die on a missing cgroup mount, so they need
+/// `lxc.mount.auto` + an apparmor decision in the config.
+fn rootfs_uses_systemd(rootfs: &str) -> bool {
+    std::path::Path::new(&format!("{}/lib/systemd/systemd", rootfs)).exists()
+        || std::path::Path::new(&format!("{}/usr/lib/systemd/systemd", rootfs)).exists()
+        || std::fs::read_link(format!("{}/sbin/init", rootfs))
+            .map(|p| p.to_string_lossy().contains("systemd"))
+            .unwrap_or(false)
+}
+
+/// Heuristic for an unprivileged container: its rootfs is stored
+/// uid-shifted, so files that are root *inside* the container are owned
+/// by 100000+ on the host. We read the actual extracted ownership rather
+/// than guessing the privilege mode.
+fn rootfs_is_unprivileged(rootfs: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    for probe in ["etc", "usr", "bin"] {
+        if let Ok(md) = std::fs::metadata(format!("{}/{}", rootfs, probe)) {
+            return md.uid() >= 100_000;
+        }
+    }
+    false
+}
+
+/// Write a *bootable* LXC config for a freshly-imported standalone
+/// container. Prefers the source's own config (carried with the archive)
+/// so arch/idmap/apparmor/cgroup/resource limits survive the move;
+/// otherwise synthesises a complete config from the rootfs. The old code
+/// wrote only `rootfs.path` + `uts.name` + `net.0.type = empty`, which
+/// left systemd containers stuck in ABORTING for want of cgroup mounts,
+/// an idmap and an apparmor decision — see `lxc_create`'s systemd block
+/// for the authoritative list of what such a rootfs needs.
+fn lxc_write_bootable_config(container_dir: &str, new_name: &str, carried_config: Option<&str>) {
+    let config_path = format!("{}/config", container_dir);
+    if std::path::Path::new(&config_path).exists() {
+        return; // native tooling already wrote a real config — leave it
+    }
+
+    if let Some(cfg) = carried_config.filter(|c| !c.trim().is_empty()) {
+        // The source's real config. rootfs.path/uts.name/networking are
+        // host-specific and get rewritten by lxc_clone_fixup_ip after
+        // this returns; everything else (arch, idmap, apparmor, cgroup
+        // mounts, cpu/mem limits, mounts, features) is preserved as-is.
+        let _ = std::fs::write(&config_path, cfg);
+        return;
+    }
+
+    // No carried config (a vzdump landing on a standalone node, or an
+    // older source node that predates config-carrying). Synthesise.
+    let rootfs = format!("{}/rootfs", container_dir);
+    let unprivileged = rootfs_is_unprivileged(&rootfs);
+    let systemd = rootfs_uses_systemd(&rootfs);
+
+    let mut lines: Vec<String> = Vec::new();
+    // arch matches the WolfStack export default (amd64); the rootfs is
+    // host-arch in practice since a migrate stays within one cluster.
+    lines.push("lxc.arch = amd64".to_string());
+    lines.push("lxc.include = /usr/share/lxc/config/common.conf".to_string());
+    if unprivileged {
+        lines.push("lxc.include = /usr/share/lxc/config/userns.conf".to_string());
+        lines.push("lxc.idmap = u 0 100000 65536".to_string());
+        lines.push("lxc.idmap = g 0 100000 65536".to_string());
+    }
+    lines.push(format!("lxc.rootfs.path = dir:{}/rootfs", container_dir));
+    lines.push(format!("lxc.uts.name = {}", new_name));
+    // A real veth on the default bridge — lxc_clone_fixup_ip refines the
+    // hwaddr + IPv4 and lxc_attach_wolfnet adds the WolfNet marker after.
+    lines.push("lxc.net.0.type = veth".to_string());
+    lines.push("lxc.net.0.link = lxcbr0".to_string());
+    lines.push("lxc.net.0.flags = up".to_string());
+    lines.push("lxc.net.0.name = eth0".to_string());
+    if systemd {
+        // Identical to lxc_create's systemd-compat toggles. Placed after
+        // common.conf so the unconfined apparmor profile wins the include.
+        lines.push("lxc.include = /usr/share/lxc/config/nesting.conf".to_string());
+        lines.push("lxc.apparmor.profile = unconfined".to_string());
+        lines.push("lxc.mount.auto = proc:rw sys:rw cgroup:rw".to_string());
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    let _ = std::fs::write(&config_path, out);
+}
+
+/// Import an LXC container from an archive file.
+///
+/// `carried_config` is the source's LXC config (ContainerExportMeta
+/// .lxc_config); on standalone targets it is used to rebuild a bootable
+/// config instead of the old unbootable stub. Returns the start
+/// identifier (VMID on Proxmox, name on standalone) so the caller can
+/// start the destination on the right platform.
+pub fn lxc_import(
+    archive_path: &str,
+    new_name: &str,
+    storage: Option<&str>,
+    carried_config: Option<&str>,
+) -> Result<LxcImportOutcome, String> {
     let path = std::path::Path::new(archive_path);
     if !path.exists() {
         return Err(format!("Archive not found: {}", archive_path));
@@ -7998,7 +8139,10 @@ pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> 
                 .map_err(|e| format!("pct restore failed: {}", e))?;
 
             if output.status.success() {
-                Ok(format!("Container '{}' imported (VMID {}, storage: {})", new_name, new_vmid, storage_id))
+                Ok(LxcImportOutcome {
+                    message: format!("Container '{}' imported (VMID {}, storage: {})", new_name, new_vmid, storage_id),
+                    start_id: new_vmid.to_string(),
+                })
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -8021,7 +8165,10 @@ pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> 
                 .map_err(|e| format!("pct create failed: {}", e))?;
 
             if output.status.success() {
-                Ok(format!("Container '{}' imported (VMID {}, storage: {})", new_name, new_vmid, storage_id))
+                Ok(LxcImportOutcome {
+                    message: format!("Container '{}' imported (VMID {}, storage: {})", new_name, new_vmid, storage_id),
+                    start_id: new_vmid.to_string(),
+                })
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -8063,17 +8210,16 @@ pub fn lxc_import(archive_path: &str, new_name: &str, storage: Option<&str>) -> 
                     .output();
             }
 
-            // Generate a minimal LXC config if one doesn't exist
-            let config_path = format!("{}/config", container_dir);
-            if !std::path::Path::new(&config_path).exists() {
-                let config_content = format!(
-                    "lxc.rootfs.path = dir:{}/rootfs\nlxc.uts.name = {}\nlxc.net.0.type = empty\n",
-                    container_dir, new_name
-                );
-                let _ = std::fs::write(&config_path, config_content);
-            }
+            // Write a bootable config — the source's own config when it
+            // travelled with the archive, otherwise a synthesised one.
+            // (Replaces the old 3-line stub that left systemd containers
+            // stuck in ABORTING.)
+            lxc_write_bootable_config(&container_dir, new_name, carried_config);
 
-            Ok(format!("Container '{}' imported from archive", new_name))
+            Ok(LxcImportOutcome {
+                message: format!("Container '{}' imported from archive", new_name),
+                start_id: new_name.to_string(),
+            })
         } else {
             // Cleanup on failure
             let _ = std::fs::remove_dir_all(&container_dir);
@@ -8187,11 +8333,7 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
         // start verifier. The same toggles a user would apply manually
         // (Settings → Nesting + lxc.apparmor.profile = unconfined).
         let rootfs = format!("{}/{}/rootfs", base, name);
-        let is_systemd = std::path::Path::new(&format!("{}/lib/systemd/systemd", rootfs)).exists()
-            || std::path::Path::new(&format!("{}/usr/lib/systemd/systemd", rootfs)).exists()
-            || std::fs::read_link(format!("{}/sbin/init", rootfs))
-                .map(|p| p.to_string_lossy().contains("systemd"))
-                .unwrap_or(false);
+        let is_systemd = rootfs_uses_systemd(&rootfs);
         if is_systemd {
             if let Ok(mut cfg) = std::fs::read_to_string(&cfg_path) {
                 let mut additions: Vec<&str> = Vec::new();

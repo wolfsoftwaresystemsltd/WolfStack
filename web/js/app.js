@@ -23166,7 +23166,7 @@ async function migrateLxcContainer(name) {
     modal.innerHTML = `
         <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 16px;color:var(--text,#fff);">Migrate Container</h3>
-            <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Copy <strong>${name}</strong> to another node. The source stays running — the destination will be imported but not started.</p>
+            <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Move <strong>${name}</strong> to another node in this cluster: the source is stopped, copied across, and started on the destination — the source is kept (stopped) on the old node as a rollback. <em>Migrating to an external cluster instead copies it and leaves the source running.</em></p>
             <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:10px 12px;margin-bottom:10px;color:var(--danger);font-size:0.85em;">
                 The container will experience downtime during migration.
             </div>
@@ -23337,8 +23337,21 @@ async function doMigrateLxc(name) {
             updateTaskLogEntry(taskId, { status: 'failed', description: `Migrate LXC '${name}': ${e.message}` });
         }
     } else {
-        // Intra-cluster: synchronous
-        const taskId = taskLogStart(`Migrate LXC '${name}' → ${lxcTargetLabel}`);
+        // Intra-cluster: background task with a live stepped progress box.
+        const logTaskId = taskLogStart(`Migrate LXC '${name}' → ${lxcTargetLabel}`);
+        const steps = [
+            { id: 'export', label: 'Stop & export source', icon: '', stages: ['preflight', 'stop_source', 'export'] },
+            { id: 'upload', label: `Transfer to ${lxcTargetLabel}`, icon: '', stages: ['upload'] },
+            { id: 'start',  label: `Import & start on ${lxcTargetLabel}`, icon: '', stages: ['import', 'start'] },
+        ];
+        showVmMigrateProgressModal(name, steps, 'Container');
+        const startTime = Date.now();
+        const elapsedEl = document.getElementById('vm-migrate-elapsed');
+        const elapsedTimer = setInterval(() => {
+            const secs = Math.floor((Date.now() - startTime) / 1000);
+            const mins = Math.floor(secs / 60);
+            if (elapsedEl) elapsedEl.textContent = mins > 0 ? `Elapsed: ${mins}m ${secs % 60}s` : `Elapsed: ${secs}s`;
+        }, 1000);
         try {
             const targetNode = allNodes.find(n => n.id === target);
             const migrateBody = { target_node: target };
@@ -23349,15 +23362,28 @@ async function doMigrateLxc(name) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(migrateBody),
             });
-            const data = await resp.json().catch(() => ({}));
-            if (resp.ok) {
-                updateTaskLogEntry(taskId, { status: 'completed', description: `Migrate LXC '${name}' → ${lxcTargetLabel}: ${data.message || 'Done'}` });
+            const kickoff = await resp.json().catch(() => ({}));
+            if (!resp.ok || !kickoff.task_id) {
+                clearInterval(elapsedTimer);
+                const msg = kickoff.error || 'Failed to start migration';
+                vmMigrateProgressFinish(steps, false, msg, 'export');
+                updateTaskLogEntry(logTaskId, { status: 'failed', description: `Migrate LXC '${name}': ${msg}` });
+                return;
+            }
+            const result = await pollVmMigrationProgress(kickoff.task_id, steps);
+            clearInterval(elapsedTimer);
+            const finishMsg = result.ok ? (result.message || 'Migration complete') : (result.error || 'Migration failed');
+            vmMigrateProgressFinish(steps, result.ok, finishMsg, result.failedStage);
+            if (result.ok) {
+                updateTaskLogEntry(logTaskId, { status: 'completed', description: `Migrate LXC '${name}' → ${lxcTargetLabel}: ${result.message || 'Done'}` });
                 setTimeout(loadLxcContainers, 500);
             } else {
-                updateTaskLogEntry(taskId, { status: 'failed', description: `Migrate LXC '${name}': ${data.error || 'Failed'}` });
+                updateTaskLogEntry(logTaskId, { status: 'failed', description: `Migrate LXC '${name}': ${result.error || 'Failed'}` });
             }
         } catch (e) {
-            updateTaskLogEntry(taskId, { status: 'failed', description: `Migrate LXC '${name}': ${e.message}` });
+            clearInterval(elapsedTimer);
+            vmMigrateProgressFinish(steps, false, `Migration failed: ${e.message}`, 'export');
+            updateTaskLogEntry(logTaskId, { status: 'failed', description: `Migrate LXC '${name}': ${e.message}` });
         }
     }
 }
@@ -23732,14 +23758,17 @@ async function doMigrateVm(name) {
 /// doMigrateVmDiskStorage. Inserts the modal into the DOM, wires up
 /// the elapsed timer display, and ensures the spin keyframes style is
 /// present. Steps array shape: { id, label, icon, stages: [string] }.
-function showVmMigrateProgressModal(name, steps) {
+function showVmMigrateProgressModal(name, steps, noun = 'VM') {
+    // Drop any stale modal so the elapsed-timer/progress lookups below bind
+    // to this run's elements, not a leftover one from an aborted migration.
+    document.getElementById('vm-op-modal')?.remove();
     const modal = document.createElement('div');
     modal.id = 'vm-op-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
         <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:480px;max-width:580px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
-            <h3 style="margin:0 0 6px;color:var(--text,#fff);">Migrating VM</h3>
-            <p style="margin:0 0 16px;color:var(--text-muted,#aaa);font-size:0.85em;">Moving <strong>${name}</strong> — progress is polled live from the server.</p>
+            <h3 style="margin:0 0 6px;color:var(--text,#fff);">Migrating ${escapeHtml(noun)}</h3>
+            <p style="margin:0 0 16px;color:var(--text-muted,#aaa);font-size:0.85em;">Moving <strong>${escapeHtml(name)}</strong> — progress is polled live from the server.</p>
             <div id="vm-migrate-steps" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;">
                 ${steps.map(s => `
                     <div id="vmstep-${s.id}" style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:var(--bg-secondary,#161622);transition:all 0.3s;">
@@ -23824,15 +23853,30 @@ async function pollVmMigrationProgress(taskId, steps) {
     steps.forEach(s => (s.stages || [s.id]).forEach(stg => { stageToStep[stg] = s.id; }));
     let lastStage = null;
     let failedStage = null;
+    // Bail out if the status endpoint is unreachable for too long (server
+    // restarted, task evicted) rather than polling forever.
+    let consecutiveFailures = 0;
+    const maxFailures = 30;
 
     while (true) {
         await new Promise(r => setTimeout(r, 1000));
         let data;
         try {
             const r = await fetch(apiUrl(`/api/migration/${taskId}/status`));
-            if (!r.ok) { continue; }
+            if (!r.ok) {
+                if (++consecutiveFailures >= maxFailures) {
+                    return { ok: false, error: 'Lost contact with the server while polling migration status. Check the destination node before starting either copy.', failedStage: failedStage || (steps[steps.length - 1] && steps[steps.length - 1].id) };
+                }
+                continue;
+            }
             data = await r.json();
-        } catch { continue; }
+            consecutiveFailures = 0;
+        } catch {
+            if (++consecutiveFailures >= maxFailures) {
+                return { ok: false, error: 'Lost contact with the server while polling migration status. Check the destination node before starting either copy.', failedStage: failedStage || (steps[steps.length - 1] && steps[steps.length - 1].id) };
+            }
+            continue;
+        }
 
         const stage = data.stage || '';
         const msg = data.message || '';

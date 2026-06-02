@@ -311,7 +311,7 @@ pub struct AlertLogEntry {
 #[derive(Clone, Serialize)]
 pub struct MigrationTask {
     pub id: String,
-    pub stage: String,       // "preflight", "export", "upload", "import", "disk_copy", "done", "failed"
+    pub stage: String,       // "preflight", "stop_source", "export", "upload", "import", "start", "disk_copy", "done", "failed"
     pub message: String,
     pub completed: bool,
     pub error: Option<String>,
@@ -9006,6 +9006,55 @@ pub async fn lxc_clone(
     }
 }
 
+/// Resolve a target node by id, falling back to an explicit address/port
+/// when the id isn't in local cluster state (e.g. a request proxied to a
+/// node whose cluster view differs). Returns None only when neither the id
+/// resolves nor a usable fallback address is supplied.
+fn resolve_target_node(
+    state: &web::Data<AppState>,
+    target_node_id: &str,
+    fallback_address: Option<&str>,
+    fallback_port: Option<u16>,
+) -> Option<crate::agent::Node> {
+    if let Some(n) = state.cluster.get_node(target_node_id) {
+        return Some(n);
+    }
+    let addr = fallback_address?;
+    let port = fallback_port.unwrap_or(8553);
+    tracing::info!("Node '{}' not in cluster state, using fallback address {}:{}", target_node_id, addr, port);
+    Some(crate::agent::Node {
+        id: target_node_id.to_string(),
+        address: addr.to_string(),
+        port,
+        hostname: addr.to_string(),
+        is_self: false,
+        online: true,
+        node_type: "wolfstack".to_string(),
+        last_seen: 0,
+        metrics: None,
+        components: vec![],
+        docker_count: 0,
+        lxc_count: 0,
+        vm_count: 0,
+        public_ip: None,
+        pve_token: None,
+        pve_fingerprint: None,
+        pve_node_name: None,
+        pve_cluster_name: None,
+        cluster_name: None,
+        join_verified: false,
+        has_docker: false,
+        has_lxc: false,
+        has_kvm: false,
+        login_disabled: false,
+        tls: false,
+        update_script: None,
+        self_id: None,
+        workload_subnets: Vec::new(),
+        site: None,
+    })
+}
+
 /// Remote clone: export on this node, stream to target, import there
 async fn lxc_remote_clone(
     state: &web::Data<AppState>,
@@ -9019,47 +9068,9 @@ async fn lxc_remote_clone(
 ) -> HttpResponse {
     // 1. Find target node — fall back to address/port if node ID not in local cluster state
     //    (can happen when request is proxied to a remote node with different cluster state)
-    let node = match state.cluster.get_node(target_node_id) {
+    let node = match resolve_target_node(state, target_node_id, fallback_address, fallback_port) {
         Some(n) => n,
-        None => {
-            if let Some(addr) = fallback_address {
-                let port = fallback_port.unwrap_or(8553);
-                tracing::info!("Node '{}' not in cluster state, using fallback address {}:{}", target_node_id, addr, port);
-                crate::agent::Node {
-                    id: target_node_id.to_string(),
-                    address: addr.to_string(),
-                    port,
-                    hostname: addr.to_string(),
-                    is_self: false,
-                    online: true,
-                    node_type: "wolfstack".to_string(),
-                    last_seen: 0,
-                    metrics: None,
-                    components: vec![],
-                    docker_count: 0,
-                    lxc_count: 0,
-                    vm_count: 0,
-                    public_ip: None,
-                    pve_token: None,
-                    pve_fingerprint: None,
-                    pve_node_name: None,
-                    pve_cluster_name: None,
-                    cluster_name: None,
-                    join_verified: false,
-                    has_docker: false,
-                    has_lxc: false,
-                    has_kvm: false,
-                    login_disabled: false,
-                    tls: false,
-                    update_script: None,
-                    self_id: None,
-                    workload_subnets: Vec::new(),
-                    site: None,
-                }
-            } else {
-                return HttpResponse::NotFound().json(serde_json::json!({"error": "Target node not found"}));
-            }
-        }
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Target node not found"})),
     };
     if node.is_self {
         // Local clone, not remote
@@ -9214,7 +9225,13 @@ pub async fn lxc_import_endpoint(
     lxc_import_endpoint_inner(&mut payload).await
 }
 
-/// POST /api/containers/lxc/{name}/migrate — migrate to another node (clone + destroy source)
+/// POST /api/containers/lxc/{name}/migrate — move a container to another
+/// node in the same cluster. Unlike a clone, this is a true move: the
+/// source is stopped, transferred, imported with a bootable config, then
+/// the destination is started and verified RUNNING. The source is left
+/// stopped (kept on the old node as a rollback). On any failure the
+/// source is restarted. Runs in the background — the response carries a
+/// `task_id`; poll GET /api/migration/{id}/status for live progress.
 pub async fn lxc_migrate(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -9223,12 +9240,168 @@ pub async fn lxc_migrate(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
-    let new_name = body.new_name.as_deref().unwrap_or(&name);
+    let new_name = body.new_name.as_deref().unwrap_or(&name).to_string();
+    // Validate here, before we stop/export anything — a bad name must not
+    // cost the operator downtime only to be rejected by the target later.
+    if !crate::auth::is_safe_name(&new_name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
+    }
 
-    // Clone to target node — source stays running, destination is not started
-    let clone_resp = lxc_remote_clone(&state, &name, new_name, &body.target_node, body.storage.as_deref(), None, body.target_address.as_deref(), body.target_port).await;
+    // Resolve the destination up front so a bad target fails fast (before
+    // we stop anything) rather than inside the background task.
+    let node = match resolve_target_node(&state, &body.target_node, body.target_address.as_deref(), body.target_port) {
+        Some(n) => n,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Target node not found"})),
+    };
+    if node.is_self {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Target is the source node — migrate moves a container between nodes; use Clone to copy it on the same host"
+        }));
+    }
 
-    clone_resp
+    // Build the import endpoints up front (Proxmox nodes register their PVE
+    // port, but WolfStack listens on 8553/8552 there).
+    let import_urls = if node.node_type == "proxmox" {
+        let mut urls = build_node_urls(&node.address, 8553, "/api/containers/lxc/import");
+        urls.extend(build_node_urls(&node.address, 8552, "/api/containers/lxc/import"));
+        urls
+    } else {
+        build_node_urls(&node.address, node.port, "/api/containers/lxc/import")
+    };
+    let target_label = if node.hostname.is_empty() { node.address.clone() } else { node.hostname.clone() };
+    let target_addr = node.address.clone();
+    let target_is_proxmox = node.node_type == "proxmox";
+
+    let tasks = state.migration_tasks.clone();
+    let task_id = migration_create(&tasks);
+    let tid = task_id.clone();
+    let cluster_secret = state.cluster_secret.clone();
+    let storage_val = body.storage.as_deref().unwrap_or("").to_string();
+
+    tokio::spawn(async move {
+        // 1. Stop the source for a consistent export. Record whether it was
+        //    running so a rollback only restarts a previously-running one.
+        migration_update(&tasks, &tid, "stop_source", &format!("Stopping '{}' on the source node…", name));
+        let was_running = containers::lxc_is_running(&name);
+        let _ = containers::lxc_stop(&name);
+        // Refuse to export a still-running rootfs — the archive would be
+        // inconsistent. The source is untouched here, so just abort.
+        if containers::lxc_is_running(&name) {
+            migration_fail(&tasks, &tid, &format!(
+                "Could not stop '{}' on the source node — aborted before export so no inconsistent copy is shipped. The source is still running, untouched.", name));
+            return;
+        }
+
+        // 2. Export (stays stopped — this is a move, not a live clone).
+        migration_update(&tasks, &tid, "export", "Exporting container…");
+        let (archive_path, meta) = match containers::lxc_export(&name) {
+            Ok(v) => v,
+            Err(e) => {
+                if was_running { let _ = containers::lxc_start(&name); }
+                migration_fail(&tasks, &tid, &format!("Export failed: {}", e));
+                return;
+            }
+        };
+        let archive_bytes = match std::fs::read(&archive_path) {
+            Ok(b) => b,
+            Err(e) => {
+                containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+                if was_running { let _ = containers::lxc_start(&name); }
+                migration_fail(&tasks, &tid, &format!("Failed to read archive: {}", e));
+                return;
+            }
+        };
+
+        let size_mb = archive_bytes.len() / (1024 * 1024);
+        migration_update(&tasks, &tid, "upload", &format!("Transferring {} MB to {}…", size_mb, target_label));
+
+        // 3. Upload → target imports a bootable config, starts + verifies it.
+        let client = &*API_HTTP_CLIENT;
+        let file_name = archive_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let meta_json = serde_json::to_string(&meta).unwrap_or_default();
+        let mut last_err: Option<String> = None;
+        // A connect failure means nothing was sent (safe to restart the
+        // source). A timeout or any other error is ambiguous — the target
+        // may already have imported AND started the container, so restarting
+        // the source would leave two copies running (split-brain).
+        let mut saw_ambiguous = false;
+
+        for import_url in &import_urls {
+            let form = reqwest::multipart::Form::new()
+                .text("new_name", new_name.clone())
+                .text("storage", storage_val.clone())
+                .text("meta", meta_json.clone())
+                .text("start", "1")
+                .part("archive", reqwest::multipart::Part::bytes(archive_bytes.clone())
+                    .file_name(file_name.clone()));
+
+            match client.post(import_url)
+                .timeout(std::time::Duration::from_secs(3600))
+                .header("X-WolfStack-Secret", cluster_secret.clone())
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(r) => {
+                    containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+                    let status = r.status();
+                    let data = r.json::<serde_json::Value>().await.unwrap_or_else(|_| serde_json::json!({}));
+                    if status.is_success() {
+                        migration_update(&tasks, &tid, "start", &format!("Starting '{}' on {}…", new_name, target_label));
+                        let started = data.get("started").and_then(|v| v.as_bool()).unwrap_or(false);
+                        if started {
+                            // Standalone→Proxmox creates a fresh PVE config from
+                            // the rootfs (pct create) — custom limits don't carry.
+                            let note = if target_is_proxmox && meta.source_type == "standalone" {
+                                "\n\nNote: imported onto Proxmox from a standalone node — custom resource limits / LXC settings were not translated; review with `pct config` and adjust via `pct set`."
+                            } else { "" };
+                            migration_done(&tasks, &tid, &format!(
+                                "Migrated '{}' to {} — destination is running. Source stopped and kept on the old node as a rollback.{}",
+                                name, target_label, note));
+                        } else {
+                            // Imported but didn't boot — roll back to the source.
+                            if was_running { let _ = containers::lxc_start(&name); }
+                            let serr = data.get("start_error").and_then(|v| v.as_str())
+                                .unwrap_or("destination did not reach RUNNING");
+                            migration_fail(&tasks, &tid, &format!(
+                                "Destination imported but failed to start — source restarted, nothing lost.\n\n{}", serr));
+                        }
+                    } else {
+                        if was_running { let _ = containers::lxc_start(&name); }
+                        let err_text = data.get("error").and_then(|v| v.as_str()).map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("HTTP {}", status));
+                        migration_fail(&tasks, &tid, &format!("Import on target failed — source restarted: {}", err_text));
+                    }
+                    return;
+                }
+                Err(e) => {
+                    if !e.is_connect() { saw_ambiguous = true; }
+                    last_err = Some(e.to_string());
+                    continue;
+                }
+            }
+        }
+
+        // Transfer failed on every endpoint.
+        containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+        if saw_ambiguous {
+            // The destination MAY have received and started the container.
+            // Do NOT restart the source — two running copies risk split-brain
+            // (critical for clustered DBs like Galera). Leave it stopped and
+            // make the operator reconcile.
+            migration_fail(&tasks, &tid, &format!(
+                "Transfer to {} timed out or failed ambiguously — the destination may have started the container. Left the source STOPPED to avoid running two copies; check {} and start whichever copy you want to keep. ({})",
+                target_addr, target_addr, last_err.unwrap_or_default()));
+        } else {
+            // Pure connect failures: nothing was sent, safe to bring it back.
+            if was_running { let _ = containers::lxc_start(&name); }
+            migration_fail(&tasks, &tid, &format!(
+                "Could not connect to {} on any port — nothing was sent, source restarted: {}",
+                target_addr, last_err.unwrap_or_default()));
+        }
+    });
+
+    HttpResponse::Ok().json(serde_json::json!({ "task_id": task_id }))
 }
 
 // ─── Cross-cluster Transfer Tokens ───
@@ -9315,6 +9488,8 @@ async fn lxc_import_endpoint_inner(
     let mut archive_path = None;
     let mut wolfnet_ip: Option<String> = None;
     let mut archive_format = String::new(); // "vzdump" or "tar.gz"
+    let mut lxc_config: Option<String> = None;   // source config, for a bootable standalone import
+    let mut start_after_import = false;          // migrate sets this to boot + verify the destination
 
     use futures::StreamExt;
     while let Some(item) = payload.next().await {
@@ -9356,7 +9531,18 @@ async fn lxc_import_endpoint_inner(
                 let s = String::from_utf8_lossy(&buf).trim().to_string();
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&s) {
                     archive_format = meta.get("archive_format").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    // The source container's LXC config, carried so a
+                    // standalone import can write a bootable config.
+                    lxc_config = meta.get("lxc_config").and_then(|v| v.as_str()).map(|c| c.to_string());
                 }
+            }
+            "start" => {
+                let mut buf = Vec::new();
+                while let Some(chunk) = field.next().await {
+                    if let Ok(data) = chunk { buf.extend_from_slice(&data); }
+                }
+                let s = String::from_utf8_lossy(&buf).trim().to_ascii_lowercase();
+                start_after_import = s == "1" || s == "true" || s == "yes";
             }
             "archive" => {
                 // Use UUID filename — pick extension based on source archive format
@@ -9392,32 +9578,73 @@ async fn lxc_import_endpoint_inner(
         None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "archive file is required"})),
     };
 
-    match containers::lxc_import(archive.to_str().unwrap(), &new_name, storage.as_deref()) {
-        Ok(msg) => {
-            let _ = std::fs::remove_file(&archive);
+    // Import (tar extract, optionally an lxc-start that polls up to ~8s)
+    // is blocking work — run it off the async runtime via web::block so a
+    // multi-GB extract or a slow boot doesn't stall a worker thread.
+    let archive_str = archive.to_string_lossy().to_string();
+    let nn = new_name.clone();
+    let storage_c = storage.clone();
+    let carried = lxc_config.clone();
+    let pre_ip = wolfnet_ip.clone();
+    let blk = web::block(move || -> Result<(String, Option<String>), String> {
+        let outcome = containers::lxc_import(&archive_str, &nn, storage_c.as_deref(), carried.as_deref())?;
+        let _ = std::fs::remove_file(&archive_str);
 
-            // Remove duplicated wolfnet IP from the template (both standalone and Proxmox)
-            let wolfnet_marker = format!("{}/{}/.wolfnet", containers::lxc_base_dir(&new_name), new_name);
-            let _ = std::fs::remove_dir_all(&wolfnet_marker);
+        // Remove duplicated wolfnet IP from the template (both standalone and Proxmox)
+        let wolfnet_marker = format!("{}/{}/.wolfnet", containers::lxc_base_dir(&nn), nn);
+        let _ = std::fs::remove_dir_all(&wolfnet_marker);
 
-            // Also strip any wolfnet veth config from the imported container
-            // so it doesn't conflict with the template's IP
-            containers::lxc_clone_fixup_ip(&new_name);
+        // Rewrite rootfs.path/hostname/networking for this host. On a carried
+        // config this just re-points host-specific keys; on a synthesised one
+        // it finishes off the hwaddr + IPv4.
+        containers::lxc_clone_fixup_ip(&nn);
 
-            // Imported container is left stopped — user starts it manually when ready
+        // Allocate a fresh wolfnet IP — use the pre-allocated one if provided
+        let ip_to_use = pre_ip.or_else(containers::next_available_wolfnet_ip);
+        if let Some(ip) = ip_to_use {
+            let _ = containers::lxc_attach_wolfnet(&nn, &ip);
+        }
 
-            // Allocate a fresh wolfnet IP — use pre-allocated one from orchestrator if available
-            let ip_to_use = wolfnet_ip.clone().or_else(|| containers::next_available_wolfnet_ip());
-            if let Some(ip) = ip_to_use {
-                let _ = containers::lxc_attach_wolfnet(&new_name, &ip);
+        // When the caller is a migrate orchestrator it asks us to boot the
+        // destination and confirm it reaches RUNNING (lxc_start polls and
+        // returns the lxc log tail on failure). Otherwise leave it stopped
+        // for the operator to start manually — the historical behaviour.
+        let start_err = if start_after_import {
+            containers::lxc_start(&outcome.start_id).err()
+        } else {
+            None
+        };
+        Ok((outcome.message, start_err))
+    })
+    .await;
 
+    match blk {
+        Ok(Ok((message, start_err))) => {
+            if start_after_import {
+                if let Some(err) = start_err {
+                    // Imported but did not boot — report so a migrate caller
+                    // can roll back to the source. The container is left in
+                    // place so the operator can inspect the log tail in `err`.
+                    return HttpResponse::Ok().json(serde_json::json!({
+                        "message": message,
+                        "started": false,
+                        "start_error": err,
+                    }));
+                }
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "message": message,
+                    "started": true,
+                }));
             }
-
-            HttpResponse::Ok().json(serde_json::json!({"message": msg}))
+            HttpResponse::Ok().json(serde_json::json!({"message": message}))
+        }
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_file(&archive);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": e}))
         }
         Err(e) => {
             let _ = std::fs::remove_file(&archive);
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": e}))
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Import task failed: {}", e)}))
         }
     }
 }
