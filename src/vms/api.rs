@@ -454,8 +454,26 @@ struct VmActionRequest {
 async fn vm_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<VmActionRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+
+    // A start must not bring up a second copy of a WolfNet IP already live
+    // elsewhere in the cluster. Read the IP under a brief lock, then release
+    // it before the async cluster check (never hold the mutex across await).
+    if body.action == "start" {
+        let ip = {
+            let manager = state.vms.lock().unwrap();
+            manager.get_vm(&name).and_then(|c| c.wolfnet_ip)
+        };
+        if let Some(ip) = ip.filter(|s| !s.trim().is_empty())
+            && let Some(holder) = crate::api::wolfnet_ip_active_elsewhere(&state, &ip).await
+        {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!("WolfNet IP already in use: {} (active on {})", ip.trim(), holder)
+            }));
+        }
+    }
+
     let manager = state.vms.lock().unwrap();
-    
+
     let result = match body.action.as_str() {
         "start" => manager.start_vm(&name),
         // Graceful ACPI shutdown — tries to let the guest close cleanly.

@@ -8463,6 +8463,18 @@ pub async fn wolfnet_used_ips_endpoint(req: HttpRequest, state: web::Data<AppSta
     HttpResponse::Ok().json(ips)
 }
 
+/// GET /api/wolfnet/active-ips — WolfNet IPs of workloads ACTIVE (running)
+/// on this node. Peers use this for routing (so a stopped container stops
+/// attracting traffic) and for start-time conflict detection. Distinct from
+/// /used-ips, which also reports stopped workloads' reserved IPs.
+pub async fn wolfnet_active_ips_endpoint(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+    // Enumeration spawns ip/docker/lxc-ls subprocesses — keep it off the
+    // async worker thread.
+    let ips = web::block(containers::wolfnet_active_ips).await.unwrap_or_default();
+    HttpResponse::Ok().json(ips)
+}
+
 /// POST /api/wolfnet/routes/announce — accept a route push from a peer.
 ///
 /// Body shape: `{ "host_ip": "10.10.10.171", "routes": { "10.10.10.100":
@@ -8781,6 +8793,64 @@ pub struct ContainerActionRequest {
 }
 
 /// POST /api/containers/docker/{id}/action — control Docker container
+/// Returns the label of another cluster node currently running a workload
+/// with this WolfNet IP, or None if the IP is free to claim here. Used to
+/// refuse a start that would put a second copy of a live WolfNet address on
+/// the overlay. A *stopped* holder's reserved IP does NOT count — the check
+/// is live (queries peers' /api/wolfnet/active-ips), so it won't
+/// false-positive on a migrate hand-off where the source was just stopped.
+/// Fails open: if peers can't be reached, the start is allowed.
+pub(crate) async fn wolfnet_ip_active_elsewhere(state: &web::Data<AppState>, ip: &str) -> Option<String> {
+    let ip = ip.trim().to_string();
+    if ip.is_empty() { return None; }
+
+    // Already active on another running workload on THIS node?
+    {
+        let ip_local = ip.clone();
+        let hit = web::block(move || containers::wolfnet_active_ips().into_iter().any(|a| a == ip_local))
+            .await.unwrap_or(false);
+        if hit { return Some("this node".to_string()); }
+    }
+
+    // Snapshot peer targets, dropping the lock before any await.
+    let targets: Vec<(String, String, u16)> = match state.cluster.nodes.read() {
+        Ok(nodes) => nodes.values()
+            .filter(|n| !n.is_self && n.online)
+            .map(|n| (
+                if n.hostname.is_empty() { n.address.clone() } else { n.hostname.clone() },
+                n.address.clone(),
+                n.port,
+            ))
+            .collect(),
+        Err(_) => return None,
+    };
+
+    let client = &*API_HTTP_CLIENT;
+    let secret = state.cluster_secret.clone();
+    for (label, address, port) in targets {
+        // WolfStack serves the API on 8553/8552 even on Proxmox nodes that
+        // are registered with the PVE port. Dedupe so a standard 8553 node
+        // isn't probed twice (each extra port costs a 3s timeout when the
+        // peer is unreachable).
+        let mut ports = vec![8553u16, 8552];
+        if port != 8553 && port != 8552 { ports.insert(0, port); }
+        'ports: for p in ports {
+            for url in build_node_urls(&address, p, "/api/wolfnet/active-ips") {
+                let Ok(resp) = client.get(&url)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .header("X-WolfStack-Secret", &secret)
+                    .send().await
+                else { continue };
+                if !resp.status().is_success() { continue; }
+                let Ok(ips) = resp.json::<Vec<String>>().await else { continue };
+                if ips.iter().any(|a| a == &ip) { return Some(label); }
+                break 'ports; // definitive answer; this node doesn't hold it
+            }
+        }
+    }
+    None
+}
+
 pub async fn docker_action(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -8789,6 +8859,16 @@ pub async fn docker_action(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
+    // A start must not bring up a second copy of a WolfNet IP already live
+    // elsewhere in the cluster.
+    if body.action == "start"
+        && let Some(ip) = containers::docker_effective_wolfnet_ip(&id)
+        && let Some(holder) = wolfnet_ip_active_elsewhere(&state, &ip).await
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("WolfNet IP already in use: {} (active on {})", ip.trim(), holder)
+        }));
+    }
     let result = match body.action.as_str() {
         "start" => containers::docker_start(&id),
         "stop" => containers::docker_stop(&id),
@@ -8952,6 +9032,16 @@ pub async fn lxc_action(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+    // A start must not bring up a second copy of a WolfNet IP already live
+    // elsewhere in the cluster.
+    if body.action == "start"
+        && let Some(ip) = containers::lxc_get_wolfnet_ip(&name)
+        && let Some(holder) = wolfnet_ip_active_elsewhere(&state, &ip).await
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("WolfNet IP already in use: {} (active on {})", ip.trim(), holder)
+        }));
+    }
     let result = match body.action.as_str() {
         "start" => containers::lxc_start(&name),
         "stop" => containers::lxc_stop(&name),
@@ -33435,6 +33525,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/agent/cluster-name", web::post().to(agent_set_cluster_name))
         .route("/api/agent/wolfnet-routes", web::post().to(agent_set_wolfnet_routes))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
+        .route("/api/wolfnet/active-ips", web::get().to(wolfnet_active_ips_endpoint))
         .route("/api/wolfnet/routes", web::get().to(wolfnet_routes_debug))
         .route("/api/wolfnet/routes/announce", web::post().to(wolfnet_routes_announce))
         // Geolocation proxy (ip-api.com is HTTP-only, browsers block mixed content on HTTPS pages)

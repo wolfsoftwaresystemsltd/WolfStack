@@ -1103,8 +1103,71 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
     format!("{}.100", prefix) // Fallback
 }
 
-/// Get list of WolfNet IPs currently in use on this node (for cluster-wide dedup)
+/// The set of LXC containers currently RUNNING on this host (names on
+/// standalone, VMIDs on Proxmox), computed in one shot so the WolfNet
+/// advertisement scan doesn't spawn a status probe per container.
+///
+/// Returns `None` when the running state can't be determined at all (the
+/// `pct`/`lxc-ls` probe failed to run) — callers then fall back to the
+/// old "advertise every marker" behaviour rather than risk dropping a
+/// reachable container's route on a transient tooling hiccup.
+fn lxc_running_names() -> Option<std::collections::HashSet<String>> {
+    let mut set = std::collections::HashSet::new();
+    if is_proxmox() {
+        let o = Command::new("pct").arg("list").output().ok()?;
+        if !o.status.success() { return None; }
+        // Header line then rows: "VMID  Status   Lock  Name".
+        for line in String::from_utf8_lossy(&o.stdout).lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() >= 2 && cols[1].eq_ignore_ascii_case("running") {
+                set.insert(cols[0].to_string()); // VMID — matches the marker dir name
+            }
+        }
+        return Some(set);
+    }
+    // Require every storage path's probe to succeed for a definitive
+    // answer; on ANY failure (missing/erroring lxc-ls, stale path) return
+    // None so callers advertise all markers — never blackhole a running
+    // container's route because one path couldn't be listed.
+    let mut all_ok = true;
+    for base in lxc_storage_paths() {
+        let mut args: Vec<String> = Vec::new();
+        if base != LXC_DEFAULT_PATH {
+            args.push("-P".to_string());
+            args.push(base);
+        }
+        args.push("-1".to_string());
+        args.push("--running".to_string());
+        match Command::new("lxc-ls").args(&args).output() {
+            Ok(o) if o.status.success() => {
+                for name in String::from_utf8_lossy(&o.stdout).split_whitespace() {
+                    if !name.is_empty() { set.insert(name.to_string()); }
+                }
+            }
+            _ => { all_ok = false; }
+        }
+    }
+    if all_ok { Some(set) } else { None }
+}
+
+/// Get list of WolfNet IPs currently in use on this node (for cluster-wide
+/// dedup / allocation). Counts every workload that holds an IP, running or
+/// stopped, so a stopped container's IP stays reserved and can't be handed
+/// out to something else.
 pub fn wolfnet_used_ips() -> Vec<String> {
+    wolfnet_ips_internal(false)
+}
+
+/// Get the WolfNet IPs of workloads ACTIVE (running) on this node. This is
+/// what gets advertised for routing and used for start-time conflict
+/// detection — a stopped container is unreachable, so its IP must neither
+/// attract cluster traffic nor block a start elsewhere. Allocation keeps
+/// using wolfnet_used_ips()/wolfnet_used_ip_set(), which still count it.
+pub fn wolfnet_active_ips() -> Vec<String> {
+    wolfnet_ips_internal(true)
+}
+
+fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
     let mut ips = Vec::new();
 
     // Host IP from wolfnet0
@@ -1142,9 +1205,16 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         }
     }
 
-    // Docker containers with WolfNet IPs (override file or label)
+    // Docker containers with WolfNet IPs (override file or label). In
+    // active-only mode list just running containers (`docker ps`); in used
+    // mode list all (`docker ps -a`) so stopped containers stay reserved.
+    let docker_ps_args: &[&str] = if running_only {
+        &["ps", "--format", "{{.Names}}"]
+    } else {
+        &["ps", "-a", "--format", "{{.Names}}"]
+    };
     if let Ok(output) = Command::new("docker")
-        .args(["ps", "-a", "--format", "{{.Names}}"])
+        .args(docker_ps_args)
         .output()
     {
         let text = String::from_utf8_lossy(&output.stdout);
@@ -1157,10 +1227,20 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         }
     }
 
-    // LXC containers (from .wolfnet/ip marker files — authoritative source)
+    // LXC containers (from .wolfnet/ip marker files — authoritative source).
+    // In active-only mode skip stopped containers: a stopped one (e.g. the
+    // source side of a completed migrate, kept as a rollback) is unreachable,
+    // and advertising its IP makes the cluster route there instead of the
+    // node now hosting the container. In used (allocation) mode count them
+    // all so their IPs stay reserved.
+    let running = if running_only { lxc_running_names() } else { None };
     for lxc_path in lxc_storage_paths() {
         if let Ok(entries) = std::fs::read_dir(&lxc_path) {
             for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // `running` is Some only in active mode; if the probe failed
+                // (None there) we fall back to advertising the marker.
+                if running.as_ref().is_some_and(|r| !r.contains(&name)) { continue; }
                 let ip_file = entry.path().join(".wolfnet/ip");
                 if let Ok(contents) = std::fs::read_to_string(&ip_file) {
                     let ip = contents.trim().to_string();
@@ -1172,7 +1252,12 @@ pub fn wolfnet_used_ips() -> Vec<String> {
         }
     }
 
-    // VM WolfNet IPs
+    // VM WolfNet IPs. Not gated by running_only: per-platform VM run-state
+    // detection (qemu pgrep / virsh / qm) lives in the vms module and is
+    // deferred — VMs are treated as always-advertised here. VM IPs are
+    // unique per allocation, so this only matters for a VM that has moved
+    // between hosts (a separate migrate path); the start-time conflict
+    // check still covers VM starts via /api/wolfnet/active-ips.
     let vm_dir = std::path::Path::new("/var/lib/wolfstack/vms");
     if let Ok(entries) = std::fs::read_dir(vm_dir) {
         for entry in entries.flatten() {
@@ -1269,37 +1354,46 @@ pub async fn sync_wolfnet_peer_routes() {
         // Extract hostname from endpoint (e.g., "cynthia.wolfterritories.org:9600" → "cynthia.wolfterritories.org")
         let hostname = endpoint.split(':').next().unwrap_or(&endpoint);
 
-        // Try calling the peer's WolfStack API for used IPs
-        // Try common WolfStack ports: 8553 (default), 8552
+        // Pull the peer's ACTIVE WolfNet IPs (running workloads only) for
+        // routing — a stopped container must not attract traffic to a node
+        // that no longer hosts it. Fall back to /used-ips for peers not yet
+        // upgraded to /active-ips. Try common WolfStack ports: 8553, 8552.
         let mut used_ips: Vec<String> = Vec::new();
-        for port in &[8553, 8552] {
-            for scheme in &["https", "http"] {
-                let url = format!("{}://{}:{}/api/wolfnet/used-ips", scheme, hostname, port);
-                if let Ok(resp) = client.get(&url)
-                    .header("X-WolfStack-Secret", &cluster_secret)
-                    .send().await {
-                    if let Ok(ips) = resp.json::<Vec<String>>().await {
-                        if !ips.is_empty() {
-                            used_ips = ips;
-                            break;
+        'byname: for path in &["/api/wolfnet/active-ips", "/api/wolfnet/used-ips"] {
+            for port in &[8553, 8552] {
+                for scheme in &["https", "http"] {
+                    let url = format!("{}://{}:{}{}", scheme, hostname, port, path);
+                    if let Ok(resp) = client.get(&url)
+                        .header("X-WolfStack-Secret", &cluster_secret)
+                        .send().await {
+                        if resp.status().is_success() {
+                            if let Ok(ips) = resp.json::<Vec<String>>().await {
+                                if !ips.is_empty() {
+                                    used_ips = ips;
+                                    break 'byname;
+                                }
+                            }
                         }
                     }
                 }
             }
-            if !used_ips.is_empty() { break; }
         }
 
         // Also try via WolfNet IP directly (in case DNS doesn't resolve but WolfNet tunnel works)
         if used_ips.is_empty() {
-            for port in &[8553, 8552] {
-                let url = format!("http://{}:{}/api/wolfnet/used-ips", allowed_ip, port);
-                if let Ok(resp) = client.get(&url)
-                    .header("X-WolfStack-Secret", &cluster_secret)
-                    .send().await {
-                    if let Ok(ips) = resp.json::<Vec<String>>().await {
-                        if !ips.is_empty() {
-                            used_ips = ips;
-                            break;
+            'byip: for path in &["/api/wolfnet/active-ips", "/api/wolfnet/used-ips"] {
+                for port in &[8553, 8552] {
+                    let url = format!("http://{}:{}{}", allowed_ip, port, path);
+                    if let Ok(resp) = client.get(&url)
+                        .header("X-WolfStack-Secret", &cluster_secret)
+                        .send().await {
+                        if resp.status().is_success() {
+                            if let Ok(ips) = resp.json::<Vec<String>>().await {
+                                if !ips.is_empty() {
+                                    used_ips = ips;
+                                    break 'byip;
+                                }
+                            }
                         }
                     }
                 }
