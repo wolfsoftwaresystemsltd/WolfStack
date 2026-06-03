@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.15.1: fix installer/KB — status pages listen on :8550, not :8555** _(2026-06-03 — [`cd68573`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cd68573172546cb5afbdb3c27a3a6a6819865d2b))_
 - **v24.15.0: WolfNet lifecycle — advertise running workloads, refuse a start on an active IP clash** _(2026-06-02 — [`a8538f4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a8538f420a9f2a7e56c2a03ed8663a9e74e0ddd0))_
 - **v24.14.1: LXC migrate preserves identity — keep IP/MAC/WolfNet as-is** _(2026-06-02 — [`e2422c7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e2422c75dabbe66d31e7220eeec71088dfad1386))_
 - **v24.14.0: LXC intra-cluster migrate is a true move — bootable destination + live progress** _(2026-06-02 — [`ad5f88f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ad5f88fe0d2045b792414db2cb13ead04aa1af76))_
