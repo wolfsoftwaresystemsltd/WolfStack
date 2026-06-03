@@ -1437,7 +1437,8 @@ fn clamav_user_present() -> bool {
     user_exists && group_exists
 }
 
-/// Startup self-heal for the clamav-user → logrotate failure mode.
+/// Self-heal for the clamav-user → logrotate failure mode (runs at startup
+/// AND on a periodic timer — see the caller in main.rs).
 ///
 /// piranhaSponsor reported (2026-05-27) that v24.7.4's fix didn't take
 /// on his cluster: his nodes already had clamav installed in the
@@ -1455,15 +1456,17 @@ fn clamav_user_present() -> bool {
 /// where the user-naming convention matches (Fedora/RHEL use clamupdate,
 /// SUSE uses vscan).
 ///
-/// Idempotent and silent — every WolfStack restart runs it; healthy
-/// hosts no-op in microseconds.
+/// Idempotent and silent — WolfStack runs it at startup AND on a periodic
+/// timer (a daily logrotate run that fails *after* boot would otherwise sit
+/// stale-red until the next reboot, re-surfacing in the predictive inbox);
+/// healthy hosts no-op in microseconds.
 ///
 /// Two-step as of 2026-05-30 (Gary/KO4BSR): step 1 heals the cause
 /// (missing user), step 2 converges the *symptom* — a `logrotate.service`
 /// left in systemd's `failed` state, which the prior gens fixed the cause
 /// for but never cleared, so the dashboard stayed red for up to a day.
 /// See [`converge_stale_logrotate_failure`].
-pub fn startup_self_heal_clamav_user() {
+pub fn self_heal_clamav_logrotate() {
     if !std::path::Path::new("/etc/logrotate.d/clamav-freshclam").exists() {
         return;
     }
