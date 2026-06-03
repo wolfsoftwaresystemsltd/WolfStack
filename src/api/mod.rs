@@ -25441,9 +25441,10 @@ pub async fn predictive_acks_remove(
 ///
 /// Slug shape: `<path>` with leading slash stripped and `/` → `__`.
 /// E.g. `etc__ssh__sshd_config` for `/etc/ssh/sshd_config`. The
-/// operator usually doesn't type slugs by hand — they hit the
-/// "Reseed baseline" button on the proposal card which carries the
-/// slug as part of the URL.
+/// operator usually doesn't type slugs by hand — they Run or Copy the
+/// pre-filled reseed command from the proposal card's remediation, which
+/// already carries the correct slug (and authenticates with the node's
+/// cluster secret).
 ///
 /// Body: optional `{ "reason": "..." }`. Reason is appended to the
 /// baseline metadata so the audit trail records WHY the reseed

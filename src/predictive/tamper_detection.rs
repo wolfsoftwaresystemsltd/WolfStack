@@ -598,8 +598,19 @@ fn build_tamper_proposal(
                 let mut v = vec!["# Inspect what changed:".to_string()];
                 v.extend(manual_cmds);
                 v.push("ls -la /var/lib/wolfstack/forensics/tamper/   # captured tampered versions".to_string());
-                v.push("# After legitimate change, reseed:".to_string());
-                v.extend(paths.iter().map(|tp| format!("curl -X POST http://localhost:8553/api/predictive/baselines/reseed/{}", baselines::slug_for(&tp.path))));
+                // Reseed after an intentional change so WolfStack stops
+                // reverting + alerting. HTTPS only (:8553 has been HTTPS since
+                // v23.11 — the old `http://` printed here just connection-
+                // refused), and the endpoint needs auth: run as root on the
+                // host, where the node's cluster secret is readable, so the
+                // operator doesn't have to mint an API key. `-k` accepts the
+                // default self-signed cert. (piranhaSponsor 2026-06-03.)
+                let secret_path = crate::paths::get().cluster_secret;
+                v.push("# After a legitimate change, reseed the baseline (run as root on this host):".to_string());
+                v.extend(paths.iter().map(|tp| format!(
+                    "curl -sk -X POST https://localhost:8553/api/predictive/baselines/reseed/{} -H \"X-WolfStack-Secret: $(cat {})\"",
+                    baselines::slug_for(&tp.path), secret_path
+                )));
                 v
             },
         },
