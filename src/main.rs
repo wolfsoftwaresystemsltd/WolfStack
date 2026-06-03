@@ -1298,13 +1298,32 @@ async fn main() -> std::io::Result<()> {
         // the tailer at startup so findings keep flowing to the UI.
         crate::antivirus::resume_on_access_tailer_if_enabled(app_state.antivirus.clone());
 
-        // Startup self-heal: if /etc/logrotate.d/clamav-freshclam is
-        // installed but the `clamav` user isn't, recreate the user so
-        // the daily logrotate run stops failing. v24.7.4 only healed
-        // post-apt-install; piranhaSponsor's nodes were already in the
-        // broken state before upgrading WolfStack, so the install-time
-        // hook never fired. Idempotent — no-op on healthy hosts.
-        tokio::task::spawn_blocking(crate::antivirus::startup_self_heal_clamav_user);
+        // Self-heal: if /etc/logrotate.d/clamav-freshclam is installed but the
+        // `clamav` user isn't, recreate the user so the daily logrotate run
+        // stops failing, and clear any stale logrotate.service failed state.
+        // v24.7.4 only healed post-apt-install; piranhaSponsor's nodes were
+        // already in the broken state before upgrading WolfStack, so the
+        // install-time hook never fired. Idempotent — no-op on healthy hosts.
+        tokio::task::spawn_blocking(crate::antivirus::self_heal_clamav_logrotate);
+
+        // ...and re-run it periodically. logrotate.timer fires daily and can
+        // fail AFTER boot (e.g. a transient lock during freshclam's rotation
+        // window); systemd then keeps logrotate.service red until its next
+        // *successful* run, so the predictive inbox kept re-surfacing a stale
+        // failure for operators whose clamav user was already fine (sponsor
+        // report 2026-06-03, 4 nodes — "restarting logrotate fixes it but it
+        // comes back"). The startup hook can't catch a failure that lands
+        // between reboots, so re-run the idempotent heal every 30 min: it only
+        // touches logrotate when the unit is actually in a failed state, and
+        // clears it the moment a re-run succeeds — no operator action needed.
+        tokio::spawn(async {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1800));
+            tick.tick().await; // consume the immediate tick — startup hook covers t0
+            loop {
+                tick.tick().await;
+                let _ = tokio::task::spawn_blocking(crate::antivirus::self_heal_clamav_logrotate).await;
+            }
+        });
 
         // Security scanner background loop — runs posture + active-attack
         // checks on a timer and fires alerts via Discord/Slack/Telegram/
