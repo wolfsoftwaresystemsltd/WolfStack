@@ -263,7 +263,7 @@
 - Flags: `--beta` (use beta branch), `--yes`/`-y` (skip confirmation), `--agent` (agent-only install — see Clustering), `--install-dir <path>` (redirect Cargo target dir to external mount for low-disk hosts)
 - Pre-flight checks (v22.6.9+) run before any package install:
   - DNS-on-:53 conflicts: Technitium, Pi-hole, AdGuard, BIND, Unbound, dnsmasq, systemd-resolved (the last is handled automatically — left alone)
-  - Port conflicts on 8553/8554/8555 with role labels; distinguishes "our previous wolfstack" vs other process
+  - Port conflicts on 8553/8554/8550 with role labels; distinguishes "our previous wolfstack" vs other process
   - Reverse proxies on 80/443 (info only — WolfStack core doesn't bind these)
   - Existing `/etc/wolfstack/` content → flagged as upgrade; explicit warning when `custom-cluster-secret` is present (move-to-new-cluster footgun)
   - ufw / firewalld active without :8553 allowed → exact `ufw allow` / `firewall-cmd` command shown

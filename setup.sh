@@ -233,12 +233,12 @@ if [ -n "$DNS_HOLDER" ]; then
     esac
 fi
 
-# 8553 / 8554 / 8555 — the three ports WolfStack actually binds. 8553 is the
+# 8553 / 8554 / 8550 — the three ports WolfStack actually binds. 8553 is the
 # management UI / API, 8554 is the inter-node HTTP listener (cluster proxy),
-# 8555 is the dedicated public status-page listener. Calling all three out
+# 8550 is the dedicated public status-page listener. Calling all three out
 # matters for firewall planning — users open just :8553 and wonder why
 # inter-node sync or status pages don't work.
-for port in 8553 8554 8555; do
+for port in 8553 8554 8550; do
     HOLDER=$(ws_port_holder "$port")
     if [ -n "$HOLDER" ] && [ "$HOLDER" != "${HOLDER#*wolfstack}" ]; then
         : # our own previous instance — fine on upgrade
@@ -246,7 +246,7 @@ for port in 8553 8554 8555; do
         case "$port" in
             8553) ROLE="management UI / API" ;;
             8554) ROLE="inter-node cluster API" ;;
-            8555) ROLE="public status pages" ;;
+            8550) ROLE="public status pages" ;;
         esac
         ws_warn "Port $port ($ROLE) is already bound by $HOLDER. WolfStack will fail to bind it until that service is stopped or the port is moved in /etc/wolfstack/config.toml."
     fi
@@ -302,11 +302,11 @@ fi
 # isn't troubleshooting "can't reach :8553" after install.
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     if ! ufw status 2>/dev/null | grep -qE "8553(/tcp)?\s+ALLOW"; then
-        echo "  ℹ ufw is active and does not allow :8553. After install run: sudo ufw allow 8553/tcp 8554/tcp 8555/tcp"
+        echo "  ℹ ufw is active and does not allow :8553. After install run: sudo ufw allow 8553/tcp 8554/tcp 8550/tcp"
     fi
 elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
     if ! firewall-cmd --list-ports 2>/dev/null | grep -q "8553/tcp"; then
-        echo "  ℹ firewalld is running and does not allow :8553. After install run: sudo firewall-cmd --permanent --add-port=8553/tcp --add-port=8554/tcp --add-port=8555/tcp && sudo firewall-cmd --reload"
+        echo "  ℹ firewalld is running and does not allow :8553. After install run: sudo firewall-cmd --permanent --add-port=8553/tcp --add-port=8554/tcp --add-port=8550/tcp && sudo firewall-cmd --reload"
     fi
 fi
 
@@ -325,7 +325,7 @@ echo ""
 echo "  This will install / update on this host:"
 echo "    • The wolfstack binary at /usr/local/bin/wolfstack"
 echo "    • A systemd unit (wolfstack.service)"
-echo "    • Listeners bound: :8553 (management UI), :8554 (inter-node), :8555 (status pages)"
+echo "    • Listeners bound: :8553 (management UI), :8554 (inter-node), :8550 (status pages)"
 echo "    • Build dependencies: git, curl, build tools, openssl headers"
 echo "    • Runtime dependencies: lxc, dnsmasq (binary), bridge-utils, qemu, socat, nfs-client, fuse3, s3fs"
 if [ "$AGENT_MODE" = true ]; then
