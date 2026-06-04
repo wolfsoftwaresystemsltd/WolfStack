@@ -1,6 +1,6 @@
 # 🐺 WolfStack™ — Server, VM & Container Management Platform
 
-[![Fund Open Source](https://img.shields.io/badge/Fund_Open_Source-%E2%9D%A4-red?style=for-the-badge&logo=github)](https://github.com/sponsors/wolfsoftwaresystemsltd)
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?style=for-the-badge&logo=github)](https://github.com/sponsors/wolfsoftwaresystemsltd)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/q9qMjHjUQY)
 [![Reddit](https://img.shields.io/badge/Reddit-r%2FWolfStack-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/r/WolfStack/)
 [![Docs](https://img.shields.io/badge/Docs-wolfstack.org-blue?style=for-the-badge)](https://wolfstack.org)
@@ -54,30 +54,36 @@ Per-version history is in [CHANGELOG.md](CHANGELOG.md).
 | **[WolfProxy](https://wolfstack.org/wolfproxy.html)** | NGINX-compatible reverse proxy with firewall |
 | **[WolfServe](https://wolfstack.org/wolfserve.html)** | Apache2-compatible web server |
 
-## Fund Open Source
+## Support development
 
-No VC funding. No ads. No telemetry. Every feature ships free to everyone — backers make that possible.
+No VC funding. No ads. No telemetry. WolfStack is **source-available** and free for personal, homelab, education, and non-profit use — sponsorships and commercial licences are what fund development.
 
 <a href="https://github.com/sponsors/wolfsoftwaresystemsltd">
-  <img src="https://img.shields.io/badge/Back_This_Project-%E2%9D%A4-red?style=for-the-badge&logo=github" alt="Back This Project">
+  <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?style=for-the-badge&logo=github" alt="Sponsor on GitHub">
 </a>
 
-Backers get access to the private roadmap, early access builds, and direct developer support on Discord.
+Sponsoring is a **donation that funds development** — from a few dollars a month, cancel anytime. Every supporter gets early-access (beta) builds, the private roadmap, and direct developer support on Discord. Sponsoring is **not** a commercial-use licence (see below).
 
-- ❤️ **Back this project:** [github.com/sponsors/wolfsoftwaresystemsltd](https://github.com/sponsors/wolfsoftwaresystemsltd)
+- ❤️ **Sponsor:** [github.com/sponsors/wolfsoftwaresystemsltd](https://github.com/sponsors/wolfsoftwaresystemsltd)
+- 💼 **Commercial licence:** [wolfstack.org/enterprise.php](https://wolfstack.org/enterprise.php)
 - 💬 **Discord:** [Join our community](https://discord.gg/q9qMjHjUQY)
 - 🔥 **Reddit:** [r/WolfStack](https://www.reddit.com/r/WolfStack/)
 - 🌐 **Website:** [wolf.uk.com](https://wolf.uk.com)
 
-## License
+## Licence
 
-[MIT License](LICENSE) — Free to use, modify, and distribute without restriction.
+WolfStack is **source-available** — not open source. See [LICENSE](LICENSE) for the full terms and [LICENSING.md](LICENSING.md) for a plain-English summary of plans and what sponsoring vs licensing gets you. In short:
+
+- **Free** for personal, homelab, education, research, and non-profit use, under the [PolyForm Noncommercial Licence 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
+- **Commercial use** — any business use (even internal), reselling, or hosting WolfStack as a service for others — requires a paid subscription: Homelab, Team, MSP, or Enterprise ([wolfstack.org/enterprise.php](https://wolfstack.org/enterprise.php)).
+- Most features are free for everyone; a few business features (SSO, API tokens, plugins, multi-tenancy) require a licence.
+- Releases up to **v22.9.x** remain available under the MIT Licence in perpetuity; **v22.10.0 and later** are under the dual licence above.
 
 © 2024-2026 [Wolf Software Systems Ltd](https://wolf.uk.com/)
 
 ## Trademarks
 
-WolfStack™, WolfRouter™, WolfAgents™, WolfNet™, WolfFlow™, WolfRun™, WolfUSB™ and WolfDisk™ are trademarks of Wolf Software Systems Ltd. The MIT licence grants rights to the source code; it does not grant rights to the Wolf Software Systems Ltd trademarks. All rights reserved.
+WolfStack™, WolfRouter™, WolfAgents™, WolfNet™, WolfFlow™, WolfRun™, WolfUSB™ and WolfDisk™ are trademarks of Wolf Software Systems Ltd. The licence grants rights to the source code under the terms above; it does not grant rights to the Wolf Software Systems Ltd trademarks. All rights reserved.
 
 ---
 

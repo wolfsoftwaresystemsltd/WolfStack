@@ -1806,6 +1806,18 @@ body {
     overflow-x: hidden;
 }
 
+/* When a custom dashboard background image is active, #dc-bg-overlay is a
+   position:fixed; z-index:-1 layer behind the content. The body's solid
+   --bg-primary would otherwise paint over it — body's background isn't
+   propagated to the canvas because overflow-x is set on body — so the image
+   stays hidden. Drop the body fill while an image is set so the overlay shows
+   through; the overlay covers the whole viewport, so nothing else is needed.
+   !important so it also wins over the decorative per-theme body backgrounds.
+   Toggled by applyDcBackground(). */
+body.dc-bg-active {
+    background: transparent !important;
+}
+
 /* ─── Sidebar ─── */
 .sidebar {
     position: fixed;

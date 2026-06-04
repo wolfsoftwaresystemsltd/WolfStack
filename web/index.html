@@ -306,7 +306,7 @@
                     <span class="ws-icon-clean-wrap" data-icon="edit"></span>
                 </button>
                 <div class="share-icons" style="display:flex; gap:6px; align-items:center; margin-left:8px;" title="Share WolfStack">
-                    <a href="https://x.com/intent/tweet?url=https%3A%2F%2Fwolfstack.org&text=WolfStack%20%E2%80%94%20free%20open-source%20server%20management%20platform.%20Docker%2C%20LXC%2C%20VMs%2C%20clustering%20%26%20more." target="_blank" rel="noopener"
+                    <a href="https://x.com/intent/tweet?url=https%3A%2F%2Fwolfstack.org&text=WolfStack%20%E2%80%94%20source-available%20server%20management%20platform.%20Docker%2C%20LXC%2C%20VMs%2C%20clustering%20%26%20more." target="_blank" rel="noopener"
                         title="Share on X"
                         style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;background:rgba(255,255,255,0.06);color:var(--text-muted);transition:all 0.2s ease;text-decoration:none;"
                         onmouseover="this.style.background='rgba(255,255,255,0.15)';this.style.color='#fff';this.style.transform='scale(1.1)'"
@@ -320,7 +320,7 @@
                         onmouseout="this.style.background='rgba(24,119,242,0.08)';this.style.transform='scale(1)'">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
                     </a>
-                    <a href="https://www.linkedin.com/shareArticle?mini=true&url=https%3A%2F%2Fwolfstack.org&title=WolfStack&summary=Free%20open-source%20server%20management%20platform" target="_blank" rel="noopener"
+                    <a href="https://www.linkedin.com/shareArticle?mini=true&url=https%3A%2F%2Fwolfstack.org&title=WolfStack&summary=Source-available%20server%20management%20platform" target="_blank" rel="noopener"
                         title="Share on LinkedIn"
                         style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;background:rgba(10,102,194,0.08);color:#0a66c2;transition:all 0.2s ease;text-decoration:none;"
                         onmouseover="this.style.background='rgba(10,102,194,0.2)';this.style.transform='scale(1.1)'"
@@ -9862,15 +9862,15 @@ region = us-east-1"></textarea>
         <button type="button" class="welcome-x" id="support-nag-close-btn" onclick="closeSupportNag()" aria-label="Close support dialog">&times;</button>
         <div class="welcome-hero">
             <span class="welcome-action-ico welcome-ico-heart" aria-hidden="true" style="margin:0 auto 10px;width:48px;height:48px;font-size:24px;">&#9829;</span>
-            <h2 id="support-nag-title">Help keep WolfStack free</h2>
-            <p class="welcome-sub">WolfStack is built by a tiny independent team &mdash; no VC money, no ads, no telemetry, and every feature ships free to everyone. If it's useful to you, please consider chipping in to keep it that way.</p>
+            <h2 id="support-nag-title">Support WolfStack</h2>
+            <p class="welcome-sub">WolfStack is built by a tiny independent team &mdash; no VC money, no ads, no telemetry. It's free for personal, homelab, and non-profit use. Two different ways to keep it going &mdash; pick whichever fits you:</p>
         </div>
         <div class="welcome-actions">
             <a class="welcome-action welcome-action-primary" href="https://github.com/sponsors/wolfsoftwaresystemsltd" target="_blank" rel="noopener noreferrer">
                 <span class="welcome-action-ico welcome-ico-heart">&#9829;</span>
                 <span class="welcome-action-txt">
-                    <strong>Become a GitHub Sponsor</strong>
-                    <span>Recurring support from a few dollars a month &mdash; cancel anytime.</span>
+                    <strong>Sponsor us &mdash; for homelab &amp; personal users</strong>
+                    <span>A donation that funds development, from a few dollars a month (GitHub or Patreon). Every supporter gets early-access beta builds. Not a commercial-use licence.</span>
                 </span>
                 <span class="welcome-action-arrow">&#8599;</span>
             </a>
@@ -9879,8 +9879,8 @@ region = us-east-1"></textarea>
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
                 </span>
                 <span class="welcome-action-txt">
-                    <strong>Buy a licence plan</strong>
-                    <span>Homelab to Enterprise &mdash; dedicated support, and every licence funds development.</span>
+                    <strong>Get a licence &mdash; required for commercial use</strong>
+                    <span>Any business use needs a subscription (Homelab &rarr; Enterprise). Grants commercial-use rights, unlocks team features (SSO, API tokens, plugins, multi-tenancy), and dedicated support.</span>
                 </span>
                 <span class="welcome-action-arrow">&#8599;</span>
             </a>
@@ -9891,7 +9891,7 @@ region = us-east-1"></textarea>
             </label>
             <button type="button" class="welcome-getstarted" onclick="closeSupportNag()">Maybe later</button>
         </div>
-        <p class="nag-once-note">We're asking for your support &mdash; this appears just once each time you sign in. Already a GitHub or Patreon supporter? Tick <strong>&ldquo;I'm supporting already&rdquo;</strong> and we'll stop asking for good &mdash; we can't auto-verify those, so it's on the honour system.</p>
+        <p class="nag-once-note">This appears just once each time you sign in. Already a GitHub or Patreon supporter? Tick <strong>&ldquo;I'm supporting already&rdquo;</strong> and we'll stop asking for good &mdash; we can't auto-verify those, so it's on the honour system.</p>
     </div>
 </div>
 

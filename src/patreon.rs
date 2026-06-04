@@ -56,15 +56,14 @@ impl Default for PatreonTier {
 }
 
 impl PatreonTier {
-    /// Whether this tier grants access to the beta update channel.
-    pub fn has_beta_access(&self) -> bool {
-        matches!(self, PatreonTier::Advanced | PatreonTier::Platinum | PatreonTier::Enterprise)
-    }
-
     /// Whether this tier reflects an actual paid pledge — excludes `None`
     /// (not linked) and `Free` (follows on Patreon but pledges nothing).
-    /// Used by the login-time support nag to exempt anyone who is in fact
-    /// paying us, even at a tier below beta access.
+    /// Drives BOTH the beta-channel grant and the login-time support-nag
+    /// exemption: every paying backer is a supporter, so a $3 Basic pledge
+    /// earns the same in-app perks (no nag, beta builds) as a higher tier.
+    /// Tier *amount* differences are recognition only — the commercial value
+    /// lives in licence-gated features (plugins, API tokens, SSO,
+    /// multi-tenancy), never in donations.
     pub fn is_paying(&self) -> bool {
         matches!(self, PatreonTier::Basic | PatreonTier::Advanced | PatreonTier::Platinum | PatreonTier::Enterprise)
     }
@@ -363,16 +362,6 @@ mod tests {
         assert_eq!(PatreonTier::from_cents(2500), PatreonTier::Advanced);
         assert_eq!(PatreonTier::from_cents(9500), PatreonTier::Platinum);
         assert_eq!(PatreonTier::from_cents(20000), PatreonTier::Platinum);
-    }
-
-    #[test]
-    fn test_beta_access() {
-        assert!(!PatreonTier::None.has_beta_access());
-        assert!(!PatreonTier::Free.has_beta_access());
-        assert!(!PatreonTier::Basic.has_beta_access());
-        assert!(PatreonTier::Advanced.has_beta_access());
-        assert!(PatreonTier::Platinum.has_beta_access());
-        assert!(PatreonTier::Enterprise.has_beta_access());
     }
 
     #[test]

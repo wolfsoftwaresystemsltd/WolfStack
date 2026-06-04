@@ -864,6 +864,8 @@ function applyDcBackground() {
     let bgEl = document.getElementById('dc-bg-overlay');
     if (!dcBgImage) {
         if (bgEl) bgEl.remove();
+        // Restore the solid (themed) body background — see body.dc-bg-active.
+        document.body.classList.remove('dc-bg-active');
         return;
     }
     if (!bgEl) {
@@ -879,6 +881,10 @@ function applyDcBackground() {
         z-index: -1; pointer-events: none;
     `;
     bgEl.style.backgroundImage = `url(${dcBgImage})`;
+    // The overlay sits at z-index:-1; make the body transparent so its solid
+    // fill doesn't paint over it (body's bg isn't propagated to the canvas
+    // because overflow-x is set on body). The overlay covers the viewport.
+    document.body.classList.add('dc-bg-active');
 }
 
 function initDcLayoutToolbar() {
@@ -32086,12 +32092,12 @@ function issRefreshCounts() {
     set('issues-count-info', c.info);
 }
 
-// Gate the beta channel dropdown based on ANY of three grants:
-// (1) Patreon Advanced+ sponsorship, (2) paid WolfStack licence, or
-// (3) operator self-attested GitHub Sponsor. Backend reports
-// `beta_access_reason` so we can show how access was granted; when
-// denied we surface a one-click "I'm a GitHub Sponsor" toggle right
-// next to the dropdown so real sponsors aren't stuck.
+// Gate the beta channel dropdown on supporter status — beta builds are a
+// thank-you perk for ANY supporter: (1) any paying Patreon pledge ($3+),
+// (2) a paid WolfStack licence, or (3) operator self-attested GitHub
+// Sponsor. Backend reports `beta_access_reason` so we can show how access
+// was granted; when denied we surface a one-click "I'm a GitHub Sponsor"
+// toggle right next to the dropdown so real sponsors aren't stuck.
 async function checkBetaAccess() {
     var sel = document.getElementById('issues-channel-select');
     if (!sel) return;
@@ -32104,14 +32110,14 @@ async function checkBetaAccess() {
                 betaOpt.disabled = false;
                 betaOpt.textContent = data.beta_access_reason === 'licence'
                     ? 'Beta (via paid licence)'
-                    : data.beta_access_reason === 'sponsor'
-                        ? 'Beta (via Patreon sponsorship)'
+                    : data.beta_access_reason === 'patreon'
+                        ? 'Beta (via Patreon support)'
                         : data.beta_access_reason === 'github_sponsor'
                             ? 'Beta (via GitHub Sponsor)'
                             : 'Beta';
             } else {
                 betaOpt.disabled = true;
-                betaOpt.textContent = 'Beta (paid licence, GitHub Sponsor, or Patreon Advanced+ required)';
+                betaOpt.textContent = 'Beta (for supporters — sponsor us, or use a paid licence)';
                 if (sel.value === 'beta') sel.value = 'master';
             }
         }

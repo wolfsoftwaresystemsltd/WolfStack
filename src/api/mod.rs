@@ -28137,10 +28137,16 @@ async fn patreon_sync(req: HttpRequest, state: web::Data<AppState>) -> HttpRespo
     }
 }
 
-/// Beta-channel access combines THREE independent grants:
+/// Beta-channel access is identical to supporter status (see `is_supporter`):
+/// beta builds are a thank-you perk for EVERYONE who supports development, not
+/// a premium upsell, so a $3 Patreon backer gets the same early-access builds
+/// as a $95 one. The commercial value lives in the licence-gated features
+/// (plugins, API tokens, SSO, multi-tenancy), never in the beta channel.
+/// Historically this gated on Patreon Advanced+ ($25) while the nag exempted
+/// Basic+ ($3) — and an unverified GitHub self-attest granted beta for free —
+/// which made the levels incoherent. The grants that count:
 ///
-///   1. **Patreon sponsorship** — Advanced / Platinum / Enterprise tier
-///      (anyone supporting development at $25+/mo through Patreon).
+///   1. **Patreon pledge** — any paying tier (Basic+, i.e. $3+/mo).
 ///   2. **WolfStack paid licence** — Homelab, Team, MSP/Pro, Enterprise.
 ///      Anyone who paid for the product earns the right to test
 ///      pre-release builds against their environment.
@@ -28160,19 +28166,10 @@ fn beta_access_granted_full(
     github_sponsor: bool,
 ) -> (bool, &'static str)
 {
-    if patreon_tier.has_beta_access() {
-        return (true, "sponsor");
-    }
-    if github_sponsor {
-        return (true, "github_sponsor");
-    }
-    // Any valid (non-expired) WolfStack licence is sufficient. We don't
-    // gate on a specific paid tier — Homelab users are exactly the
-    // power-user audience most interested in testing pre-release.
-    if crate::compat::platform_ready() {
-        return (true, "licence");
-    }
-    (false, "none")
+    // Beta == supporter. Single source of truth so the two can never drift
+    // apart again (a paying backer must never be offered less than a free
+    // self-attest).
+    is_supporter(patreon_tier, github_sponsor)
 }
 
 /// Convenience wrapper that defaults github_sponsor=false. Retained
