@@ -111,7 +111,7 @@ pub fn record_node_wolfnet_ip(address: &str, wolfnet_ip: &str) {
     }
 }
 
-fn lookup_node_wolfnet_ip(address: &str) -> Option<String> {
+pub fn lookup_node_wolfnet_ip(address: &str) -> Option<String> {
     NODE_WOLFNET_IPS.lock().ok().and_then(|m| m.get(address).cloned())
 }
 

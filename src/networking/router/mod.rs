@@ -2745,6 +2745,37 @@ pub fn enable_subnet_route_forwarding(route: &SubnetRoute) -> Result<(), String>
 /// freshly-installed rule logs `info`, an error logs `warn`. Without
 /// transition-aware logging this would spam an "applied" line every
 /// 60s indefinitely.
+/// De-dupes the watchdog's per-route warnings. `reconcile_subnet_routes`
+/// runs every 60s; without this it logged an identical failure (e.g. a
+/// Docker-bridge route collision on the same CIDR) on every single tick.
+/// Maps subnet_cidr → last warning text; we log only when the text first
+/// appears or changes, and log a one-line recovery when the route applies.
+static SUBNET_ROUTE_WARN_STATE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Log `msg` for `cidr` only if it differs from the last message logged for
+/// that CIDR — collapses every-tick repeats to a single line per state.
+fn warn_subnet_route_once(cidr: &str, msg: String) {
+    let mut state = SUBNET_ROUTE_WARN_STATE.lock().unwrap_or_else(|p| p.into_inner());
+    if state.get(cidr).map(String::as_str) != Some(msg.as_str()) {
+        tracing::warn!("{}", msg);
+        state.insert(cidr.to_string(), msg);
+    }
+}
+
+/// Clear a CIDR's warning state, logging a one-line recovery if it had been
+/// failing. Called when the route applies cleanly.
+fn clear_subnet_route_warn(cidr: &str) {
+    let mut state = SUBNET_ROUTE_WARN_STATE.lock().unwrap_or_else(|p| p.into_inner());
+    if state.remove(cidr).is_some() {
+        tracing::info!(
+            "WolfRouter watchdog: subnet route {} now applies cleanly (previously failing).",
+            cidr
+        );
+    }
+}
+
 pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
     let cfg = state.config.read().unwrap().clone();
     // Snapshot the set of gateway IPs that correspond to current wolfnet
@@ -2773,21 +2804,21 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
         // case where the peer vanished some other way (manual edit,
         // crashed mid-update, etc.).
         if !current_wn_gateways.contains(&route.gateway) {
-            tracing::warn!(
+            warn_subnet_route_once(&route.subnet_cidr, format!(
                 "WolfRouter watchdog: subnet route {} via {} skipped — \
                  gateway is not a current wolfnet peer (orphan route; \
                  delete via UI or `wolfnet_tombstone_add` the peer to clean up)",
                 route.subnet_cidr, route.gateway
-            );
+            ));
             continue;
         }
         match apply_subnet_route(route, None) {
-            Ok(()) => {} // Idempotent — silent in steady state.
+            Ok(()) => clear_subnet_route_warn(&route.subnet_cidr), // recovery logged once
             Err(e) => {
-                tracing::warn!(
+                warn_subnet_route_once(&route.subnet_cidr, format!(
                     "WolfRouter watchdog: subnet route reconcile failed: {} via {}: {}",
                     route.subnet_cidr, route.gateway, e
-                );
+                ));
             }
         }
     }

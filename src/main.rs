@@ -1544,31 +1544,61 @@ async fn main() -> std::io::Result<()> {
         // config entries that aren't wolfstack cluster members but
         // have loop-inducing endpoints (klasSponsor's unifios case,
         // a UniFi router with a stale `10.100.10.1:9634` endpoint).
+        //
+        // Runs 30s after launch (first gossip cycle done) and then every
+        // 5 minutes, so it also self-heals drift that appears at runtime —
+        // notably a stale/wrong peer `allowed_ip` in config.toml (klasSponsor
+        // 2026-06-04: a VPS that showed peers as 10.10.20.x instead of
+        // 10.100.10.x). The batch no-ops (one config read, no write, no
+        // reload) when nothing has drifted, so the periodic cadence is cheap.
         {
             let cluster_for_wnfix = cluster.clone();
             tokio::spawn(async move {
+                // Initial settle delay so the first cluster poll has
+                // populated peer WolfNet IPs before we self-heal the config.
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                let self_addr = cluster_for_wnfix.self_address.clone();
-                let targets: Vec<crate::networking::ReconcileTarget> = cluster_for_wnfix
-                    .get_all_nodes()
-                    .into_iter()
-                    .filter(|n| !n.is_self && n.node_type == "wolfstack")
-                    .map(|n| crate::networking::ReconcileTarget {
-                        hostname: n.hostname,
-                        lan_address: Some(n.address),
-                        public_ip: n.public_ip,
-                    })
-                    .collect();
-                tokio::task::spawn_blocking(move || {
-                    match crate::networking::reconcile_wolfnet_peers_batch(&self_addr, &targets) {
-                        Ok(0) => {}
-                        Ok(n) => tracing::info!(
-                            "WolfNet startup reconcile: {} peer entr{} updated",
-                            n, if n == 1 { "y" } else { "ies" }
-                        ),
-                        Err(e) => tracing::warn!("WolfNet startup reconcile failed: {}", e),
-                    }
-                }).await.ok();
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+                loop {
+                    tick.tick().await; // first tick fires immediately
+                    let self_addr = cluster_for_wnfix.self_address.clone();
+                    // Cluster-scope the targets. The WolfNet IP self-heal writes
+                    // to /etc/wolfnet/config.toml, so it must only ever trust
+                    // peers in THIS cluster — feeding another cluster's nodes in
+                    // (a hostname collision on a shared /24 would slip past the
+                    // subnet guard) is exactly the cross-cluster poisoning class
+                    // that bit klasSponsor before (v24.3.6). Same membership test
+                    // the subnet-route path uses in agent::poll.
+                    let self_cluster = cluster_for_wnfix.get_self_cluster_name();
+                    let targets: Vec<crate::networking::ReconcileTarget> = cluster_for_wnfix
+                        .get_all_nodes()
+                        .into_iter()
+                        .filter(|n| !n.is_self
+                            && n.node_type == "wolfstack"
+                            && n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster)
+                        .map(|n| {
+                            // Authoritative WolfNet IP = the peer's own live
+                            // wolfnet0 address, recorded from gossip. Borrow
+                            // n.address before it's moved into lan_address.
+                            let wolfnet_ip = crate::api::lookup_node_wolfnet_ip(&n.address);
+                            crate::networking::ReconcileTarget {
+                                hostname: n.hostname,
+                                lan_address: Some(n.address),
+                                public_ip: n.public_ip,
+                                wolfnet_ip,
+                            }
+                        })
+                        .collect();
+                    tokio::task::spawn_blocking(move || {
+                        match crate::networking::reconcile_wolfnet_peers_batch(&self_addr, &targets) {
+                            Ok(0) => {}
+                            Ok(n) => tracing::info!(
+                                "WolfNet reconcile: {} peer entr{} updated",
+                                n, if n == 1 { "y" } else { "ies" }
+                            ),
+                            Err(e) => tracing::warn!("WolfNet reconcile failed: {}", e),
+                        }
+                    }).await.ok();
+                }
             });
         }
 
