@@ -1347,6 +1347,12 @@ pub struct ReconcileTarget {
     /// `Node.public_ip` from gossip — what the peer detected as its own
     /// public IP via outbound probe.
     pub public_ip: Option<String>,
+    /// The peer's authoritative WolfNet IP — its own live `wolfnet0`
+    /// address as self-reported via cluster gossip
+    /// (`crate::api::lookup_node_wolfnet_ip`). `None` until the peer has
+    /// been polled at least once. Used to self-heal a stale/wrong
+    /// `allowed_ip` in the local `/etc/wolfnet/config.toml`.
+    pub wolfnet_ip: Option<String>,
 }
 
 /// Reconcile ALL peers in one pass — read config once, apply every
@@ -1384,8 +1390,13 @@ pub fn reconcile_wolfnet_peers_batch(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let config_path = "/etc/wolfnet/config.toml";
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        // No WolfNet config = nothing to reconcile. Return Ok(0) so the periodic
+        // caller doesn't log an error every tick on nodes that don't run WolfNet.
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("Failed to read config: {}", e)),
+    };
     let mut doc: toml::Value = toml::from_str(&content)
         .map_err(|e| format!("Failed to parse config: {}", e))?;
 
@@ -1413,6 +1424,51 @@ pub fn reconcile_wolfnet_peers_batch(
                 Some(n) => n.to_string(),
                 None => continue,
             };
+
+            // ── WolfNet IP self-heal ──
+            // A peer is authoritative about its own WolfNet IP (it reports its
+            // live wolfnet0 address). If our local config.toml has drifted —
+            // e.g. stale addresses left by a past cross-cluster sync; the
+            // klasSponsor 2026-06-04 case where a VPS showed peers as
+            // 10.10.20.x instead of 10.100.10.x — converge the peer's
+            // allowed_ip to that authoritative value. Two guards keep this
+            // safe: only cluster-known, non-tombstoned peers are in
+            // `target_by_name`, and we ONLY write an address that is inside
+            // our own WolfNet subnet, so a stale out-of-mesh IP can never be
+            // propagated back into the config.
+            if let Some(target) = target_by_name.get(name.as_str()) {
+                if let (Some(correct_ip), Some((net_addr, prefix))) =
+                    (target.wolfnet_ip.as_deref(), wn_subnet)
+                {
+                    if let Ok(correct_v4) = correct_ip.parse::<std::net::Ipv4Addr>() {
+                        let current_ip = peer.get("allowed_ip").and_then(|v| v.as_str())
+                            .or_else(|| peer.get("ip").and_then(|v| v.as_str()))
+                            .map(|s| s.split('/').next().unwrap_or(s).to_string());
+                        if is_in_subnet(correct_v4, net_addr, prefix) {
+                            if let Some(cur) = current_ip {
+                                if !cur.is_empty() && cur != correct_ip {
+                                    if let Some(tbl) = peer.as_table_mut() {
+                                        tbl.insert(
+                                            "allowed_ip".to_string(),
+                                            toml::Value::String(format!("{}/32", correct_ip)),
+                                        );
+                                        // Drop any legacy `ip` key so it can't
+                                        // shadow the corrected allowed_ip.
+                                        tbl.remove("ip");
+                                    }
+                                    changes += 1;
+                                    tracing::warn!(
+                                        "WolfNet IP self-heal: peer '{}' allowed_ip {} → {} \
+                                         (was stale; converged to the peer's live WolfNet address)",
+                                        name, cur, correct_ip
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let current_endpoint = peer.get("endpoint")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
