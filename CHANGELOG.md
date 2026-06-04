@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.20.0: auto-heal stale peer WolfNet IPs in config.toml (cluster-scoped, converges to each peer's authoritative live address, runs every 5min); stop the WolfRouter watchdog logging subnet-route reconcile failures on every tick (de-dupe per CIDR + recovery line)** _(2026-06-04 — [`8126d3e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8126d3eda4b6be774eedb461b616202ee76c2f74))_
 - **v24.19.0: clarify licensing & sponsorship — source-available (not MIT/open-source), sponsoring is not a commercial licence; beta builds now for all supporters (not just Patreon $25+); show the dashboard background image through the solid body layer** _(2026-06-04 — [`543871b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/543871b2fe5926a56edca55956d8272dcc24a24e))_
 - **v24.18.0: App Store LXC installs register with Proxmox (pct, not native lxc-create); adopt orphaned native LXC containers into PVE on startup** _(2026-06-04 — [`f9c8ee2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f9c8ee22e0a75fa6914dd3008e9d4ec0bf440579))_
 - **v24.17.0: login-time support nag for non-supporters** _(2026-06-03 — [`45b98df`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/45b98dfcf5bc3d2e1df2b87c5e64fc8232b7f075))_
