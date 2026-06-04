@@ -326,6 +326,186 @@
     --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
+/* ─── Bat Dark Theme ───
+   Cold tactical-HUD aesthetic modelled on a cave command console: a
+   near-black canvas with a faint blue tint, concentric radar rings
+   radiating from an off-centre core glow, and steel-cyan accents over
+   gunmetal hairline panels. Crisp small radii give the precise,
+   instrument-panel feel. Semantic colours stay distinct (a clearly
+   readable teal-green / dim-gold / cold-red) so status meaning survives
+   the monochrome treatment. Original name to steer clear of anyone's
+   masked-vigilante trademarks. */
+[data-theme="bat"] {
+    --bg-primary: #06080c;
+    --bg-secondary: #0a0d13;
+    --bg-card: #0e131b;
+    --bg-card-hover: #131a25;
+    --bg-input: #05070b;
+    --bg-tertiary: #0c111a;
+    --border: #1b2530;
+    --border-light: #2b3a48;
+    --text-primary: #cdd6e0;
+    --text-secondary: #7e8c9b;
+    --text-muted: #4d5965;
+    --accent: #4ea7d4;
+    --accent-light: #86ccea;
+    --accent-glow: rgba(78, 167, 212, 0.18);
+    --success: #2fb589;
+    --success-bg: rgba(47, 181, 137, 0.10);
+    --warning: #d6a649;
+    --warning-bg: rgba(214, 166, 73, 0.10);
+    --danger: #d75763;
+    --danger-bg: rgba(215, 87, 99, 0.12);
+    --info: #4ea7d4;
+    --info-bg: rgba(78, 167, 212, 0.10);
+    --gradient-main: linear-gradient(135deg, #2a6f93 0%, #4ea7d4 50%, #86ccea 100%);
+    --gradient-success: linear-gradient(135deg, #1f9a78 0%, #2fb589 100%);
+    --gradient-danger: linear-gradient(135deg, #b8404c 0%, #d75763 100%);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 3px 12px rgba(0, 0, 0, 0.55), 0 0 1px rgba(78, 167, 212, 0.10);
+    --shadow-lg: 0 14px 44px rgba(0, 0, 0, 0.70), 0 0 28px rgba(20, 70, 110, 0.18);
+    --shadow-glow: 0 0 0 3px var(--accent-glow);
+    --radius: 3px;
+    --radius-sm: 2px;
+    --radius-lg: 5px;
+}
+
+/* Bat — concentric radar rings + off-centre core glow on the canvas.
+   The repeating-radial-gradient draws faint 1px steel rings every 82px
+   around the core; the two radial-gradients lay a cold central glow and
+   an outer vignette over them. Fixed so the rings stay put as you scroll. */
+[data-theme="bat"] body {
+    background:
+        radial-gradient(circle at 50% 38%, rgba(40, 110, 150, 0.18) 0%, rgba(20, 60, 90, 0.07) 22%, transparent 46%),
+        radial-gradient(ellipse at 50% 50%, rgba(8, 24, 40, 0.55) 0%, transparent 75%),
+        repeating-radial-gradient(circle at 50% 38%,
+            transparent 0,
+            transparent 80px,
+            rgba(90, 150, 185, 0.045) 81px,
+            rgba(90, 150, 185, 0.045) 82px),
+        #06080c;
+    background-attachment: fixed;
+}
+
+/* Bat — gunmetal sidebar with a faint cold edge glow */
+[data-theme="bat"] .sidebar {
+    background: rgba(8, 11, 17, 0.94);
+    border-right: 1px solid var(--border);
+    box-shadow: 2px 0 28px rgba(0, 0, 0, 0.6);
+}
+
+/* Bat — top-bar matches the sidebar tone */
+[data-theme="bat"] .top-bar {
+    background: rgba(7, 10, 15, 0.94);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 2px 20px rgba(0, 0, 0, 0.55);
+}
+
+/* Bat — instrument panels: hairline border, faint inner top highlight */
+[data-theme="bat"] .card,
+[data-theme="bat"] .stat-card {
+    background: rgba(14, 19, 27, 0.82);
+    border: 1px solid var(--border);
+    box-shadow:
+        0 4px 18px rgba(0, 0, 0, 0.55),
+        inset 0 1px 0 rgba(120, 180, 215, 0.05);
+}
+
+[data-theme="bat"] .card:hover,
+[data-theme="bat"] .stat-card:hover {
+    border-color: var(--border-light);
+    box-shadow:
+        0 8px 28px rgba(0, 0, 0, 0.65),
+        inset 0 1px 0 rgba(130, 195, 230, 0.08),
+        0 0 22px rgba(30, 90, 130, 0.16);
+}
+
+/* Bat — subtle cold glow on panel headings for the HUD readout feel */
+[data-theme="bat"] .card h1,
+[data-theme="bat"] .card h2,
+[data-theme="bat"] .card h3,
+[data-theme="bat"] .card-header h3 {
+    text-shadow: 0 0 6px rgba(78, 167, 212, 0.22);
+}
+
+/* Bat — deep modals / dropdowns with steel edge */
+[data-theme="bat"] .modal-content,
+[data-theme="bat"] .dropdown-menu {
+    background: rgba(9, 13, 19, 0.97);
+    border: 1px solid var(--border-light);
+    box-shadow:
+        0 24px 80px rgba(0, 0, 0, 0.8),
+        inset 0 1px 0 rgba(120, 180, 215, 0.06);
+}
+
+/* Bat — recessed form inputs */
+[data-theme="bat"] .form-control,
+[data-theme="bat"] input,
+[data-theme="bat"] select,
+[data-theme="bat"] textarea {
+    background: rgba(5, 7, 11, 0.95);
+    border-color: var(--border);
+    color: var(--text-primary);
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="bat"] .form-control:focus,
+[data-theme="bat"] input:focus,
+[data-theme="bat"] select:focus,
+[data-theme="bat"] textarea:focus {
+    border-color: rgba(78, 167, 212, 0.5);
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 3px var(--accent-glow);
+    outline: none;
+}
+
+/* Bat — primary action: steel-cyan gradient with a cold rim light */
+[data-theme="bat"] .btn-primary {
+    background: linear-gradient(135deg, #2a6f93 0%, #4ea7d4 100%);
+    border: 1px solid rgba(120, 195, 230, 0.35);
+    box-shadow: 0 3px 14px rgba(0, 60, 100, 0.4), inset 0 1px 0 rgba(160, 215, 240, 0.18);
+}
+
+[data-theme="bat"] .btn-primary:hover {
+    background: linear-gradient(135deg, #347fa6 0%, #62b6df 100%);
+    box-shadow: 0 5px 20px rgba(0, 80, 130, 0.5), inset 0 1px 0 rgba(180, 225, 245, 0.22);
+}
+
+/* Bat — active nav: steel bar + faint glow */
+[data-theme="bat"] .nav-item.active {
+    background: rgba(30, 80, 110, 0.22);
+    box-shadow: inset 3px 0 0 var(--accent), 0 0 14px rgba(20, 70, 110, 0.25);
+}
+
+/* Bat — stat icon ring + log readout */
+[data-theme="bat"] .stat-icon {
+    box-shadow: 0 0 10px rgba(78, 167, 212, 0.25), inset 0 1px 0 rgba(160, 215, 240, 0.12);
+}
+
+[data-theme="bat"] .log-viewer {
+    background: #04060a;
+    color: #9fc4d8;
+    box-shadow: inset 0 4px 28px rgba(0, 0, 0, 0.7);
+}
+
+/* Bat — recessed progress track */
+[data-theme="bat"] .progress-bar {
+    background: rgba(8, 14, 22, 0.7);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="bat"] ::selection {
+    background: rgba(78, 167, 212, 0.35);
+    color: #eaf4fb;
+}
+
+[data-theme="bat"] ::-webkit-scrollbar-thumb {
+    background: var(--border-light);
+}
+
+[data-theme="bat"] ::-webkit-scrollbar-track {
+    background: #05070b;
+}
+
 /* ─── Light theme overrides for specific elements ─── */
 [data-theme="light"] .top-bar {
     background: rgba(245, 246, 250, 0.9);
