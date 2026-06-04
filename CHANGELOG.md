@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.18.0: App Store LXC installs register with Proxmox (pct, not native lxc-create); adopt orphaned native LXC containers into PVE on startup** _(2026-06-04 — [`f9c8ee2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f9c8ee22e0a75fa6914dd3008e9d4ec0bf440579))_
 - **v24.17.0: login-time support nag for non-supporters** _(2026-06-03 — [`45b98df`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/45b98dfcf5bc3d2e1df2b87c5e64fc8232b7f075))_
 - **v24.16.0: LXC clone on Proxmox — exact copy, operator-chosen VMID, never auto-start** _(2026-06-03 — [`33c6bae`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/33c6bae4c3355a74365bab15ba69fb058ea39cb5))_
 - **v24.15.3: fix the tamper-baseline reseed command — https + authenticate** _(2026-06-03 — [`0d23cce`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0d23cceeefc0143e09a966420da2d3dcd1f8b60e))_
