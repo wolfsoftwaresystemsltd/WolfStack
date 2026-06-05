@@ -4694,6 +4694,45 @@ pub async fn service_action(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let service = path.into_inner();
+
+    // WolfProxy daemonizes (forks a worker, parent exits), so with a
+    // Type=simple unit systemd loses track of the worker: `systemctl stop`
+    // reports success but the orphan keeps holding :80/:443, and the next
+    // start fails "Address in use" (klasSponsor 2026-06-05). For wolfproxy
+    // stop/restart, reap any orphan still on the host ports after the
+    // systemctl call so the ports are actually freed. Reaping is port-scoped
+    // and name-checked (see installer::wolfproxy_pids_on_ports) so a wolfproxy
+    // inside a container is never touched.
+    if service == "wolfproxy" && (body.action == "stop" || body.action == "restart") {
+        let _ = installer::stop_service("wolfproxy");
+        let pids = installer::wolfproxy_pids_on_ports(&[80, 443]);
+        let reaped = pids.len();
+        for pid in &pids {
+            let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).output();
+        }
+        if reaped > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            for pid in installer::wolfproxy_pids_on_ports(&[80, 443]) {
+                let _ = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).output();
+            }
+        }
+        let note = if reaped > 0 {
+            format!(" (reaped {} orphaned worker{} systemd had lost track of)",
+                reaped, if reaped == 1 { "" } else { "s" })
+        } else {
+            String::new()
+        };
+        if body.action == "restart" {
+            // Let the kernel release the listening sockets before re-binding.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            return match installer::start_service("wolfproxy") {
+                Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "message": format!("wolfproxy restarted{}", note) })),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Freed the ports{} but start failed: {}", note, e) })),
+            };
+        }
+        return HttpResponse::Ok().json(serde_json::json!({ "message": format!("wolfproxy stopped{}", note) }));
+    }
+
     let result = match body.action.as_str() {
         "start" => installer::start_service(&service),
         "stop" => installer::stop_service(&service),
@@ -19747,6 +19786,194 @@ pub async fn user_prefs_patch(req: HttpRequest, state: web::Data<AppState>, body
     }
 }
 
+/// GET /api/ping — lightweight liveness probe for the frontend connection
+/// monitor. Auth-required so the client can distinguish three states: 200 =
+/// reachable + session valid, 401 = reachable but session gone (→ login),
+/// network error = server unreachable (→ "connection lost" banner). Does no
+/// work beyond the auth check so it's cheap to poll every few seconds.
+pub async fn ping(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+}
+
+// ─── Per-user interface lock (idle lock + PIN) ───
+//
+// A soft, client-enforced screen lock: after `idle_minutes` of inactivity
+// the dashboard covers itself and asks for a PIN. This is a "stop a random
+// passer-by getting into an unattended session" deterrent, NOT a hard
+// access control — a technical user with devtools can bypass a client-side
+// overlay. The PIN itself, though, is treated as a credential: it's stored
+// only as a salted SHA-256 hash in a per-user file that the prefs GET never
+// returns, and it's verified server-side with a small delay on failure to
+// slow guessing. The watchful eye of the lock — like Durin's Gate, it opens
+// only to the one who knows the word.
+
+/// Per-user lock profile path. Separate from `user_prefs_path` so the PIN
+/// hash is never served by the preferences GET. Same sanitisation +
+/// traversal guard as the prefs path.
+fn user_lock_path(username: &str) -> Option<String> {
+    let safe: String = username.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if safe.is_empty() || safe == "cluster-node" { return None; }
+    let path = format!("{}/user-prefs/{}.lock.json", crate::paths::get().config_dir, safe);
+    let expected_dir = format!("{}/user-prefs/", crate::paths::get().config_dir);
+    if !path.starts_with(&expected_dir) { return None; }
+    Some(path)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct UserLockProfile {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    idle_minutes: u32,
+    #[serde(default)]
+    pin_salt: String,
+    #[serde(default)]
+    pin_hash: String,
+}
+
+fn load_user_lock(path: &str) -> UserLockProfile {
+    std::fs::read_to_string(path).ok()
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .unwrap_or_default()
+}
+
+/// Salted SHA-256 of the PIN. Salt is per-PIN-set, so the same PIN on two
+/// accounts (or reset on the same account) yields a different hash.
+fn hash_user_pin(salt: &str, pin: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(format!("{}:{}", salt, pin).as_bytes());
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn random_lock_salt() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Constant-time comparison so a failed verify doesn't leak how many
+/// leading hex chars matched via timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) { diff |= x ^ y; }
+    diff == 0
+}
+
+/// GET /api/user/lock — the current user's idle-lock settings. Never
+/// returns the salt or hash; `pin_set` is the only PIN signal.
+pub async fn user_lock_get(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let username = match require_auth(&req, &state) {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+    let path = match user_lock_path(&username) {
+        Some(p) => p,
+        None => return HttpResponse::Forbidden().json(serde_json::json!({ "error": "Not a user account" })),
+    };
+    let lock = load_user_lock(&path);
+    HttpResponse::Ok().json(serde_json::json!({
+        "username": username,
+        "enabled": lock.enabled,
+        "idle_minutes": if lock.idle_minutes == 0 { 10 } else { lock.idle_minutes },
+        "pin_set": !lock.pin_hash.is_empty(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UserLockUpdate {
+    enabled: Option<bool>,
+    idle_minutes: Option<u32>,
+    /// `Some(non-empty)` sets a new PIN; `Some("")` clears it; `None` leaves
+    /// the existing PIN untouched.
+    pin: Option<String>,
+}
+
+/// POST /api/user/lock — update idle-lock settings and/or the PIN.
+pub async fn user_lock_save(req: HttpRequest, state: web::Data<AppState>, body: web::Json<UserLockUpdate>) -> HttpResponse {
+    let username = match require_auth(&req, &state) {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+    let path = match user_lock_path(&username) {
+        Some(p) => p,
+        None => return HttpResponse::Forbidden().json(serde_json::json!({ "error": "Not a user account" })),
+    };
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    let mut lock = load_user_lock(&path);
+    let update = body.into_inner();
+
+    if let Some(en) = update.enabled { lock.enabled = en; }
+    if let Some(m) = update.idle_minutes { lock.idle_minutes = m.clamp(1, 240); }
+    match update.pin.as_deref() {
+        Some(p) if !p.is_empty() => {
+            if p.len() < 4 || p.len() > 12 || !p.chars().all(|c| c.is_ascii_digit()) {
+                return HttpResponse::BadRequest().json(serde_json::json!({ "error": "PIN must be 4–12 digits" }));
+            }
+            let salt = random_lock_salt();
+            lock.pin_hash = hash_user_pin(&salt, p);
+            lock.pin_salt = salt;
+        }
+        Some(_) => {
+            // Explicit empty string = clear the PIN. Without a PIN there's
+            // nothing to unlock with, so the lock must also turn off.
+            lock.pin_hash.clear();
+            lock.pin_salt.clear();
+            lock.enabled = false;
+        }
+        None => {}
+    }
+    // Can't arm a lock with no PIN to unlock it.
+    if lock.enabled && lock.pin_hash.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Set a PIN before enabling the lock" }));
+    }
+    if lock.idle_minutes == 0 { lock.idle_minutes = 10; }
+
+    let json = serde_json::to_string_pretty(&lock).unwrap_or_default();
+    match std::fs::write(&path, &json) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true,
+            "enabled": lock.enabled,
+            "idle_minutes": lock.idle_minutes,
+            "pin_set": !lock.pin_hash.is_empty(),
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to save: {}", e) })),
+    }
+}
+
+/// POST /api/user/lock/verify — check a PIN to lift the lock. Returns
+/// `{ ok: bool }`. A 300 ms delay on failure rate-limits brute force.
+pub async fn user_lock_verify(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let username = match require_auth(&req, &state) {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+    let path = match user_lock_path(&username) {
+        Some(p) => p,
+        None => return HttpResponse::Forbidden().json(serde_json::json!({ "error": "Not a user account" })),
+    };
+    let lock = load_user_lock(&path);
+    // No PIN configured → nothing to verify against, treat as unlocked.
+    if lock.pin_hash.is_empty() {
+        return HttpResponse::Ok().json(serde_json::json!({ "ok": true }));
+    }
+    let pin = body.get("pin").and_then(|v| v.as_str()).unwrap_or("");
+    let candidate = hash_user_pin(&lock.pin_salt, pin);
+    let ok = ct_eq(candidate.as_bytes(), lock.pin_hash.as_bytes());
+    if !ok {
+        // Async sleep — never block the runtime thread (see CLAUDE.md).
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "ok": ok }))
+}
+
 // ─── WolfUSB API ───
 
 /// GET /api/wolfusb/status — wolfusb availability, config, assignments
@@ -33509,6 +33736,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/user/preferences", web::get().to(user_prefs_get))
         .route("/api/user/preferences", web::post().to(user_prefs_save))
         .route("/api/user/preferences", web::patch().to(user_prefs_patch))
+        // Lightweight liveness probe for the connection-loss banner
+        .route("/api/ping", web::get().to(ping))
+        // Per-user interface lock (idle lock + PIN)
+        .route("/api/user/lock", web::get().to(user_lock_get))
+        .route("/api/user/lock", web::post().to(user_lock_save))
+        .route("/api/user/lock/verify", web::post().to(user_lock_verify))
         // WolfUSB — USB over IP
         .route("/api/wolfusb/status", web::get().to(wolfusb_status))
         .route("/api/wolfusb/install", web::post().to(wolfusb_install))
