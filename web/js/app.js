@@ -4154,8 +4154,8 @@ async function checkSession() {
             return;
         }
     } catch (e) {
-        // Server unreachable — let the heartbeat/banner handle it.
-        markConnectionDown();
+        // Network error at load — not our signal. The connection heartbeat
+        // (/api/ping) owns the banner; a transient blip here just no-ops.
     }
 }
 checkSession();
@@ -4212,20 +4212,24 @@ function markConnectionDown() {
 }
 
 async function connHeartbeat() {
+    // BARE path, never apiUrl() — we must probe the LOCAL backend the user is
+    // connected to. apiUrl() would rewrite to /api/nodes/{id}/proxy/ping while
+    // viewing a remote node, measuring that node's health instead.
+    let resp;
     try {
-        // BARE path, never apiUrl() — we must probe the LOCAL backend the user
-        // is connected to. apiUrl() would rewrite to /api/nodes/{id}/proxy/ping
-        // while viewing a remote node, measuring that node's health instead
-        // (and a down remote → 502 → false "connection lost", plus 120s proxy
-        // timeouts stacking up). Mirrors fetchNodes using bare /api/nodes.
-        const resp = await fetch('/api/ping', { method: 'GET', cache: 'no-store' });
-        if (resp.status === 401) { window.location.href = '/login.html'; return; }
-        if (!resp.ok) throw new Error('status ' + resp.status);
-        _connFails = 0;
-        showConnRestored();
+        resp = await fetch('/api/ping', { method: 'GET', cache: 'no-store' });
     } catch (e) {
+        // A thrown fetch is the ONLY signal of unreachability. A non-2xx
+        // response (404 on an old binary without /api/ping, a transient 500,
+        // etc.) means the server is reachable and must NOT trip the banner —
+        // treating !resp.ok as "down" made it flap on healthy backends.
         markConnectionDown();
+        return;
     }
+    if (resp.status === 401) { window.location.href = '/login.html'; return; }
+    // Server responded → reachable. Clear any pending offline state.
+    _connFails = 0;
+    showConnRestored();
 }
 
 function startConnectionMonitor() {
@@ -5253,13 +5257,13 @@ async function fetchNodes() {
         // Update 3D topology if viewing
         if (typeof topologyCheckUpdate === 'function') topologyCheckUpdate();
     } catch (e) {
+        // A single node-fetch failure is NOT a connection-loss signal — this
+        // endpoint aggregates cluster/WolfNet state and blips transiently even
+        // when the local backend is perfectly healthy. Driving the banner from
+        // here made it flash on/off against the heartbeat. Connection state is
+        // owned solely by connHeartbeat() (the /api/ping probe); just log and
+        // let the next poll retry.
         console.error('Failed to fetch nodes:', e);
-        // Server unreachable (TLS handshakes during restarts, slow WolfNet hops,
-        // momentary network blips, or a real outage). Surface it through the
-        // connection-loss banner instead of bouncing to login — login wouldn't
-        // work if the server is down, and the banner auto-clears on recovery
-        // without losing the operator's place.
-        markConnectionDown();
     }
 }
 
