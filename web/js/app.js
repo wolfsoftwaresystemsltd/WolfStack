@@ -35981,7 +35981,7 @@ const LOCK_FLAG_KEY = 'ws-iface-locked';
 
 async function loadUserProfile() {
     try {
-        const resp = await fetch(apiUrl('/api/user/lock'));
+        const resp = await fetch('/api/user/lock');
         if (!resp.ok) return;
         const data = await resp.json();
         _lockSettings = {
@@ -36023,7 +36023,7 @@ async function saveUserPin() {
         return;
     }
     try {
-        const resp = await fetch(apiUrl('/api/user/lock'), {
+        const resp = await fetch('/api/user/lock', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pin }),
@@ -36046,7 +36046,7 @@ async function saveUserPin() {
 async function clearUserPin() {
     if (!(await showConfirm('Remove your PIN and turn off the interface lock?', 'Remove PIN'))) return;
     try {
-        const resp = await fetch(apiUrl('/api/user/lock'), {
+        const resp = await fetch('/api/user/lock', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pin: '' }),
@@ -36074,7 +36074,7 @@ async function saveUserLockSettings() {
         return;
     }
     try {
-        const resp = await fetch(apiUrl('/api/user/lock'), {
+        const resp = await fetch('/api/user/lock', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled, idle_minutes: idle }),
@@ -36137,7 +36137,13 @@ async function submitUnlock() {
     const pin = input ? input.value : '';
     if (!pin) return;
     try {
-        const resp = await fetch(apiUrl('/api/user/lock/verify'), {
+        // BARE path, never apiUrl() — the lock PIN is the user's session-local
+        // profile, stored on the node they logged into. apiUrl() would rewrite
+        // to /api/nodes/{currentNodeId}/proxy/... while a remote node is open,
+        // verifying against THAT node's lock file (no PIN, or a different one)
+        // → "invalid PIN" for a correct PIN. All /api/user/lock calls are bare
+        // for the same reason.
+        const resp = await fetch('/api/user/lock/verify', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pin }),
@@ -36250,7 +36256,7 @@ function initInterfaceLock() {
 // Profile tab UI (which may not be open).
 async function bootInterfaceLock() {
     try {
-        const resp = await fetch(apiUrl('/api/user/lock'));
+        const resp = await fetch('/api/user/lock');
         if (!resp.ok) return;
         const data = await resp.json();
         _lockSettings = {
