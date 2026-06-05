@@ -5208,6 +5208,7 @@
                     <div class="settings-tabs">
                         <button class="settings-tab-btn active" onclick="switchSettingsTab('appearance')"><span class="ws-icon-clean-wrap" data-icon="palette"></span>
                             Appearance</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('profile')"><span class="ws-icon-clean-wrap" data-icon="user"></span> Profile</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('sidebar')"><span class="ws-icon-clean-wrap" data-icon="compass"></span> Sidebar</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('icons')"><span class="ws-icon-clean-wrap" data-icon="image"></span> Icons</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('alerts')"><span class="ws-icon-clean-wrap" data-icon="bell"></span> Alerts</button>
@@ -5584,6 +5585,62 @@
                             </div>
                         </div>
 
+                    </div>
+
+                    <!-- ─── Profile Tab — per-user identity + interface lock ─── -->
+                    <div id="settings-tab-profile" class="settings-tab-panel">
+                        <h4 style="margin:0 0 4px 0; font-size:16px; font-weight:600;">User Profile</h4>
+                        <p style="font-size:13px; color:var(--text-muted); margin:0 0 20px 0;">
+                            Signed in as <strong id="profile-username">…</strong>. Settings here apply to <em>your</em> account only.
+                        </p>
+
+                        <div class="card" style="padding:18px 20px; margin-bottom:18px; max-width:560px;">
+                            <h5 style="margin:0 0 6px 0; font-size:14px; font-weight:600;">Interface Lock</h5>
+                            <p style="font-size:13px; color:var(--text-muted); margin:0 0 16px 0;">
+                                Automatically cover the dashboard with a PIN prompt after a period of inactivity, so an
+                                unattended session can't be used by someone walking up to it. This is a convenience lock,
+                                not a replacement for logging out on shared machines.
+                            </p>
+
+                            <div style="margin-bottom:16px;">
+                                <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px;">PIN code</label>
+                                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                                    <input id="profile-pin" type="password" inputmode="numeric" autocomplete="new-password"
+                                        maxlength="12" placeholder="4–12 digits"
+                                        style="width:160px; font-family:var(--font-mono); letter-spacing:3px;"
+                                        aria-describedby="profile-pin-status">
+                                    <input id="profile-pin-confirm" type="password" inputmode="numeric" autocomplete="new-password"
+                                        maxlength="12" placeholder="confirm"
+                                        style="width:160px; font-family:var(--font-mono); letter-spacing:3px;">
+                                    <button class="btn btn-sm btn-primary" onclick="saveUserPin()">Set PIN</button>
+                                    <button class="btn btn-sm btn-danger" id="profile-pin-clear" onclick="clearUserPin()" style="display:none;">Remove PIN</button>
+                                </div>
+                                <div id="profile-pin-status" role="status" aria-live="polite" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
+                            </div>
+
+                            <div style="margin-bottom:16px;">
+                                <label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; cursor:pointer;">
+                                    <input id="profile-lock-enabled" type="checkbox" onchange="saveUserLockSettings()">
+                                    Lock the interface after inactivity
+                                </label>
+                            </div>
+
+                            <div style="margin-bottom:6px;">
+                                <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px;">Lock after</label>
+                                <select id="profile-lock-idle" onchange="saveUserLockSettings()" style="width:200px;">
+                                    <option value="1">1 minute</option>
+                                    <option value="5">5 minutes</option>
+                                    <option value="10" selected>10 minutes</option>
+                                    <option value="15">15 minutes</option>
+                                    <option value="30">30 minutes</option>
+                                    <option value="60">1 hour</option>
+                                </select>
+                            </div>
+
+                            <div style="margin-top:16px;">
+                                <button class="btn btn-sm" id="profile-lock-now" onclick="lockInterfaceNow()">Lock now</button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- ─── Sidebar Tab — per-user menu customisation ─── -->

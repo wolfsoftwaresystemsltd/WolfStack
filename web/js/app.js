@@ -4142,8 +4142,10 @@ function handleAuthError(resp) {
     return false;
 }
 
-// Session check — redirect to login if session is gone (e.g. after upgrade/restart)
-let _sessionCheckFails = 0;
+// Session check — redirect to login if the session is genuinely gone (401).
+// A *network* failure (server unreachable) is NOT a reason to bounce to login —
+// login wouldn't work either, and it loses the user's place. Those are surfaced
+// by the connection-loss banner instead (see the connection monitor below).
 async function checkSession() {
     try {
         const resp = await fetch('/api/nodes', { method: 'GET' });
@@ -4151,16 +4153,91 @@ async function checkSession() {
             window.location.href = '/login.html';
             return;
         }
-        _sessionCheckFails = 0;
     } catch (e) {
-        _sessionCheckFails++;
-        // After 3 consecutive network errors (server restarting), redirect to login
-        if (_sessionCheckFails >= 3) {
-            window.location.href = '/login.html';
-        }
+        // Server unreachable — let the heartbeat/banner handle it.
+        markConnectionDown();
     }
 }
 checkSession();
+
+// ─── Connection-loss monitor ───
+//
+// klasSponsor 2026-06-05: the UI could silently lose the backend — clicks and
+// saves appeared to work but nothing reached the server, with no indication.
+// A 5s heartbeat to /api/ping drives a visible, non-dismissing banner so the
+// operator always knows when their actions won't land, and a "reconnected"
+// toast when it clears. Auth-required ping means a 401 still routes to login;
+// only true unreachability shows the banner.
+let _connOffline = false;
+let _connFails = 0;
+let _connTimer = null;
+const CONN_FAIL_THRESHOLD = 2; // ~10s of failures before crying wolf — rides out blips
+
+function ensureConnBanner() {
+    let b = document.getElementById('conn-lost-banner');
+    if (b) return b;
+    b = document.createElement('div');
+    b.id = 'conn-lost-banner';
+    b.setAttribute('role', 'alert');
+    b.setAttribute('aria-live', 'assertive');
+    // Fixed colours (theme-independent), white-on-red ~6.4:1 contrast (passes
+    // WCAG AA), bottom bar so it never covers the top-bar controls or shifts layout.
+    b.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483645;display:none;'
+        + 'padding:11px 16px;text-align:center;font-size:13px;font-weight:600;'
+        + 'background:#b91c1c;color:#ffffff;box-shadow:0 -2px 12px rgba(0,0,0,0.4);';
+    b.textContent = 'Connection to the server lost — changes may not be saved. Reconnecting…';
+    document.body.appendChild(b);
+    return b;
+}
+
+function showConnLost() {
+    if (_connOffline) return;
+    _connOffline = true;
+    ensureConnBanner().style.display = 'block';
+}
+
+function showConnRestored() {
+    if (!_connOffline) return;
+    _connOffline = false;
+    const b = document.getElementById('conn-lost-banner');
+    if (b) b.style.display = 'none';
+    if (typeof showToast === 'function') showToast('Reconnected to the server', 'success', 3000);
+}
+
+// Record a connectivity failure observed by another poller (e.g. the node
+// poll). Shares the same threshold/banner as the heartbeat.
+function markConnectionDown() {
+    _connFails++;
+    if (_connFails >= CONN_FAIL_THRESHOLD) showConnLost();
+}
+
+async function connHeartbeat() {
+    try {
+        // BARE path, never apiUrl() — we must probe the LOCAL backend the user
+        // is connected to. apiUrl() would rewrite to /api/nodes/{id}/proxy/ping
+        // while viewing a remote node, measuring that node's health instead
+        // (and a down remote → 502 → false "connection lost", plus 120s proxy
+        // timeouts stacking up). Mirrors fetchNodes using bare /api/nodes.
+        const resp = await fetch('/api/ping', { method: 'GET', cache: 'no-store' });
+        if (resp.status === 401) { window.location.href = '/login.html'; return; }
+        if (!resp.ok) throw new Error('status ' + resp.status);
+        _connFails = 0;
+        showConnRestored();
+    } catch (e) {
+        markConnectionDown();
+    }
+}
+
+function startConnectionMonitor() {
+    if (_connTimer) return;
+    connHeartbeat();
+    _connTimer = setInterval(connHeartbeat, 5000);
+    // Instant feedback on a browser-level network drop; the next heartbeat
+    // confirms recovery and clears the banner.
+    window.addEventListener('offline', showConnLost);
+    window.addEventListener('online', connHeartbeat);
+}
+document.addEventListener('DOMContentLoaded', startConnectionMonitor);
 
 // ─── Metrics Polling ───
 async function fetchMetrics() {
@@ -5177,12 +5254,12 @@ async function fetchNodes() {
         if (typeof topologyCheckUpdate === 'function') topologyCheckUpdate();
     } catch (e) {
         console.error('Failed to fetch nodes:', e);
-        // Transient fetch failures (TLS handshakes during restarts, slow WolfNet
-        // hops, momentary network blips) just count toward the session-check
-        // failure budget. Only after 3 consecutive failures do we treat the
-        // session as gone and bounce to login.
-        _sessionCheckFails++;
-        if (_sessionCheckFails >= 3) window.location.href = '/login.html';
+        // Server unreachable (TLS handshakes during restarts, slow WolfNet hops,
+        // momentary network blips, or a real outage). Surface it through the
+        // connection-loss banner instead of bouncing to login — login wouldn't
+        // work if the server is down, and the banner auto-clears on recovery
+        // without losing the operator's place.
+        markConnectionDown();
     }
 }
 
@@ -35874,12 +35951,310 @@ function switchSettingsTab(tabName) {
         loadPlugins();
     } else if (tabName === 'apikeys') {
         loadApiKeysTab();
+    } else if (tabName === 'profile') {
+        loadUserProfile();
     } else if (tabName === 'systemcheck') {
         populateSystemCheckNodes();
         const out = document.getElementById('systemcheck-results');
         if (out && !out.innerHTML.trim()) runSystemCheck();
     }
 }
+
+// ─── User Profile + Interface Lock ───
+//
+// A soft, client-enforced idle lock: after the configured inactivity window
+// the dashboard is covered by a PIN prompt. The PIN is stored server-side as
+// a salted hash and verified server-side (/api/user/lock). This deters a
+// passer-by from using an unattended session; it is NOT a hard access
+// control (a technical user can bypass a client overlay) and we don't claim
+// otherwise in the UI copy.
+
+let _lockSettings = { enabled: false, idle_minutes: 10, pin_set: false };
+let _idleTimer = null;
+let _lastActivityReset = 0;
+let _ifaceLocked = false;
+const LOCK_FLAG_KEY = 'ws-iface-locked';
+
+async function loadUserProfile() {
+    try {
+        const resp = await fetch(apiUrl('/api/user/lock'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        _lockSettings = {
+            enabled: !!data.enabled,
+            idle_minutes: data.idle_minutes || 10,
+            pin_set: !!data.pin_set,
+        };
+        const userEl = document.getElementById('profile-username');
+        if (userEl) userEl.textContent = data.username || 'user';
+        const enabledEl = document.getElementById('profile-lock-enabled');
+        if (enabledEl) enabledEl.checked = _lockSettings.enabled;
+        const idleEl = document.getElementById('profile-lock-idle');
+        if (idleEl) idleEl.value = String(_lockSettings.idle_minutes);
+        const clearBtn = document.getElementById('profile-pin-clear');
+        if (clearBtn) clearBtn.style.display = _lockSettings.pin_set ? '' : 'none';
+        const status = document.getElementById('profile-pin-status');
+        if (status) status.textContent = _lockSettings.pin_set
+            ? 'A PIN is set. Enter a new one above to change it, or remove it.'
+            : 'No PIN set. Set one to enable the interface lock.';
+        const lockNow = document.getElementById('profile-lock-now');
+        if (lockNow) lockNow.disabled = !_lockSettings.pin_set;
+    } catch (e) {
+        console.error('Failed to load user profile:', e);
+    }
+}
+
+async function saveUserPin() {
+    const pin = (document.getElementById('profile-pin') || {}).value || '';
+    const confirm = (document.getElementById('profile-pin-confirm') || {}).value || '';
+    const status = document.getElementById('profile-pin-status');
+    if (!/^\d{4,12}$/.test(pin)) {
+        showToast('PIN must be 4–12 digits', 'error');
+        if (status) status.textContent = 'PIN must be 4–12 digits.';
+        return;
+    }
+    if (pin !== confirm) {
+        showToast('PINs do not match', 'error');
+        if (status) status.textContent = 'The two PINs do not match.';
+        return;
+    }
+    try {
+        const resp = await fetch(apiUrl('/api/user/lock'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+            showToast('PIN saved', 'success');
+            document.getElementById('profile-pin').value = '';
+            document.getElementById('profile-pin-confirm').value = '';
+            await loadUserProfile();
+            initInterfaceLock();
+        } else {
+            showToast(data.error || 'Failed to save PIN', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to save PIN: ' + e.message, 'error');
+    }
+}
+
+async function clearUserPin() {
+    if (!(await showConfirm('Remove your PIN and turn off the interface lock?', 'Remove PIN'))) return;
+    try {
+        const resp = await fetch(apiUrl('/api/user/lock'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin: '' }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+            showToast('PIN removed', 'success');
+            await loadUserProfile();
+            initInterfaceLock();
+        } else {
+            showToast(data.error || 'Failed to remove PIN', 'error');
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function saveUserLockSettings() {
+    const enabled = !!(document.getElementById('profile-lock-enabled') || {}).checked;
+    const idle = parseInt((document.getElementById('profile-lock-idle') || {}).value || '10', 10);
+    if (enabled && !_lockSettings.pin_set) {
+        showToast('Set a PIN first to enable the lock', 'error');
+        const el = document.getElementById('profile-lock-enabled');
+        if (el) el.checked = false;
+        return;
+    }
+    try {
+        const resp = await fetch(apiUrl('/api/user/lock'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled, idle_minutes: idle }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+            showToast('Lock settings saved', 'success');
+            await loadUserProfile();
+            initInterfaceLock();
+        } else {
+            showToast(data.error || 'Failed to save', 'error');
+            await loadUserProfile();
+        }
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+// Build the full-screen lock overlay once and return it.
+function ensureLockOverlay() {
+    let ov = document.getElementById('iface-lock-overlay');
+    if (ov) return ov;
+    ov = document.createElement('div');
+    ov.id = 'iface-lock-overlay';
+    ov.setAttribute('role', 'dialog');
+    ov.setAttribute('aria-modal', 'true');
+    ov.setAttribute('aria-label', 'Interface locked');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:2147483646;display:none;align-items:center;justify-content:center;'
+        + 'background:rgba(6,8,14,0.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);';
+    ov.innerHTML =
+        '<div style="text-align:center;max-width:340px;padding:32px 28px;border-radius:14px;background:var(--bg-card,#1a1f35);'
+        + 'border:1px solid var(--border,#2a3660);box-shadow:0 20px 60px rgba(0,0,0,0.6);">'
+        + '<div style="font-size:34px;margin-bottom:10px;" aria-hidden="true"><span class="ws-icon-clean-wrap" data-icon="lock"></span></div>'
+        + '<h2 style="margin:0 0 4px 0;font-size:18px;color:var(--text-primary,#e8ecf4);">Interface locked</h2>'
+        + '<p style="margin:0 0 18px 0;font-size:13px;color:var(--text-secondary,#8892a8);">Enter your PIN to continue.</p>'
+        + '<input id="iface-lock-pin" type="password" inputmode="numeric" autocomplete="off" maxlength="12" '
+        + 'aria-label="PIN" style="width:100%;text-align:center;font-size:20px;letter-spacing:8px;font-family:var(--font-mono,monospace);'
+        + 'padding:10px;border-radius:8px;border:1px solid var(--border,#2a3660);background:var(--bg-input,#0d1225);color:var(--text-primary,#e8ecf4);">'
+        + '<div id="iface-lock-error" role="alert" aria-live="assertive" style="min-height:18px;margin-top:10px;font-size:12px;color:var(--danger,#ef4444);"></div>'
+        + '<button id="iface-lock-btn" class="btn btn-primary" style="width:100%;margin-top:6px;">Unlock</button>'
+        + '<button id="iface-lock-logout" type="button" style="margin-top:14px;background:none;border:none;cursor:pointer;'
+        + 'font-size:12px;color:var(--text-secondary,#8892a8);text-decoration:underline;">Forgot your PIN? Log out</button>'
+        + '</div>';
+    document.body.appendChild(ov);
+    const input = ov.querySelector('#iface-lock-pin');
+    const btn = ov.querySelector('#iface-lock-btn');
+    btn.addEventListener('click', submitUnlock);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitUnlock(); });
+    // Escape hatch for a forgotten PIN: log out (destroys the session) and
+    // clear the lock flag. A passer-by gains nothing — they still need login
+    // credentials to get back in — but the legitimate user can recover.
+    ov.querySelector('#iface-lock-logout').addEventListener('click', lockScreenLogout);
+    if (typeof fillDataIconPlaceholders === 'function') { try { fillDataIconPlaceholders(ov); } catch (_) {} }
+    return ov;
+}
+
+async function submitUnlock() {
+    const input = document.getElementById('iface-lock-pin');
+    const err = document.getElementById('iface-lock-error');
+    const pin = input ? input.value : '';
+    if (!pin) return;
+    try {
+        const resp = await fetch(apiUrl('/api/user/lock/verify'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+            unlockInterface();
+        } else {
+            if (err) err.textContent = 'Incorrect PIN';
+            if (input) { input.value = ''; input.focus(); }
+        }
+    } catch (e) {
+        if (err) err.textContent = 'Verification failed — check your connection';
+    }
+}
+
+function lockInterface() {
+    if (_ifaceLocked) return;
+    _ifaceLocked = true;
+    try { localStorage.setItem(LOCK_FLAG_KEY, '1'); } catch (_) {}
+    const ov = ensureLockOverlay();
+    ov.style.display = 'flex';
+    const err = document.getElementById('iface-lock-error');
+    if (err) err.textContent = '';
+    const input = document.getElementById('iface-lock-pin');
+    if (input) { input.value = ''; setTimeout(() => input.focus(), 50); }
+    clearTimeout(_idleTimer);
+}
+
+function unlockInterface() {
+    _ifaceLocked = false;
+    try { localStorage.removeItem(LOCK_FLAG_KEY); } catch (_) {}
+    const ov = document.getElementById('iface-lock-overlay');
+    if (ov) ov.style.display = 'none';
+    resetIdleTimer();
+}
+
+function lockInterfaceNow() {
+    if (!_lockSettings.pin_set) {
+        showToast('Set a PIN first', 'error');
+        return;
+    }
+    lockInterface();
+}
+
+// Forgotten-PIN escape: clear the lock flag, destroy the session, go to login.
+async function lockScreenLogout() {
+    try { localStorage.removeItem(LOCK_FLAG_KEY); } catch (_) {}
+    _ifaceLocked = false;
+    try { await fetch(apiUrl('/api/auth/logout'), { method: 'POST' }); } catch (_) {}
+    window.location.href = '/login.html';
+}
+
+function resetIdleTimer() {
+    if (!_lockSettings.enabled || !_lockSettings.pin_set || _ifaceLocked) return;
+    // Throttle: activity events fire constantly; only re-arm at most once/sec.
+    const now = Date.now();
+    if (now - _lastActivityReset < 1000) return;
+    _lastActivityReset = now;
+    clearTimeout(_idleTimer);
+    _idleTimer = setTimeout(lockInterface, _lockSettings.idle_minutes * 60 * 1000);
+}
+
+let _idleListenersBound = false;
+function bindIdleListeners() {
+    if (_idleListenersBound) return;
+    _idleListenersBound = true;
+    ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'wheel'].forEach(ev => {
+        window.addEventListener(ev, resetIdleTimer, { passive: true });
+    });
+}
+
+// (Re)initialise the lock engine from current settings. Safe to call
+// repeatedly (after settings changes); it re-reads _lockSettings.
+function initInterfaceLock() {
+    clearTimeout(_idleTimer);
+    if (!_lockSettings.enabled || !_lockSettings.pin_set) {
+        // Lock turned off — drop any stale locked state.
+        if (_ifaceLocked) unlockInterface();
+        try { localStorage.removeItem(LOCK_FLAG_KEY); } catch (_) {}
+        return;
+    }
+    bindIdleListeners();
+    // If we were locked before a refresh, stay locked.
+    let wasLocked = false;
+    try { wasLocked = localStorage.getItem(LOCK_FLAG_KEY) === '1'; } catch (_) {}
+    if (wasLocked) {
+        lockInterface();
+    } else {
+        _lastActivityReset = 0;
+        resetIdleTimer();
+    }
+}
+
+// Boot the lock engine on load — fetch settings once, without touching the
+// Profile tab UI (which may not be open).
+async function bootInterfaceLock() {
+    try {
+        const resp = await fetch(apiUrl('/api/user/lock'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        _lockSettings = {
+            enabled: !!data.enabled,
+            idle_minutes: data.idle_minutes || 10,
+            pin_set: !!data.pin_set,
+        };
+        initInterfaceLock();
+    } catch (_) { /* not logged in / offline — no lock */ }
+}
+document.addEventListener('DOMContentLoaded', bootInterfaceLock);
+
+// Cross-tab sync: if the lock is lifted in another tab (unlocked, or the PIN
+// removed), drop this tab's overlay too — same browser, same session, so one
+// successful unlock applies everywhere. We only react to the flag CLEARING,
+// never to it being set, so an idle-lock in one tab doesn't yank an actively-
+// used tab out from under the user.
+window.addEventListener('storage', (e) => {
+    if (e.key === LOCK_FLAG_KEY && e.newValue === null && _ifaceLocked) {
+        unlockInterface();
+    }
+});
 
 // ─── System Check (Settings → 🩺 System Check) ───
 // Audits any server in the datacenter for every runtime dependency

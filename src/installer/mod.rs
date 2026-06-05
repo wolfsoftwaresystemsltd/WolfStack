@@ -314,8 +314,18 @@ pub fn get_component_version(component: Component) -> Option<String> {
 /// Get status of all components
 pub fn get_all_status() -> Vec<ComponentStatus> {
     Component::all().iter().map(|comp| {
-        let (installed, running, enabled) = check_service(comp.service_name());
+        let (installed, mut running, enabled) = check_service(comp.service_name());
         let bin_exists = binary_exists(comp.service_name());
+        // WolfProxy daemonizes, so its unit can read "inactive" while a forked
+        // worker is still serving — an orphan systemd lost track of. If a
+        // wolfproxy is actually listening on :80/:443, report it as running so
+        // the UI matches reality and the operator gets Stop/Restart (which reap
+        // it) instead of a Start that would collide on the ports.
+        if matches!(comp, Component::WolfProxy) && !running
+            && !wolfproxy_pids_on_ports(&[80, 443]).is_empty()
+        {
+            running = true;
+        }
         ComponentStatus {
             component: *comp,
             installed: installed || bin_exists,
@@ -550,6 +560,55 @@ pub fn restart_service(service: &str) -> Result<String, String> {
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
+}
+
+/// Read `/proc/<pid>/comm` — the process's executable name.
+fn proc_comm(pid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{}/comm", pid))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Host PIDs that both (a) listen on one of `ports` in the host network
+/// namespace and (b) are actually `wolfproxy`.
+///
+/// WolfProxy daemonizes (forks a worker, parent exits), so with a
+/// `Type=simple` unit systemd loses track of the worker; it lingers as an
+/// orphan holding :80/:443 and the next `systemctl start` fails with
+/// "Address in use" (klasSponsor 2026-06-05: `ss` showed wolfproxy pid 551997
+/// on :80 while the unit's main PID had exited 0 after 25ms). This is the
+/// precise, safe way to find that orphan to reap it: port-scoped so we only
+/// look at the host's own listeners, and name-checked against `comm` so we
+/// never kill an unrelated service holding the port — nor a wolfproxy running
+/// *inside* a container, which binds its own namespaced socket that the host
+/// `ss` doesn't list.
+pub fn wolfproxy_pids_on_ports(ports: &[u16]) -> Vec<u32> {
+    let mut found = std::collections::HashSet::new();
+    for &port in ports {
+        let out = match Command::new("ss")
+            .args(["-H", "-ltnp", &format!("sport = :{}", port)])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => continue, // ss missing — nothing we can do, fall through
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            // ...users:(("wolfproxy",pid=551997,fd=9)) — a line can list more
+            // than one process, so scan every `pid=` occurrence.
+            let mut rest = line;
+            while let Some(i) = rest.find("pid=") {
+                rest = &rest[i + 4..];
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(pid) = digits.parse::<u32>() {
+                    if proc_comm(pid).as_deref() == Some("wolfproxy") {
+                        found.insert(pid);
+                    }
+                }
+            }
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// Marker the API layer keys off to render the "use DNS-01 / wildcard"
