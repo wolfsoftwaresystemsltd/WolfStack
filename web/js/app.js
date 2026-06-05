@@ -45571,7 +45571,15 @@ function k8sProvisionDone() {
 // ─── Import Cluster Modal ───
 
 function showK8sImportModal() {
+    // Drop any stale instance first. closeModal() only DEACTIVATES overlays
+    // (strips the `active` class) — it doesn't remove them from the DOM — so
+    // reopening this modal would otherwise leave two #k8s-import-name /
+    // #k8s-import-kubeconfig elements on the page. getElementById then returns
+    // the FIRST (hidden, empty) one, which is exactly why a fully filled-in
+    // form reported "Please fill in all fields" (HoXsan 2026-06-05).
+    document.getElementById('k8s-import-overlay')?.remove();
     const overlay = document.createElement('div');
+    overlay.id = 'k8s-import-overlay';
     overlay.className = 'modal-overlay active';
     overlay.onclick = e => { if (e.target === overlay) closeModal(); };
     overlay.innerHTML = `
@@ -45605,8 +45613,11 @@ function showK8sImportModal() {
 }
 
 async function k8sImportCluster() {
-    const name = document.getElementById('k8s-import-name').value.trim();
-    const kubeconfig = document.getElementById('k8s-import-kubeconfig').value.trim();
+    // Read from within THIS overlay rather than a bare getElementById, so a
+    // stray duplicate elsewhere in the DOM can never shadow the visible fields.
+    const overlay = document.getElementById('k8s-import-overlay');
+    const name = (overlay?.querySelector('#k8s-import-name')?.value || '').trim();
+    const kubeconfig = (overlay?.querySelector('#k8s-import-kubeconfig')?.value || '').trim();
     if (!name || !kubeconfig) { showToast('Please fill in all fields', 'error'); return; }
     closeModal();
     try {
