@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.22.0: WolfProxy orphan-reaper + connection-loss banner + User Profile idle-lock** _(2026-06-05 — [`af9cfd3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af9cfd32b85ad36265ff661b8c08735e3bb2db78))_
 - **v24.21.1: fix WolfNet self-peer injection + SIGHUP churn purging learned peers** _(2026-06-05 — [`f394868`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f394868cebc1723c84c5095ce6c499b4f419fe03))_
 - **v24.21.0: add Bat Dark theme — cold steel-cyan tactical-HUD on near-black with concentric radar rings + off-centre core glow; gunmetal hairline panels, crisp small radii, distinct semantic colours; wired into the theme picker and validThemes whitelist** _(2026-06-04 — [`2f00006`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2f0000643f65f9fa99bd2984e0170e819f885eb4))_
 - **v24.20.0: auto-heal stale peer WolfNet IPs in config.toml (cluster-scoped, converges to each peer's authoritative live address, runs every 5min); stop the WolfRouter watchdog logging subnet-route reconcile failures on every tick (de-dupe per CIDR + recovery line)** _(2026-06-04 — [`8126d3e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8126d3eda4b6be774eedb461b616202ee76c2f74))_
