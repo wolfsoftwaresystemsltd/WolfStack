@@ -3208,13 +3208,18 @@ pub fn first_addr_in_cidr(cidr: &str) -> Option<String> {
 ///
 /// File format: { "<cidr>": "<gateway-wolfnet-ip>", ... }. Replaces
 /// the file atomically (write + rename pattern not needed: small map,
-/// single writer, wolfnetd reads on SIGHUP or 15s tick).
+/// single writer, wolfnetd reads it on its own 15s tick).
 ///
-/// Sends SIGHUP to wolfnetd so the new map takes effect immediately
-/// (same pattern as containers/mod.rs::flush_routes_to_disk).
+/// Does NOT SIGHUP wolfnetd. wolfnetd reloads subnet-routes.json on its own
+/// 15s tick (wolfnet/src/main.rs:930 `load_subnet_routes`), so it doesn't need
+/// the signal to pick this file up. wolfnetd's only signal is SIGHUP, and its
+/// handler does a full config reload that ALSO purges every PEX-/roaming-learned
+/// peer not pinned in config.toml (wolfnet/src/main.rs:1010-1027). This is
+/// called from the 60s `reconcile_subnet_routes` self-heal, so signalling here
+/// bought nothing but that purge — it wiped the mesh's learned endpoints before
+/// it could stabilise (JJ 2026-06-04: "SIGHUP every 60s purging dynamically
+/// learned peer endpoints"). Same rationale as containers/mod.rs::flush_routes_to_disk.
 pub fn sync_subnet_routes_to_wolfnet(routes: &[SubnetRoute]) {
-    use std::process::Command;
-
     // BTreeMap (not HashMap) so the JSON serialization is deterministic
     // across calls — `serde_json::to_string_pretty` walks the map in
     // iteration order, and HashMap iteration is randomized per-process.
@@ -3254,18 +3259,9 @@ pub fn sync_subnet_routes_to_wolfnet(routes: &[SubnetRoute]) {
     }
     if let Err(e) = std::fs::write(path, &json) {
         tracing::warn!("Failed to write {}: {}", path, e);
-        return;
     }
-
-    // SIGHUP wolfnetd so it reloads. Best-effort: if wolfnet isn't
-    // running yet (e.g. we're applying config during early boot), the
-    // 15s periodic reload will pick the file up later.
-    if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
-        let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !pid_str.is_empty() {
-            let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
-        }
-    }
+    // No SIGHUP — wolfnetd reloads this file on its own 15s tick. See the
+    // function doc for why signalling here purged learned peers.
 }
 
 /// Run `ip -4 route get <first-in-subnet>` and pull out the egress iface

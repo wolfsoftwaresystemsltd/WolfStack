@@ -1072,6 +1072,12 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
     // it does so we don't deadlock the cluster on a stray panic.
     let _guard = WOLFNET_CONFIG_WRITE_LOCK.lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Normalise to a BARE address — WolfNet's config parser does a plain
+    // `Ipv4Addr::parse` on allowed_ip (wolfnet/src/main.rs:489,945) and a
+    // CIDR suffix like "/32" makes it log "Invalid peer IP" and skip the
+    // peer. Strip any prefix here so no caller can write a form WolfNet
+    // can't read, regardless of what it passes in.
+    let ip = ip.split('/').next().unwrap_or(ip);
     let config_path = "/etc/wolfnet/config.toml";
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read config: {}", e))?;
@@ -1088,6 +1094,22 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
 
     let mut doc: toml::Value = toml::from_str(&fixed)
         .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    // Self-peer guard: a node must never list its own WolfNet address as a
+    // peer. Such an entry is logged by WolfNet as "Invalid peer IP" forever
+    // and can wedge the route/peer reconcile into a per-tick rewrite loop.
+    // JJ 2026-06-04: amd9 was being added as its own peer. `[network].address`
+    // is this node's own WolfNet IP. The `is_some()` check stops a missing
+    // address + unparseable `ip` (None == None) from matching.
+    let self_wn_ip = doc.get("network")
+        .and_then(|n| n.get("address"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok());
+    if self_wn_ip.is_some() && ip.parse::<std::net::Ipv4Addr>().ok() == self_wn_ip {
+        return Err(format!(
+            "Refusing to add '{}' as a WolfNet peer: {} is this node's own \
+             WolfNet address (self-peer)", name, ip));
+    }
 
     let peers = doc.get_mut("peers")
         .and_then(|v| v.as_array_mut());
@@ -1107,10 +1129,13 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
                     }
                 }
             }
-            // Match by IP
+            // Match by IP — compare bare. `ip` is already normalised above;
+            // an existing entry may still carry a legacy "/32" suffix, so
+            // strip it here too or a bare add would miss the match and
+            // append a duplicate peer.
             if !ip.is_empty() {
                 if let Some(pip) = p.get("allowed_ip").and_then(|v| v.as_str()) {
-                    if pip == ip { return true; }
+                    if pip.split('/').next().unwrap_or(pip) == ip { return true; }
                 }
             }
             false
@@ -1419,6 +1444,55 @@ pub fn reconcile_wolfnet_peers_batch(
             Some(p) => p,
             None => return Ok(0), // no peers section, nothing to do
         };
+
+        // Self-peer removal. A node must NEVER list its own WolfNet address
+        // in its own [[peers]] — WolfNet logs it as "Invalid peer IP" on
+        // every reload and the entry perturbs the route/peer reconcile.
+        // JJ 2026-06-04: amd9 had itself as a peer. Guarded on a parseable
+        // local [network].address (the first element of `wn_subnet`) so a
+        // missing/malformed address can never wipe legitimate peers.
+        if let Some((self_wn_ip, _)) = wn_subnet {
+            let before = peers_arr.len();
+            peers_arr.retain(|p| {
+                let allowed = p.get("allowed_ip").and_then(|v| v.as_str())
+                    .or_else(|| p.get("ip").and_then(|v| v.as_str()))
+                    .map(|s| s.split('/').next().unwrap_or(s));
+                match allowed.and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()) {
+                    Some(a) => a != self_wn_ip,   // drop only an exact self-match
+                    None => true,                 // no/unparseable IP — leave alone
+                }
+            });
+            let removed = before - peers_arr.len();
+            if removed > 0 {
+                changes += removed;
+                tracing::warn!(
+                    "WolfNet self-heal: removed {} self-peer entr{} \
+                     (own WolfNet address {} must never appear in [[peers]])",
+                    removed, if removed == 1 { "y" } else { "ies" }, self_wn_ip
+                );
+            }
+        }
+
+        // Legacy "/32" normalisation. The v24.20.0 IP self-heal wrote
+        // allowed_ip as "<ip>/32"; WolfNet rejects any CIDR suffix
+        // (wolfnet/src/main.rs:489,945) and skips the peer. The drift-based
+        // correction below only rewrites on an IP *change*, so a "/32" entry
+        // whose stripped value is already correct would never be healed — it
+        // would stay rejected on every reload forever. Strip the suffix here
+        // so existing configs converge to bare addresses on the next tick.
+        for peer in peers_arr.iter_mut() {
+            let bare = match peer.get("allowed_ip").and_then(|v| v.as_str()) {
+                Some(s) if s.contains('/') => Some(s.split('/').next().unwrap_or(s).to_string()),
+                _ => None,
+            };
+            if let Some(bare) = bare {
+                if let Some(tbl) = peer.as_table_mut() {
+                    tbl.insert("allowed_ip".to_string(), toml::Value::String(bare));
+                    changes += 1;
+                }
+            }
+        }
+
         for peer in peers_arr.iter_mut() {
             let name = match peer.get("name").and_then(|v| v.as_str()) {
                 Some(n) => n.to_string(),
@@ -1448,9 +1522,16 @@ pub fn reconcile_wolfnet_peers_batch(
                             if let Some(cur) = current_ip {
                                 if !cur.is_empty() && cur != correct_ip {
                                     if let Some(tbl) = peer.as_table_mut() {
+                                        // Write a BARE address, no CIDR suffix.
+                                        // WolfNet parses allowed_ip with a plain
+                                        // `Ipv4Addr::parse` (wolfnet/src/main.rs:489,945)
+                                        // which rejects "/32" — it then logs
+                                        // "Invalid peer IP '<ip>/32'" and skips the
+                                        // peer on every reload. JJ 2026-06-04: this
+                                        // was dropping amd9's peers from the mesh.
                                         tbl.insert(
                                             "allowed_ip".to_string(),
-                                            toml::Value::String(format!("{}/32", correct_ip)),
+                                            toml::Value::String(correct_ip.to_string()),
                                         );
                                         // Drop any legacy `ip` key so it can't
                                         // shadow the corrected allowed_ip.

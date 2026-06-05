@@ -248,16 +248,18 @@ pub fn flush_routes_to_disk(routes: &std::collections::HashMap<String, String>) 
                     // Wake the push task — peers should learn about
                     // this route change immediately, not on a poll.
                     WOLFNET_ROUTES_CHANGED.notify_one();
-                    // Signal WolfNet to reload (SIGHUP)
-                    if let Ok(output) = Command::new("pidof").arg("wolfnet").output() {
-                        let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        if !pid_str.is_empty() {
-                            let _ = Command::new("kill").args(["-HUP", &pid_str]).output();
-
-                        } else {
-
-                        }
-                    }
+                    // Deliberately do NOT SIGHUP WolfNet here. WolfNet's only
+                    // signal is SIGHUP, and its handler does a FULL config reload:
+                    // it reloads routes (wolfnet/src/main.rs:1031-1032) AND purges
+                    // every PEX-/roaming-learned peer not pinned in config.toml
+                    // (wolfnet/src/main.rs:1010-1027). We don't need the SIGHUP for
+                    // the routes — WolfNet already reloads routes.json on its own 15s
+                    // timer (wolfnet/src/main.rs:928-930) — so signalling here buys
+                    // nothing but the peer-purge, which wiped the mesh's learned
+                    // endpoints before it could stabilise (JJ 2026-06-04: "SIGHUP
+                    // every 60s purging dynamically learned peer endpoints"). The 15s
+                    // tick applies the route locally; the push notify above propagates
+                    // it to peers immediately.
                 }
                 Err(e) => warn!("Failed to write {}: {}", routes_path, e),
             }

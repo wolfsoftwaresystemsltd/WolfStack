@@ -5653,8 +5653,9 @@ pub async fn reapply_subnet_route(
             // configured set so any side-effect on the userspace daemon
             // (e.g. dropped CIDR after a previous bad apply) is also
             // resolved by the same operator click. Snapshot the routes
-            // and drop the read lock before the disk write + SIGHUP so
-            // we don't block concurrent writers during I/O.
+            // and drop the read lock before the disk write so we don't
+            // block concurrent writers during I/O. (wolfnetd reloads the
+            // file on its own 15s tick — no SIGHUP, see sync_subnet_routes_to_wolfnet.)
             let snapshot = {
                 let cfg = state.router.config.read().unwrap();
                 cfg.subnet_routes.clone()
@@ -5681,9 +5682,9 @@ pub async fn reapply_subnet_route(
 
 /// POST /api/router/wolfnet/routes/resync — recompute the local route
 /// map from cluster gossip + local containers and flush to
-/// `/var/run/wolfnet/routes.json`. Sends SIGHUP to wolfnetd. Returns the
-/// route map that was written so the operator can verify the propagation
-/// actually landed.
+/// `/var/run/wolfnet/routes.json` (wolfnetd reloads it on its own 15s tick;
+/// no SIGHUP — see containers::flush_routes_to_disk). Returns the route map
+/// that was written so the operator can verify the propagation actually landed.
 ///
 /// klasSponsor 2026-05-13: container/VM WolfNet IPs unreachable from the
 /// VPS while peer-to-peer ping kept working — symptom of routes.json

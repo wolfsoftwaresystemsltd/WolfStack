@@ -8541,8 +8541,9 @@ pub async fn wolfnet_routes_announce(
 
     // First sweep stale entries pointing at this host from this peer
     // (so a container that moved off the peer doesn't linger). Then
-    // merge the fresh set. Atomic w.r.t. the WOLFNET_ROUTES lock so
-    // wolfnet daemon sees a consistent state on the SIGHUP.
+    // merge the fresh set. Atomic w.r.t. the WOLFNET_ROUTES lock so the
+    // single routes.json write below reflects a consistent state (wolfnetd
+    // picks it up on its 15s tick — flush_routes_to_disk no longer SIGHUPs).
     let host_ip = announce.host_ip.clone();
     let cache_changed = tokio::task::spawn_blocking(move || {
         use std::collections::HashMap;
