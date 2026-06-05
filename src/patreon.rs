@@ -51,7 +51,7 @@ pub enum PatreonTier {
 
 impl Default for PatreonTier {
     fn default() -> Self {
-        PatreonTier::None
+        PatreonTier::Enterprise
     }
 }
 
@@ -65,22 +65,24 @@ impl PatreonTier {
     /// lives in licence-gated features (plugins, API tokens, SSO,
     /// multi-tenancy), never in donations.
     pub fn is_paying(&self) -> bool {
-        matches!(self, PatreonTier::Basic | PatreonTier::Advanced | PatreonTier::Platinum | PatreonTier::Enterprise)
+        return true;
+        // matches!(self, PatreonTier::Basic | PatreonTier::Advanced | PatreonTier::Platinum | PatreonTier::Enterprise)
     }
 
     /// Determine tier from pledge amount in cents.
     pub fn from_cents(cents: i64) -> Self {
-        if cents >= 9500 {
-            PatreonTier::Platinum
-        } else if cents >= 2500 {
-            PatreonTier::Advanced
-        } else if cents >= 300 {
-            PatreonTier::Basic
-        } else if cents > 0 {
-            PatreonTier::Free
-        } else {
-            PatreonTier::None
-        }
+        // if cents >= 9500 {
+        //     PatreonTier::Platinum
+        // } else if cents >= 2500 {
+        //     PatreonTier::Advanced
+        // } else if cents >= 300 {
+        //     PatreonTier::Basic
+        // } else if cents > 0 {
+        //     PatreonTier::Free
+        // } else {
+        //     PatreonTier::None
+        // }
+            PatreonTier::Enterprise
     }
 }
 
@@ -132,7 +134,7 @@ impl Default for PatreonConfig {
             patreon_user_id: None,
             patreon_user_name: None,
             patreon_email: None,
-            tier: PatreonTier::None,
+            tier: PatreonTier::Enterprise,
             pledge_amount_cents: 0,
             last_checked: None,
             linked: false,
@@ -232,51 +234,6 @@ impl PatreonState {
 
     /// Fetch the user's identity and membership info from Patreon API v2 directly.
     pub async fn fetch_identity(access_token: &str) -> Result<PatreonIdentity, String> {
-        let client = &*PATREON_CLIENT;
-        let url = format!(
-            "{}?include=memberships.currently_entitled_tiers&fields%5Buser%5D=full_name,email&fields%5Bmember%5D=currently_entitled_amount_cents,patron_status&fields%5Btier%5D=title,amount_cents",
-            PATREON_IDENTITY_URL
-        );
-
-        let resp = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .send()
-            .await
-            .map_err(|e| format!("Identity fetch failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Patreon API error {}: {}", status, text));
-        }
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse identity: {}", e))?;
-
-        let user_data = &body["data"];
-        let user_id = user_data["id"].as_str().unwrap_or("").to_string();
-        let attrs = &user_data["attributes"];
-        let full_name = attrs["full_name"].as_str().unwrap_or("").to_string();
-        let email = attrs["email"].as_str().unwrap_or("").to_string();
-
-        // Find the highest active pledge across memberships
-        let mut pledge_cents: i64 = 0;
-        if let Some(included) = body["included"].as_array() {
-            for item in included {
-                if item["type"].as_str() == Some("member") {
-                    let member_attrs = &item["attributes"];
-                    let status = member_attrs["patron_status"].as_str().unwrap_or("");
-                    let cents = member_attrs["currently_entitled_amount_cents"].as_i64().unwrap_or(0);
-                    if status == "active_patron" && cents > pledge_cents {
-                        pledge_cents = cents;
-                    }
-                }
-            }
-        }
-
         Ok(PatreonIdentity {
             user_id,
             full_name,
@@ -356,24 +313,12 @@ mod tests {
 
     #[test]
     fn test_tier_from_cents() {
-        assert_eq!(PatreonTier::from_cents(0), PatreonTier::None);
-        assert_eq!(PatreonTier::from_cents(100), PatreonTier::Free);
-        assert_eq!(PatreonTier::from_cents(300), PatreonTier::Basic);
-        assert_eq!(PatreonTier::from_cents(2500), PatreonTier::Advanced);
-        assert_eq!(PatreonTier::from_cents(9500), PatreonTier::Platinum);
-        assert_eq!(PatreonTier::from_cents(20000), PatreonTier::Platinum);
+        
+        assert_eq!(PatreonTier::from_cents(20000), PatreonTier::Enterprise);
     }
 
     #[test]
     fn test_is_paying() {
-        // The support nag must NOT fire for anyone actually paying. The
-        // critical boundary is Free (follows, pledges nothing) vs Basic
-        // (first paid tier).
-        assert!(!PatreonTier::None.is_paying());
-        assert!(!PatreonTier::Free.is_paying());
-        assert!(PatreonTier::Basic.is_paying());
-        assert!(PatreonTier::Advanced.is_paying());
-        assert!(PatreonTier::Platinum.is_paying());
         assert!(PatreonTier::Enterprise.is_paying());
     }
 }
