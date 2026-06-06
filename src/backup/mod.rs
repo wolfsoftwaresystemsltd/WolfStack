@@ -2783,16 +2783,37 @@ pub fn restore_lxc_local(
             new_name));
     }
     let container_name: &str = if new_name.is_empty() { original_name } else { new_name };
-
-    // Detect if this is a vzdump archive (Proxmox backup)
-    let filename = local_path.file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let is_vzdump = filename.contains("vzdump");
-
-    if is_vzdump && crate::containers::is_proxmox() {
-        return restore_lxc_proxmox(local_path, storage, overwrite, container_name);
+    // Validate the EFFECTIVE name. When new_name is empty it falls back to
+    // `original_name`, which on the PBS path is the snapshot id ("ct/<id>/..")
+    // and has NOT been through is_safe_name — a crafted id like "../../etc"
+    // would otherwise escape /var/lib/lxc on the native restore paths.
+    if !crate::auth::is_safe_name(container_name) {
+        let _ = fs::remove_file(local_path);
+        return Err(format!(
+            "'{}' is not a valid container name/id — use letters, digits, '-', '_' and '.' only, with no '..'.",
+            container_name));
     }
+
+    // Detect whether this is a Proxmox vzdump archive vs a native WolfStack
+    // rootfs tar, and which platform we're restoring ONTO. All four
+    // combinations are routed independently so a backup taken on one platform
+    // restores correctly on the other — PBS snapshots and exported archives
+    // move freely between Proxmox and native WolfStack nodes.
+    let is_vzdump = crate::containers::lxc_archive_is_vzdump(&local_path.to_string_lossy());
+    let proxmox_host = crate::containers::is_proxmox();
+
+    if is_vzdump {
+        if proxmox_host {
+            // vzdump → Proxmox: `pct restore` handles it natively.
+            return restore_lxc_proxmox(local_path, storage, overwrite, container_name);
+        }
+        // vzdump → native host: `pct restore` is unavailable, so unwrap the
+        // rootfs and stand it up as a native LXC with a synthesised config.
+        return restore_lxc_vzdump_native(local_path, container_name, overwrite);
+    }
+    // Below: a native WolfStack archive (`<name>/config` + `<name>/rootfs/`).
+    // On a native host it installs directly; on a Proxmox host it is adopted
+    // into PVE at the end of this function.
 
     // Native LXC restore. `backup_lxc` archives the container directory with
     // its ORIGINAL name at the archive's top level (`<orig>/config`,
@@ -2914,9 +2935,110 @@ pub fn restore_lxc_local(
     // cluster cache; the generic warning covers that case.
     let mac_warning = build_mac_duplication_warning(&config_path, container_name);
 
+    // A native WolfStack backup restored onto a Proxmox host lands as a
+    // native /var/lib/lxc container PVE can't see. Adopt it into PVE now so
+    // it's a first-class container immediately (fresh VMID), instead of
+    // waiting for the next startup reconciliation. Adoption re-tars the rootfs
+    // into a new PVE container with fresh networking, so the carried-MAC note
+    // no longer applies on success.
+    if proxmox_host {
+        return match crate::containers::pct_adopt_native_orphan(container_name) {
+            Ok(vmid) => Ok(format!(
+                "LXC container '{}' restored and adopted into Proxmox as VMID {} — start it from the Containers page.",
+                container_name, vmid
+            )),
+            Err(e) => {
+                // Surface it in the log too — if the cause is permanent
+                // (e.g. no free VMID) a restart won't fix it and the operator
+                // needs to see why.
+                tracing::warn!(target: "backup",
+                    "PVE adoption of restored container '{}' failed: {} — left as a native /var/lib/lxc container",
+                    container_name, e);
+                Ok(format!(
+                    "LXC container '{}' restored as a native container, but Proxmox adoption failed ({}). \
+                     It will be adopted automatically on the next WolfStack restart.{}",
+                    container_name, e, mac_warning
+                ))
+            }
+        };
+    }
+
     Ok(format!(
         "LXC container '{}' restored and verified — start it from the Containers page.{}",
         container_name, mac_warning
+    ))
+}
+
+/// Restore a Proxmox vzdump LXC archive onto a NATIVE (non-Proxmox) host.
+///
+/// `pct restore` isn't available here, so unwrap the vzdump's root filesystem
+/// and stand it up as a native LXC container under /var/lib/lxc. The carried
+/// `etc/vzdump/pct.conf` is Proxmox-specific and can't be used verbatim, so a
+/// fresh bootable config is synthesised from the rootfs (systemd / privilege
+/// auto-detected). `local_path` (the extracted archive) is consumed.
+fn restore_lxc_vzdump_native(archive: &Path, container_name: &str, overwrite: bool) -> Result<String, String> {
+    let container_dir = format!("/var/lib/lxc/{}", container_name);
+
+    // Replace an existing container only with explicit consent.
+    if Path::new(&container_dir).exists() {
+        if !overwrite {
+            let _ = fs::remove_file(archive);
+            return Err(format!(
+                "A container already exists at {} — re-run the restore with \"replace\" enabled to overwrite it.",
+                container_dir));
+        }
+        let _ = Command::new("lxc-stop").args(["-n", container_name, "-k"]).output();
+        if let Err(e) = fs::remove_dir_all(&container_dir) {
+            let _ = fs::remove_file(archive);
+            return Err(format!("Failed to remove the existing container at {}: {}", container_dir, e));
+        }
+    }
+
+    let rootfs_target = format!("{}/rootfs", container_dir);
+    if let Err(e) = fs::create_dir_all(&rootfs_target) {
+        let _ = fs::remove_file(archive);
+        return Err(format!("Failed to create container directory {}: {}", container_dir, e));
+    }
+
+    // Shared extractor: handles zstd, flattens a nested rootfs/, strips
+    // etc/vzdump. Leaves the container's root filesystem in `rootfs_target`.
+    let archive_str = archive.to_string_lossy().to_string();
+    if let Err(e) = crate::containers::lxc_extract_archive_to_rootfs(&archive_str, &rootfs_target) {
+        let _ = fs::remove_dir_all(&container_dir);
+        let _ = fs::remove_file(archive);
+        return Err(format!("Failed to unpack vzdump archive for '{}': {}", container_name, e));
+    }
+    // Verify a real root filesystem actually landed — otherwise the container
+    // would start and instantly die with "Failed to exec /sbin/init". Keep the
+    // (ephemeral) archive until this passes so a failed restore is recoverable.
+    let rootfs_ok = ["sbin", "etc", "bin", "usr"]
+        .iter()
+        .any(|d| Path::new(&format!("{}/{}", rootfs_target, d)).exists());
+    if !rootfs_ok {
+        let _ = fs::remove_dir_all(&container_dir);
+        let _ = fs::remove_file(archive);
+        return Err(format!(
+            "The vzdump archive contained no usable root filesystem (no sbin, etc or bin). \
+             Nothing was restored for '{}'.", container_name));
+    }
+    let _ = fs::remove_file(archive);
+
+    // Synthesise a bootable native config from the rootfs (the carried
+    // pct.conf is Proxmox-format and unusable here).
+    crate::containers::lxc_write_bootable_config(&container_dir, container_name, None);
+
+    // Own the container dir + config as root — NOT recursive, so the rootfs
+    // keeps the UIDs tar restored (recursing would break an unprivileged
+    // container whose files are owned by shifted UIDs).
+    let config_path = format!("{}/config", container_dir);
+    let _ = Command::new("chown").args(["root:root", &container_dir]).output();
+    let _ = Command::new("chown").args(["root:root", &config_path]).output();
+    let _ = Command::new("chmod").args(["755", &container_dir]).output();
+
+    Ok(format!(
+        "Proxmox container restored as native LXC '{}' — start it from the Containers page. \
+         Its network was reset to a fresh veth on lxcbr0; adjust it in Settings → Resources if needed.",
+        container_name
     ))
 }
 

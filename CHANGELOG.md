@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.23.7: PBS restore lets you pick the target Proxmox storage** _(2026-06-06 — [`642d5dd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/642d5dd3bb7e0ba2b23579cecbb78c6ad3a224ac))_
 - **v24.23.6: WolfScale cluster adoption falls back to LAN address (§4.4)** _(2026-06-06 — [`88781a8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/88781a8ce9a80122535893c7a50216eee7773e29))_
 - **v24.23.5: status-page monitors now run without a status page (fix stuck 'Unknown')** _(2026-06-06 — [`bcc61e5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bcc61e5fb63071d60821eaefb652ec8206396a98))_
 - **v24.23.4: fix Gemini 400 on WolfAgents SendEmail tool (union 'to' + items)** _(2026-06-05 — [`bc754d0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bc754d07ae0870c6915f791613e3b8ef4fc87493))_
