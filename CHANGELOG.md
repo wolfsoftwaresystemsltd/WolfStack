@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.23.8: cross-platform LXC restore (Proxmox vzdump <-> native WolfStack)** _(2026-06-06 — [`16695e0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/16695e0541091f45cbbce9f7ceaab8c1bc05082b))_
 - **v24.23.7: PBS restore lets you pick the target Proxmox storage** _(2026-06-06 — [`642d5dd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/642d5dd3bb7e0ba2b23579cecbb78c6ad3a224ac))_
 - **v24.23.6: WolfScale cluster adoption falls back to LAN address (§4.4)** _(2026-06-06 — [`88781a8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/88781a8ce9a80122535893c7a50216eee7773e29))_
 - **v24.23.5: status-page monitors now run without a status page (fix stuck 'Unknown')** _(2026-06-06 — [`bcc61e5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bcc61e5fb63071d60821eaefb652ec8206396a98))_

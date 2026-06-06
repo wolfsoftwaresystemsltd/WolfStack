@@ -2347,6 +2347,7 @@ pub async fn reset_password(state: web::Data<AppState>, body: web::Json<serde_js
         if let Err(e) = store.save() {
             return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
         }
+        trigger_control_plane_push(&state);
         HttpResponse::Ok().json(serde_json::json!({"success": true, "message": "Password has been reset. You can now log in."}))
     } else {
         HttpResponse::BadRequest().json(serde_json::json!({"error": "User no longer exists"}))
@@ -2364,8 +2365,12 @@ pub async fn get_auth_config(req: HttpRequest, state: web::Data<AppState>) -> Ht
 /// POST /api/auth/config — update auth configuration
 pub async fn save_auth_config(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::auth::users::AuthConfig>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // save() stamps a fresh version; trigger an immediate replication push.
     match body.into_inner().save() {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"success": true})),
+        Ok(()) => {
+            trigger_control_plane_push(&state);
+            HttpResponse::Ok().json(serde_json::json!({"success": true}))
+        }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
     }
 }
@@ -2441,7 +2446,12 @@ pub async fn create_user(req: HttpRequest, state: web::Data<AppState>, body: web
 
     let mut store = crate::auth::users::UserStore::load();
     match store.add(user) {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"success": true, "username": username})),
+        Ok(()) => {
+            // Replicate the new user to the rest of the fleet so it can log in
+            // on any node.
+            trigger_control_plane_push(&state);
+            HttpResponse::Ok().json(serde_json::json!({"success": true, "username": username}))
+        }
         Err(e) => HttpResponse::Conflict().json(serde_json::json!({"error": e})),
     }
 }
@@ -2452,7 +2462,12 @@ pub async fn delete_user(req: HttpRequest, state: web::Data<AppState>, path: web
     let username = path.into_inner();
     let mut store = crate::auth::users::UserStore::load();
     match store.remove(&username) {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"success": true})),
+        Ok(()) => {
+            // Propagate the deletion (newer version) so it isn't undone by a
+            // peer's stale copy on the next sweep.
+            trigger_control_plane_push(&state);
+            HttpResponse::Ok().json(serde_json::json!({"success": true}))
+        }
         Err(e) => HttpResponse::NotFound().json(serde_json::json!({"error": e})),
     }
 }
@@ -2476,7 +2491,10 @@ pub async fn change_user_password(req: HttpRequest, state: web::Data<AppState>, 
         Some(user) => {
             user.password_hash = password_hash;
             match store.save() {
-                Ok(()) => HttpResponse::Ok().json(serde_json::json!({"success": true})),
+                Ok(()) => {
+                    trigger_control_plane_push(&state);
+                    HttpResponse::Ok().json(serde_json::json!({"success": true}))
+                }
                 Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
             }
         }
@@ -2524,7 +2542,10 @@ pub async fn confirm_2fa(req: HttpRequest, state: web::Data<AppState>, path: web
             user.totp_secret = secret.to_string();
             user.totp_enabled = true;
             match store.save() {
-                Ok(()) => HttpResponse::Ok().json(serde_json::json!({"success": true})),
+                Ok(()) => {
+                    trigger_control_plane_push(&state);
+                    HttpResponse::Ok().json(serde_json::json!({"success": true}))
+                }
                 Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
             }
         }
@@ -2568,11 +2589,14 @@ pub async fn update_user_clusters(
         Some(user) => {
             user.allowed_clusters = new_clusters.clone();
             match store.save() {
-                Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-                    "success": true,
-                    "username": username,
-                    "allowed_clusters": new_clusters,
-                })),
+                Ok(()) => {
+                    trigger_control_plane_push(&state);
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "success": true,
+                        "username": username,
+                        "allowed_clusters": new_clusters,
+                    }))
+                }
                 Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
             }
         }
@@ -2590,7 +2614,10 @@ pub async fn disable_2fa(req: HttpRequest, state: web::Data<AppState>, path: web
             user.totp_secret.clear();
             user.totp_enabled = false;
             match store.save() {
-                Ok(()) => HttpResponse::Ok().json(serde_json::json!({"success": true})),
+                Ok(()) => {
+                    trigger_control_plane_push(&state);
+                    HttpResponse::Ok().json(serde_json::json!({"success": true}))
+                }
                 Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
             }
         }
@@ -3851,6 +3878,32 @@ pub async fn agent_set_cluster_name(req: HttpRequest, state: web::Data<AppState>
     } else {
         HttpResponse::BadRequest().json(serde_json::json!({ "error": "cluster_name required" }))
     }
+}
+
+/// POST /api/cluster/control-plane — receive a peer's control-plane bundle.
+/// Converges cluster membership (so logging into ANY node shows the whole
+/// fleet) and replicates WolfStack users + auth config last-write-wins.
+/// Cluster-secret authed (an inter-node call, NOT a user session) — it carries
+/// password hashes, the same trust boundary the rest of the gossip uses.
+pub async fn cluster_control_plane_receive(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::agent::ControlPlaneBundle>,
+) -> HttpResponse {
+    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
+    let detail = crate::agent::apply_control_plane_bundle(&state.cluster, &body);
+    HttpResponse::Ok().json(serde_json::json!({ "applied": true, "detail": detail }))
+}
+
+/// Fire a one-shot control-plane replication push after a local user/auth
+/// change so peers converge within seconds instead of waiting for the periodic
+/// sweep. Best-effort and non-blocking.
+pub fn trigger_control_plane_push(state: &web::Data<AppState>) {
+    let cluster = state.cluster.clone();
+    tokio::spawn(async move {
+        let secret = crate::auth::load_cluster_secret();
+        crate::agent::sweep_replicate_control_plane(cluster, secret).await;
+    });
 }
 
 /// POST /api/agent/wolfnet-routes — accept WolfNet route updates from orchestrator
@@ -33247,6 +33300,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/cluster/secret/generate", web::post().to(cluster_secret_generate))
         .route("/api/cluster/secret/repush", web::post().to(cluster_secret_repush))
         .route("/api/cluster/secret/receive", web::post().to(cluster_secret_receive))
+        .route("/api/cluster/control-plane", web::post().to(cluster_control_plane_receive))
         .route("/api/cluster/leave", web::post().to(cluster_leave))
         .route("/api/dns-providers", web::get().to(dns_providers_list))
         .route("/api/dns-providers", web::post().to(dns_providers_add))

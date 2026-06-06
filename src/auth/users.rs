@@ -20,6 +20,17 @@ fn auth_config_path() -> String {
     format!("{}/auth-config.json", cfg)
 }
 
+/// Wall-clock milliseconds since the epoch — the logical version stamp for
+/// control-plane replication. Last-write-wins compares these across nodes, so
+/// nodes should run NTP (they do in any real cluster). Monotonic enough for a
+/// human-paced admin action (create/delete/change user).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // ─── Auth Config ───
 
 /// Controls which authentication backends are active
@@ -31,6 +42,11 @@ pub struct AuthConfig {
     /// Whether to require 2FA for WolfStack users that have it enabled
     #[serde(default = "default_true")]
     pub require_2fa_when_configured: bool,
+    /// Logical version (epoch-ms of last change) for control-plane
+    /// replication. Newer wins. Defaults to 0 on configs written before
+    /// replication existed, so any explicit save supersedes them.
+    #[serde(default)]
+    pub version: u64,
 }
 
 fn default_auth_mode() -> String { "linux".into() }
@@ -41,6 +57,7 @@ impl Default for AuthConfig {
         Self {
             auth_mode: default_auth_mode(),
             require_2fa_when_configured: true,
+            version: 0,
         }
     }
 }
@@ -55,7 +72,11 @@ impl AuthConfig {
 
     pub fn save(&self) -> Result<(), String> {
         let path = auth_config_path();
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        // Stamp a fresh version on every save so the change wins control-plane
+        // replication (see UserStore::save for the rationale).
+        let mut stamped = self.clone();
+        stamped.version = now_ms();
+        let json = serde_json::to_string_pretty(&stamped).map_err(|e| e.to_string())?;
         // 0600 — config tunes auth behaviour and can carry secrets.
         crate::paths::write_secure(&path, json)
             .map_err(|e| format!("Failed to write auth config: {}", e))
@@ -117,6 +138,11 @@ fn default_role() -> String { "admin".into() }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserStore {
     pub users: Vec<WolfUser>,
+    /// Logical version (epoch-ms of last mutation) for control-plane
+    /// replication. Bumped by every add/remove/edit; newer wins across the
+    /// fleet. Defaults to 0 for pre-replication stores.
+    #[serde(default)]
+    pub version: u64,
 }
 
 impl UserStore {
@@ -129,7 +155,13 @@ impl UserStore {
 
     pub fn save(&self) -> Result<(), String> {
         let path = users_config_path();
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        // Stamp a fresh logical version on EVERY save so any mutation wins
+        // control-plane replication and no handler can forget to bump it.
+        // (Replication ADOPTION writes the file directly via write_secure, not
+        // through save(), so it preserves the originating peer's version.)
+        let mut stamped = self.clone();
+        stamped.version = now_ms();
+        let json = serde_json::to_string_pretty(&stamped).map_err(|e| e.to_string())?;
         // 0600 — this file contains password hashes. Pre-v18.7.30 it
         // was world-readable, giving any local user the hashes to
         // offline-crack.
@@ -150,7 +182,7 @@ impl UserStore {
             return Err(format!("User '{}' already exists", user.username));
         }
         self.users.push(user);
-        self.save()
+        self.save() // save() stamps a fresh version for replication
     }
 
     pub fn remove(&mut self, username: &str) -> Result<(), String> {
@@ -159,8 +191,66 @@ impl UserStore {
         if self.users.len() == before {
             return Err(format!("User '{}' not found", username));
         }
-        self.save()
+        self.save() // save() stamps a fresh version for replication
     }
+}
+
+// ─── Control-plane replication (users + auth config) ───
+
+/// Snapshot the replicable control-plane state for a sync push:
+/// `(users_json, users_version, auth_json, auth_version)`. The JSON is the
+/// raw on-disk form (version field included) so a receiver can write it
+/// verbatim.
+pub fn control_plane_snapshot() -> (String, u64, String, u64) {
+    let users = UserStore::load();
+    // Pretty-print to match what save() writes, so the replicated file is
+    // byte-identical to a locally-saved one (clean audits / diffs).
+    let users_json = serde_json::to_string_pretty(&users).unwrap_or_default();
+    let auth = AuthConfig::load();
+    let auth_json = serde_json::to_string_pretty(&auth).unwrap_or_default();
+    (users_json, users.version, auth_json, auth.version)
+}
+
+/// Serialises concurrent control-plane applies (two peers pushing at the same
+/// instant) so the load-version → check → write window can't race.
+static CONTROL_PLANE_APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply replicated control-plane state from a peer, last-write-wins by
+/// version. Each blob is written ONLY when its incoming version is strictly
+/// newer than the local one AND it parses cleanly (so a malformed or empty
+/// payload can never clobber a good local file). Returns
+/// `(users_updated, auth_updated)`.
+pub fn control_plane_apply(
+    users_json: &str,
+    users_version: u64,
+    auth_json: &str,
+    auth_version: u64,
+) -> (bool, bool) {
+    // Hold the apply lock across the whole check-then-write so two peers
+    // applying concurrently can't both pass the version check and double-write.
+    let _guard = CONTROL_PLANE_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut users_updated = false;
+    let mut auth_updated = false;
+
+    if users_version > UserStore::load().version
+        && !users_json.trim().is_empty()
+        && serde_json::from_str::<UserStore>(users_json).is_ok()
+    {
+        if crate::paths::write_secure(&users_config_path(), users_json.to_string()).is_ok() {
+            users_updated = true;
+        }
+    }
+
+    if auth_version > AuthConfig::load().version
+        && !auth_json.trim().is_empty()
+        && serde_json::from_str::<AuthConfig>(auth_json).is_ok()
+    {
+        if crate::paths::write_secure(&auth_config_path(), auth_json.to_string()).is_ok() {
+            auth_updated = true;
+        }
+    }
+
+    (users_updated, auth_updated)
 }
 
 // ─── Password Hashing (pure Rust, no libcrypt dependency) ───

@@ -1734,6 +1734,22 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Background: control-plane replication sweep. Converges cluster
+        // membership (so ANY node shows the whole fleet, not just the node the
+        // cluster was built on) AND replicates WolfStack users + auth config
+        // last-write-wins, so a user created on one node can log in on any
+        // node. 30s cadence heals peers that were offline when a change's
+        // immediate push fired. Secret re-read each tick (survives rotation).
+        let cluster_repl = cluster.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            loop {
+                let secret = auth::load_cluster_secret();
+                agent::sweep_replicate_control_plane(cluster_repl.clone(), secret).await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+
         // Background: clean up stale WolfNet kernel routes (every 60s)
         // Only runs if WolfNet is configured (cleanup fn returns early if not)
         tokio::spawn(async move {

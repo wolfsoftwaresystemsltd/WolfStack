@@ -604,6 +604,61 @@ impl ClusterState {
         self.deleted_ids.read().unwrap().iter().cloned().collect()
     }
 
+    /// Merge a peer's advertised cluster members into our own list so that ANY
+    /// node converges to the full mesh — not just the node the cluster was
+    /// built on. This is what lets an operator log into a secondary node and
+    /// see every other node (the previous behaviour showed only itself,
+    /// because membership only ever flowed toward the polling node).
+    ///
+    /// Conservative and re-injection-safe — mirrors the pull-gossip merge's
+    /// rules: it only ADDS peers we don't already know, skips ourselves (by
+    /// local id, global self_id, or hostname/address + port), and skips any
+    /// tombstoned (operator-removed) node, so it can never resurrect a peer the
+    /// operator deleted. Node settings and online status stay owned by the
+    /// regular poll — this only seeds the existence of a peer so the poll can
+    /// then reach it.
+    pub fn merge_member_refs(&self, members: &[Node]) {
+        let self_hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let current = self.get_all_nodes();
+        for m in members {
+            if m.node_type != "wolfstack" { continue; }
+            // Never seed ourselves as a peer.
+            if m.id == self.self_id { continue; }
+            if m.self_id.as_deref() == Some(self.self_id.as_str()) { continue; }
+            if m.hostname == self_hostname && m.port == self.port { continue; }
+            if m.address == self.self_address && m.port == self.port { continue; }
+            // Never resurrect an operator-removed node (same guard the pull
+            // gossip uses).
+            if self.is_tombstoned(&m.id) { continue; }
+            // Already known — by id, self_id, address+port, or hostname+port
+            // (the ghost-dup guard the pull gossip uses)? Leave refinement to
+            // the regular poll.
+            let already_known = current.iter().any(|n| {
+                n.id == m.id
+                    || (m.self_id.is_some() && n.self_id == m.self_id)
+                    || (n.address == m.address && n.port == m.port && n.pve_node_name == m.pve_node_name)
+                    || (n.hostname == m.hostname && n.port == m.port && n.node_type == m.node_type)
+            });
+            if already_known { continue; }
+            // Only auto-seed nodes on private/local networks — a public-IP node
+            // must be added manually. Mirrors the pull-gossip guard so a
+            // tampered or compromised peer can't make us start polling an
+            // attacker-controlled address.
+            if !is_private_address(&m.address) { continue; }
+            // Mirror the pull-gossip new-node path: carry the peer's full
+            // record (id, self_id, cluster_name…), marked offline until our own
+            // poll reaches it. (update_remote, NOT add_server — keeps the
+            // global self_id so cross-node proxy lookups resolve.)
+            let mut new_node = m.clone();
+            new_node.online = false;
+            new_node.is_self = false;
+            self.update_remote(new_node);
+            self.save_nodes();
+        }
+    }
+
     /// Drop every non-self peer and clear all tombstones in memory.
     /// Used by POST /api/cluster/leave so that — during the short window
     /// between the on-disk wipe and the scheduled service restart — any
@@ -1001,6 +1056,116 @@ pub async fn sweep_push_cluster_names(cluster: Arc<ClusterState>, cluster_secret
                     let success = resp.status().is_success();
                     let _ = resp.bytes().await;
                     if success { break; }
+                }
+                Err(_) => { /* try next URL */ }
+            }
+        }
+    }
+}
+
+// ─── Control-plane replication (cluster membership + users + auth) ───
+//
+// So that logging into ANY node shows the same fleet view and the same
+// WolfStack users — not just the node the cluster was built on. Membership
+// converges (re-injection-safe via tombstones); users.json + auth-config.json
+// replicate last-write-wins by their logical version.
+
+/// The replicable control-plane state a node pushes to its peers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ControlPlaneBundle {
+    /// Sender's self_id (diagnostics only).
+    #[serde(default)]
+    pub from_id: String,
+    /// Sender's view of cluster members (metrics stripped) — for convergence.
+    #[serde(default)]
+    pub members: Vec<Node>,
+    /// Sender's tombstones — merged first so we never re-add a removed node.
+    #[serde(default)]
+    pub deleted_ids: Vec<String>,
+    /// Raw users.json (UserStore) + its logical version.
+    #[serde(default)]
+    pub users_json: String,
+    #[serde(default)]
+    pub users_version: u64,
+    /// Raw auth-config.json (AuthConfig) + its logical version.
+    #[serde(default)]
+    pub auth_json: String,
+    #[serde(default)]
+    pub auth_version: u64,
+}
+
+/// Build the local control-plane bundle to push to peers. Member metrics and
+/// components are stripped — the receiver only needs the existence + address of
+/// each peer; status is filled in by its own poll.
+pub fn build_control_plane_bundle(cluster: &ClusterState) -> ControlPlaneBundle {
+    let (users_json, users_version, auth_json, auth_version) =
+        crate::auth::users::control_plane_snapshot();
+    let members = cluster.get_all_nodes().into_iter().map(|mut n| {
+        n.metrics = None;
+        n.components = Vec::new();
+        n
+    }).collect();
+    ControlPlaneBundle {
+        from_id: cluster.self_id.clone(),
+        members,
+        deleted_ids: cluster.get_deleted_ids(),
+        users_json,
+        users_version,
+        auth_json,
+        auth_version,
+    }
+}
+
+/// Apply a received control-plane bundle: merge tombstones, converge
+/// membership, then last-write-wins the users/auth blobs. Returns a one-line
+/// summary for logging.
+pub fn apply_control_plane_bundle(cluster: &ClusterState, bundle: &ControlPlaneBundle) -> String {
+    cluster.merge_tombstones(&bundle.deleted_ids);
+    cluster.merge_member_refs(&bundle.members);
+    let (users_updated, auth_updated) = crate::auth::users::control_plane_apply(
+        &bundle.users_json,
+        bundle.users_version,
+        &bundle.auth_json,
+        bundle.auth_version,
+    );
+    format!(
+        "members={} users_updated={} auth_updated={}",
+        bundle.members.len(), users_updated, auth_updated
+    )
+}
+
+/// Push our control-plane bundle to every online WolfStack peer. Runs both as
+/// a periodic sweep (heals nodes that were offline) and one-shot right after a
+/// user/auth change (so edits land in seconds). Cluster-secret authed.
+pub async fn sweep_replicate_control_plane(cluster: Arc<ClusterState>, cluster_secret: String) {
+    let peers: Vec<(String, u16)> = {
+        let nodes = cluster.nodes.read().unwrap();
+        nodes.values()
+            .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
+            .map(|n| (n.address.clone(), n.port))
+            .collect()
+    };
+    if peers.is_empty() { return; }
+
+    let payload = match serde_json::to_value(build_control_plane_bundle(&cluster)) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let client = crate::api::API_HTTP_CLIENT.clone();
+    for (address, port) in peers {
+        let urls = crate::api::build_node_urls(&address, port, "/api/cluster/control-plane");
+        for url in &urls {
+            match client.post(url)
+                .timeout(std::time::Duration::from_secs(8))
+                .header("X-WolfStack-Secret", &cluster_secret)
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let ok = resp.status().is_success();
+                    let _ = resp.bytes().await;
+                    if ok { break; } // delivered — don't try the next URL scheme
                 }
                 Err(_) => { /* try next URL */ }
             }
