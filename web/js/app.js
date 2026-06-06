@@ -3348,6 +3348,10 @@ function buildServerTree(nodes) {
                     <span class="icon ws-icon-clean-wrap" data-icon="save" style="font-size:15px;"></span> <span style="font-weight:600;">Backups</span>
                 </a>
 
+                <a class="nav-item server-child-item truenas-cluster-item" data-cluster="${escapedName}" data-view="truenas" onclick="showTrueNasForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
+                    <span class="icon ws-icon-clean-wrap" data-icon="database" style="font-size:15px;"></span> <span style="font-weight:600;">Storage</span>
+                </a>
+
                 <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon ws-icon-clean-wrap" data-icon="package" style="font-size:15px;"></span> <span style="font-weight:600;">WolfKube</span>
                     <span class="k8s-cluster-count" id="k8s-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:#326ce5; color:#fff; border-radius:10px; display:none;"></span>
@@ -28803,6 +28807,374 @@ document.addEventListener('click', (e) => {
     const wrap = document.querySelector('.global-search-wrap');
     if (wrap && !wrap.contains(e.target)) hideGlobalSearchResults();
 });
+
+// ═══════════════════════════════════════════════════
+// TrueNAS (cluster Storage integration) — multi-instance
+// ═══════════════════════════════════════════════════
+let truenasCurrentCluster = '';
+window._tnInstances = [];
+window._tnCurrentId = null;
+window._tnTab = 'overview';
+
+// Cluster-level endpoints — apiUrl returns the path unchanged when not viewing
+// a specific node (currentNodeId is nulled below), so this hits the local node.
+function tnFetch(path, opts) { return fetch(apiUrl(path), opts); }
+
+// Escape a value for safe use inside a single-quoted JS string literal that
+// itself sits inside a double-quoted HTML attribute, e.g. onclick="fn('VALUE')".
+// The app's runtime escapeHtml does NOT escape single quotes, so free text
+// (server labels) interpolated into onclick must use this instead.
+function tnArg(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'");
+}
+// Only treat http(s) URLs as a usable "Open TrueNAS" link (defence-in-depth;
+// the backend already rejects non-http(s) api_url via validate_outbound_url).
+function tnHttpUrl(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
+
+function showTrueNasForCluster(clusterName) {
+    closeSidebarMobile();
+    truenasCurrentCluster = clusterName;
+    currentPage = 'truenas';
+    currentNodeId = null;
+    currentComponent = null;
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-truenas');
+    if (el) el.style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const item = document.querySelector(`.truenas-cluster-item[data-cluster="${CSS.escape(clusterName)}"]`);
+    if (item) item.classList.add('active');
+    const t = document.getElementById('page-title');
+    if (t) t.textContent = `Storage — ${clusterName}`;
+    loadTrueNasInstances();
+}
+
+async function loadTrueNasInstances() {
+    const body = document.getElementById('truenas-body');
+    if (!body) return;
+    try {
+        const r = await tnFetch('/api/truenas/instances');
+        const all = r.ok ? await r.json() : [];
+        // Show servers tagged for this cluster + untagged (visible everywhere).
+        window._tnInstances = (Array.isArray(all) ? all : []).filter(i =>
+            !i.cluster || i.cluster === truenasCurrentCluster);
+    } catch (_) {
+        window._tnInstances = [];
+    }
+    // Keep current selection if still present, else first.
+    if (!window._tnInstances.some(i => i.id === window._tnCurrentId)) {
+        window._tnCurrentId = window._tnInstances[0]?.id || null;
+    }
+    if (!window._tnCurrentId) window._tnTab = 'settings'; // nothing yet → land on add
+    truenasRender();
+}
+
+function tnCurrent() { return window._tnInstances.find(i => i.id === window._tnCurrentId) || null; }
+function tnBaseUrl(inst) { return (inst?.api_url || '').replace(/\/api\/v2\.0\/?$/i, '') || (inst?.api_url || ''); }
+
+function truenasRender() {
+    const body = document.getElementById('truenas-body');
+    if (!body) return;
+    const inst = tnCurrent();
+    const tabs = [
+        ['overview', 'Overview'], ['snapshots', 'Snapshots'], ['nfs', 'NFS Exports'],
+        ['integrations', 'Integrations'], ['settings', 'Settings'],
+    ];
+    const opts = window._tnInstances.map(i =>
+        `<option value="${escapeHtml(i.id)}" ${i.id === window._tnCurrentId ? 'selected' : ''}>${escapeHtml(i.label)}${i.status && i.status !== 'ok' ? ' (' + escapeHtml(i.status) + ')' : ''}</option>`).join('');
+    const selector = window._tnInstances.length
+        ? `<select onchange="truenasSelectInstance(this.value)" style="padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary);font-size:13px;">${opts}</select>`
+        : '';
+    const safeUrl = tnHttpUrl(tnBaseUrl(inst));
+    const openLink = (inst && safeUrl) ? `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener" style="color:var(--accent-primary);text-decoration:underline;">Open TrueNAS</a>` : '';
+    body.innerHTML = `
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;">
+            <div>
+                <h1 style="margin:0;font-size:26px;font-weight:700;">TrueNAS</h1>
+                <div style="font-size:13px;color:var(--text-muted);margin-top:2px;">
+                    ${inst ? escapeHtml(inst.label) + ' · ' + openLink : 'No TrueNAS servers for this cluster yet'}
+                </div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;">
+                ${selector}
+                <button class="btn btn-sm" onclick="loadTrueNasInstances()" title="Refresh"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
+            </div>
+        </div>
+        <div style="display:flex;gap:4px;border-bottom:1px solid var(--border);margin:10px 0 16px;">
+            ${tabs.map(([k, label]) => `<button onclick="truenasTab('${k}')" style="background:none;border:none;padding:8px 14px;font-size:13px;cursor:pointer;color:${window._tnTab === k ? 'var(--text-primary)' : 'var(--text-muted)'};border-bottom:2px solid ${window._tnTab === k ? 'var(--accent-primary)' : 'transparent'};font-weight:${window._tnTab === k ? '600' : '400'};">${label}</button>`).join('')}
+        </div>
+        <div id="truenas-tab-content"><div style="color:var(--text-muted);padding:20px;">Loading…</div></div>`;
+    truenasLoadTab();
+}
+
+function truenasSelectInstance(id) { window._tnCurrentId = id; truenasRender(); }
+function truenasTab(tab) { window._tnTab = tab; truenasRender(); }
+
+function truenasLoadTab() {
+    const c = document.getElementById('truenas-tab-content');
+    if (!c) return;
+    const inst = tnCurrent();
+    if (window._tnTab === 'settings') { truenasRenderSettings(c); return; }
+    if (!inst) { c.innerHTML = `<div class="card"><div class="card-body" style="text-align:center;padding:30px;color:var(--text-muted);">No TrueNAS server selected. <button class="btn btn-sm btn-primary" onclick="truenasServerModal()" style="margin-left:8px;">+ Add server</button></div></div>`; return; }
+    if (window._tnTab === 'overview') truenasLoadOverview(inst.id);
+    else if (window._tnTab === 'snapshots') truenasLoadSnapshots(inst.id);
+    else if (window._tnTab === 'nfs') truenasLoadNfs(inst.id);
+    else if (window._tnTab === 'integrations') truenasRenderIntegrations(c, inst);
+}
+
+async function truenasLoadOverview(id) {
+    const c = document.getElementById('truenas-tab-content');
+    if (!c) return;
+    try {
+        const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}/overview`);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { c.innerHTML = truenasError(d.error); return; }
+        const p = d.pool;
+        const pct = p && p.total_bytes > 0 ? Math.round(p.used_bytes / p.total_bytes * 100) : 0;
+        const online = p && (p.healthy || (p.status || '').toLowerCase() === 'online');
+        const poolCard = p ? `
+            <div class="card" style="margin-bottom:16px;"><div class="card-body">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <div style="font-size:18px;font-weight:700;display:flex;align-items:center;gap:8px;"><span class="server-dot ${online ? 'online' : 'offline'}"></span>${escapeHtml(p.name)}</div>
+                    <div style="font-weight:700;color:${online ? '#22c55e' : '#ef4444'};">${escapeHtml((p.status || 'UNKNOWN').toUpperCase())}</div>
+                </div>
+                <div style="display:flex;gap:32px;margin-bottom:10px;">
+                    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Used</div><div style="font-size:22px;font-weight:700;">${formatBytes(p.used_bytes)}</div></div>
+                    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Free</div><div style="font-size:22px;font-weight:700;">${formatBytes(p.free_bytes)}</div></div>
+                    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Total</div><div style="font-size:22px;font-weight:700;">${formatBytes(p.total_bytes)}</div></div>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">${pct}% used${p.scrub_state ? ' · last scrub: ' + escapeHtml(p.scrub_state) : ''}</div>
+                <div style="height:8px;border-radius:4px;background:var(--bg-tertiary);overflow:hidden;"><div style="height:100%;width:${pct}%;background:${pct > 90 ? '#ef4444' : pct > 75 ? '#f59e0b' : '#22c55e'};"></div></div>
+            </div></div>` : `<div class="card"><div class="card-body" style="color:var(--text-muted);">No pool reported (check the configured pool name in Settings).</div></div>`;
+        const datasets = (d.datasets || []).map(ds => `
+            <div style="display:flex;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border);"><span>${escapeHtml(ds.name)}</span><span style="color:var(--text-muted);">${formatBytes(ds.used_bytes)}</span></div>`).join('') || '<div style="padding:12px;color:var(--text-muted);">No datasets.</div>';
+        const disks = (d.disks || []).map(dk => `
+            <div style="display:flex;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border);"><span><strong>${escapeHtml(dk.name)}</strong> <span style="color:var(--text-muted);font-size:12px;">${formatBytes(dk.size_bytes)} ${escapeHtml(dk.disk_type)} ${escapeHtml(dk.serial)}</span></span></div>`).join('') || '<div style="padding:12px;color:var(--text-muted);">No disks.</div>';
+        c.innerHTML = `${poolCard}
+            <div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;margin:6px 0;">Datasets</div>
+            <div class="card" style="margin-bottom:16px;"><div class="card-body" style="padding:0;">${datasets}</div></div>
+            <div style="font-size:12px;color:var(--text-muted);text-transform:uppercase;margin:6px 0;">Disks</div>
+            <div class="card"><div class="card-body" style="padding:0;">${disks}</div></div>`;
+    } catch (e) { c.innerHTML = truenasError(e.message); }
+}
+
+async function truenasLoadNfs(id) {
+    const c = document.getElementById('truenas-tab-content');
+    if (!c) return;
+    try {
+        const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}/nfs`);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { c.innerHTML = truenasError(d.error); return; }
+        const ex = d.exports || [];
+        if (!ex.length) { c.innerHTML = `<div class="card"><div class="card-body" style="color:var(--text-muted);">No NFS exports.</div></div>`; return; }
+        c.innerHTML = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">${ex.length} export${ex.length !== 1 ? 's' : ''}</div>
+            <div class="card"><div class="card-body" style="padding:0;">${ex.map(e => `
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--border);">
+                    <div style="display:flex;align-items:center;gap:8px;"><span class="server-dot ${e.enabled ? 'online' : 'offline'}"></span><code>${escapeHtml(e.path)}</code>${e.comment ? `<span style="color:var(--text-muted);font-size:11px;">${escapeHtml(e.comment)}</span>` : ''}</div>
+                    <div style="display:flex;align-items:center;gap:10px;"><span style="color:var(--text-muted);font-size:12px;">${escapeHtml((e.networks || []).join(', '))}</span><span class="badge" style="background:${e.read_only ? '#6b7280' : '#3b82f6'};color:#fff;">${e.read_only ? 'ro' : 'rw'}</span></div>
+                </div>`).join('')}</div></div>`;
+    } catch (e) { c.innerHTML = truenasError(e.message); }
+}
+
+async function truenasLoadSnapshots(id) {
+    const c = document.getElementById('truenas-tab-content');
+    if (!c) return;
+    try {
+        const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}/snapshots`);
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { c.innerHTML = truenasError(d.error); return; }
+        const snaps = d.snapshots || [];
+        const shown = snaps.slice(0, 300);
+        const rows = shown.map(s => `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border);">
+                <code style="font-size:12px;">${escapeHtml(s.dataset)}@${escapeHtml(s.name)}</code>
+                <button class="btn btn-sm" onclick="truenasDeleteSnapshot('${tnArg(id)}','${tnArg(s.id)}')" style="font-size:11px;color:var(--danger-color,#ef4444);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
+            </div>`).join('') || '<div style="padding:12px;color:var(--text-muted);">No snapshots.</div>';
+        const countLabel = snaps.length > 300
+            ? `showing 300 of ${snaps.length} snapshots`
+            : `${snaps.length} snapshot${snaps.length !== 1 ? 's' : ''}`;
+        c.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <div style="font-size:12px;color:var(--text-muted);">${countLabel}</div>
+                <button class="btn btn-sm btn-primary" onclick="truenasCreateSnapshotModal('${tnArg(id)}')" style="font-size:12px;"><span class="ws-icon-clean-wrap" data-icon="lightning"></span> New snapshot</button>
+            </div>
+            <div class="card"><div class="card-body" style="padding:0;">${rows}</div></div>`;
+    } catch (e) { c.innerHTML = truenasError(e.message); }
+}
+
+function truenasRenderIntegrations(c, inst) {
+    const card = (title, status, sColor, lines) => `
+        <div class="card"><div class="card-body">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><strong>${title}</strong><span class="badge" style="background:${sColor};color:#fff;">${status}</span></div>
+            <div style="font-size:12px;color:var(--text-muted);">${lines}</div>
+        </div></div>`;
+    c.innerHTML = `<p style="font-size:13px;color:var(--text-muted);margin:0 0 12px;">How this TrueNAS server wires into the rest of WolfStack.</p>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;">
+            ${card('Alerts', 'Planned', '#f59e0b', 'Pool offline / disk errors → WolfStack alert channels. Coming in a later release.')}
+            ${card('Backups', 'Available', '#22c55e', 'Point a Backup destination at an NFS export from this server (Backups page → NFS storage).')}
+            ${card('WolfAgents', 'Available', '#22c55e', 'Agents can query pool status, datasets, NFS and snapshots via the TrueNAS API.')}
+            ${card('Status Pages', 'Planned', '#f59e0b', 'Surface pool health as a status-page component. Coming in a later release.')}
+        </div>`;
+}
+
+function truenasRenderSettings(c) {
+    const rows = window._tnInstances.map(i => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--border);">
+            <div><strong>${escapeHtml(i.label)}</strong> <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(i.api_url)}${i.cluster ? ' · ' + escapeHtml(i.cluster) : ' · all clusters'}</span>
+                <div style="font-size:11px;color:var(--text-muted);">pool: ${escapeHtml(i.pool_name || '(first)')} · TLS: ${i.insecure_tls ? 'insecure' : 'verified'} · ${i.status ? escapeHtml(i.status) : 'untested'}</div></div>
+            <div style="display:flex;gap:6px;">
+                <button class="btn btn-sm" onclick="truenasTest('${tnArg(i.id)}')" style="font-size:11px;">Test</button>
+                <button class="btn btn-sm" onclick="truenasServerModal('${tnArg(i.id)}')" style="font-size:11px;">Edit</button>
+                <button class="btn btn-sm" onclick="truenasDelete('${tnArg(i.id)}')" style="font-size:11px;color:var(--danger-color,#ef4444);">Remove</button>
+            </div>
+        </div>`).join('') || '<div style="padding:14px;color:var(--text-muted);">No TrueNAS servers registered yet.</div>';
+    c.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div style="font-size:12px;color:var(--text-muted);">TrueNAS servers (API keys are encrypted at rest and never shown). Snapshot create/delete needs a write-scoped API key.</div>
+            <button class="btn btn-sm btn-primary" onclick="truenasServerModal()" style="font-size:12px;">+ Add server</button>
+        </div>
+        <div class="card"><div class="card-body" style="padding:0;">${rows}</div></div>`;
+}
+
+function truenasError(msg) {
+    return `<div class="card"><div class="card-body" role="alert" style="color:var(--danger-color,#ef4444);">${escapeHtml(msg || 'Request failed')}</div></div>`;
+}
+
+// ── Add/edit server modal ──
+function truenasServerModal(id) {
+    const inst = id ? window._tnInstances.find(i => i.id === id) : null;
+    const stale = document.getElementById('tn-modal'); if (stale) stale.remove();
+    const bd = document.createElement('div');
+    bd.id = 'tn-modal';
+    bd.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10001;display:flex;align-items:center;justify-content:center;';
+    const f = (label, idAttr, val, ph, type) => `<label style="display:block;margin-bottom:10px;"><span style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:3px;">${label}</span><input id="${idAttr}" type="${type || 'text'}" value="${escapeHtml(val || '')}" placeholder="${escapeHtml(ph || '')}" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);"></label>`;
+    bd.innerHTML = `<div role="dialog" aria-modal="true" aria-labelledby="tn-modal-title" style="background:var(--bg-primary);border:1px solid var(--border);border-radius:12px;padding:20px;width:480px;max-width:92vw;max-height:88vh;overflow-y:auto;">
+        <h3 id="tn-modal-title" style="margin:0 0 14px;font-size:16px;">${inst ? 'Edit' : 'Add'} TrueNAS server</h3>
+        ${f('Label', 'tn-f-label', inst?.label, 'atlas')}
+        ${f('API URL', 'tn-f-url', inst?.api_url, 'https://10.2.0.153/api/v2.0')}
+        ${f('API key' + (inst ? ' (leave blank to keep current)' : ''), 'tn-f-key', '', inst ? '••••••••' : 'paste the TrueNAS API key', 'password')}
+        ${f('Pool name', 'tn-f-pool', inst?.pool_name, 'vault (blank = first pool)')}
+        ${f('Cluster tag (blank = all clusters)', 'tn-f-cluster', inst?.cluster || truenasCurrentCluster, truenasCurrentCluster)}
+        <label style="display:flex;align-items:center;gap:8px;margin:10px 0;font-size:13px;cursor:pointer;"><input id="tn-f-insecure" type="checkbox" ${inst ? (inst.insecure_tls ? 'checked' : '') : 'checked'}> Accept self-signed TLS (TrueNAS default)</label>
+        ${f('Cache TTL (seconds)', 'tn-f-ttl', String(inst?.cache_ttl_secs || 300), '300')}
+        <div id="tn-modal-err" role="alert" style="display:none;color:var(--danger-color,#ef4444);font-size:12px;margin-bottom:8px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+            <button class="btn btn-sm" onclick="document.getElementById('tn-modal').remove()">Cancel</button>
+            <button class="btn btn-sm btn-primary" id="tn-modal-save" onclick="truenasSaveServer('${tnArg(id || '')}')">${inst ? 'Save' : 'Add & test'}</button>
+        </div>
+    </div>`;
+    bd.onclick = (e) => { if (e.target === bd) bd.remove(); };
+    document.body.appendChild(bd);
+    document.getElementById('tn-f-label')?.focus();
+}
+
+async function truenasSaveServer(id) {
+    const err = document.getElementById('tn-modal-err');
+    const btn = document.getElementById('tn-modal-save');
+    const val = (x) => (document.getElementById(x)?.value || '').trim();
+    const payload = {
+        label: val('tn-f-label'),
+        api_url: val('tn-f-url'),
+        api_key: val('tn-f-key'),
+        pool_name: val('tn-f-pool'),
+        cluster: val('tn-f-cluster') || null,
+        insecure_tls: document.getElementById('tn-f-insecure')?.checked || false,
+        cache_ttl_secs: parseInt(val('tn-f-ttl'), 10) || 300,
+    };
+    if (!payload.label || !payload.api_url || (!id && !payload.api_key)) {
+        if (err) { err.style.display = 'block'; err.textContent = 'Label, API URL and API key are required.'; }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = id ? 'Saving…' : 'Testing…'; }
+    try {
+        const r = await tnFetch(id ? `/api/truenas/instances/${encodeURIComponent(id)}` : '/api/truenas/instances', {
+            method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { if (err) { err.style.display = 'block'; err.textContent = d.error || 'Save failed'; } if (btn) { btn.disabled = false; btn.textContent = id ? 'Save' : 'Add & test'; } return; }
+        document.getElementById('tn-modal')?.remove();
+        showToast(id ? 'TrueNAS server updated' : 'TrueNAS server added', 'success');
+        if (!id && d.id) window._tnCurrentId = d.id;
+        window._tnTab = 'overview';
+        loadTrueNasInstances();
+    } catch (e) {
+        if (err) { err.style.display = 'block'; err.textContent = e.message; }
+        if (btn) { btn.disabled = false; btn.textContent = id ? 'Save' : 'Add & test'; }
+    }
+}
+
+async function truenasTest(id) {
+    showToast('Testing TrueNAS connection…', 'info');
+    try {
+        const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}/test`, { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) showToast('TrueNAS reachable' + (d.version ? ' (' + d.version + ')' : ''), 'success');
+        else showToast('TrueNAS test failed: ' + (d.error || d.status || 'error'), 'error', 0);
+        loadTrueNasInstances(); // refresh the status badge after a definitive result
+    } catch (e) { showToast('TrueNAS test failed: ' + e.message, 'error', 0); }
+}
+
+async function truenasDelete(id) {
+    const label = window._tnInstances.find(i => i.id === id)?.label || id;
+    if (!(await showModal(`Remove TrueNAS server "${label}"? This only unregisters it from WolfStack; the NAS itself is untouched.`, 'Remove TrueNAS server', { okText: 'Remove', danger: true }))) return;
+    try {
+        const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (r.ok) { showToast('TrueNAS server removed', 'success'); if (window._tnCurrentId === id) window._tnCurrentId = null; loadTrueNasInstances(); }
+        else { const d = await r.json().catch(() => ({})); showToast('Remove failed: ' + (d.error || 'error'), 'error', 0); }
+    } catch (e) { showToast('Remove failed: ' + e.message, 'error', 0); }
+}
+
+// ── Snapshot create/delete ──
+function truenasCreateSnapshotModal(id) {
+    const stale = document.getElementById('tn-snap-modal'); if (stale) stale.remove();
+    const bd = document.createElement('div');
+    bd.id = 'tn-snap-modal';
+    bd.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10001;display:flex;align-items:center;justify-content:center;';
+    bd.innerHTML = `<div role="dialog" aria-modal="true" aria-labelledby="tn-snap-title" style="background:var(--bg-primary);border:1px solid var(--border);border-radius:12px;padding:20px;width:440px;max-width:92vw;">
+        <h3 id="tn-snap-title" style="margin:0 0 14px;font-size:16px;">New ZFS snapshot</h3>
+        <label style="display:block;margin-bottom:10px;"><span style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:3px;">Dataset (full path, e.g. vault/projects)</span><input id="tn-snap-dataset" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);"></label>
+        <label style="display:block;margin-bottom:10px;"><span style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:3px;">Snapshot name</span><input id="tn-snap-name" value="manual-${new Date().toISOString().slice(0,10)}" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);"></label>
+        <label style="display:flex;align-items:center;gap:8px;margin:8px 0;font-size:13px;cursor:pointer;"><input id="tn-snap-recursive" type="checkbox"> Recursive (include child datasets)</label>
+        <div id="tn-snap-err" role="alert" style="display:none;color:var(--danger-color,#ef4444);font-size:12px;margin-bottom:8px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
+            <button class="btn btn-sm" onclick="document.getElementById('tn-snap-modal').remove()">Cancel</button>
+            <button class="btn btn-sm btn-primary" id="tn-snap-go" onclick="truenasDoCreateSnapshot('${tnArg(id)}')">Create</button>
+        </div>
+    </div>`;
+    bd.onclick = (e) => { if (e.target === bd) bd.remove(); };
+    document.body.appendChild(bd);
+    document.getElementById('tn-snap-dataset')?.focus();
+}
+
+async function truenasDoCreateSnapshot(id) {
+    const err = document.getElementById('tn-snap-err');
+    const dataset = (document.getElementById('tn-snap-dataset')?.value || '').trim();
+    const name = (document.getElementById('tn-snap-name')?.value || '').trim();
+    const recursive = document.getElementById('tn-snap-recursive')?.checked || false;
+    if (!dataset || !name) { if (err) { err.style.display = 'block'; err.textContent = 'Dataset and name are required.'; } return; }
+    const btn = document.getElementById('tn-snap-go'); if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+    try {
+        const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}/snapshots`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataset, name, recursive }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) { document.getElementById('tn-snap-modal')?.remove(); showToast('Snapshot created', 'success'); truenasLoadSnapshots(id); }
+        else { if (err) { err.style.display = 'block'; err.textContent = d.error || 'Create failed'; } if (btn) { btn.disabled = false; btn.textContent = 'Create'; } }
+    } catch (e) { if (err) { err.style.display = 'block'; err.textContent = e.message; } if (btn) { btn.disabled = false; btn.textContent = 'Create'; } }
+}
+
+async function truenasDeleteSnapshot(id, snap) {
+    if (!(await showModal(`Delete snapshot "${snap}"? This cannot be undone.`, 'Delete snapshot', { okText: 'Delete', danger: true }))) return;
+    try {
+        const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}/snapshots?snap=${encodeURIComponent(snap)}`, { method: 'DELETE' });
+        if (r.ok) { showToast('Snapshot deleted', 'success'); truenasLoadSnapshots(id); }
+        else { const d = await r.json().catch(() => ({})); showToast('Delete failed: ' + (d.error || 'error'), 'error', 0); }
+    } catch (e) { showToast('Delete failed: ' + e.message, 'error', 0); }
+}
+window.showTrueNasForCluster = showTrueNasForCluster;
 
 function showClusterBackupsPage(clusterName) {
     closeSidebarMobile();
