@@ -8182,6 +8182,59 @@ fn rootfs_is_unprivileged(rootfs: &str) -> bool {
     false
 }
 
+/// Detect whether an LXC archive is a Proxmox vzdump (vs a native WolfStack
+/// rootfs tar). WolfStack's own native LXC backups are always `lxc-*.tar.gz`
+/// (gzip); a Proxmox vzdump is `vzdump-lxc-*.tar.zst` (zstd). Either signal —
+/// the `vzdump` name or zstd compression — identifies it. Used by the restore
+/// path to route a Proxmox-origin backup landing on a native host (and vice
+/// versa) instead of feeding it to the wrong restorer. (Safe while native LXC
+/// backups stay gzip — see `backup_lxc`, which always writes `.tar.gz`.)
+pub(crate) fn lxc_archive_is_vzdump(archive_path: &str) -> bool {
+    let p = archive_path.to_ascii_lowercase();
+    p.contains("vzdump") || p.ends_with(".tar.zst") || p.ends_with(".zst")
+}
+
+/// Extract an LXC backup/export archive's root filesystem into `rootfs_target`.
+/// Handles both gzip (native WolfStack) and zstd (Proxmox vzdump) compression,
+/// and normalises the layouts a vzdump can land in: when the rootfs comes out
+/// nested under `rootfs_target/rootfs/` it is flattened up, and (ONLY for a
+/// vzdump source) the Proxmox `etc/vzdump` metadata dir is stripped. A native
+/// backup's filesystem is taken verbatim — including any legitimate
+/// `/etc/vzdump` it might carry. The caller still owns writing the LXC
+/// `config` (see [`lxc_write_bootable_config`]).
+pub(crate) fn lxc_extract_archive_to_rootfs(archive_path: &str, rootfs_target: &str) -> Result<(), String> {
+    let tar_args: Vec<&str> = if archive_path.ends_with(".tar.zst") || archive_path.ends_with(".zst") {
+        vec!["--zstd", "-xf", archive_path, "-C", rootfs_target]
+    } else {
+        vec!["xzf", archive_path, "-C", rootfs_target]
+    };
+    let output = Command::new("tar")
+        .args(&tar_args)
+        .output()
+        .map_err(|e| format!("tar extract failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("tar extract failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+
+    // A vzdump can land the rootfs nested under rootfs_target/rootfs/ — flatten
+    // it up. (Paths are quoted in case rootfs_target ever contains a space.)
+    let nested_rootfs = format!("{}/rootfs", rootfs_target);
+    if std::path::Path::new(&nested_rootfs).exists() {
+        let _ = Command::new("bash")
+            .args(["-c", &format!(
+                "shopt -s dotglob; mv \"{t}\"/rootfs/* \"{t}\"/ 2>/dev/null; rmdir \"{t}\"/rootfs 2>/dev/null; true",
+                t = rootfs_target
+            )])
+            .output();
+    }
+    // Strip the Proxmox backup-bookkeeping dir ONLY for a vzdump source — a
+    // native container can legitimately carry its own /etc/vzdump.
+    if lxc_archive_is_vzdump(archive_path) {
+        let _ = std::fs::remove_dir_all(format!("{}/etc/vzdump", rootfs_target));
+    }
+    Ok(())
+}
+
 /// Write a *bootable* LXC config for a freshly-imported standalone
 /// container. Prefers the source's own config (carried with the archive)
 /// so arch/idmap/apparmor/cgroup/resource limits survive the move;
@@ -8190,7 +8243,7 @@ fn rootfs_is_unprivileged(rootfs: &str) -> bool {
 /// left systemd containers stuck in ABORTING for want of cgroup mounts,
 /// an idmap and an apparmor decision — see `lxc_create`'s systemd block
 /// for the authoritative list of what such a rootfs needs.
-fn lxc_write_bootable_config(container_dir: &str, new_name: &str, carried_config: Option<&str>) {
+pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, carried_config: Option<&str>) {
     let config_path = format!("{}/config", container_dir);
     if std::path::Path::new(&config_path).exists() {
         return; // native tooling already wrote a real config — leave it
@@ -8331,45 +8384,26 @@ pub fn lxc_import(
         std::fs::create_dir_all(&rootfs_target)
             .map_err(|e| format!("Failed to create container dir: {}", e))?;
 
-        // Detect archive format and use appropriate decompressor
-        let tar_args: Vec<&str> = if archive_path.ends_with(".tar.zst") || archive_path.ends_with(".zst") {
-            vec!["--zstd", "-xf", archive_path, "-C", &rootfs_target]
-        } else {
-            vec!["xzf", archive_path, "-C", &rootfs_target]
-        };
+        // Shared with the backup-restore path: handles gzip/zstd and the
+        // nested-rootfs / etc/vzdump normalisation in one place.
+        match lxc_extract_archive_to_rootfs(archive_path, &rootfs_target) {
+            Ok(()) => {
+                // Write a bootable config — the source's own config when it
+                // travelled with the archive, otherwise a synthesised one.
+                // (Replaces the old 3-line stub that left systemd containers
+                // stuck in ABORTING.)
+                lxc_write_bootable_config(&container_dir, new_name, carried_config);
 
-        let output = Command::new("tar")
-            .args(&tar_args)
-            .output()
-            .map_err(|e| format!("tar extract failed: {}", e))?;
-
-        if output.status.success() {
-            // If a vzdump archive was extracted, rootfs is double-nested (rootfs/rootfs/) — flatten
-            let nested_rootfs = format!("{}/rootfs", rootfs_target);
-            if std::path::Path::new(&nested_rootfs).exists() {
-                let _ = Command::new("bash")
-                    .args(["-c", &format!(
-                        "shopt -s dotglob; mv {}/rootfs/* {}/ 2>/dev/null; rmdir {}/rootfs 2>/dev/null; rm -rf {}/etc/vzdump 2>/dev/null; true",
-                        rootfs_target, rootfs_target, rootfs_target, rootfs_target
-                    )])
-                    .output();
+                Ok(LxcImportOutcome {
+                    message: format!("Container '{}' imported from archive", new_name),
+                    start_id: new_name.to_string(),
+                })
             }
-
-            // Write a bootable config — the source's own config when it
-            // travelled with the archive, otherwise a synthesised one.
-            // (Replaces the old 3-line stub that left systemd containers
-            // stuck in ABORTING.)
-            lxc_write_bootable_config(&container_dir, new_name, carried_config);
-
-            Ok(LxcImportOutcome {
-                message: format!("Container '{}' imported from archive", new_name),
-                start_id: new_name.to_string(),
-            })
-        } else {
-            // Cleanup on failure
-            let _ = std::fs::remove_dir_all(&container_dir);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("Import failed: {}", stderr.trim()))
+            Err(e) => {
+                // Cleanup on failure
+                let _ = std::fs::remove_dir_all(&container_dir);
+                Err(format!("Import failed: {}", e))
+            }
         }
     }
 }
@@ -11030,6 +11064,29 @@ mod port_mapping_tests {
 
         // "8000-8010:8000-8010" — range form: skip (Docker handles)
         assert!(parse_docker_port_arg("8000-8010:8000-8010").is_none());
+    }
+}
+
+#[cfg(test)]
+mod cross_platform_restore_tests {
+    use super::*;
+
+    #[test]
+    fn vzdump_archives_are_detected_by_name_or_zstd() {
+        // Proxmox vzdump: name carries "vzdump", compression is zstd.
+        assert!(lxc_archive_is_vzdump("/var/lib/wolfstack/backups/vzdump-lxc-105-2026_06_06.tar.zst"));
+        assert!(lxc_archive_is_vzdump("/tmp/VZDUMP-LXC-105.tar.zst")); // case-insensitive
+        // A renamed vzdump that lost its name is still caught by zstd.
+        assert!(lxc_archive_is_vzdump("/tmp/backup.tar.zst"));
+        assert!(lxc_archive_is_vzdump("/tmp/whatever.zst"));
+    }
+
+    #[test]
+    fn native_wolfstack_backups_are_not_vzdump() {
+        // backup_lxc() always produces lxc-<name>-<ts>.tar.gz (gzip).
+        assert!(!lxc_archive_is_vzdump("/var/lib/wolfstack/backups/lxc-web01-2026_06_06.tar.gz"));
+        assert!(!lxc_archive_is_vzdump("/tmp/myct.tar.gz"));
+        assert!(!lxc_archive_is_vzdump("/tmp/rootfs.tar"));
     }
 }
 
