@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.29.3: fix config restore (nodes import) so a fleet can be recovered from a backup** _(2026-06-06 — [`8c89a0a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8c89a0a26fc199a2fef38d5afc519c6f1d01704d))_
 - **v24.29.2: fix v24.29.1 regression that pruned federated clusters to one node** _(2026-06-06 — [`f71c864`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f71c864de62755960fc59a6e949bac667f13713d))_
 - **v24.29.1: fix v24.27 control-plane convergence storm (100% CPU / connection flood)** _(2026-06-06 — [`8b3fe25`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8b3fe25fa6500b125c848f515e5e1af646b57ff0))_
 - **v24.29.0: File Locations fleet sync + fix broken delete confirmations** _(2026-06-06 — [`a24ad53`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a24ad53af6e01681957481ddf0a058aabf4d7fa4))_
