@@ -884,6 +884,36 @@ pub struct AdoptPick {
 /// container's reachable address is resolved ON ITS HOST (host-aware) — no IPs
 /// to type, same as the Galera adopt.
 #[allow(clippy::too_many_arguments)]
+/// A node's reported address can be a comma/space-separated list when its
+/// container has several NICs (the lxcbr0 bridge + a LAN/vSwitch NIC + a
+/// WolfNet overlay NIC). Pick a single address usable for cross-host cluster
+/// traffic: prefer any address that is NOT host-local (the lxcbr0 bridge
+/// 10.0.3.0/24, loopback, or link-local), falling back to the first valid
+/// candidate.
+///
+/// JJ 2026-06: adoption failed with "no reachable address found (got
+/// 10.0.3.3, 10.10.10.3)" because the raw multi-IP string failed validation —
+/// now we fall back to the reachable LAN address (10.10.10.3) when the WolfNet
+/// overlay address isn't present (e.g. WolfNet partially down). This is the
+/// requested LAN-fallback for adoption when WolfNet is unreachable.
+fn pick_usable_address(raw: &str) -> Option<String> {
+    let candidates: Vec<std::net::Ipv4Addr> = raw
+        .split([',', ' ', '\t', '\n', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<std::net::Ipv4Addr>().ok())
+        .collect();
+    let host_local = |ip: &std::net::Ipv4Addr| {
+        let o = ip.octets();
+        ip.is_loopback()
+            || ip.is_link_local()
+            || (o[0] == 10 && o[1] == 0 && o[2] == 3) // lxcbr0 bridge — host-local
+    };
+    candidates.iter().find(|ip| !host_local(ip))
+        .or_else(|| candidates.first())
+        .map(|ip| ip.to_string())
+}
+
 pub fn adopt_cluster(
     ws_cluster: &str, name: &str, db_user: &str, db_password: &str,
     cluster_port: u16, api_port: u16, proxy_port: u16, picks: &[AdoptPick],
@@ -903,12 +933,17 @@ pub fn adopt_cluster(
         // Always probe-locate (picked id is just a hint) so a peer self_id this
         // node hasn't directly polled still resolves — routing is by local key.
         let host = locate_host(ctx, &p.container, &p.node_id)?;
-        let addr = run_op(ctx, &host, &p.container, NodeOp::Address)
-            .map_err(|e| format!("[{}] couldn't resolve address: {}", p.container, e))?
-            .trim().to_string();
-        if !valid_address(&addr) {
-            return Err(format!("[{}] no reachable address found (got '{}') — is it running on WolfNet?", p.container, addr));
-        }
+        let raw = run_op(ctx, &host, &p.container, NodeOp::Address)
+            .map_err(|e| format!("[{}] couldn't resolve address: {}", p.container, e))?;
+        // A container can report several NICs (lxcbr0 bridge + LAN + WolfNet
+        // overlay); pick one reachable from other hosts, falling back to the
+        // LAN address when the WolfNet overlay address isn't present (e.g.
+        // WolfNet partially down). JJ 2026-06.
+        let addr = pick_usable_address(&raw)
+            .filter(|a| valid_address(a))
+            .ok_or_else(|| format!(
+                "[{}] no usable address found (got '{}') — give the container a reachable LAN or WolfNet IP and retry",
+                p.container, raw.trim()))?;
         nodes.push(WolfScaleNode {
             node_id: host,
             container: p.container.clone(),
@@ -933,4 +968,33 @@ pub fn adopt_cluster(
     };
     let pw = if db_password.is_empty() { None } else { Some(db_password) };
     upsert_cluster(cluster, pw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_usable_address;
+
+    // JJ 2026-06: adoption got "10.0.3.3, 10.10.10.3" — the bridge IP first,
+    // then the reachable LAN. We must pick the LAN (cross-host reachable), not
+    // the host-local lxcbr0 bridge, and not reject the whole list.
+    #[test]
+    fn picks_lan_over_bridge() {
+        assert_eq!(pick_usable_address("10.0.3.3, 10.10.10.3").as_deref(), Some("10.10.10.3"));
+        assert_eq!(pick_usable_address("10.10.10.3 10.0.3.3").as_deref(), Some("10.10.10.3"));
+    }
+
+    #[test]
+    fn single_or_only_bridge_falls_back() {
+        assert_eq!(pick_usable_address("10.10.10.3").as_deref(), Some("10.10.10.3"));
+        // only the bridge IP available → use it rather than failing
+        assert_eq!(pick_usable_address("10.0.3.3").as_deref(), Some("10.0.3.3"));
+    }
+
+    #[test]
+    fn rejects_loopback_linklocal_and_garbage() {
+        // loopback/link-local are host-local; prefer the real LAN address
+        assert_eq!(pick_usable_address("127.0.0.1, 169.254.1.2, 192.168.1.5").as_deref(), Some("192.168.1.5"));
+        assert_eq!(pick_usable_address("not-an-ip").as_deref(), None);
+        assert_eq!(pick_usable_address("").as_deref(), None);
+    }
 }
