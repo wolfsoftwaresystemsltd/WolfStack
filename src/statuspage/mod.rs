@@ -703,18 +703,20 @@ impl MonitorStatus {
 /// Run all enabled monitors and record results.
 /// Called periodically by the background task in main.rs.
 pub async fn run_checks(state: &Arc<StatusPageState>) {
-    let (monitors, has_pages) = {
+    let monitors = {
         let config = state.config.read().unwrap();
-        let has_pages = config.pages.iter().any(|p| p.enabled);
-        let monitors = config.monitors.iter()
+        config.monitors.iter()
             .filter(|m| m.enabled)
             .cloned()
-            .collect::<Vec<_>>();
-        (monitors, has_pages)
+            .collect::<Vec<_>>()
     };
 
-    // Only run checks if there's at least one enabled page
-    if !has_pages || monitors.is_empty() {
+    // Check every enabled monitor regardless of whether a status PAGE exists.
+    // Monitors are useful on their own (the admin uptime view, alerting), and
+    // the old `has_pages` gate left freshly-created monitors stuck showing
+    // "Unknown" forever until the user also created and enabled a status page
+    // (user report 2026-06-06).
+    if monitors.is_empty() {
         return;
     }
 
