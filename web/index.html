@@ -3819,8 +3819,11 @@
 
             <!-- Backup History Card -->
             <div class="card" style="margin-bottom:16px;">
-                <div class="card-header">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
                     <h3>Backup History</h3>
+                    <button class="btn btn-sm" onclick="loadBackups()" title="Reload the backup list (a long vzdump may finish after the page first loads)">
+                        <span class="ws-icon-clean-wrap" data-icon="refresh"></span> Refresh
+                    </button>
                 </div>
                 <div class="card-body" style="overflow-x:auto;">
                     <table class="data-table" style="width:100%;">

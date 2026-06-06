@@ -15882,6 +15882,13 @@ pub struct PbsRestoreRequest {
     /// original. Empty = keep the original. LXC only.
     #[serde(default)]
     pub new_name: String,
+    /// Target Proxmox storage for the restored guest's disks (e.g.
+    /// "local-lvm", "local-zfs"). Passed to `pct restore --storage` /
+    /// `qm` restore. Empty = let Proxmox choose its default — but on hosts
+    /// with no usable default for the guest type the restore fails, so the
+    /// UI now offers a picker. Older nodes ignore this field.
+    #[serde(default)]
+    pub storage: String,
 }
 fn default_pbs_target_dir() -> String { "/var/lib/wolfstack/restored".to_string() }
 
@@ -15916,6 +15923,7 @@ pub async fn pbs_restore(
     let target_dir = body.target_dir.clone();
     let overwrite = body.overwrite;
     let new_name = body.new_name.clone();
+    let target_storage = body.storage.clone();
 
     // Reset progress state
     {
@@ -15940,7 +15948,7 @@ pub async fn pbs_restore(
                 progress.progress_text = text;
                 progress.percentage = pct;
             }
-        }, overwrite, &new_name) {
+        }, overwrite, &new_name, &target_storage) {
             Ok(msg) => {
                 if let Ok(mut progress) = state_clone.pbs_restore_progress.lock() {
                     progress.active = false;

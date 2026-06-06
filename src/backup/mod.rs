@@ -3097,7 +3097,9 @@ fn restore_lxc_proxmox(archive_path: &Path, storage: &str, overwrite: bool, vmid
 /// Restore a VM from backup
 pub fn restore_vm(entry: &BackupEntry) -> Result<String, String> {
     let local_path = retrieve_backup(entry)?;
-    restore_vm_local(&local_path, &entry.target.name)
+    // Backups-list VM restore keeps Proxmox's default storage (local-lvm);
+    // the PBS path threads an operator-picked storage instead.
+    restore_vm_local(&local_path, &entry.target.name, None)
 }
 
 /// Restore a VM from an archive already on local disk. Shared by
@@ -3116,9 +3118,9 @@ pub fn restore_vm(entry: &BackupEntry) -> Result<String, String> {
 /// + `<name>.qcow2` (OS disk) + optional `<name>-<slot>.qcow2` extra
 /// disks. Restore reads the JSON, then routes to the per-platform
 /// creation primitives.
-pub fn restore_vm_local(local_path: &Path, vm_name: &str) -> Result<String, String> {
+pub fn restore_vm_local(local_path: &Path, vm_name: &str, target_storage: Option<&str>) -> Result<String, String> {
     if crate::containers::is_proxmox() {
-        return restore_vm_to_proxmox(local_path, vm_name, None);
+        return restore_vm_to_proxmox(local_path, vm_name, target_storage);
     }
     if crate::containers::is_libvirt() {
         return restore_vm_to_libvirt(local_path, vm_name);
@@ -3561,9 +3563,9 @@ fn restore_vm_to_native(local_path: &Path, vm_name: &str) -> Result<String, Stri
 /// disk lands at scsi0; extras at scsi1, scsi2, … (or their original
 /// bus name when StorageVolume.bus is set).
 ///
-/// `target_storage = None` defaults to `local-lvm` (the standard
-/// Proxmox install layout). Callers with custom storage can pass it
-/// explicitly.
+/// `target_storage = None` (operator left the picker blank) auto-selects
+/// the first ACTIVE images-capable PVE storage, falling back to `local-lvm`
+/// only if none is found. An explicit pick is validated and used as-is.
 fn restore_vm_to_proxmox(
     local_path: &Path,
     vm_name: &str,
@@ -3575,7 +3577,28 @@ fn restore_vm_to_proxmox(
     // would escape paths or break `qm create` arg passing.
     validate_vm_name_for_restore(vm_name)?;
 
-    let storage = target_storage.unwrap_or("local-lvm");
+    // `qm importdisk` REQUIRES a target storage (unlike `pct restore
+    // --storage`, which is optional and lets PVE pick its own default). So
+    // when the operator left the picker blank we must choose one ourselves —
+    // the first ACTIVE images-capable PVE storage, rather than blindly
+    // assuming `local-lvm`, which doesn't exist on ZFS-only / custom hosts
+    // (that assumption was itself a restore-failure source). Any explicit
+    // pick is validated the same way the LXC path validates its storage id —
+    // it becomes a `qm` execve arg, so reject anything that isn't a plausible
+    // PVE storage id as defence in depth.
+    let storage_owned: String = match target_storage.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(s) => {
+            if !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+                return Err(format!("Invalid Proxmox storage id: '{}'", s));
+            }
+            s.to_string()
+        }
+        None => crate::containers::pvesm_list_storage().into_iter()
+            .find(|st| st.status == "active" && st.content.iter().any(|c| c == "images"))
+            .map(|st| st.id)
+            .unwrap_or_else(|| "local-lvm".to_string()),
+    };
+    let storage = storage_owned.as_str();
 
     // 1) Extract the portable archive into a per-restore work dir so
     //    we don't pollute staging if the qm step fails halfway.
@@ -4909,6 +4932,7 @@ pub fn restore_from_pbs_with_progress<F>(
     on_progress: F,
     overwrite: bool,
     new_name: &str,
+    target_storage: &str,
 ) -> Result<String, String>
 where
     F: Fn(String, Option<f64>),
@@ -5050,9 +5074,12 @@ where
     // Hand the archive to the SAME restore path the Backups list uses —
     // it un-archives the rootfs properly and restores the real config,
     // instead of leaving a compressed file behind under a stub config.
+    // The operator-picked Proxmox storage (empty = let Proxmox default)
+    // flows into both `pct restore --storage` (LXC) and `qm` restore (VM).
+    let pve_storage = if target_storage.trim().is_empty() { None } else { Some(target_storage.trim()) };
     let result = match snap_type {
-        "ct" => restore_lxc_local(&archive_file, snap_id, "", overwrite, new_name),
-        "vm" => restore_vm_local(&archive_file, snap_id),
+        "ct" => restore_lxc_local(&archive_file, snap_id, pve_storage.unwrap_or(""), overwrite, new_name),
+        "vm" => restore_vm_local(&archive_file, snap_id, pve_storage),
         other => {
             let _ = fs::remove_file(&archive_file);
             Err(format!(

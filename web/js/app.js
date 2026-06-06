@@ -28461,6 +28461,41 @@ async function restorePbsSnapshot(snapshot, backupType) {
     const snapType = parts[0] || backupType || '';
     const snapId = parts[1] || '';
     const isCt = snapType === 'ct';
+    const isVm = snapType === 'vm';
+
+    // Proxmox needs a target storage for the restored guest's disks —
+    // `pct restore --storage` (CT) / qm restore (VM). Without one the host
+    // falls back to a default that may not exist, which is the restore
+    // failure operators hit. Offer a picker sourced from the TARGET node's
+    // PVE storages (apiUrl proxies to the node being viewed).
+    let pveProxmox = false, pveStorages = [];
+    try {
+        // Short timeout so a slow/unreachable node never leaves the operator
+        // staring at a blank dialog before the picker (or its absence) shows.
+        const r = await fetch(apiUrl('/api/storage/list'), { signal: AbortSignal.timeout(3000) });
+        if (r.ok) {
+            const d = await r.json();
+            pveProxmox = !!d.proxmox;
+            pveStorages = Array.isArray(d.storages) ? d.storages : [];
+        }
+    } catch (_) { /* no picker — restore still works with the host default */ }
+
+    const wantStorage = pveProxmox && (isCt || isVm);
+    const wantContent = isCt ? 'rootdir' : 'images';
+    let pveStores = pveStorages.filter(s => Array.isArray(s.content) && s.content.includes(wantContent));
+    if (wantStorage && pveStores.length === 0) pveStores = pveStorages;  // content unknown — offer all
+    const storageRow = (wantStorage && pveStores.length > 0) ? `
+        <div style="margin-bottom:14px;">
+            <label for="pbs-restore-storage" style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">Target Proxmox storage</label>
+            <select id="pbs-restore-storage" class="form-control">
+                ${pveStores.map(s => {
+                    const free = s.available_bytes ? ` — ${formatBytes(s.available_bytes)} free` : '';
+                    const st = s.type ? ` (${escapeHtml(String(s.type))})` : '';
+                    return `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.id))}${st}${free}</option>`;
+                }).join('')}
+            </select>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Where the restored ${isCt ? "container's root filesystem" : "VM's disks"} are placed on this node — passed to <code>${isCt ? 'pct restore --storage' : 'qm importdisk'}</code>.</div>
+        </div>` : '';
 
     const stale = document.getElementById('pbs-restore-backdrop');
     if (stale) {
@@ -28485,6 +28520,7 @@ async function restorePbsSnapshot(snapshot, backupType) {
             <h3 id="pbs-restore-title" style="margin:0 0 4px;font-size:16px;">Restore PBS snapshot</h3>
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;font-family:monospace;">${escapeHtml(String(snapshot))}</div>
             ${nameRow}
+            ${storageRow}
             <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:14px;cursor:pointer;">
                 <input type="checkbox" id="pbs-restore-overwrite" style="margin-top:2px;">
                 <span>Replace the target if it already exists<br><span style="color:var(--text-muted);font-size:11px;">Any existing copy is stopped and replaced.</span></span>
@@ -28527,8 +28563,10 @@ async function restorePbsSnapshot(snapshot, backupType) {
         resultEl.style.display = 'none';
         const overwrite = backdrop.querySelector('#pbs-restore-overwrite').checked;
         const nameEl = backdrop.querySelector('#pbs-restore-name');
+        const storageSel = backdrop.querySelector('#pbs-restore-storage');
         const ok = await _runPbsRestore(snapshot, snapType, overwrite,
-                                        nameEl ? nameEl.value.trim() : '', progressEl, resultEl);
+                                        nameEl ? nameEl.value.trim() : '',
+                                        storageSel ? storageSel.value : '', progressEl, resultEl);
         running = false;
         cancelBtn.disabled = false;
         if (ok) {
@@ -28549,7 +28587,7 @@ async function restorePbsSnapshot(snapshot, backupType) {
 
 // POST a PBS restore and poll its progress into the modal. Resolves
 // true on success, false on failure.
-async function _runPbsRestore(snapshot, snapType, overwrite, newName, progressEl, resultEl) {
+async function _runPbsRestore(snapshot, snapType, overwrite, newName, storage, progressEl, resultEl) {
     let targetDir = '/var/lib/wolfstack/restored';
     if (snapType === 'ct') targetDir = '/var/lib/lxc';
     else if (snapType === 'vm') targetDir = '/var/lib/wolfstack/vms';
@@ -28575,6 +28613,7 @@ async function _runPbsRestore(snapshot, snapType, overwrite, newName, progressEl
                 target_dir: targetDir,
                 overwrite: !!overwrite,
                 new_name: newName || '',
+                storage: storage || '',
             }),
         });
         const data = await res.json().catch(() => ({}));
