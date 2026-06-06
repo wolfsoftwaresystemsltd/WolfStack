@@ -1962,6 +1962,39 @@ mod convergence_tests {
         assert!(!is_private_address("0.0.0.0"));       // wildcard → not private
     }
 
+    #[test]
+    fn exported_nodes_bundle_deserializes_as_array() {
+        // nodes.json (and the config-export "nodes" key) is a JSON ARRAY of
+        // Node — NOT a map. config_import::import_nodes used to parse it as a
+        // map, so every restore failed with "invalid type: sequence, expected
+        // a map" and the operator's whole fleet+cluster grouping couldn't be
+        // restored. This shape matches a real v24.0.2 export (only `site` is
+        // absent — it post-dates the export and has #[serde(default)]).
+        let array_json = r#"[
+            {"id":"node-233a2011","hostname":"wolf3","address":"wolf3.wolf.uk.com","port":8553,
+             "last_seen":0,"metrics":null,"components":[],"online":true,"is_self":false,
+             "node_type":"wolfstack","self_id":"ws-33548073","cluster_name":"WolfStack-Shannon"},
+            {"id":"node-641fb254","hostname":"sophie","address":"sophie.wolfterritories.org","port":8553,
+             "last_seen":0,"metrics":null,"components":[],"online":false,"is_self":false,
+             "node_type":"wolfstack","self_id":"ws-286f90be","cluster_name":"Minio"}
+        ]"#;
+        let nodes: Vec<Node> = serde_json::from_str(array_json)
+            .expect("exported nodes array must deserialize as Vec<Node>");
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].cluster_name.as_deref(), Some("WolfStack-Shannon"));
+        assert_eq!(nodes[1].cluster_name.as_deref(), Some("Minio"));
+
+        // The legacy/hand-edited object/map form must still parse too (the
+        // importer accepts both).
+        let map_json = r#"{"node-233a2011":{"id":"node-233a2011","hostname":"wolf3",
+            "address":"wolf3.wolf.uk.com","port":8553,"last_seen":0,"metrics":null,
+            "components":[],"online":true,"is_self":false,"node_type":"wolfstack",
+            "cluster_name":"WolfStack-Shannon"}}"#;
+        let map: std::collections::HashMap<String, Node> = serde_json::from_str(map_json)
+            .expect("legacy nodes map must still deserialize");
+        assert_eq!(map.len(), 1);
+    }
+
     // Build a Node with only the fields the prune logic reads; the rest take
     // their serde defaults.
     fn mk(

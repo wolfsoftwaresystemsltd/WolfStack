@@ -19186,8 +19186,20 @@ pub async fn config_export(
             .and_then(|s| serde_json::from_str(&s).ok())
     }
 
-    // Nodes (cluster links)
-    if let Some(v) = read_json_file("/etc/wolfstack/nodes.json") {
+    // Nodes (cluster links). Strip PVE API credentials before export:
+    // nodes.json is stored mode 0600 precisely because each record can embed a
+    // peer's pve_token / pve_fingerprint, and an export bundle is a file an
+    // operator may hand to support or store off-box. Topology + cluster names
+    // restore fine without them; PVE tokens are re-entered after a restore.
+    if let Some(mut v) = read_json_file("/etc/wolfstack/nodes.json") {
+        if let Some(arr) = v.as_array_mut() {
+            for node in arr.iter_mut() {
+                if let Some(obj) = node.as_object_mut() {
+                    obj.remove("pve_token");
+                    obj.remove("pve_fingerprint");
+                }
+            }
+        }
         bundle.insert("nodes".into(), v);
     }
     // AI config
@@ -19351,29 +19363,59 @@ fn write_json_file(path: &str, val: &serde_json::Value) -> Result<(), String> {
 
 /// Import nodes into the cluster, merging with existing. Returns count of added nodes.
 fn import_nodes(nodes_val: &serde_json::Value, state: &web::Data<AppState>) -> Result<usize, String> {
-    // Parse as HashMap<String, Node> (same format as nodes.json)
-    let import_nodes: std::collections::HashMap<String, crate::agent::Node> =
-        serde_json::from_value(nodes_val.clone())
-            .map_err(|e| format!("Invalid nodes format: {}", e))?;
+    // nodes.json — and therefore the exported bundle's "nodes" — is a JSON
+    // ARRAY of Node (see ClusterState::save_nodes, which serializes
+    // `Vec<&Node>`). The old importer parsed it as a map, so EVERY config
+    // restore failed on nodes with "invalid type: sequence, expected a map".
+    // Accept the array form (the real format); also tolerate a legacy
+    // object/map form so a hand-edited bundle still imports.
+    let import_nodes: Vec<crate::agent::Node> = match nodes_val {
+        serde_json::Value::Array(_) => serde_json::from_value(nodes_val.clone())
+            .map_err(|e| format!("Invalid nodes format: {}", e))?,
+        serde_json::Value::Object(_) => {
+            serde_json::from_value::<std::collections::HashMap<String, crate::agent::Node>>(nodes_val.clone())
+                .map_err(|e| format!("Invalid nodes format: {}", e))?
+                .into_values()
+                .collect()
+        }
+        _ => return Err("expected an array of nodes".to_string()),
+    };
 
-    let self_id = &state.cluster.self_id;
+    let self_id = state.cluster.self_id.clone();
     let mut added = 0;
 
     {
         let mut nodes = state.cluster.nodes.write()
             .map_err(|_| "Failed to acquire lock".to_string())?;
-        for (id, mut node) in import_nodes {
-            // Skip self
-            if id == *self_id {
+        for mut node in import_nodes {
+            // Never import ourselves — match BOTH the local key id and the
+            // global self_id the record carries (the exporting node lists us as
+            // a peer keyed by our ws-{uuid}).
+            if node.id == self_id || node.self_id.as_deref() == Some(self_id.as_str()) {
                 continue;
             }
-            // Only add if not already present
-            if !nodes.contains_key(&id) {
-                node.is_self = false;
-                node.online = false; // Will be updated on next poll
-                nodes.insert(id, node);
-                added += 1;
+            // Dedup against what we already hold: by local id, by stable global
+            // self_id (when present), or by reachable address+port+type. Mirrors
+            // the convergence dedup so a restore can't create duplicate records.
+            let dup = nodes.values().any(|n| {
+                n.id == node.id
+                    || (node.self_id.is_some() && n.self_id == node.self_id)
+                    // Include pve_node_name in the address key — a multi-node
+                    // Proxmox cluster shares one API endpoint address+port but
+                    // has a distinct pve_node_name per node. Omitting it (as the
+                    // first cut did) would collapse pve2/pve3 into pve1 and
+                    // silently drop them. Mirrors add_server_full's dedup.
+                    || (n.address == node.address && n.port == node.port
+                        && n.node_type == node.node_type
+                        && n.pve_node_name == node.pve_node_name)
+            });
+            if dup {
+                continue;
             }
+            node.is_self = false;
+            node.online = false; // re-confirmed on next poll
+            nodes.insert(node.id.clone(), node);
+            added += 1;
         }
     }
 
