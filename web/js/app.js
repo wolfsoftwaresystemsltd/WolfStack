@@ -29119,7 +29119,7 @@ async function truenasTest(id) {
 
 async function truenasDelete(id) {
     const label = window._tnInstances.find(i => i.id === id)?.label || id;
-    if (!(await showModal(`Remove TrueNAS server "${label}"? This only unregisters it from WolfStack; the NAS itself is untouched.`, 'Remove TrueNAS server', { okText: 'Remove', danger: true }))) return;
+    if (!(await wolfConfirm(`Remove TrueNAS server "${label}"? This only unregisters it from WolfStack; the NAS itself is untouched.`, 'Remove TrueNAS server', { okText: 'Remove', danger: true }))) return;
     try {
         const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
         if (r.ok) { showToast('TrueNAS server removed', 'success'); if (window._tnCurrentId === id) window._tnCurrentId = null; loadTrueNasInstances(); }
@@ -29167,7 +29167,7 @@ async function truenasDoCreateSnapshot(id) {
 }
 
 async function truenasDeleteSnapshot(id, snap) {
-    if (!(await showModal(`Delete snapshot "${snap}"? This cannot be undone.`, 'Delete snapshot', { okText: 'Delete', danger: true }))) return;
+    if (!(await wolfConfirm(`Delete snapshot "${snap}"? This cannot be undone.`, 'Delete snapshot', { okText: 'Delete', danger: true }))) return;
     try {
         const r = await tnFetch(`/api/truenas/instances/${encodeURIComponent(id)}/snapshots?snap=${encodeURIComponent(snap)}`, { method: 'DELETE' });
         if (r.ok) { showToast('Snapshot deleted', 'success'); truenasLoadSnapshots(id); }
@@ -38543,62 +38543,142 @@ const _pathFields = [
     { key: 'patreon_config', label: 'Patreon Config', group: 'UI' },
 ];
 
-async function loadFileLocations() {
+// The node whose file locations are currently being edited (default: this node).
+window._pathsNodeId = null;
+
+function pathsFleetNodes() {
+    return (typeof getAllWolfStackNodes === 'function' ? getAllWolfStackNodes() : [])
+        .filter(n => n.online || n.is_self);
+}
+
+async function loadFileLocations(nodeId) {
     const container = document.getElementById('paths-form');
     if (!container) return;
+    // Resolve the target node — default to this node, else the first known node.
+    if (nodeId === undefined || nodeId === null) {
+        nodeId = window._pathsNodeId
+            || (allNodes.find(n => n.is_self)?.id)
+            || (pathsFleetNodes()[0]?.id)
+            || '';
+    }
+    window._pathsNodeId = nodeId;
+    const nodes = pathsFleetNodes();
+    const nodeLabel = (allNodes.find(n => n.id === nodeId)?.hostname) || 'this node';
     try {
-        const resp = await fetch('/api/settings/paths');
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/settings/paths'));
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
+        // Race guard: if the operator switched nodes while this was in flight,
+        // a newer load won — don't paint stale data over it.
+        if (window._pathsNodeId !== nodeId) return;
 
-        let html = '';
+        // Fleet node selector — pull/edit/save a chosen node's paths.
+        let html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+            <label style="font-size:13px;color:var(--text-secondary);font-weight:600;">Node:</label>
+            <select id="paths-node-select" onchange="loadFileLocations(this.value)" style="font-size:13px;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);">
+                ${nodes.map(n => `<option value="${escapeHtml(n.id)}" ${n.id === nodeId ? 'selected' : ''}>${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this node)' : ''}</option>`).join('')}
+            </select>
+            <span style="font-size:12px;color:var(--text-muted);">Pull, edit and Save a node's file locations. <strong>Fleet</strong> pushes one setting to every node.</span>
+        </div>`;
+
         let currentGroup = '';
         for (const field of _pathFields) {
             if (field.group !== currentGroup) {
                 currentGroup = field.group;
-                html += `<div style="margin-top:${html ? '24' : '0'}px;margin-bottom:8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);border-bottom:1px solid var(--border);padding-bottom:6px;">${currentGroup}</div>`;
+                html += `<div style="margin-top:24px;margin-bottom:8px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);border-bottom:1px solid var(--border);padding-bottom:6px;">${currentGroup}</div>`;
             }
-            const val = data[field.key] || '';
-            html += `<div style="display:grid;grid-template-columns:200px 1fr;gap:8px;align-items:center;margin-bottom:6px;">
+            const val = String(data[field.key] || '');
+            html += `<div style="display:grid;grid-template-columns:200px 1fr auto;gap:8px;align-items:center;margin-bottom:6px;">
                 <label style="font-size:13px;color:var(--text-secondary);white-space:nowrap;">${field.label}</label>
                 <input type="text" id="path-${field.key}" value="${val.replace(/"/g, '&quot;')}"
                     style="font-size:13px;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:var(--font-mono, monospace);">
+                <button class="btn btn-sm" onclick="pushPathFieldToFleet('${field.key}')" title="Push this value to every node in the fleet" style="font-size:11px;padding:5px 9px;white-space:nowrap;background:var(--bg-tertiary);border:1px solid var(--border);">&#8599; Fleet</button>
             </div>`;
         }
         html += `<div style="margin-top:20px;display:flex;gap:8px;">
-            <button class="btn btn-primary" onclick="saveFileLocations()">Save File Locations</button>
-            <button class="btn" onclick="loadFileLocations()" style="background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);">Reset</button>
+            <button class="btn btn-primary" onclick="saveFileLocations()">Save to ${escapeHtml(nodeLabel)}</button>
+            <button class="btn" onclick="loadFileLocations('${escapeHtml(nodeId)}')" style="background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);">Reset</button>
         </div>
-        <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">Changes require a WolfStack restart to take effect. Existing files are not moved automatically.</p>`;
+        <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">Changes require a WolfStack restart <em>on the target node</em>. Existing files are not moved automatically.</p>`;
         container.innerHTML = html;
     } catch (e) {
-        container.innerHTML = `<div style="color:var(--danger);padding:20px;">Failed to load file locations: ${e.message}</div>`;
+        container.innerHTML = `<div style="color:var(--danger);padding:20px;">Failed to load file locations for ${escapeHtml(nodeLabel)}: ${escapeHtml(e.message)}</div>
+            <button class="btn btn-sm" onclick="loadFileLocations()" style="margin-top:8px;">Back to this node</button>`;
     }
 }
 
 async function saveFileLocations() {
+    const nodeId = window._pathsNodeId || '';
+    const nodeLabel = (allNodes.find(n => n.id === nodeId)?.hostname) || 'this node';
     const payload = {};
     for (const field of _pathFields) {
         const input = document.getElementById('path-' + field.key);
         if (input) payload[field.key] = input.value.trim();
     }
+    // Guard: if the form was cleared (e.g. a concurrent reload), don't POST an
+    // empty struct that would reset the node to defaults.
+    if (Object.keys(payload).length === 0) {
+        showToast('Nothing to save — the form is still loading.', 'error', 0);
+        return;
+    }
     try {
-        const resp = await fetch('/api/settings/paths', {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/settings/paths'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        const data = await resp.json();
-        if (data.success) {
-            showToast('File locations saved. Restart WolfStack for changes to take effect.', 'success');
-            taskLog('File locations updated');
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.success) {
+            showToast(`File locations saved to ${nodeLabel}. Restart it for changes to take effect.`, 'success');
+            taskLog(`File locations updated on ${nodeLabel}`);
         } else {
-            showToast('Failed to save: ' + (data.error || 'Unknown error'), 'error');
+            showToast('Failed to save: ' + (data.error || 'HTTP ' + resp.status), 'error', 0);
         }
     } catch (e) {
-        showToast('Failed to save file locations: ' + e.message, 'error');
+        showToast('Failed to save file locations: ' + e.message, 'error', 0);
     }
 }
+
+// Push a single file-location setting (its current edited value) to EVERY
+// node in the fleet, read-modify-write so the other settings on each node are
+// left untouched. Confirmed first.
+async function pushPathFieldToFleet(key) {
+    const field = _pathFields.find(f => f.key === key);
+    const input = document.getElementById('path-' + key);
+    if (!field || !input) return;
+    const value = input.value.trim();
+    const nodes = pathsFleetNodes();
+    if (!nodes.length) { showToast('No reachable nodes', 'error', 0); return; }
+    const ok = await wolfConfirm(
+        `Push "${field.label}" = "${value || '(empty)'}" to all ${nodes.length} node(s)?\n\nOnly this one setting is overwritten on each node; their other file locations are left unchanged. Each node needs a WolfStack restart for it to take effect.`,
+        'Push setting to the whole fleet', { okText: `Push to ${nodes.length} node(s)`, danger: true });
+    if (!ok) return;
+    showToast(`Pushing "${field.label}" to ${nodes.length} node(s)…`, 'info');
+    let okc = 0; const errs = [];
+    for (const n of nodes) {
+        try {
+            const gr = await fetch(nodeApiUrl(n.id, '/api/settings/paths'));
+            if (!gr.ok) throw new Error('read HTTP ' + gr.status);
+            const cfg = await gr.json();
+            cfg[key] = value; // change only this field
+            const pr = await fetch(nodeApiUrl(n.id, '/api/settings/paths'), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
+            });
+            const pd = await pr.json().catch(() => ({}));
+            if (pr.ok && pd.success) okc++;
+            else errs.push(`${n.hostname || n.id}: ${pd.error || 'HTTP ' + pr.status}`);
+        } catch (e) { errs.push(`${n.hostname || n.id}: ${e.message}`); }
+    }
+    const total = nodes.length;
+    if (errs.length === 0) {
+        showToast(`Pushed "${field.label}" to all ${okc} node(s). Restart each for it to take effect.`, 'success');
+    } else {
+        showToast(`Pushed to ${okc}/${total}. Failed: ${errs.slice(0, 3).join('; ')}${errs.length > 3 ? ` (+${errs.length - 3} more)` : ''}`, 'error', 0);
+    }
+    taskLog(`Pushed file-location "${field.label}" to ${okc}/${total} nodes`);
+}
+window.loadFileLocations = loadFileLocations;
+window.pushPathFieldToFleet = pushPathFieldToFleet;
 
 // ─── Reverse Proxy config (Settings → 🌐 Reverse Proxy) ───
 
