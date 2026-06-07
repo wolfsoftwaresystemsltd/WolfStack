@@ -34,6 +34,14 @@
     --text-primary: #e8ecf4;
     --text-secondary: #8892a8;
     --text-muted: #5a6378;
+    /* `--text` is an alias for `--text-primary`. Inline styles in app.js /
+       index.html reference `var(--text, #fff)`; without this alias `--text`
+       was undefined everywhere except the glass/trek themes, so the #fff/#eee
+       fallback forced near-white text — invisible on the light/arctic/fruit
+       light-surface themes (Gary KO4BSR, 2026-06-07: AI chat input unreadable).
+       data-theme lives on :root, so this re-resolves to each theme's overridden
+       --text-primary on the same element. */
+    --text: var(--text-primary);
     --accent: #dc2626;
     --accent-light: #f87171;
     --accent-glow: rgba(220, 38, 38, 0.15);
