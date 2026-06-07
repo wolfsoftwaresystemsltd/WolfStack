@@ -385,10 +385,14 @@ pub fn harden_existing() {
             }
         }
         // Sensitive directories — /etc/wolfstack/s3 contains per-mount
-        // credentials files; lock the directory itself AND every
-        // passwd file inside it.
+        // credentials files; /etc/wolfstack/config-backups holds whole-config
+        // snapshots that embed storage / AI / PBS credentials. Lock the
+        // directory itself (0700) AND every file inside it (0600). The runtime
+        // already sets these on write, but harden a dir that pre-existed at
+        // looser perms (e.g. created by a manual restore).
         let sensitive_dirs = [
             "/etc/wolfstack/s3",
+            "/etc/wolfstack/config-backups",
         ];
         for dir in &sensitive_dirs {
             let p = std::path::Path::new(dir);

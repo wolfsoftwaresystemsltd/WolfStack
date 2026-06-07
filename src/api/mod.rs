@@ -19171,13 +19171,11 @@ async fn sync_mount_to_cluster(
 /// POST /api/upgrade — run the WolfStack upgrade script in the background
 // ─── Config Export / Import ───
 
-/// Export all WolfStack configuration as a JSON file
-pub async fn config_export(
-    req: HttpRequest, state: web::Data<AppState>,
-) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
-
-
+/// Build the full config-export bundle. Shared by the HTTP export, the daily
+/// auto-backup task, and the manual "back up now" action so all three produce
+/// identical bundles. PVE API credentials are stripped from the node records
+/// (the bundle is a downloadable / on-disk artifact, not the live 0600 config).
+pub fn build_config_bundle() -> serde_json::Value {
     let mut bundle = serde_json::Map::new();
 
     // Helper: read a JSON file and insert into bundle
@@ -19229,7 +19227,7 @@ pub async fn config_export(
         bundle.insert("pbs_config".into(), v);
     }
 
-    // Add metadata
+    // Metadata
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".into());
@@ -19241,10 +19239,18 @@ pub async fn config_export(
         env!("CARGO_PKG_VERSION").to_string()
     ));
 
+    serde_json::Value::Object(bundle)
+}
+
+/// Export all WolfStack configuration as a downloadable JSON file
+pub async fn config_export(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
     HttpResponse::Ok()
         .insert_header(("Content-Type", "application/json"))
         .insert_header(("Content-Disposition", "attachment; filename=\"wolfstack-config.json\""))
-        .json(serde_json::Value::Object(bundle))
+        .json(build_config_bundle())
 }
 
 /// Import WolfStack configuration from a JSON bundle
@@ -19252,7 +19258,6 @@ pub async fn config_import(
     req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-
 
     let bundle = body.into_inner();
     let obj = match bundle.as_object() {
@@ -19262,6 +19267,20 @@ pub async fn config_import(
         })),
     };
 
+    let (imported, errors) = apply_config_bundle(obj, &state);
+    HttpResponse::Ok().json(config_import_summary(imported, errors))
+}
+
+/// Apply a parsed config bundle to THIS node: merge cluster nodes, overwrite
+/// the simple config files, and merge backup schedules. Shared by the HTTP
+/// upload-import (`config_import`) and the restore-from-saved-backup endpoint
+/// (`config_backup_restore`). Returns (imported_labels, error_labels) so each
+/// caller can build its own response. Non-destructive: nodes merge, schedules
+/// merge by id; only the simple settings files are overwritten wholesale.
+fn apply_config_bundle(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    state: &web::Data<AppState>,
+) -> (Vec<String>, Vec<String>) {
     let mut imported = Vec::new();
     let mut errors = Vec::new();
 
@@ -19270,7 +19289,7 @@ pub async fn config_import(
 
     // Import nodes — merge with existing, skip self
     if let Some(nodes_val) = obj.get("nodes") {
-        match import_nodes(nodes_val, &state) {
+        match import_nodes(nodes_val, state) {
             Ok(count) => imported.push(format!("{} nodes", count)),
             Err(e) => errors.push(format!("nodes: {}", e)),
         }
@@ -19297,7 +19316,6 @@ pub async fn config_import(
         let reloaded = crate::ai::AiConfig::load();
         let mut cfg = state.ai_agent.config.lock().unwrap();
         *cfg = reloaded;
-
     }
 
     // Backup config (schedules only)
@@ -19335,18 +19353,21 @@ pub async fn config_import(
         }
     }
 
+    (imported, errors)
+}
+
+/// Build the JSON response body for an import/restore from its result labels.
+fn config_import_summary(imported: Vec<String>, errors: Vec<String>) -> serde_json::Value {
     let summary = if errors.is_empty() {
         format!("Successfully imported: {}", imported.join(", "))
     } else {
         format!("Imported: {}. Errors: {}", imported.join(", "), errors.join(", "))
     };
-
-
-    HttpResponse::Ok().json(serde_json::json!({
+    serde_json::json!({
         "message": summary,
         "imported": imported,
         "errors": errors,
-    }))
+    })
 }
 
 /// Write a serde_json::Value to a file as pretty JSON
@@ -19423,6 +19444,200 @@ fn import_nodes(nodes_val: &serde_json::Value, state: &web::Data<AppState>) -> R
     state.cluster.save_nodes();
 
     Ok(added)
+}
+
+// ─── Automatic config backups ───
+//
+// WolfStack snapshots its whole configuration (cluster nodes + AI / storage /
+// PBS / IP-mapping settings + backup schedules) to disk once a day, plus on
+// demand, so a wiped or garbled config can always be restored from
+// Settings → Config Backup. This is exactly the hole the v24.29.x incident
+// fell into: the membership list was lost and there was no on-box snapshot to
+// roll back to. Bundles are written 0600 (they can embed storage / PBS creds)
+// in a 0700 directory; PVE creds are stripped by build_config_bundle.
+
+/// Directory holding on-box config snapshots.
+fn config_backup_dir() -> &'static str { "/etc/wolfstack/config-backups" }
+
+/// How many snapshots to keep — older ones are pruned after each new write.
+const CONFIG_BACKUP_KEEP: usize = 14;
+
+/// Validate a backup filename (a URL path segment) and resolve it INSIDE the
+/// backup dir. Rejects every path-traversal shape (slashes, `..`, leading dot,
+/// non-allowlisted chars) so a crafted name can't read/delete arbitrary files.
+fn safe_backup_path(name: &str) -> Result<std::path::PathBuf, String> {
+    if name.is_empty()
+        || name.len() > 128
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.starts_with('.')
+        || !name.ends_with(".json")
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err("invalid backup name".into());
+    }
+    Ok(std::path::Path::new(config_backup_dir()).join(name))
+}
+
+/// List saved config backups newest-first: (filename, size_bytes, mtime_secs).
+fn list_config_backups() -> Vec<(String, u64, u64)> {
+    let mut out: Vec<(String, u64, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(config_backup_dir()) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !(name.starts_with("wolfstack-config-") && name.ends_with(".json")) {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                let mtime = meta.modified().ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                out.push((name, meta.len(), mtime));
+            }
+        }
+    }
+    // Newest first. The timestamped name also sorts chronologically, so it's a
+    // stable tiebreaker when two files share an mtime second.
+    out.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| b.0.cmp(&a.0)));
+    out
+}
+
+/// Delete all but the newest `keep` snapshots.
+fn prune_config_backups(keep: usize) {
+    for (name, _, _) in list_config_backups().into_iter().skip(keep) {
+        if let Ok(p) = safe_backup_path(&name) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Write the current config bundle to a timestamped snapshot, then prune to
+/// `CONFIG_BACKUP_KEEP`. Returns the filename written. Sync (file I/O) — call
+/// via `web::block` / `spawn_blocking` off the async runtime.
+pub fn write_config_backup_now() -> Result<String, String> {
+    let dir = config_backup_dir();
+    std::fs::create_dir_all(dir).map_err(|e| format!("create dir: {}", e))?;
+    // Lock the directory down — snapshots can embed storage / PBS credentials.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let name = format!("wolfstack-config-{}.json", stamp);
+    let path = std::path::Path::new(dir).join(&name);
+    let json = serde_json::to_string_pretty(&build_config_bundle())
+        .map_err(|e| format!("serialize: {}", e))?;
+    // 0600 — same sensitivity as the live config files it snapshots.
+    crate::paths::write_secure(&path.to_string_lossy(), json)
+        .map_err(|e| format!("write: {}", e))?;
+    prune_config_backups(CONFIG_BACKUP_KEEP);
+    Ok(name)
+}
+
+/// Write a daily snapshot if none exists for today (UTC). Returns the name
+/// written, or `None` if today's snapshot is already present. Driven by the
+/// hourly task in main.rs — the per-day guard makes it at-most-once-per-day
+/// and restart-safe.
+pub fn maybe_write_daily_config_backup() -> Result<Option<String>, String> {
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    let prefix = format!("wolfstack-config-{}-", today);
+    if list_config_backups().iter().any(|(n, _, _)| n.starts_with(&prefix)) {
+        return Ok(None);
+    }
+    write_config_backup_now().map(Some)
+}
+
+/// GET /api/config/backups — list saved config snapshots
+pub async fn config_backups_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let listed = web::block(list_config_backups).await.unwrap_or_default();
+    let backups: Vec<serde_json::Value> = listed.into_iter()
+        .map(|(name, size, modified)| serde_json::json!({
+            "name": name, "size": size, "modified": modified,
+        }))
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({ "backups": backups }))
+}
+
+/// POST /api/config/backups — create a snapshot now
+pub async fn config_backup_create(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match web::block(write_config_backup_now).await {
+        Ok(Ok(name)) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Backup created: {}", name), "name": name,
+        })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "backup task failed" })),
+    }
+}
+
+/// GET /api/config/backups/{name} — download a saved snapshot
+pub async fn config_backup_download(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let p = match safe_backup_path(&name) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    match web::block(move || std::fs::read(&p)).await {
+        Ok(Ok(bytes)) => HttpResponse::Ok()
+            .insert_header(("Content-Type", "application/json"))
+            // name is allowlisted to [A-Za-z0-9._-] above, so it's safe in the header.
+            .insert_header(("Content-Disposition", format!("attachment; filename=\"{}\"", name)))
+            .body(bytes),
+        _ => HttpResponse::NotFound().json(serde_json::json!({ "error": "backup not found" })),
+    }
+}
+
+/// DELETE /api/config/backups/{name} — delete a saved snapshot
+pub async fn config_backup_delete(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let p = match safe_backup_path(&name) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    match web::block(move || std::fs::remove_file(&p)).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "message": format!("Deleted {}", name) })),
+        _ => HttpResponse::NotFound().json(serde_json::json!({ "error": "backup not found" })),
+    }
+}
+
+/// POST /api/config/backups/{name}/restore — restore a saved snapshot onto this node
+pub async fn config_backup_restore(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let p = match safe_backup_path(&name) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    let data = match web::block(move || std::fs::read_to_string(&p)).await {
+        Ok(Ok(d)) => d,
+        _ => return HttpResponse::NotFound().json(serde_json::json!({ "error": "backup not found" })),
+    };
+    let bundle: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("backup is not valid JSON: {}", e)
+        })),
+    };
+    let obj = match bundle.as_object() {
+        Some(o) => o,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "backup is not a config bundle object"
+        })),
+    };
+    let (imported, errors) = apply_config_bundle(obj, &state);
+    HttpResponse::Ok().json(config_import_summary(imported, errors))
 }
 
 /// Path the web-triggered upgrade streams its stdout+stderr to. The
@@ -34335,6 +34550,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // System
         .route("/api/config/export", web::get().to(config_export))
         .route("/api/config/import", web::post().to(config_import))
+        .route("/api/config/backups", web::get().to(config_backups_list))
+        .route("/api/config/backups", web::post().to(config_backup_create))
+        .route("/api/config/backups/{name}", web::get().to(config_backup_download))
+        .route("/api/config/backups/{name}", web::delete().to(config_backup_delete))
+        .route("/api/config/backups/{name}/restore", web::post().to(config_backup_restore))
         .route("/api/upgrade", web::post().to(system_upgrade))
         .route("/api/upgrade/log", web::get().to(system_upgrade_log))
         // Issues Scanner

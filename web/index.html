@@ -6331,6 +6331,29 @@
                             </div>
                         </div>
 
+                        <!-- ─── Automatic on-box backups ─── -->
+                        <div
+                            style="margin-top:20px;background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--border);">
+                            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+                                <h4 style="margin:0;font-size:15px;">Automatic Backups</h4>
+                                <div style="display:flex;gap:8px;">
+                                    <button class="btn btn-sm" onclick="loadConfigBackups()" id="btn-refresh-config-backups">
+                                        <span class="ws-icon-clean-wrap" data-icon="refresh"></span> Refresh
+                                    </button>
+                                    <button class="btn btn-sm btn-primary" onclick="createConfigBackupNow()" id="btn-create-config-backup">
+                                        <span class="ws-icon-clean-wrap" data-icon="save"></span> Back Up Now
+                                    </button>
+                                </div>
+                            </div>
+                            <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px 0;">
+                                WolfStack snapshots this server's configuration here once a day (keeps the latest 14).
+                                Restore any snapshot to recover cluster links and settings, or download it to keep off-box.
+                            </p>
+                            <div id="config-backups-list" role="status" aria-live="polite">
+                                <p style="font-size:13px;color:var(--text-muted);margin:0;">Loading…</p>
+                            </div>
+                        </div>
+
                         <div
                             style="margin-top:20px;padding:16px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border);">
                             <h4 style="margin:0 0 8px;font-size:14px;color:var(--text-muted);">ℹ️ What's included</h4>
@@ -6345,6 +6368,9 @@
                             <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0;">
                                 <span class="ws-icon-clean-wrap" data-icon="warning"></span> Does not include: login credentials, join tokens, TLS certificates, or container/VM
                                 data.
+                            </p>
+                            <p style="font-size:12px;color:var(--warning,#d9822b);margin:6px 0 0;">
+                                <span class="ws-icon-clean-wrap" data-icon="warning"></span> Contains storage, AI, and PBS credentials (Proxmox API tokens are stripped). Keep exported and downloaded files private.
                             </p>
                         </div>
                     </div>
