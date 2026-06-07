@@ -565,25 +565,34 @@ fn announce_gateway(iface: &str, router_ip: &str) {
     // The kernel does NOT arp_notify on a mere secondary-IP add (how WolfRouter
     // assigns a gateway when the IP wasn't already present) and never fires on
     // a plain service restart where the IP didn't move — so fire an explicit
-    // unsolicited ARP now. This is the iputils-arping form (the build shipped
-    // on WolfStack's Debian/Ubuntu/Proxmox targets); it's best-effort, with
-    // arp_notify as the tool-free backstop when arping isn't installed.
-    match Command::new("arping")
-        .args(["-U", "-c", "2", "-w", "3", "-I", iface, router_ip])
-        .output()
-    {
-        Ok(o) if o.status.success() => info!(
-            "WolfRouter: announced gateway {} on {} (gratuitous ARP)", router_ip, iface
-        ),
-        Ok(_) => tracing::debug!(
-            "WolfRouter: arping returned non-zero announcing {} on {} — arp_notify still armed",
-            router_ip, iface
-        ),
-        Err(_) => tracing::debug!(
-            "WolfRouter: arping unavailable to announce {} on {} — relying on arp_notify",
-            router_ip, iface
-        ),
-    }
+    // unsolicited ARP now. iputils-arping form (the build shipped on WolfStack's
+    // Debian/Ubuntu/Proxmox targets); best-effort, with arp_notify as the
+    // tool-free backstop when arping isn't installed.
+    //
+    // Run it on a detached thread: arping sends a packet/sec, so `-c 2` blocks
+    // ~2s, and start() is called inline on latency-sensitive paths (inter-node
+    // config-receive, save-and-apply). The thread still waits on the child so
+    // it's reaped (no zombies), but the caller returns immediately. The GARP
+    // goes out a few ms later — the gateway is already live by then.
+    let (iface, router_ip) = (iface.to_string(), router_ip.to_string());
+    std::thread::spawn(move || {
+        match Command::new("arping")
+            .args(["-U", "-c", "2", "-w", "3", "-I", &iface, &router_ip])
+            .output()
+        {
+            Ok(o) if o.status.success() => info!(
+                "WolfRouter: announced gateway {} on {} (gratuitous ARP)", router_ip, iface
+            ),
+            Ok(_) => tracing::debug!(
+                "WolfRouter: arping returned non-zero announcing {} on {} — arp_notify still armed",
+                router_ip, iface
+            ),
+            Err(_) => tracing::debug!(
+                "WolfRouter: arping unavailable to announce {} on {} — relying on arp_notify",
+                router_ip, iface
+            ),
+        }
+    });
 }
 
 /// List all non-loopback interfaces visible to the kernel. Used to give
