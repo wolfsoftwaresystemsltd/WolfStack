@@ -22,7 +22,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -508,44 +507,49 @@ pub fn pppoe_apply(conn: &WanConnection, cfg: &PppoeConfig) -> Result<(), String
 ///      manual route restore.
 pub fn pppoe_stop(conn: &WanConnection) -> Result<(), String> {
     let peer_name = peer_name_for(&conn.id);
-    let pid_path = format!("/var/run/{}.pid", peer_name);
-    let pid_file_exists = || std::path::Path::new(&pid_path).exists();
+    // Liveness is the running pppd process, NOT a pidfile. `pppd call <peer>`
+    // writes /var/run/ppp<N>.pid (keyed on the iface unit), never
+    // /var/run/<peer>.pid — so the old pidfile sentinel never existed, the
+    // SIGTERM/SIGKILL ladder below never fired, and a stuck pppd (e.g. persist
+    // + maxfail 0) had no fallback past poff. pppd_running_for() probes the
+    // actual process, so the escalation now works.
+    let alive = || pppd_running_for(&peer_name);
 
-    // 1. Clean shutdown via poff.
+    // 1. Clean shutdown via poff (matches `call <peer>`, SIGTERMs pppd so its
+    //    ip-down hooks run).
     let _ = Command::new("poff").arg(&peer_name).status();
 
-    // 2. Wait up to 8s for pppd to exit and clean up the pid file.
+    // 2. Wait up to 8s for pppd to actually exit.
     for _ in 0..32 {
-        if !pid_file_exists() { break; }
+        if !alive() { break; }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
-    // 3. Still alive? SIGTERM — pppd still runs ip-down hooks on TERM.
-    if pid_file_exists() {
+    // 3. Still alive? SIGTERM — pppd still runs ip-down hooks on TERM. Anchor
+    //    the pattern ($) so we never kill another link whose peer name shares
+    //    this one's prefix (wolfrouter-wan vs wolfrouter-wan2).
+    if alive() {
         let _ = Command::new("pkill")
-            .args(["-TERM", "-f", &format!("pppd call {}", peer_name)])
+            .args(["-TERM", "-f", &format!("pppd call {}$", peer_name)])
             .status();
         for _ in 0..16 {
-            if !pid_file_exists() { break; }
+            if !alive() { break; }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     }
 
     // 4. Truly stuck? SIGKILL — we lose hook execution, so the
     // caller falls back to manual state restore.
-    let hooks_skipped = if pid_file_exists() {
+    let hooks_skipped = if alive() {
         let _ = Command::new("pkill")
-            .args(["-KILL", "-f", &format!("pppd call {}", peer_name)])
+            .args(["-KILL", "-f", &format!("pppd call {}$", peer_name)])
             .status();
         for _ in 0..8 {
-            if !pid_file_exists() { break; }
+            if !alive() { break; }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         true
     } else { false };
-
-    // Remove any stale pid file.
-    let _ = fs::remove_file(&pid_path);
 
     // If we had to SIGKILL, the ip-down hook didn't run — manually
     // replay the "restore pre-PPPoE state" the hook would have done.
@@ -639,29 +643,57 @@ fn peer_name_for(id: &str) -> String {
     format!("wolfrouter-{}", safe)
 }
 
-/// Live PPP interface state — looks for a ppp* device backed by the
-/// peer name. Returns (iface_name, ip_addr) when up, None otherwise.
+/// Live PPP interface state — returns (iface_name, ip_addr) when this
+/// connection's PPPoE link is up, None otherwise.
+///
+/// We deliberately do NOT gate on a pidfile. `pppd call <peer>` writes
+/// `/var/run/ppp<N>.pid` (named after the interface unit), never
+/// `/var/run/<peer>.pid` — so the old gate could never pass and the WAN's
+/// live IP stayed invisible in the UI until an operator restarted WolfStack
+/// and something re-walked the topology. That is exactly the "Addresses: —"
+/// PapaSchlumpf saw while `ip a show ppp0` clearly held 100.65.x. Instead we
+/// confirm pppd is actually running for THIS peer (same `pppd call <peer>`
+/// cmdline pppoe_stop kills) and then read the live ppp* address — which also
+/// correctly picks up a pppd that survived an in-place binary upgrade.
 pub fn pppoe_status(conn: &WanConnection) -> Option<(String, String)> {
     let peer = peer_name_for(&conn.id);
-    // pppd writes /var/run/<peer>.pid when up. Checking that is the
-    // cheapest "is it running" signal.
-    let pid_path = format!("/var/run/{}.pid", peer);
-    if !Path::new(&pid_path).exists() {
+    if !pppd_running_for(&peer) {
         return None;
     }
-    // Walk ppp interfaces and pick the first with an IP. Multi-PPPoE
-    // setups would want a stricter mapping; that's a v17.2 problem.
+    // Walk ppp interfaces and return the first carrying an IPv4. Single-PPPoE
+    // is the supported case; strict per-peer mapping for multi-PPPoE is future
+    // work (a ppp iface doesn't record which peer file dialled it). Skip
+    // IP-less ppp ifaces rather than bailing — a down ppp0 must not hide an
+    // up ppp1.
     let out = Command::new("ip").args(["-j", "-4", "addr", "show"]).output().ok()?;
     if !out.status.success() { return None; }
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     for entry in json.as_array()? {
-        let name = entry.get("ifname")?.as_str()?;
+        let Some(name) = entry.get("ifname").and_then(|v| v.as_str()) else { continue };
         if !name.starts_with("ppp") { continue; }
-        let ip = entry.get("addr_info")?.as_array()?
-            .iter().find_map(|a| a.get("local").and_then(|v| v.as_str()))?;
-        return Some((name.to_string(), ip.to_string()));
+        let ip = entry.get("addr_info").and_then(|a| a.as_array())
+            .and_then(|arr| arr.iter().find_map(|a| a.get("local").and_then(|v| v.as_str())));
+        if let Some(ip) = ip {
+            return Some((name.to_string(), ip.to_string()));
+        }
     }
     None
+}
+
+/// True when a pppd process is running for this peer. pppd's argv is
+/// `pppd call <peer>` (pppoe_stop relies on the same shape in its pkill), so
+/// `pgrep -f` on that exact string is an accurate per-peer liveness probe that
+/// doesn't depend on a pidfile pppd may never have written under this name.
+fn pppd_running_for(peer: &str) -> bool {
+    // `$`-anchor the pattern: the peer is pppd's last argv, so anchoring stops
+    // `wolfrouter-wan` from also matching a running `wolfrouter-wan2`. Worst
+    // case (a pgrep build that leaves a trailing space) is a conservative
+    // non-match, never a false positive that would mis-kill another link.
+    Command::new("pgrep")
+        .args(["-f", &format!("pppd call {}$", peer)])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 /// Apply or stop a single connection based on its enabled flag.

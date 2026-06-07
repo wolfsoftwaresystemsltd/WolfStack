@@ -3199,6 +3199,12 @@ impl VmManager {
                     // Kick off a passive learner that registers VLAN VIDs
                     // with the hardware filter table as the guest uses them.
                     crate::vms::vlan_learner::start_if_needed(iface);
+                    // Re-pin the MAC on reuse too: a bridge created by an older
+                    // WolfStack, or recreated by ifupdown after a host reboot,
+                    // is still in auto mode and will drift the moment the guest's
+                    // tap joins. Pinning here (before tap attach) restores the
+                    // NIC's MAC and locks it. See pin_bridge_mac().
+                    Self::pin_bridge_mac(bridge_name, iface);
                     info!("Passthrough: {} already in bridge {} (hw VLAN offload disabled on NIC)", iface, bridge_name);
                     return Ok(bridge_name.to_string());
                 }
@@ -3232,6 +3238,64 @@ impl VmManager {
             .map(|g| g.to_string());
 
         Some((ip, prefix, gateway))
+    }
+
+    /// Pin a passthrough bridge's MAC to its physical NIC's own MAC so it can
+    /// never drift.
+    ///
+    /// A Linux bridge left in the kernel's default (auto) MAC mode tracks the
+    /// numerically-lowest MAC among its members — `br_stp_recalculate_bridge_id()`
+    /// in `net/bridge/br_stp_if.c` only bails out when `addr_assign_type ==
+    /// NET_ADDR_SET`. So the moment the guest's tap joins with a lower MAC, or the
+    /// bridge is torn down and recreated across a service restart / host reboot,
+    /// the bridge address flips. That bridge is the L2 face WolfRouter presents
+    /// upstream, so a flip reads to the ISP / LAN exactly like the gateway
+    /// changing its MAC: stale ARP entries, a fresh DHCP lease, dropped
+    /// connectivity. PapaSchlumpf's HA VM (bridge-mode passthrough on ens1) hit
+    /// this on an upgrade restart.
+    ///
+    /// Pinning to the physical NIC's own hardware MAC keeps the identity the wire
+    /// always saw before WolfStack ever bridged the NIC, and `ip link set address`
+    /// sets `addr_assign_type = NET_ADDR_SET` (see `dev_set_mac_address()` in
+    /// `net/core/dev.c`), which permanently disables the kernel's member-MAC
+    /// recalculation. Idempotent: a bridge already SET to the NIC's MAC is left
+    /// untouched, so the steady-state reuse path doesn't churn the link.
+    fn pin_bridge_mac(bridge: &str, iface: &str) {
+        let read_sys = |dev: &str, attr: &str| {
+            std::fs::read_to_string(format!("/sys/class/net/{}/{}", dev, attr))
+                .map(|s| s.trim().to_string())
+                .ok()
+        };
+        // addr_assign_type is already intentionally fixed → leave it alone: the
+        // kernel won't auto-drift it and we must not clobber a deliberate choice.
+        //   3 == NET_ADDR_SET   (operator/ifupdown `hwaddress`, or a prior pin here)
+        //   0 == NET_ADDR_PERM  (a permanent hardware MAC — not how the kernel
+        //                        births a software bridge, but be explicit)
+        // Only auto-mode bridges (1 RANDOM / 2 STOLEN) are drift-prone.
+        match read_sys(bridge, "addr_assign_type").as_deref() {
+            Some("3") | Some("0") => return,
+            _ => {}
+        }
+        // The slave keeps its own hardware MAC after enslaving, so sysfs is the
+        // stable source of truth on both the create and the reuse path.
+        let nic_mac = match read_sys(iface, "address") {
+            Some(m) if !m.is_empty() && m != "00:00:00:00:00:00" => m.to_ascii_lowercase(),
+            _ => return,
+        };
+        match Command::new("ip")
+            .args(["link", "set", "dev", bridge, "address", &nic_mac])
+            .output()
+        {
+            Ok(o) if o.status.success() => info!(
+                "Passthrough: pinned bridge {} MAC to physical NIC {} ({}) so it can't drift to a tap/veth",
+                bridge, iface, nic_mac
+            ),
+            Ok(o) => warn!(
+                "Passthrough: could not pin bridge {} MAC to {}: {}",
+                bridge, nic_mac, String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => warn!("Passthrough: could not pin bridge {} MAC: {}", bridge, e),
+        }
     }
 
     /// Create a Linux bridge for physical NIC passthrough (standalone QEMU/KVM).
@@ -3289,6 +3353,10 @@ impl VmManager {
         // Bring up both
         let _ = Command::new("ip").args(["link", "set", iface, "up"]).output();
         let _ = Command::new("ip").args(["link", "set", &bridge_name, "up"]).output();
+
+        // Lock the bridge MAC to the NIC's own MAC before the guest's tap can
+        // join and drag it to a lower address. See pin_bridge_mac().
+        Self::pin_bridge_mac(&bridge_name, iface);
 
         // Move the host's IP and gateway to the bridge so the host stays reachable
         if let Some((ip, prefix, gateway)) = ip_config {
@@ -3357,6 +3425,10 @@ impl VmManager {
         let _ = Command::new("ip").args(["link", "set", iface, "master", &bridge_name]).output();
         let _ = Command::new("ip").args(["link", "set", iface, "up"]).output();
         let _ = Command::new("ip").args(["link", "set", &bridge_name, "up"]).output();
+
+        // Lock the bridge MAC to the NIC's own MAC before the guest's tap can
+        // join and drag it to a lower address. See pin_bridge_mac().
+        Self::pin_bridge_mac(&bridge_name, iface);
 
         // Move the host's IP and gateway to the bridge so the host stays reachable
         if let Some((ip, prefix, gateway)) = ip_config {

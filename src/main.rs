@@ -1301,6 +1301,29 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Daily config auto-backup — snapshot all WolfStack config (cluster
+        // nodes, AI/storage/PBS/IP-mapping settings, backup schedules) once a
+        // day to /etc/wolfstack/config-backups so a wiped or garbled config can
+        // always be restored from Settings → Config Backup. This is the hole
+        // the v24.29.x control-plane incident fell into — no on-box snapshot to
+        // roll back to. Hourly tick + a "today already done?" guard makes it
+        // at-most-once-per-day and restart-safe; the first tick fires
+        // immediately so a fresh node gets a snapshot at boot. PVE creds are
+        // stripped from the snapshot (build_config_bundle).
+        tokio::spawn(async {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                let _ = tokio::task::spawn_blocking(|| {
+                    match crate::api::maybe_write_daily_config_backup() {
+                        Ok(Some(name)) => tracing::info!("config: wrote daily backup {}", name),
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("config: daily backup failed: {}", e),
+                    }
+                }).await;
+            }
+        });
+
         // If on-access scanning was previously enabled, clamonacc keeps
         // running across a wolfstack restart (it's a systemd service)
         // but the log tailer thread doesn't (in-process). Re-attach

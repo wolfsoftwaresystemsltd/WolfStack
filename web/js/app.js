@@ -30768,6 +30768,113 @@ async function importConfigFile(input) {
     input.value = '';
 }
 
+// ─── Automatic config backups ───
+
+async function loadConfigBackups() {
+    const el = document.getElementById('config-backups-list');
+    if (!el) return;
+    try {
+        const res = await fetch('/api/config/backups', { credentials: 'include' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const backups = data.backups || [];
+        if (!backups.length) {
+            el.innerHTML = '<p style="font-size:13px;color:var(--text-muted);margin:0;">No backups yet. One is created automatically each day, or click "Back Up Now".</p>';
+            return;
+        }
+        let html = '<div style="display:flex;flex-direction:column;gap:8px;">';
+        for (const b of backups) {
+            const when = b.modified ? new Date(b.modified * 1000).toLocaleString() : '';
+            const kb = b.size ? (b.size / 1024).toFixed(1) + ' KB' : '';
+            const arg = encodeURIComponent(b.name);
+            html +=
+                '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border);flex-wrap:wrap;">' +
+                  '<div style="min-width:0;">' +
+                    '<div style="font-size:13px;font-weight:600;word-break:break-all;">' + escapeHtml(b.name) + '</div>' +
+                    '<div style="font-size:12px;color:var(--text-muted);">' + escapeHtml(when) + (kb ? ' · ' + kb : '') + '</div>' +
+                  '</div>' +
+                  '<div style="display:flex;gap:6px;flex-shrink:0;">' +
+                    '<button class="btn btn-sm" onclick="downloadConfigBackup(\'' + arg + '\')">Download</button>' +
+                    '<button class="btn btn-sm btn-primary" onclick="restoreConfigBackup(\'' + arg + '\')">Restore</button>' +
+                    '<button class="btn btn-sm btn-danger" onclick="deleteConfigBackup(\'' + arg + '\')">Delete</button>' +
+                  '</div>' +
+                '</div>';
+        }
+        html += '</div>';
+        el.innerHTML = html;
+    } catch (e) {
+        el.innerHTML = '<p role="alert" style="font-size:13px;color:var(--danger,#e5484d);margin:0;">Failed to load backups: ' + escapeHtml(e.message) + '</p>';
+    }
+}
+
+async function createConfigBackupNow() {
+    const btn = document.getElementById('btn-create-config-backup');
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/api/config/backups', { method: 'POST', credentials: 'include' });
+        const result = await res.json();
+        if (res.ok) {
+            showToast(result.message || 'Backup created', 'success');
+            loadConfigBackups();
+        } else {
+            showToast(result.error || 'Backup failed', 'error');
+        }
+    } catch (e) {
+        showToast('Backup failed: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+function downloadConfigBackup(name) {
+    // `name` is already URL-encoded by the caller.
+    const a = document.createElement('a');
+    a.href = '/api/config/backups/' + name;
+    a.download = decodeURIComponent(name);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+async function restoreConfigBackup(name) {
+    if (!(await showConfirm('Restore configuration from this backup?\n\n' +
+        'This merges cluster nodes and overwrites settings on THIS server.'))) {
+        return;
+    }
+    try {
+        const res = await fetch('/api/config/backups/' + name + '/restore', {
+            method: 'POST', credentials: 'include',
+        });
+        const result = await res.json();
+        if (res.ok) {
+            showToast(result.message || 'Config restored', 'success');
+            setTimeout(() => fetchNodes(), 1000);
+        } else {
+            showToast(result.error || 'Restore failed', 'error');
+        }
+    } catch (e) {
+        showToast('Restore failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteConfigBackup(name) {
+    if (!(await showConfirm('Delete this backup permanently?'))) return;
+    try {
+        const res = await fetch('/api/config/backups/' + name, {
+            method: 'DELETE', credentials: 'include',
+        });
+        const result = await res.json();
+        if (res.ok) {
+            showToast(result.message || 'Backup deleted', 'success');
+            loadConfigBackups();
+        } else {
+            showToast(result.error || 'Delete failed', 'error');
+        }
+    } catch (e) {
+        showToast('Delete failed: ' + e.message, 'error');
+    }
+}
+
 // ─── MySQL Database Editor ───
 
 let mysqlCreds = null; // { host, port, user, password, db_type }
@@ -36451,6 +36558,8 @@ function switchSettingsTab(tabName) {
         loadAiConfig();
         loadAiStatus();
         loadAiAlerts();
+    } else if (tabName === 'backup') {
+        loadConfigBackups();
     } else if (tabName === 'alerts') {
         // Unified Alerts surface (Overview / History / Notifications /
         // Schedule / Docker Updates). Default to Overview; each sub-panel

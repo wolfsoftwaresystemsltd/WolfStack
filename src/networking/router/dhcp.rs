@@ -531,7 +531,68 @@ pub fn start(lan: &LanSegment) -> Result<ApplyResolution, String> {
         ));
     }
     info!("WolfRouter: dnsmasq started for LAN {} on {}", lan.name, bind_iface);
+
+    // Proactively announce the gateway's MAC to every LAN client so none is
+    // left on a stale ARP entry after WolfRouter (re)binds the gateway IP —
+    // across an upgrade restart, a self-heal that moved router_ip to another
+    // interface, or a WAN bounce. macOS especially clings to stale neighbour
+    // entries: PapaSchlumpf's MacBook lost the whole LAN (couldn't even ping
+    // the gateway) until he reset Wi-Fi, while every other device rode it out.
+    announce_gateway(&bind_iface, &lan.router_ip);
+
     Ok(resolution)
+}
+
+/// Push the LAN gateway's current MAC to every client via gratuitous ARP, and
+/// arm the kernel to keep doing so on future link-ups / MAC changes.
+///
+/// A client holding the gateway's *old* MAC — because a restart re-placed the
+/// IP, a bridge MAC drifted, or the gateway briefly went unreachable on a WAN
+/// bounce — black-holes all traffic to the gateway until its ARP entry ages
+/// out: minutes on Linux, stickier still on macOS. RFC 5227 gratuitous ARP is
+/// the standard cure: announce unsolicited so every neighbour overwrites its
+/// cache at once. Best-effort throughout — an apply must never fail over it.
+fn announce_gateway(iface: &str, router_ip: &str) {
+    // arp_notify=1: the kernel emits a gratuitous ARP whenever the iface is
+    // brought up or its hardware address changes. Set-and-forget, needs no
+    // tool, harmless if the knob is absent — covers the link-up / MAC-drift
+    // cases for free on every future event.
+    let _ = Command::new("sysctl")
+        .args(["-w", "net.ipv4.conf.all.arp_notify=1"]).output();
+    let _ = Command::new("sysctl")
+        .args(["-w", &format!("net.ipv4.conf.{}.arp_notify=1", iface)]).output();
+
+    // The kernel does NOT arp_notify on a mere secondary-IP add (how WolfRouter
+    // assigns a gateway when the IP wasn't already present) and never fires on
+    // a plain service restart where the IP didn't move — so fire an explicit
+    // unsolicited ARP now. iputils-arping form (the build shipped on WolfStack's
+    // Debian/Ubuntu/Proxmox targets); best-effort, with arp_notify as the
+    // tool-free backstop when arping isn't installed.
+    //
+    // Run it on a detached thread: arping sends a packet/sec, so `-c 2` blocks
+    // ~2s, and start() is called inline on latency-sensitive paths (inter-node
+    // config-receive, save-and-apply). The thread still waits on the child so
+    // it's reaped (no zombies), but the caller returns immediately. The GARP
+    // goes out a few ms later — the gateway is already live by then.
+    let (iface, router_ip) = (iface.to_string(), router_ip.to_string());
+    std::thread::spawn(move || {
+        match Command::new("arping")
+            .args(["-U", "-c", "2", "-w", "3", "-I", &iface, &router_ip])
+            .output()
+        {
+            Ok(o) if o.status.success() => info!(
+                "WolfRouter: announced gateway {} on {} (gratuitous ARP)", router_ip, iface
+            ),
+            Ok(_) => tracing::debug!(
+                "WolfRouter: arping returned non-zero announcing {} on {} — arp_notify still armed",
+                router_ip, iface
+            ),
+            Err(_) => tracing::debug!(
+                "WolfRouter: arping unavailable to announce {} on {} — relying on arp_notify",
+                router_ip, iface
+            ),
+        }
+    });
 }
 
 /// List all non-loopback interfaces visible to the kernel. Used to give
