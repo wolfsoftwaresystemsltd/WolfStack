@@ -70,18 +70,25 @@ fn wolfproxy_binary_path() -> Option<String> {
         "/opt/wolfproxy/wolfproxy",
         "/usr/bin/wolfproxy",
     ] {
-        if std::path::Path::new(cand).exists() {
-            if Command::new(cand).arg("--version").output()
-                .map(|o| o.status.success()).unwrap_or(false)
-            {
-                return Some((*cand).to_string());
-            }
+        if std::path::Path::new(cand).exists() && wolfproxy_version_ok(cand) {
+            return Some((*cand).to_string());
         }
     }
-    if Command::new("wolfproxy").arg("--version").output()
-        .map(|o| o.status.success()).unwrap_or(false)
-    {
+    if wolfproxy_version_ok("wolfproxy") {
         return Some("wolfproxy".into());
     }
     None
+}
+
+/// Probe `<bin> --version` under a hard timeout. A correct wolfproxy (v0.4.7+)
+/// prints its version and exits instantly; a pre-v0.4.7 binary ignored argv and
+/// started a full server on `--version`, so an unbounded probe could bind a
+/// port (orphan) or hang this detection — which runs on every status poll —
+/// forever. `timeout` caps the probe and TERMs any stray it spawned.
+fn wolfproxy_version_ok(bin: &str) -> bool {
+    Command::new("timeout")
+        .args(["5", bin, "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }

@@ -245,7 +245,16 @@ pub fn test_config(target: &ExecTarget) -> ConfigTestResult {
     }
 
     if wolfproxy_present {
-        if let Ok((output, stderr, success)) = target.exec_full("wolfproxy --test 2>&1") {
+        // `--config` points the test at the deployed config (the test runs in
+        // an arbitrary cwd, and wolfproxy reads ./wolfproxy.toml by default).
+        // `timeout` is a hard safety net for pre-v0.4.7 wolfproxy binaries that
+        // ignored argv and started a *full server* on `--test` — when the
+        // service was down that bound :80 and orphaned a listener (klasSponsor
+        // 2026-06). On a fixed binary `--test` validates and exits in <1s; on an
+        // old one timeout TERMs the stray instead of letting it hang/orphan.
+        if let Ok((output, stderr, success)) = target.exec_full(
+            "timeout 10 wolfproxy --test --config /opt/wolfproxy/wolfproxy.toml 2>&1"
+        ) {
             let combined = if stderr.is_empty() { output }
                            else { format!("{}\n{}", output, stderr) };
             return ConfigTestResult { success, output: combined.trim().to_string() };

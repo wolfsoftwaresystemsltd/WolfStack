@@ -4403,7 +4403,17 @@ pub async fn list_http_proxies(
 /// detection. Used by the UI's install-picker banner.
 pub async fn http_proxy_runtime(req: HttpRequest, state: S) -> HttpResponse {
     auth_or_return!(req, state);
-    let status = crate::networking::router::proxy_runtime::detect_runtime();
+    // detect_runtime() shells out (nginx -v, systemctl, wolfproxy --version) —
+    // blocking work that must not run on the async executor. The wolfproxy probe
+    // is now timeout-bounded but can still cost a few seconds on a stale binary,
+    // so offload the whole detection to the blocking pool.
+    let status = match web::block(
+        crate::networking::router::proxy_runtime::detect_runtime
+    ).await {
+        Ok(s) => s,
+        Err(_) => return HttpResponse::InternalServerError()
+            .body("reverse-proxy runtime detection failed"),
+    };
     let active = status.active_runtime().unwrap_or("");
     HttpResponse::Ok().json(serde_json::json!({
         "nginx_installed":     status.nginx_installed,
