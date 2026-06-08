@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.31.0: WolfNet peer Edit UI + on-link endpoint guard + light-theme bubble fix** _(2026-06-08 — [`4d78d9e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4d78d9e1478f1ee9500ad4512e65f9c62356afa0))_
 - **v24.30.4: fix invisible AI chat input text on light/arctic/fruit themes** _(2026-06-07 — [`a439a95`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a439a9504485895983dd7bf75cb9ab3c1992f499))_
 - **v24.30.3: harden WolfProxy probes — companion to wolfproxy v0.4.7 (orphan-on-:80 fix)** _(2026-06-07 — [`6e045e8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6e045e826a273258881c367d7a52b20ef8f0e8a0))_
 - **v24.30.2: run WolfRouter's gateway ARP announce off-thread (no apply/config-receive latency)** _(2026-06-07 — [`8c353e4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8c353e41611021b4829ea765c1327ec16b4313bf))_
