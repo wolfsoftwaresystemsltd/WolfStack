@@ -1227,6 +1227,58 @@ pub fn recent_protected_block_events() -> Vec<ProtectedBlockEvent> {
     protected_events().read().map(|g| g.iter().cloned().collect()).unwrap_or_default()
 }
 
+// ─── Local workload-subnet block protection ─────────────────────────────────
+// klasSponsor 2026-06-08 (round 2): the same auto-block was also firewalling the
+// host's OWN containers — a Docker/LXC service that hit an auth endpoint with bad
+// creds tripped the 3-strike brute-force block, and kernel_block_ip's INPUT+FORWARD
+// DROP on the container's IP killed its traffic ("wolfstack made iptables rules to
+// drop traffic from those containers"). We exempt the locally-managed container
+// bridges (docker0/br-*/lxcbr*/virbr*, from `collect_workload_subnets`) the same way
+// cluster-node IPs are exempt. A genuinely-compromised container is stopped /
+// quarantined, never blanket FORWARD-DROP'd (which is over-broad). CIDR-based
+// because container IPs are dynamic; refreshed every ~10s in main.rs.
+static PROTECTED_WORKLOAD_SUBNETS: std::sync::OnceLock<RwLock<Vec<(std::net::Ipv4Addr, u8)>>> =
+    std::sync::OnceLock::new();
+
+fn protected_workload_subnets() -> &'static RwLock<Vec<(std::net::Ipv4Addr, u8)>> {
+    PROTECTED_WORKLOAD_SUBNETS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Parse an IPv4 CIDR "a.b.c.d/prefix" into (network, prefix). None on garbage,
+/// a missing prefix, or a /0 — we must never whitelist the entire internet.
+fn parse_workload_cidr(cidr: &str) -> Option<(std::net::Ipv4Addr, u8)> {
+    let (ip_s, pfx_s) = cidr.split_once('/')?;
+    let ip: std::net::Ipv4Addr = ip_s.trim().parse().ok()?;
+    let prefix: u8 = pfx_s.trim().parse().ok()?;
+    if prefix == 0 || prefix > 32 { return None; }
+    Some((ip, prefix))
+}
+
+/// Replace the set of locally-managed container/workload subnets (Docker/LXC/
+/// libvirt bridges) whose IPs must never be kernel-blocked. CIDR strings come
+/// from `collect_workload_subnets()`.
+pub fn set_protected_workload_subnets(cidrs: Vec<String>) {
+    let parsed: Vec<(std::net::Ipv4Addr, u8)> =
+        cidrs.iter().filter_map(|c| parse_workload_cidr(c)).collect();
+    if let Ok(mut g) = protected_workload_subnets().write() {
+        *g = parsed;
+    }
+}
+
+/// True if `ip` falls inside a protected workload subnet.
+pub fn is_protected_workload_ip(ip: std::net::Ipv4Addr) -> bool {
+    let g = match protected_workload_subnets().read() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let ip_u = u32::from(ip);
+    g.iter().any(|&(net, prefix)| {
+        // prefix is 1..=32 (parse_workload_cidr rejects 0 and >32), shift is safe.
+        let mask = u32::MAX << (32 - prefix as u32);
+        (ip_u & mask) == (u32::from(net) & mask)
+    })
+}
+
 /// Add a kernel DROP rule for `ip` (v4 or v6). Idempotent — uses
 /// iptables -C to check before adding. Silent when iptables is missing
 /// (the HTTP-level Forbidden fallback still applies).
@@ -1238,16 +1290,21 @@ pub fn kernel_block_ip(ip: &str) {
             return;
         }
     };
-    // Universal cluster-node guard. Every block path (brute-force, scan,
-    // propagated) funnels through here, so this single check stops a WolfStack
-    // node ever DROP'ing a peer's traffic. Record the refusal so the operator
-    // sees a red banner / alert about the misfire. (klasSponsor 2026-06-08.)
-    if is_protected_node_ip(ip) {
+    // Universal guard: never DROP a WolfStack-managed address. Every block path
+    // (brute-force, scan, propagated) funnels through here, so this one check
+    // covers them all — cluster-node IPs AND the host's own container/workload
+    // bridges, so a container that trips auth detection can't get its own traffic
+    // firewalled. Record the refusal so the Security UI shows a banner / alert.
+    // (klasSponsor 2026-06-08.)
+    let protected = is_protected_node_ip(ip)
+        || matches!(target, std::net::IpAddr::V4(v4) if is_protected_workload_ip(v4));
+    if protected {
         record_protected_block(ip);
         tracing::error!(
-            "auth: REFUSED kernel-block of {} — it is a WolfStack cluster node \
-             (auto-whitelisted). A security trigger tried to ban a peer; check \
-             the Security page for the misconfiguration.",
+            "auth: REFUSED kernel-block of {} — it is a WolfStack-managed address \
+             (a cluster node or a local container bridge), auto-whitelisted. A \
+             security trigger tried to firewall your own infrastructure; check the \
+             Security page (a compromised container should be stopped, not blocked).",
             ip
         );
         return;
@@ -1781,5 +1838,27 @@ mod protected_node_tests {
         record_protected_block("10.9.9.2");
         assert_eq!(before, recent_protected_block_events().len(),
             "a rapid repeat of the same IP must coalesce, not append");
+    }
+
+    #[test]
+    fn workload_subnet_protection_matches_only_container_ranges() {
+        // CIDRs exactly as collect_workload_subnets() returns them.
+        set_protected_workload_subnets(vec![
+            "172.17.0.0/16".into(), // docker0
+            "10.0.3.0/24".into(),   // lxcbr0
+            "garbage".into(),       // dropped (unparseable)
+            "0.0.0.0/0".into(),     // dropped — must NEVER whitelist the whole internet
+        ]);
+        // Container IPs inside the bridges are protected.
+        assert!(is_protected_workload_ip("172.17.0.5".parse().unwrap()));
+        assert!(is_protected_workload_ip("172.17.255.254".parse().unwrap()));
+        assert!(is_protected_workload_ip("10.0.3.42".parse().unwrap()));
+        // Everything outside is NOT — including the adjacent /24, an unrelated
+        // LAN, and any public IP (the /0 was dropped, so this must be false).
+        assert!(!is_protected_workload_ip("10.0.4.1".parse().unwrap()));
+        assert!(!is_protected_workload_ip("192.168.1.1".parse().unwrap()));
+        assert!(!is_protected_workload_ip("8.8.8.8".parse().unwrap()));
+        // Clear it so we don't leak protection into other tests sharing the global.
+        set_protected_workload_subnets(vec![]);
     }
 }

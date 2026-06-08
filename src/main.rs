@@ -848,6 +848,12 @@ async fn main() -> std::io::Result<()> {
                 let mut last_alerted_id: u64 = 0;
                 loop {
                     tick.tick().await;
+                    // Also exempt this host's own container/workload bridges
+                    // (docker0/br-*/lxcbr*/virbr*) so the auto-block never
+                    // firewalls a local container (klasSponsor 2026-06-08).
+                    crate::auth::set_protected_workload_subnets(
+                        crate::networking::collect_workload_subnets(),
+                    );
                     let newly = crate::auth::set_protected_node_ips(cluster.wolfstack_node_ips());
                     // Heal a pre-existing bad ban (the one klas hit before this
                     // shipped). One-shot per newly-protected IP; iptables -D is a

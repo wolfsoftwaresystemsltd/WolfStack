@@ -4346,8 +4346,8 @@ async function checkClusterBlockEvents() {
     const ipList = [...new Set(events.filter(e => e.id > _cnbDismissedId).map(e => e.ip))];
     const ips = ipList.slice(0, 3).map(escapeHtml).join(', ') + (ipList.length > 3 ? ` +${ipList.length - 3} more` : '');
     b.innerHTML =
-        '<span>⚠ A security trigger tried to block WolfStack cluster node IP(s) <strong>' + ips + '</strong> — '
-        + 'auto-whitelisted &amp; refused. A node may be tripping brute-force/scan detection against a peer. '
+        '<span>⚠ A security trigger tried to block a WolfStack-managed IP <strong>' + ips + '</strong> — '
+        + 'auto-whitelisted &amp; refused (these are cluster nodes or local container bridges). Something may be tripping brute-force/scan detection against your own infrastructure. '
         + '<a href="#" onclick="selectView(\'fleet-security\');dismissClusterBlockBanner(' + newest.id + ');return false;" '
         + 'style="color:#fff;text-decoration:underline;">Open Fleet Security</a></span>'
         + '<button onclick="dismissClusterBlockBanner(' + newest.id + ')" aria-label="Dismiss" '

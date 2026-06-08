@@ -23630,6 +23630,14 @@ fn generate_jail_local(cluster_ips: &[String]) -> String {
             ignore_entries.push(ip.clone());
         }
     }
+    // Also whitelist the host's own container/workload bridges (Docker/LXC/
+    // libvirt) so fail2ban never bans a local container that hit the sshd jail
+    // (klasSponsor 2026-06-08). These are valid CIDR ignoreip entries.
+    for cidr in crate::networking::collect_workload_subnets() {
+        if !ignore_entries.iter().any(|e| e == &cidr) {
+            ignore_entries.push(cidr);
+        }
+    }
     let ignoreip = ignore_entries.join(" ");
 
     let mut config = format!(
