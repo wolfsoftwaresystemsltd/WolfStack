@@ -19832,6 +19832,11 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
             name: cp.name || (live ? live.hostname : '—'),
             ip: cp.ip,
             endpoint: (live ? live.endpoint : cp.endpoint) || '',
+            // The endpoint as stored in config.toml (NOT the live/roaming-learned
+            // one) — this is what the Edit modal pre-fills, so editing operates on
+            // the persisted value rather than silently pinning a learned address.
+            config_endpoint: cp.endpoint || '',
+            in_config: true,
             connected: live ? live.connected : cp.connected,
             last_seen_secs: live ? live.last_seen_secs : null,
             rx_bytes: live ? live.rx_bytes : 0,
@@ -19842,13 +19847,17 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
         };
     });
 
-    // Also add any live peers not in config (discovered via PEX)
+    // Also add any live peers not in config (discovered via PEX). These are
+    // NOT in config.toml, so they aren't editable in place — Edit operates on
+    // configured peers only (the backend rejects an unknown name).
     for (const lp of livePeers) {
         if (!mergedPeers.find(mp => mp.ip === lp.address)) {
             mergedPeers.push({
                 name: lp.hostname || 'discovered',
                 ip: lp.address,
                 endpoint: lp.endpoint || '',
+                config_endpoint: '',
+                in_config: false,
                 connected: lp.connected,
                 last_seen_secs: lp.last_seen_secs,
                 rx_bytes: lp.rx_bytes || 0,
@@ -19859,6 +19868,9 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
             });
         }
     }
+    // Stash for the Edit handler so it can look a peer up by name without
+    // fragile onclick-string quoting of every field.
+    window._wolfnetMergedPeers = mergedPeers;
 
     const connectedCount = mergedPeers.filter(p => p.connected).length;
     if (connectedEl) connectedEl.textContent = connectedCount;
@@ -19873,7 +19885,7 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
             if (empty) empty.style.display = 'block';
         } else {
             if (empty) empty.style.display = 'none';
-            table.innerHTML = mergedPeers.map(p => {
+            table.innerHTML = mergedPeers.map((p, idx) => {
                 const statusBadge = p.connected
                     ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;">● Connected</span>'
                     : p.relay_via
@@ -19901,7 +19913,8 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
                     <td>${traffic}</td>
                     <td>
                         <div style="display:flex; gap:4px;">
-                            <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer('${escapeHtml(p.name)}')" style="font-size:11px; padding:3px 8px;" title="Remove peer"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
+                            ${p.in_config ? `<button class="btn btn-sm" onclick="editWolfNetPeer(${idx})" style="font-size:11px; padding:3px 8px;" title="Edit peer"><span class="ws-icon-clean-wrap" data-icon="edit"></span></button>` : ''}
+                            <button class="btn btn-sm btn-danger" onclick="removeWolfNetPeer(${idx})" style="font-size:11px; padding:3px 8px;" title="Remove peer"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                         </div>
                     </td>
                 </tr>
@@ -20079,7 +20092,13 @@ function copyJoinConfig() {
     }
 }
 
-async function removeWolfNetPeer(name) {
+async function removeWolfNetPeer(idx) {
+    // Looked up by row index into the stashed list (see editWolfNetPeer) so the
+    // onclick carries no name string to break on apostrophes.
+    const peers = window._wolfnetMergedPeers || [];
+    const p = peers[idx];
+    if (!p) { showModal('Could not find that peer. Refresh and try again.'); return; }
+    const name = p.name;
     if (!(await showConfirm(`Remove peer "${name}"? WolfNet will be restarted.`))) return;
     try {
         const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {
@@ -20093,6 +20112,68 @@ async function removeWolfNetPeer(name) {
         setTimeout(loadWolfNet, 2000);
     } catch (e) {
         showModal('Error: ' + e.message);
+    }
+}
+
+// Open the Edit modal for a configured peer, looked up by ROW INDEX into the
+// stashed merged-peer list — passing an index (not the name string) keeps the
+// onclick free of any quoting hazard from names containing apostrophes etc.
+function editWolfNetPeer(idx) {
+    const peers = window._wolfnetMergedPeers || [];
+    const p = peers[idx];
+    if (!p || !p.in_config) {
+        showModal('Could not find that peer to edit. Refresh and try again.');
+        return;
+    }
+    document.getElementById('edit-peer-old-name').value = p.name;
+    document.getElementById('edit-peer-name').value = p.name;
+    document.getElementById('edit-peer-ip').value = (p.ip || '').split('/')[0];
+    // Pre-fill the CONFIG endpoint (the persisted value), not the live/roaming
+    // one, so editing operates on what's actually written to config.toml.
+    document.getElementById('edit-peer-endpoint').value = p.config_endpoint || '';
+    document.getElementById('edit-peer-public-key').value = '';
+    const err = document.getElementById('edit-peer-error');
+    if (err) { err.style.display = 'none'; err.textContent = ''; }
+    document.getElementById('edit-peer-modal').classList.add('active');
+}
+
+function closeEditPeerModal() {
+    document.getElementById('edit-peer-modal').classList.remove('active');
+}
+
+async function submitEditWolfNetPeer() {
+    const old_name = document.getElementById('edit-peer-old-name').value;
+    const name = document.getElementById('edit-peer-name').value.trim();
+    const ip = document.getElementById('edit-peer-ip').value.trim();
+    const endpoint = document.getElementById('edit-peer-endpoint').value.trim();
+    const public_key = document.getElementById('edit-peer-public-key').value.trim();
+    const errEl = document.getElementById('edit-peer-error');
+    const showErr = (msg) => {
+        if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+        else showModal(msg);
+    };
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+    if (!name) { showErr('Please enter a peer name'); return; }
+    if (!ip) { showErr('Please enter the peer\'s WolfNet IP address'); return; }
+
+    // WYSIWYG: endpoint and public_key are sent as-is. The backend clears the
+    // endpoint when it's empty (auto-discovery) and keeps the current key when
+    // public_key is empty.
+    const body = { old_name, name, ip, endpoint, public_key };
+    try {
+        const resp = await fetch(apiUrl('/api/networking/wolfnet/peers'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to update peer');
+        closeEditPeerModal();
+        showToast(data.message || 'Peer updated', 'success');
+        setTimeout(loadWolfNet, 2000);
+    } catch (e) {
+        showErr('Error: ' + e.message);
     }
 }
 

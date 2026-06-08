@@ -29,6 +29,18 @@
     --bg-card: #1a1f35;
     --bg-card-hover: #1f2545;
     --bg-input: #0d1225;
+    /* `--bg-tertiary` is an elevated-surface alias for `--bg-card-hover`.
+       Inline styles (~280 of them — AI chat bubbles, code blocks, badges)
+       reference `var(--bg-tertiary, #252540)`, but --bg-tertiary is only
+       defined in the obe1/glass/trek themes. Everywhere else the dark #252540
+       fallback won, so on the light/arctic/fruit themes these panels rendered
+       as a dark box — dark-on-dark with --text-primary text (Gary KO4BSR,
+       2026-06-07: AI welcome bubble = "black box with blue letters"). Aliasing
+       to --bg-card-hover gives a near-identical dark surface on dark themes
+       (it's #1f2545, ~the old #252540) but a light, panel-distinct surface on
+       the light themes. data-theme lives on :root so it re-resolves per theme;
+       bat/glass/trek keep their explicit --bg-tertiary (override wins). */
+    --bg-tertiary: var(--bg-card-hover);
     --border: #1e2a4a;
     --border-light: #2a3660;
     --text-primary: #e8ecf4;

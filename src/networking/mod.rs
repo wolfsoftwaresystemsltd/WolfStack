@@ -1054,6 +1054,38 @@ pub fn decide_peer_endpoint(
     PeerEndpoint::Set(format!("{}:{}", pip, peer_port))
 }
 
+/// Subnets this node is directly attached to via a NON-WolfNet interface.
+/// An endpoint inside one of these is reachable on-link, even when the cluster
+/// classifies this node's own address as public. The WolfNet overlay is
+/// excluded — a match there would be the routing loop that `decide_peer_endpoint`
+/// guard #2 exists to prevent. One `list_interfaces()` call; the caller computes
+/// this once per reconcile pass and reuses it.
+fn local_lan_subnets(self_wolfnet_subnet: Option<(std::net::Ipv4Addr, u8)>) -> Vec<(std::net::Ipv4Addr, u8)> {
+    let mut out = Vec::new();
+    for iface in list_interfaces() {
+        for addr in &iface.addresses {
+            if addr.family != "inet" || addr.scope != "global" { continue; }
+            let ip = match addr.address.parse::<std::net::Ipv4Addr>() {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            if let Some((wn_net, wn_prefix)) = self_wolfnet_subnet
+                && is_in_subnet(ip, wn_net, wn_prefix)
+            {
+                continue;
+            }
+            out.push((ip, addr.prefix as u8));
+        }
+    }
+    out
+}
+
+/// True if `target` sits on one of `subnets` — i.e. reachable on-link from
+/// this node without routing through the overlay.
+fn is_on_link(target: std::net::Ipv4Addr, subnets: &[(std::net::Ipv4Addr, u8)]) -> bool {
+    subnets.iter().any(|&(net, prefix)| is_in_subnet(target, net, prefix))
+}
+
 /// Add or update a peer in WolfNet config (upsert).
 /// If a peer with the same name, public key, or allowed IP already exists,
 /// its name is updated and the endpoint is handled per `endpoint` (see
@@ -1251,6 +1283,137 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
     Ok(result_msg)
 }
 
+/// Edit an existing WolfNet peer, located by its current name.
+///
+/// Unlike `add_wolfnet_peer` (an upsert whose "empty endpoint = preserve"
+/// rule protects scripted callers), edit is WYSIWYG — the operator submits the
+/// full desired state from the Edit modal, so `PeerEndpoint::Clear` means "the
+/// endpoint field was emptied, make this peer roaming/auto-discovery" and
+/// `PeerEndpoint::Set` pins it. `public_key` is changed only when a non-empty
+/// value is supplied (blank = keep current) so a name/IP/endpoint correction
+/// doesn't force the operator to re-paste the key.
+///
+/// Returns Err if no peer matches `old_name`: edit operates on *configured*
+/// peers. Pinning a PEX-discovered/relay peer is done via Add (it needs the
+/// peer's key, which a relay entry doesn't carry locally).
+pub fn edit_wolfnet_peer(
+    old_name: &str,
+    new_name: &str,
+    ip: &str,
+    endpoint: PeerEndpoint,
+    public_key: Option<&str>,
+) -> Result<String, String> {
+    // Same lock as add/remove/reconcile — the whole read-modify-write-reload
+    // cycle is serialised so a racing reconcile can't clobber the edit.
+    let _guard = WOLFNET_CONFIG_WRITE_LOCK.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Normalise to a BARE address — WolfNet rejects a CIDR suffix on allowed_ip
+    // (same reason as add_wolfnet_peer).
+    let ip = ip.split('/').next().unwrap_or(ip);
+    let config_path = "/etc/wolfnet/config.toml";
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read config: {}", e))?;
+
+    // Fix any legacy `ip = ` entries to `allowed_ip = ` before parsing.
+    let fixed: String = content.lines().map(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with("ip = ") && !trimmed.starts_with("ip_") {
+            line.replace("ip = ", "allowed_ip = ")
+        } else {
+            line.to_string()
+        }
+    }).collect::<Vec<_>>().join("\n");
+
+    let mut doc: toml::Value = toml::from_str(&fixed)
+        .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    // Self-peer guard: never let an edit point a peer at this node's own
+    // WolfNet address — WolfNet logs such an entry as "Invalid peer IP" forever
+    // (mirrors add_wolfnet_peer). Computed before the mutable borrow below.
+    let self_wn_ip = doc.get("network")
+        .and_then(|n| n.get("address"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok());
+    if !ip.is_empty()
+        && self_wn_ip.is_some()
+        && ip.parse::<std::net::Ipv4Addr>().ok() == self_wn_ip
+    {
+        return Err(format!(
+            "Refusing to set peer '{}' to {}: that is this node's own WolfNet \
+             address (self-peer)", new_name, ip));
+    }
+
+    // Locate the peer by its CURRENT name.
+    let idx = doc.get("peers")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.iter().position(|p| {
+            p.get("name").and_then(|v| v.as_str()) == Some(old_name)
+        }));
+    let idx = match idx {
+        Some(i) => i,
+        None => return Err(format!(
+            "Peer '{}' not found in WolfNet config (a discovered/relay peer is \
+             pinned via Add, not Edit)", old_name)),
+    };
+
+    let peers_arr = doc.get_mut("peers").unwrap().as_array_mut().unwrap();
+    let peer = peers_arr[idx].as_table_mut()
+        .ok_or_else(|| "Malformed peer entry in config".to_string())?;
+
+    let mut cleared_endpoint = false;
+
+    peer.insert("name".to_string(), toml::Value::String(new_name.to_string()));
+
+    // allowed_ip — only when provided; an empty ip means "leave as-is".
+    if !ip.is_empty() {
+        peer.insert("allowed_ip".to_string(), toml::Value::String(ip.to_string()));
+        peer.remove("ip"); // drop any legacy key that could shadow it
+    }
+
+    // public_key — only overwrite when a non-empty value is supplied.
+    if let Some(pk) = public_key.filter(|s| !s.is_empty()) {
+        peer.insert("public_key".to_string(), toml::Value::String(pk.to_string()));
+    }
+
+    // endpoint — WYSIWYG.
+    match &endpoint {
+        PeerEndpoint::Set(s) if !s.is_empty() => {
+            peer.insert("endpoint".to_string(), toml::Value::String(s.clone()));
+        }
+        PeerEndpoint::Clear => {
+            if peer.remove("endpoint").is_some() {
+                cleared_endpoint = true;
+            }
+        }
+        // Set("") / Preserve: leave the endpoint untouched.
+        PeerEndpoint::Set(_) | PeerEndpoint::Preserve => {}
+    }
+
+    // A rename can strand a tombstone under either name and make the endpoint
+    // reconciler skip the peer — clear both so an explicit edit always wins.
+    if new_name != old_name {
+        let _ = wolfnet_tombstone_remove(old_name);
+    }
+    let _ = wolfnet_tombstone_remove(new_name);
+
+    let output = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    write_wolfnet_config_atomic(&output)?;
+
+    // Clearing an endpoint needs a cold restart on pre-0.5.22 daemons whose
+    // SIGHUP handler leaves a stale in-memory endpoint when the config line
+    // vanishes (same rationale as add_wolfnet_peer's cleared branch).
+    if cleared_endpoint {
+        restart_wolfnet();
+    } else {
+        reload_or_restart_wolfnet();
+    }
+
+    Ok(format!("Peer '{}' updated and WolfNet {}", new_name,
+        if cleared_endpoint { "restarted" } else { "reloaded" }))
+}
+
 /// Auto-fix a single peer's endpoint in the local wolfnet config if it
 /// matches a known-bad pattern that can't be reached from this node.
 /// Returns `Some(msg)` when a fix was applied, `None` when nothing
@@ -1321,6 +1484,16 @@ pub fn reconcile_local_wolfnet_endpoint_if_needed(
     let host = endpoint_host(current_endpoint)?;
     let host_ip: std::net::Ipv4Addr = host.parse().ok()?;
     if !is_private_ip(host_ip) { return None; }
+
+    // 4a. On-link guard. A dual-homed node — public in the cluster's eyes yet
+    //     also sitting on the peer's LAN — can reach an RFC1918 endpoint
+    //     directly. Never "repair" an endpoint that lives on a subnet this node
+    //     has a real (non-WolfNet) interface on. klasSponsor 2026-06-08: hemulen
+    //     (public cluster address) wiped ninni's 10.10.10.20:9620 endpoint even
+    //     though both nodes are on the same home LAN, leaving ninni unreachable.
+    if is_on_link(host_ip, &local_lan_subnets(get_local_wolfnet_subnet())) {
+        return None;
+    }
 
     // 5. Reuse the existing port (wolfnet listen ports vary per peer,
     //    e.g. 9600/9605/9630 in klas's cluster). If somehow malformed,
@@ -1426,6 +1599,9 @@ pub fn reconcile_wolfnet_peers_batch(
         .map_err(|e| format!("Failed to parse config: {}", e))?;
 
     let wn_subnet = get_local_wolfnet_subnet();
+    // Local LAN subnets, computed once for the on-link guard below (a peer
+    // endpoint we can reach directly must not be cleared as "unreachable").
+    let local_subnets = local_lan_subnets(wn_subnet);
     let tombstoned = load_wolfnet_tombstones();
     // Index targets by hostname for O(1) lookup as we walk the peers array.
     // Filter out tombstoned targets up-front so they're never considered for
@@ -1576,12 +1752,25 @@ pub fn reconcile_wolfnet_peers_batch(
                 // Preserve that conservative gate here so LAN-only clusters aren't
                 // disturbed by the batched pass.
                 if !self_priv && trigger_present {
-                    Some(decide_peer_endpoint(
+                    let d = decide_peer_endpoint(
                         self_lan_address, wn_subnet,
                         target.lan_address.as_deref(),
                         target.public_ip.as_deref(),
                         port,
-                    ))
+                    );
+                    // On-link guard (see reconcile_local_wolfnet_endpoint_if_needed):
+                    // don't clear an RFC1918 endpoint this node can reach on a
+                    // directly-attached interface. klasSponsor 2026-06-08.
+                    let reachable_on_link = current_endpoint.as_deref()
+                        .and_then(endpoint_host)
+                        .and_then(|h| h.parse::<std::net::Ipv4Addr>().ok())
+                        .map(|ip| is_on_link(ip, &local_subnets))
+                        .unwrap_or(false);
+                    if matches!(d, PeerEndpoint::Clear) && reachable_on_link {
+                        None
+                    } else {
+                        Some(d)
+                    }
                 } else {
                     None
                 }
@@ -4436,5 +4625,23 @@ mod tests {
             PeerEndpoint::Set(s) => assert_eq!(s, "185.57.4.100:9600"),
             other => panic!("expected Set, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn on_link_matches_directly_attached_subnet() {
+        // hemulen's real LAN interfaces (address form — is_in_subnet masks).
+        let subnets = [
+            ("10.10.10.30".parse().unwrap(), 24u8),
+            ("192.168.1.10".parse().unwrap(), 24u8),
+        ];
+        // ninni's LAN endpoint host sits on 10.10.10.0/24 → reachable on-link,
+        // so the reconciler must NOT clear it (klasSponsor 2026-06-08).
+        assert!(is_on_link("10.10.10.20".parse().unwrap(), &subnets));
+        assert!(is_on_link("192.168.1.50".parse().unwrap(), &subnets));
+        // Addresses on no local subnet are not on-link.
+        assert!(!is_on_link("10.10.20.5".parse().unwrap(), &subnets));
+        assert!(!is_on_link("8.8.8.8".parse().unwrap(), &subnets));
+        // No local subnets → never on-link, so the guard can't wrongly fire.
+        assert!(!is_on_link("10.10.10.20".parse().unwrap(), &[]));
     }
 }

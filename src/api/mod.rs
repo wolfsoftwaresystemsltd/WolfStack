@@ -11977,6 +11977,47 @@ pub async fn net_add_wolfnet_peer(req: HttpRequest, state: web::Data<AppState>, 
     }
 }
 
+#[derive(Deserialize)]
+pub struct WolfNetEditPeer {
+    /// The peer's CURRENT name (locates the entry to edit).
+    pub old_name: String,
+    /// New name (may equal old_name when only other fields change).
+    pub name: String,
+    /// WYSIWYG: a value pins the endpoint; empty/absent = auto-discovery (clear).
+    pub endpoint: Option<String>,
+    pub ip: Option<String>,
+    /// Empty/absent keeps the current key.
+    pub public_key: Option<String>,
+}
+
+/// PUT /api/networking/wolfnet/peers — edit an existing WolfNet peer.
+pub async fn net_edit_wolfnet_peer(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetEditPeer>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let old_name = body.old_name.clone();
+    let new_name = body.name.clone();
+    if new_name.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Peer name is required"}));
+    }
+    // Edit is WYSIWYG (see edit_wolfnet_peer): an emptied endpoint field means
+    // "make this peer auto-discovery", so empty maps to Clear (not Preserve).
+    let endpoint = match body.endpoint.as_deref() {
+        Some(s) if !s.is_empty() => networking::PeerEndpoint::Set(s.to_string()),
+        _ => networking::PeerEndpoint::Clear,
+    };
+    let ip = body.ip.clone().unwrap_or_default();
+    let public_key = body.public_key.clone();
+    // Offload the blocking config read-modify-write + wolfnet reload/restart
+    // (it shells out and sleeps) off the actix worker.
+    let result = web::block(move || {
+        networking::edit_wolfnet_peer(&old_name, &new_name, &ip, endpoint, public_key.as_deref())
+    }).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("edit task failed: {}", e)})),
+    }
+}
+
 /// GET /api/networking/wolfnet/local-info — get this node's WolfNet identity
 pub async fn net_get_wolfnet_local_info(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
@@ -34212,6 +34253,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/networking/wolfnet/config", web::get().to(net_get_wolfnet_config))
         .route("/api/networking/wolfnet/config", web::put().to(net_save_wolfnet_config))
         .route("/api/networking/wolfnet/peers", web::post().to(net_add_wolfnet_peer))
+        .route("/api/networking/wolfnet/peers", web::put().to(net_edit_wolfnet_peer))
         .route("/api/networking/wolfnet/peers", web::delete().to(net_remove_wolfnet_peer))
         .route("/api/networking/wolfnet/tombstones", web::get().to(net_wolfnet_tombstones_list))
         .route("/api/networking/wolfnet/tombstones", web::delete().to(net_wolfnet_tombstone_remove))
