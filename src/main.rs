@@ -836,6 +836,52 @@ async fn main() -> std::io::Result<()> {
         // This is what would have caught the zmap incident at minute 1.
         app_state.scan_detector.clone().start();
 
+        // Cluster-node block protection (klasSponsor 2026-06-08). Keep the auth
+        // guard's protected-IP set in sync with cluster membership so WolfStack
+        // nodes never kernel-block each other, heal any pre-existing bad ban
+        // once per newly-seen node IP, and fire an alert when a peer-block is
+        // refused (the red banner is driven by /api/security/protected-block-events).
+        {
+            let cluster = app_state.cluster.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+                let mut last_alerted_id: u64 = 0;
+                loop {
+                    tick.tick().await;
+                    let newly = crate::auth::set_protected_node_ips(cluster.wolfstack_node_ips());
+                    // Heal a pre-existing bad ban (the one klas hit before this
+                    // shipped). One-shot per newly-protected IP; iptables -D is a
+                    // sync subprocess, so off the executor.
+                    if !newly.is_empty() {
+                        tokio::task::spawn_blocking(move || {
+                            for ip in newly { crate::auth::kernel_unblock_ip(&ip); }
+                        }).await.ok();
+                    }
+                    // Alert once per new refused-block event.
+                    let events = crate::auth::recent_protected_block_events();
+                    let newest = events.last().map(|e| e.id).unwrap_or(0);
+                    if newest > last_alerted_id {
+                        let fresh = events.iter().filter(|e| e.id > last_alerted_id).count();
+                        let latest_ip = events.last().map(|e| e.ip.clone()).unwrap_or_default();
+                        last_alerted_id = newest;
+                        let extra = if fresh > 1 {
+                            format!(" (and {} other peer-block attempt(s))", fresh - 1)
+                        } else { String::new() };
+                        crate::alerting::send_local_alert(
+                            crate::alerting::AlertCategory::Posture,
+                            "Refused a block against a cluster node",
+                            &format!(
+                                "A security trigger tried to block WolfStack cluster node IP {}{} — it is \
+                                 auto-whitelisted, so the block was refused. This usually means a node \
+                                 tripped brute-force/scan detection against a peer; review the Security page.",
+                                latest_ip, extra
+                            ),
+                        ).await;
+                    }
+                }
+            });
+        }
+
         // Storage-array health watcher — every 60s, scan /proc/mdstat
         // and per-disk SMART. Fire an alert_log entry on first
         // observation of a degraded array, faulty disk, or

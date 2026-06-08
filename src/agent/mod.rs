@@ -471,6 +471,38 @@ impl ClusterState {
         }).collect()
     }
 
+    /// All WolfStack cluster-node IPs — this node plus every known wolfstack
+    /// peer's LAN `address` and any `public_ip`, sorted and deduped. Used to
+    /// auto-whitelist the cluster in the kernel-block guard and fail2ban's
+    /// `ignoreip` so nodes never ban each other (klasSponsor 2026-06-08).
+    /// proxmox-type nodes are excluded — this targets WolfStack node<->node
+    /// traffic. Validity (loopback/unspecified) filtering is left to consumers.
+    pub fn wolfstack_node_ips(&self) -> Vec<String> {
+        let mut ips: Vec<String> = Vec::new();
+        if !self.self_address.is_empty() {
+            ips.push(self.self_address.clone());
+        }
+        for n in self.get_all_nodes() {
+            if n.node_type != "wolfstack" { continue; }
+            // SECURITY: only whitelist peers that completed the authenticated
+            // join handshake (the same trust bar as purge_unverified). Gossip
+            // seeds peers as join_verified=false; without this filter a spoofed
+            // gossip entry could add an attacker's RFC1918 IP to the protected
+            // set and permanently suppress blocking for it (code review,
+            // 2026-06-08). self is always trusted.
+            if !n.join_verified && !n.is_self { continue; }
+            if !n.address.is_empty() { ips.push(n.address); }
+            if let Some(p) = n.public_ip
+                && !p.is_empty()
+            {
+                ips.push(p);
+            }
+        }
+        ips.sort();
+        ips.dedup();
+        ips
+    }
+
     /// Get a single node by either its locally-assigned cluster key
     /// (`node-{uuid}`) or its self-reported self_id (from
     /// `/etc/wolfstack/node_id` on the peer). The direct key lookup
