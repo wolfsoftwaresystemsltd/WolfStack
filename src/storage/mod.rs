@@ -1543,6 +1543,16 @@ pub fn save_provider_config(name: &str, content: &str) -> Result<String, String>
         "wolfdisk" => "/etc/wolfdisk/config.toml",
         _ => return Err(format!("Unknown provider: {}", name)),
     };
+    // Ensure the parent directory exists before writing. WolfDisk's
+    // /etc/wolfdisk is normally created by its installer, but the dashboard
+    // lets the operator save the config before/independently of the install,
+    // which failed with "Failed to write /etc/wolfdisk/config.toml: No such
+    // file or directory" (WolfDisk install report B1, 2026-06-08). create_dir_all
+    // is a no-op when the directory already exists (the other providers' /etc).
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create {}: {}", parent.display(), e))?;
+    }
     std::fs::write(path, content)
         .map_err(|e| format!("Cannot write {}: {}", path, e))?;
     // If NFS, reload exports
