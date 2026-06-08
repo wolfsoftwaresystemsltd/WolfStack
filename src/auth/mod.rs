@@ -1139,6 +1139,94 @@ fn lockouts_file() -> String {
     format!("{}/auth-active-lockouts.json", crate::paths::get().config_dir)
 }
 
+// ─── Cluster-node block protection ──────────────────────────────────────────
+// klasSponsor 2026-06-08: WolfStack nodes were kernel-blocking / fail2ban-
+// banning each OTHER's IPs (inter-node polling, a propagated block, or SSH
+// between nodes tripping the 3-strike / scan auto-block), silently breaking
+// cluster connectivity — "one node had banned another's ip". Every kernel
+// block funnels through `kernel_block_ip`, so a single guard there protects
+// all paths (brute-force, scan, AND propagated blocks). The set is refreshed
+// from cluster state every ~10s by a background task in main.rs; a refused
+// block is recorded so the Security UI can raise a red banner and an alert can
+// fire. (fail2ban bans independently — its ignoreip is handled separately.)
+static PROTECTED_NODE_IPS: std::sync::OnceLock<RwLock<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+static PROTECTED_BLOCK_EVENTS: std::sync::OnceLock<RwLock<std::collections::VecDeque<ProtectedBlockEvent>>> =
+    std::sync::OnceLock::new();
+const MAX_PROTECTED_EVENTS: usize = 50;
+
+/// A refused attempt to kernel-block a cluster-node IP. Drives the red banner.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProtectedBlockEvent {
+    /// Monotonic id so the UI / alerter can tell what's new.
+    pub id: u64,
+    pub ip: String,
+    /// Unix seconds.
+    pub at: u64,
+}
+
+fn protected_ips() -> &'static RwLock<std::collections::HashSet<String>> {
+    PROTECTED_NODE_IPS.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
+}
+fn protected_events() -> &'static RwLock<std::collections::VecDeque<ProtectedBlockEvent>> {
+    PROTECTED_BLOCK_EVENTS.get_or_init(|| RwLock::new(std::collections::VecDeque::new()))
+}
+
+/// Replace the set of cluster-node IPs that must never be kernel-blocked.
+/// Returns the IPs that are NEWLY protected since the last call, so the caller
+/// can heal any pre-existing bad ban (a one-shot unblock per IP) without
+/// shelling out to iptables every cycle. Unspecified / unparseable addresses
+/// (e.g. a node still reporting 0.0.0.0) are dropped — they'd match far too
+/// much and must never be whitelisted.
+pub fn set_protected_node_ips(ips: Vec<String>) -> Vec<String> {
+    let set: std::collections::HashSet<String> = ips.into_iter()
+        .filter(|s| {
+            s.parse::<std::net::IpAddr>()
+                .map(|ip| !ip.is_unspecified() && !ip.is_loopback())
+                .unwrap_or(false)
+        })
+        .collect();
+    let mut newly = Vec::new();
+    if let Ok(mut g) = protected_ips().write() {
+        for ip in &set {
+            if !g.contains(ip) { newly.push(ip.clone()); }
+        }
+        *g = set;
+    }
+    newly
+}
+
+/// True if `ip` is a known cluster-node address that must never be blocked.
+pub fn is_protected_node_ip(ip: &str) -> bool {
+    protected_ips().read().map(|g| g.contains(ip)).unwrap_or(false)
+}
+
+/// Record that a block was refused for a protected cluster-node IP. Coalesces
+/// a rapid repeat for the same IP so a tight propagation loop can't flood the
+/// ring (or re-alert) — it bumps the existing entry's timestamp instead.
+/// `pub` so other block paths that don't go through `kernel_block_ip` (e.g. the
+/// compromise-remediation C2 block) can surface their own refusals too.
+pub fn record_protected_block(ip: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut g) = protected_events().write() {
+        if let Some(last) = g.back_mut()
+            && last.ip == ip && now.saturating_sub(last.at) < 5
+        {
+            last.at = now;
+            return;
+        }
+        let id = g.back().map(|e| e.id + 1).unwrap_or(1);
+        g.push_back(ProtectedBlockEvent { id, ip: ip.to_string(), at: now });
+        while g.len() > MAX_PROTECTED_EVENTS { g.pop_front(); }
+    }
+}
+
+/// Recent refused blocks, oldest first. For the Security UI banner + alerter.
+pub fn recent_protected_block_events() -> Vec<ProtectedBlockEvent> {
+    protected_events().read().map(|g| g.iter().cloned().collect()).unwrap_or_default()
+}
+
 /// Add a kernel DROP rule for `ip` (v4 or v6). Idempotent — uses
 /// iptables -C to check before adding. Silent when iptables is missing
 /// (the HTTP-level Forbidden fallback still applies).
@@ -1150,6 +1238,20 @@ pub fn kernel_block_ip(ip: &str) {
             return;
         }
     };
+    // Universal cluster-node guard. Every block path (brute-force, scan,
+    // propagated) funnels through here, so this single check stops a WolfStack
+    // node ever DROP'ing a peer's traffic. Record the refusal so the operator
+    // sees a red banner / alert about the misfire. (klasSponsor 2026-06-08.)
+    if is_protected_node_ip(ip) {
+        record_protected_block(ip);
+        tracing::error!(
+            "auth: REFUSED kernel-block of {} — it is a WolfStack cluster node \
+             (auto-whitelisted). A security trigger tried to ban a peer; check \
+             the Security page for the misconfiguration.",
+            ip
+        );
+        return;
+    }
     let cmd = match target {
         std::net::IpAddr::V4(_) => "iptables",
         std::net::IpAddr::V6(_) => "ip6tables",
@@ -1624,5 +1726,60 @@ mod lockout_tests {
         assert!(l.force_lockout("5.5.5.5", "auto", "first"));
         assert!(!l.force_lockout("5.5.5.5", "auto", "second"),
             "second force_lockout while still locked must return false");
+    }
+}
+
+#[cfg(test)]
+mod protected_node_tests {
+    use super::*;
+
+    // These touch process-global statics, but no other test exercises them, so
+    // the sequences below are deterministic within the test binary.
+
+    #[test]
+    fn protected_ip_set_filters_and_diffs() {
+        // Valid IPs are kept; loopback / unspecified / garbage are dropped —
+        // protecting those would whitelist far too much.
+        let newly = set_protected_node_ips(vec![
+            "10.0.0.1".into(),
+            "127.0.0.1".into(),   // loopback
+            "0.0.0.0".into(),     // unspecified
+            "not-an-ip".into(),   // garbage
+            "192.168.1.5".into(),
+        ]);
+        assert!(is_protected_node_ip("10.0.0.1"));
+        assert!(is_protected_node_ip("192.168.1.5"));
+        assert!(!is_protected_node_ip("127.0.0.1"), "loopback must never be protected");
+        assert!(!is_protected_node_ip("0.0.0.0"), "unspecified must never be protected");
+        assert!(!is_protected_node_ip("8.8.8.8"));
+        // First set → both valid IPs are newly protected (drives the one-shot heal).
+        assert!(newly.contains(&"10.0.0.1".to_string()));
+        assert!(newly.contains(&"192.168.1.5".to_string()));
+        assert_eq!(newly.len(), 2);
+
+        // Re-asserting the same set reports nothing new (no repeat heal churn).
+        assert!(set_protected_node_ips(vec!["10.0.0.1".into(), "192.168.1.5".into()]).is_empty());
+
+        // Dropping an IP from the set un-protects it.
+        let _ = set_protected_node_ips(vec!["10.0.0.1".into()]);
+        assert!(is_protected_node_ip("10.0.0.1"));
+        assert!(!is_protected_node_ip("192.168.1.5"), "dropped IP must no longer be protected");
+    }
+
+    #[test]
+    fn protected_block_events_record_and_coalesce() {
+        record_protected_block("10.9.9.1");
+        record_protected_block("10.9.9.2");
+        let ev = recent_protected_block_events();
+        assert!(ev.iter().any(|e| e.ip == "10.9.9.1"));
+        assert!(ev.iter().any(|e| e.ip == "10.9.9.2"));
+        // Event ids are monotonic.
+        let ids: Vec<u64> = ev.iter().map(|e| e.id).collect();
+        for w in ids.windows(2) { assert!(w[1] > w[0], "event ids must be monotonic"); }
+        // A rapid repeat of the most-recent IP coalesces — no new ring entry.
+        let before = recent_protected_block_events().len();
+        record_protected_block("10.9.9.2");
+        assert_eq!(before, recent_protected_block_events().len(),
+            "a rapid repeat of the same IP must coalesce, not append");
     }
 }

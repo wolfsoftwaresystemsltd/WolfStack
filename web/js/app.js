@@ -825,17 +825,71 @@ function toggleDcCompact(checked) {
 function handleBgUpload(input) {
     const file = input.files[0];
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) {
-        showModal('Image too large', 'Please use an image under 2MB.');
+    if (file.type && !/^image\//.test(file.type)) {
+        showModal('Not an image', 'Please choose an image file.');
         return;
     }
     const reader = new FileReader();
+    reader.onerror = () => showModal('Could not read image', 'That file could not be read — try another.');
     reader.onload = (e) => {
-        dcBgImage = e.target.result;
-        savePref('wolfstack_dc_bg_image', dcBgImage);
-        applyDcBackground();
+        const dataUrl = e.target.result;
+        if (typeof dataUrl !== 'string') return;
+        // Accept ANY size (user req 2026-06-08 — no more "image too large" nag).
+        // Small images are stored verbatim (keeps PNG quality / transparency);
+        // larger ones are auto-downscaled to fit so the data-URL stays under the
+        // ~5MB localStorage quota. ~2.6MB stores comfortably.
+        const STORE_BUDGET = 2600000;
+        if (dataUrl.length <= STORE_BUDGET) {
+            setDcBackgroundImage(dataUrl);
+            return;
+        }
+        const img = new Image();
+        img.onerror = () => showModal('Could not load image', 'That image could not be decoded — try a different file.');
+        img.onload = () => setDcBackgroundImage(downscaleImageToFit(img, STORE_BUDGET) || dataUrl);
+        img.src = dataUrl;
     };
     reader.readAsDataURL(file);
+}
+
+// Apply + persist a dashboard background data-URL. A persistence failure
+// (localStorage quota) degrades gracefully to a session-only background with a
+// gentle notice — never the old hard rejection.
+function setDcBackgroundImage(dataUrl) {
+    dcBgImage = dataUrl;
+    let saved = true;
+    try {
+        savePref('wolfstack_dc_bg_image', dcBgImage);
+    } catch (e) {
+        saved = false;
+    }
+    applyDcBackground();
+    if (!saved && typeof showToast === 'function') {
+        showToast('Background applied (too large to save between sessions)', 'warning', 6000);
+    }
+}
+
+// Downscale `img` to a JPEG data-URL no larger than `maxBytes` (string length),
+// stepping down the max dimension then quality until it fits. Returns null only
+// if even the smallest attempt can't fit (extremely unlikely for a background).
+function downscaleImageToFit(img, maxBytes) {
+    const maxDims = [2560, 1920, 1600, 1280, 1024, 800];
+    const qualities = [0.85, 0.75, 0.65, 0.55];
+    for (const maxDim of maxDims) {
+        const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+        const w = Math.max(1, Math.round((img.width || maxDim) * scale));
+        const h = Math.max(1, Math.round((img.height || maxDim) * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        ctx.drawImage(img, 0, 0, w, h);
+        for (const q of qualities) {
+            let url;
+            try { url = canvas.toDataURL('image/jpeg', q); } catch (e) { return null; }
+            if (url && url.length <= maxBytes) return url;
+        }
+    }
+    return null;
 }
 
 function clearBgImage() {
@@ -4246,6 +4300,67 @@ function startConnectionMonitor() {
     window.addEventListener('online', connHeartbeat);
 }
 document.addEventListener('DOMContentLoaded', startConnectionMonitor);
+
+// ─── Cluster-node-block banner ───────────────────────────────────────────────
+// klasSponsor 2026-06-08: warn loudly when a WolfStack node tried to ban a
+// cluster peer's IP (it's auto-whitelisted so the block was refused, but it
+// signals a misconfig that could break connectivity). Backed by
+// /api/security/protected-block-events; dismissible per newest event id.
+let _cnbDismissedId = 0;
+let _cnbTimer = null;
+
+function ensureClusterBlockBanner() {
+    let b = document.getElementById('cluster-block-banner');
+    if (b) return b;
+    b = document.createElement('div');
+    b.id = 'cluster-block-banner';
+    b.setAttribute('role', 'alert');
+    b.setAttribute('aria-live', 'assertive');
+    // Theme-independent white-on-red (~6.4:1, WCAG AA), fixed top bar.
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483644;display:none;'
+        + 'padding:11px 44px 11px 16px;text-align:center;font-size:13px;font-weight:600;'
+        + 'background:#b91c1c;color:#ffffff;box-shadow:0 2px 12px rgba(0,0,0,0.4);';
+    document.body.appendChild(b);
+    return b;
+}
+
+function dismissClusterBlockBanner(id) {
+    _cnbDismissedId = id;
+    const b = document.getElementById('cluster-block-banner');
+    if (b) b.style.display = 'none';
+}
+
+async function checkClusterBlockEvents() {
+    let data;
+    try {
+        // BARE path — probe the LOCAL backend the user is connected to.
+        const resp = await fetch('/api/security/protected-block-events', { cache: 'no-store' });
+        if (!resp.ok) return;          // old binary (404) / transient — leave banner as-is
+        data = await resp.json();
+    } catch (e) { return; }
+    const events = (data && data.events) || [];
+    const b = ensureClusterBlockBanner();
+    if (events.length === 0) { b.style.display = 'none'; return; }
+    const newest = events[events.length - 1];
+    if (!newest || newest.id <= _cnbDismissedId) { b.style.display = 'none'; return; }
+    const ipList = [...new Set(events.filter(e => e.id > _cnbDismissedId).map(e => e.ip))];
+    const ips = ipList.slice(0, 3).map(escapeHtml).join(', ') + (ipList.length > 3 ? ` +${ipList.length - 3} more` : '');
+    b.innerHTML =
+        '<span>⚠ A security trigger tried to block WolfStack cluster node IP(s) <strong>' + ips + '</strong> — '
+        + 'auto-whitelisted &amp; refused. A node may be tripping brute-force/scan detection against a peer. '
+        + '<a href="#" onclick="selectView(\'fleet-security\');dismissClusterBlockBanner(' + newest.id + ');return false;" '
+        + 'style="color:#fff;text-decoration:underline;">Open Fleet Security</a></span>'
+        + '<button onclick="dismissClusterBlockBanner(' + newest.id + ')" aria-label="Dismiss" '
+        + 'style="position:absolute;right:10px;top:7px;background:transparent;border:none;color:#fff;font-size:18px;cursor:pointer;line-height:1;">×</button>';
+    b.style.display = 'block';
+}
+
+function startClusterBlockMonitor() {
+    if (_cnbTimer) return;
+    checkClusterBlockEvents();
+    _cnbTimer = setInterval(checkClusterBlockEvents, 60000);
+}
+document.addEventListener('DOMContentLoaded', startClusterBlockMonitor);
 
 // ─── Metrics Polling ───
 async function fetchMetrics() {
