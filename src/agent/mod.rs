@@ -233,6 +233,17 @@ pub struct Node {
     /// configs and older peers (gossip stays compatible).
     #[serde(default)]
     pub site: Option<String>,
+    /// Operator-set friendly DISPLAY NAME, distinct from the OS `hostname`.
+    /// Persisted on the OWNING node (`self_display_name.json`), carried in
+    /// its StatusReport, and authoritative on merge — exactly like `site`.
+    /// The UI shows `display_name` when set, else falls back to `hostname`.
+    /// Keeping it separate from `hostname` is what stops a rename from being
+    /// clobbered by the node's self-reported OS hostname every poll.
+    ///
+    /// Backward-compat: missing for older configs and older peers (gossip
+    /// stays compatible); `None` means "no override, show the hostname".
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -260,6 +271,7 @@ impl ClusterState {
     fn deleted_file() -> String { crate::paths::get().deleted_nodes_config }
     fn self_cluster_file() -> String { crate::paths::get().self_cluster_config }
     fn self_site_file() -> String { crate::paths::get().self_site_config }
+    fn self_display_name_file() -> String { crate::paths::get().self_display_name_config }
     const SELF_LOGIN_DISABLED_FILE: &'static str = "/etc/wolfstack/login_disabled";
 
     pub fn new(self_id: String, self_address: String, port: u16) -> Self {
@@ -402,6 +414,12 @@ impl ClusterState {
         let prev_site = nodes.get(&self.self_id)
             .and_then(|n| n.site.clone())
             .or_else(Self::load_self_site);
+        // Display name follows the same in-memory-then-disk re-assertion as
+        // site, so this node's StatusReport keeps carrying the operator's
+        // chosen name and it never reverts to the OS hostname.
+        let prev_display_name = nodes.get(&self.self_id)
+            .and_then(|n| n.display_name.clone())
+            .or_else(Self::load_self_display_name);
         nodes.insert(self.self_id.clone(), Node {
             id: self.self_id.clone(),
             hostname: metrics.hostname.clone(),
@@ -439,6 +457,7 @@ impl ClusterState {
             // gossip to detect missing subnet_routes.
             workload_subnets: crate::networking::collect_workload_subnets(),
             site: prev_site,
+            display_name: prev_display_name,
         });
     }
 
@@ -600,6 +619,9 @@ impl ClusterState {
             // each peer's own declared site). Until then we don't know
             // it; effective_site() will auto-derive from the address.
             site: None,
+            // Display name likewise arrives on the first poll from the
+            // peer's own self-report.
+            display_name: None,
         });
         drop(nodes);
         self.save_nodes();
@@ -980,7 +1002,8 @@ impl ProxmoxCleanupNotice {
 impl ClusterState {
 
     /// Update node settings (hostname, address, port, token, fingerprint, cluster name, site)
-    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>, site: Option<String>) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>, site: Option<String>, display_name: Option<String>) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         if let Some(node) = nodes.get_mut(id) {
             if let Some(h) = hostname { node.hostname = h; }
@@ -996,6 +1019,13 @@ impl ClusterState {
                 // non-empty is the operator's chosen label.
                 node.site = if s.is_empty() { None } else { Some(s.clone()) };
             }
+            if let Some(dn) = display_name.as_ref() {
+                // Empty string clears the override (UI falls back to the OS
+                // hostname); non-empty is the operator's chosen name. A `None`
+                // arg means "leave untouched" — which is exactly what makes
+                // gossip mirroring safe (an older peer's None never clears it).
+                node.display_name = if dn.is_empty() { None } else { Some(dn.clone()) };
+            }
             if let Some(ref name) = cluster_name {
                 // Update both cluster_name fields so sidebar grouping works
                 node.cluster_name = Some(name.clone());
@@ -1007,6 +1037,7 @@ impl ClusterState {
             let is_self = node.is_self;
             let final_cluster = node.cluster_name.clone();
             let final_site = node.site.clone();
+            let final_display_name = node.display_name.clone();
             drop(nodes);
             self.save_nodes();
             if is_self {
@@ -1018,6 +1049,10 @@ impl ClusterState {
                 // and login_disabled).
                 if site.is_some() {
                     Self::save_self_site(final_site.as_deref().unwrap_or(""));
+                }
+                // Persist display name for self node (save_nodes skips self).
+                if display_name.is_some() {
+                    Self::save_self_display_name(final_display_name.as_deref().unwrap_or(""));
                 }
                 // Persist login_disabled for self node (since save_nodes skips self)
                 if let Some(disabled) = login_disabled {
@@ -1089,6 +1124,39 @@ impl ClusterState {
         }
     }
 
+    /// Load persisted self display name from disk. Same path/format as the
+    /// site tag. `None` for missing/empty/malformed — UI then shows the
+    /// hostname.
+    fn load_self_display_name() -> Option<String> {
+        if let Ok(data) = std::fs::read_to_string(Self::self_display_name_file()) {
+            if let Ok(name) = serde_json::from_str::<String>(&data) {
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+        None
+    }
+
+    /// Persist self display name to disk (survives reinstalls). Empty string
+    /// clears the file so the operator can drop the override and fall back to
+    /// the OS hostname.
+    pub fn save_self_display_name(name: &str) {
+        let path = Self::self_display_name_file();
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if name.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        if let Ok(json) = serde_json::to_string(name) {
+            if let Err(e) = std::fs::write(&path, json) {
+                warn!("Failed to save self display name: {}", e);
+            }
+        }
+    }
+
     /// Load persisted login_disabled for self node
     fn load_self_login_disabled() -> Option<bool> {
         if let Ok(data) = std::fs::read_to_string(Self::SELF_LOGIN_DISABLED_FILE) {
@@ -1153,6 +1221,10 @@ pub enum AgentMessage {
         /// falls back to auto-derive from address in that case.
         #[serde(default)]
         site: Option<String>,
+        /// Operator-set friendly display name — see `Node::display_name`.
+        /// `None` from older peers; the UI then shows the hostname.
+        #[serde(default)]
+        display_name: Option<String>,
         /// Enterprise license key — propagated to cluster nodes that don't have one
         #[serde(default)]
         license_key: Option<String>,
@@ -1225,6 +1297,140 @@ pub async fn sweep_push_cluster_names(cluster: Arc<ClusterState>, cluster_secret
                 Err(_) => { /* try next URL */ }
             }
         }
+    }
+}
+
+// ─── Identity-intent queue (reliable rename / move propagation) ──────
+//
+// An operator rename (display_name) or move (cluster_name) made on the admin
+// node must reach the OWNING node — only its own self-report is authoritative,
+// so until the owner adopts the value, the next poll would revert it. We push
+// synchronously on edit, but the owner may be offline or briefly unreachable;
+// `pending_identity.json` records the intended value (keyed by the node's
+// local id) and `sweep_identity_intents` re-pushes every cycle until the
+// owner's self-report confirms it, then clears the intent. This is what makes
+// "rename an offline node, it applies when it reconnects" work, and stops a
+// gossip race from reverting an applied edit.
+
+/// One node's pending identity edit. A field set to `Some` is what we want
+/// the owner to end up with (`display_name: Some("")` means "clear the
+/// override"); `None` means "no intent for this field".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IdentityIntent {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub cluster_name: Option<String>,
+    #[serde(default)]
+    pub ts: u64,
+}
+
+fn identity_intents_file() -> String { crate::paths::get().pending_identity_config }
+
+/// Load the intent map (node id → intent). Missing/malformed → empty.
+pub fn load_identity_intents() -> HashMap<String, IdentityIntent> {
+    std::fs::read_to_string(identity_intents_file()).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_identity_intents(map: &HashMap<String, IdentityIntent>) {
+    let path = identity_intents_file();
+    if let Some(dir) = std::path::Path::new(&path).parent() { let _ = std::fs::create_dir_all(dir); }
+    if map.is_empty() { let _ = std::fs::remove_file(&path); return; }
+    if let Ok(json) = serde_json::to_string_pretty(map) {
+        if let Err(e) = std::fs::write(&path, json) { warn!("Failed to save identity intents: {}", e); }
+    }
+}
+
+/// Record (merge) an intent to push `display_name`/`cluster_name` to node `id`
+/// until the owner confirms. Only the `Some` fields are recorded.
+pub fn record_identity_intent(id: &str, display_name: Option<String>, cluster_name: Option<String>, ts: u64) {
+    if display_name.is_none() && cluster_name.is_none() { return; }
+    let mut map = load_identity_intents();
+    let e = map.entry(id.to_string()).or_default();
+    if display_name.is_some() { e.display_name = display_name; }
+    if cluster_name.is_some() { e.cluster_name = cluster_name; }
+    e.ts = ts;
+    save_identity_intents(&map);
+}
+
+/// Drop any pending intent for `id` (node deleted, or edit confirmed).
+pub fn clear_identity_intent(id: &str) {
+    let mut map = load_identity_intents();
+    if map.remove(id).is_some() { save_identity_intents(&map); }
+}
+
+/// Push one node's intended identity fields to it. Best-effort; returns true
+/// if every requested field was accepted by the owner.
+pub async fn push_identity_to_node(node: &Node, intent: &IdentityIntent, cluster_secret: &str) -> bool {
+    let client = crate::api::API_HTTP_CLIENT.clone();
+    let mut all_ok = true;
+    // Each field is its own receiver, mirroring the existing cluster-name push.
+    let pushes: Vec<(&str, String)> = [
+        intent.display_name.as_ref().map(|v| ("/api/agent/display-name", serde_json::json!({ "display_name": v }).to_string())),
+        intent.cluster_name.as_ref().map(|v| ("/api/agent/cluster-name", serde_json::json!({ "cluster_name": v }).to_string())),
+    ].into_iter().flatten().collect();
+    for (route, payload) in pushes {
+        let urls = crate::api::build_node_urls(&node.address, node.port, route);
+        let mut ok = false;
+        for url in &urls {
+            if let Ok(resp) = client.post(url)
+                .timeout(std::time::Duration::from_secs(5))
+                .header("X-WolfStack-Secret", cluster_secret)
+                .header("Content-Type", "application/json")
+                .body(payload.clone())
+                .send().await
+            {
+                let success = resp.status().is_success();
+                let _ = resp.bytes().await;
+                if success { ok = true; break; }
+            }
+        }
+        all_ok &= ok;
+    }
+    all_ok
+}
+
+/// True when the owner's current `(display_name, cluster_name)` already match
+/// the intent — so the intent can be cleared. An empty-string intent value
+/// means "cleared", which is confirmed by the owner reporting `None`. Pure so
+/// the convergence-clear rule (a forever-loop risk if wrong) is unit-tested.
+fn identity_intent_confirmed(intent: &IdentityIntent, cur_display: Option<&str>, cur_cluster: Option<&str>) -> bool {
+    let dn_ok = match &intent.display_name {
+        None => true,
+        Some(v) if v.is_empty() => cur_display.is_none(),
+        Some(v) => cur_display == Some(v.as_str()),
+    };
+    let cn_ok = match &intent.cluster_name {
+        None => true,
+        Some(v) if v.is_empty() => cur_cluster.is_none(),
+        Some(v) => cur_cluster == Some(v.as_str()),
+    };
+    dn_ok && cn_ok
+}
+
+/// Reconcile loop: re-push every pending intent to its owner until the owner's
+/// self-report (its current cluster view) confirms the value, then clear it.
+/// Clears intents for nodes that vanished or aren't WolfStack agents.
+pub async fn sweep_identity_intents(cluster: Arc<ClusterState>, cluster_secret: String) {
+    let intents = load_identity_intents();
+    if intents.is_empty() { return; }
+    for (id, intent) in intents {
+        let Some(node) = cluster.get_node(&id) else { clear_identity_intent(&id); continue; };
+        // Self never needs a push; Proxmox labels are admin-local only.
+        if node.is_self || node.node_type != "wolfstack" { clear_identity_intent(&id); continue; }
+        // Already converged? (owner's self-report now matches the intent.)
+        if identity_intent_confirmed(&intent, node.display_name.as_deref(), node.cluster_name.as_deref()) {
+            clear_identity_intent(&id);
+            continue;
+        }
+        // Not yet converged. Push only when reachable; otherwise wait for the
+        // node to come back (that's the "applies on reconnect" guarantee).
+        if !node.online { continue; }
+        let _ = push_identity_to_node(&node, &intent, &cluster_secret).await;
+        // Confirmation + clear happens on the next sweep, once the owner has
+        // self-reported the new value back to us.
     }
 }
 
@@ -1455,7 +1661,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         continue;
                     }
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
-                        if let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, site: peer_site, license_key } = msg {
+                        if let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, site: peer_site, display_name: peer_display_name, license_key } = msg {
                             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                             // Detect TLS by the URL scheme that actually
                             // answered. v23.12 chain is HTTPS → HTTP-over-
@@ -1523,6 +1729,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 // that's the source of truth for a
                                 // node's own location.
                                 site: peer_site,
+                                // The owner is authoritative for its own
+                                // display name — trust its self-report, same
+                                // as site. (None = no override → show hostname.)
+                                display_name: peer_display_name,
                             });
 
                             // Reset fail count on success
@@ -1609,6 +1819,28 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             ClusterState::save_self_cluster_name(gossiped_cluster);
                                         }
                                     }
+                                    // Same gossip-adoption safety net for the display name an
+                                    // admin set on another node. Only adopt a Some value —
+                                    // an older peer that doesn't know the field gossips None,
+                                    // which must NOT wipe an operator-set name.
+                                    if let Some(ref gossiped_name) = known.display_name {
+                                        // Normalise empty → cleared so memory and the
+                                        // on-disk file (which save_* removes on empty)
+                                        // never disagree and re-assert a stale "".
+                                        let want = if gossiped_name.is_empty() { None } else { Some(gossiped_name.clone()) };
+                                        let current_name = {
+                                            let nodes_r = cluster.nodes.read().unwrap();
+                                            nodes_r.get(&cluster.self_id).and_then(|n| n.display_name.clone())
+                                        };
+                                        if current_name != want {
+                                            let mut nodes_w = cluster.nodes.write().unwrap();
+                                            if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
+                                                n.display_name = want.clone();
+                                            }
+                                            drop(nodes_w);
+                                            ClusterState::save_self_display_name(want.as_deref().unwrap_or(""));
+                                        }
+                                    }
                                     continue;
                                 }
                                 // Also skip if this is us by hostname+port (gossip may report different address)
@@ -1635,6 +1867,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         || existing.pve_token != known.pve_token
                                         || existing.pve_fingerprint != known.pve_fingerprint
                                         || existing.cluster_name != known.cluster_name
+                                        // Only a Some gossiped display name counts as a change —
+                                        // a None from an older peer must never clear an operator-set name.
+                                        || (known.display_name.is_some() && existing.display_name != known.display_name)
                                     {
 
 
@@ -1660,6 +1895,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             None,  // don't propagate login_disabled via gossip
                                             None,  // don't propagate update_script via gossip
                                             None,  // site is propagated via StatusReport, not nested gossip
+                                            // Mirror the gossiped display name (None = leave
+                                            // untouched, so an older peer can't wipe it).
+                                            known.display_name.clone(),
                                         );
                                     }
                                 } else {
@@ -1963,6 +2201,41 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
 #[cfg(test)]
 mod convergence_tests {
     use super::*;
+
+    #[test]
+    fn identity_intent_serde_defaults_golden_rule() {
+        // An older/empty file must deserialize (no panic, all fields default).
+        let i: IdentityIntent = serde_json::from_str("{}").unwrap();
+        assert!(i.display_name.is_none() && i.cluster_name.is_none() && i.ts == 0);
+        // A whole map keyed by node id round-trips.
+        let parsed: std::collections::HashMap<String, IdentityIntent> =
+            serde_json::from_str(r#"{"node-1":{"display_name":"web","ts":5}}"#).unwrap();
+        assert_eq!(parsed["node-1"].display_name.as_deref(), Some("web"));
+        assert!(parsed["node-1"].cluster_name.is_none());
+    }
+
+    #[test]
+    fn identity_intent_confirm_and_clear_rules() {
+        // No intent for a field → that field never blocks confirmation.
+        let none = IdentityIntent::default();
+        assert!(identity_intent_confirmed(&none, Some("anything"), Some("anything")));
+
+        // Set a display name: confirmed only once the owner reports it.
+        let set = IdentityIntent { display_name: Some("web".into()), cluster_name: None, ts: 1 };
+        assert!(!identity_intent_confirmed(&set, None, None));
+        assert!(!identity_intent_confirmed(&set, Some("old"), None));
+        assert!(identity_intent_confirmed(&set, Some("web"), None));
+
+        // Clear (empty string): confirmed only when the owner reports None.
+        let clear = IdentityIntent { display_name: Some("".into()), cluster_name: None, ts: 1 };
+        assert!(!identity_intent_confirmed(&clear, Some("web"), None), "still set → not yet cleared");
+        assert!(identity_intent_confirmed(&clear, None, None), "owner now reports None → cleared");
+
+        // A move: both fields must match.
+        let mv = IdentityIntent { display_name: Some("db".into()), cluster_name: Some("prod".into()), ts: 1 };
+        assert!(!identity_intent_confirmed(&mv, Some("db"), Some("dev")));
+        assert!(identity_intent_confirmed(&mv, Some("db"), Some("prod")));
+    }
 
     #[test]
     fn unusable_addresses_are_rejected() {

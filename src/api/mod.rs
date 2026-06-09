@@ -3672,6 +3672,11 @@ pub struct UpdateNodeSettings {
     /// previously-set tag (falls back to auto-derived). Frontend
     /// sends this from the "Site" field on the node settings card.
     pub site: Option<String>,
+    /// Friendly display name — see `agent::Node::display_name`. Empty
+    /// string clears the override (UI falls back to the OS hostname).
+    /// This is the operator-set "node name" from the fleet UI.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateNodeSettings>) -> HttpResponse {
@@ -3698,9 +3703,14 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
     // Support updating both pve_cluster_name (for compat) and generic cluster_name
     let cluster_name = body.cluster_name.clone().or(body.pve_cluster_name.clone());
 
-    // Capture old cluster name before update so we can migrate data if it changes
-    let old_cluster_name = state.cluster.get_node(&id)
-        .and_then(|n| n.cluster_name.clone());
+    // Length cap on the display name (same as the agent receiver).
+    if let Some(ref dn) = body.display_name {
+        if dn.len() > 64 {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "display name too long (max 64 chars)"
+            }));
+        }
+    }
 
     if state.cluster.update_node_settings(
         &id,
@@ -3713,38 +3723,14 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         body.login_disabled,
         body.update_script.clone(),
         body.site.clone(),
+        body.display_name.clone(),
     ) {
-        // If cluster name changed, rename all cluster-scoped data to match.
-        // All nodes in the cluster share the same name, so wolfrun services,
-        // status pages, monitors, and incidents must all follow the rename.
-        if let (Some(old_name), Some(new_name)) = (&old_cluster_name, &cluster_name) {
-            if old_name != new_name {
-                // Rename status page monitors, pages, and incidents
-                let mut config = state.statuspage.config.write().unwrap();
-                let sp_count = config.rename_cluster(old_name, new_name);
-                if sp_count > 0 {
-                    let _ = config.save();
-                    tracing::info!("Cluster rename: updated {} status page items '{}' -> '{}'", sp_count, old_name, new_name);
-                }
-                drop(config);
-
-                // Rename wolfrun services
-                let wr_count = state.wolfrun.rename_cluster(old_name, new_name);
-                if wr_count > 0 {
-                    tracing::info!("Cluster rename: updated {} WolfRun services '{}' -> '{}'", wr_count, old_name, new_name);
-                }
-
-                // Rename other nodes in the same cluster so the whole cluster stays together
-                for node in state.cluster.get_all_nodes() {
-                    if node.cluster_name.as_deref() == Some(old_name.as_str()) {
-                        state.cluster.update_node_settings(
-                            &node.id, None, None, None, None, None,
-                            Some(new_name.clone()), None, None, None,
-                        );
-                    }
-                }
-            }
-        }
+        // NOTE: this PATCH edits ONE node only. Changing `cluster_name` here
+        // MOVES this single node to a (possibly new) cluster — it does NOT
+        // rename the whole cluster or drag the other members along (that was
+        // the old "creates a mess" behaviour). Renaming a cluster as a group,
+        // with the status-page / WolfRun data migration, is a separate
+        // operation: POST /api/clusters/{old}/rename (cluster_rename_handler).
         // Propagate site to remote WolfStack node so its own
         // StatusReport carries the new tag immediately — without
         // this the next gossip tick would still carry the peer's
@@ -3827,37 +3813,41 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                 }
             }
         }
-        // Propagate cluster_name to remote WolfStack node so its own reconcile works correctly
-        let cluster_name = body.cluster_name.clone().or(body.pve_cluster_name.clone());
-        if let Some(ref name) = cluster_name {
-            let node = state.cluster.get_node(&id);
-            if let Some(node) = node {
+        // Reliable propagation of identity edits (display name + cluster move)
+        // to the OWNING remote node. The owner's self-report is authoritative,
+        // so until it adopts the value the next 10s poll would revert it. We
+        // record the intent (so an offline owner converges when it reconnects —
+        // sweep_identity_intents re-pushes until confirmed), push synchronously,
+        // and tell the UI whether it applied now or was queued.
+        let mut queued = false;
+        let want_display = body.display_name.clone();
+        let want_cluster = body.cluster_name.clone().or(body.pve_cluster_name.clone());
+        if want_display.is_some() || want_cluster.is_some() {
+            if let Some(node) = state.cluster.get_node(&id) {
                 if !node.is_self && node.node_type == "wolfstack" {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    // Record the durable intent first (so an offline/unreachable
+                    // owner converges via sweep_identity_intents on reconnect),
+                    // then fire the push in the background — never block the
+                    // actix worker on remote HTTP. `queued` is a best-effort
+                    // immediate signal from liveness; the sweep is the real
+                    // delivery guarantee.
+                    crate::agent::record_identity_intent(&id, want_display.clone(), want_cluster.clone(), ts);
+                    queued = !node.online;
+                    let intent = crate::agent::IdentityIntent {
+                        display_name: want_display,
+                        cluster_name: want_cluster,
+                        ts,
+                    };
                     let secret = state.cluster_secret.clone();
-                    let address = node.address.clone();
-                    let port = node.port;
-                    let cluster_name_val = name.clone();
                     tokio::spawn(async move {
-                        let client = &*API_HTTP_CLIENT;
-                        let urls = build_node_urls(&address, port, "/api/agent/cluster-name");
-                        let payload = serde_json::json!({ "cluster_name": cluster_name_val });
-                        for url in &urls {
-                            if let Ok(resp) = client.post(url)
-                                .timeout(std::time::Duration::from_secs(5))
-                                .header("X-WolfStack-Secret", &secret)
-                                .json(&payload)
-                                .send()
-                                .await
-                            {
-                                let _ = resp.bytes().await;
-                                break;
-                            }
-                        }
+                        let _ = crate::agent::push_identity_to_node(&node, &intent, &secret).await;
                     });
                 }
             }
         }
-        HttpResponse::Ok().json(serde_json::json!({ "updated": true }))
+        HttpResponse::Ok().json(serde_json::json!({ "updated": true, "queued": queued }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
     }
@@ -3878,6 +3868,109 @@ pub async fn agent_set_cluster_name(req: HttpRequest, state: web::Data<AppState>
     } else {
         HttpResponse::BadRequest().json(serde_json::json!({ "error": "cluster_name required" }))
     }
+}
+
+/// POST /api/agent/display-name — accept a friendly display-name update from
+/// the admin node. Updates the in-memory self node immediately (so the next
+/// 2s status-cache rebuild self-reports it) and persists it. Empty string
+/// clears the override (UI falls back to the OS hostname). Mirrors
+/// `agent_set_cluster_name`.
+pub async fn agent_set_display_name(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(e) = require_cluster_auth(&req, &state) { return e; }
+    match body.get("display_name").and_then(|v| v.as_str()) {
+        Some(name) => {
+            if name.len() > 64 {
+                return HttpResponse::BadRequest().json(serde_json::json!({ "error": "display name too long (max 64 chars)" }));
+            }
+            let mut nodes = state.cluster.nodes.write().unwrap();
+            if let Some(n) = nodes.get_mut(&state.cluster.self_id) {
+                n.display_name = if name.is_empty() { None } else { Some(name.to_string()) };
+            }
+            drop(nodes);
+            crate::agent::ClusterState::save_self_display_name(name);
+            HttpResponse::Ok().json(serde_json::json!({ "updated": true, "display_name": name }))
+        }
+        None => HttpResponse::BadRequest().json(serde_json::json!({ "error": "display_name required" })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct ClusterRenameRequest {
+    pub new_name: String,
+}
+
+/// POST /api/clusters/{old}/rename — rename a WHOLE cluster (every member
+/// node), migrating cluster-scoped status-page + WolfRun data, and reliably
+/// pushing the new name to each member's owner. This is the GROUP rename,
+/// distinct from MOVING one node (PATCH /api/nodes/{id}/settings with
+/// cluster_name, which only touches that node). Splitting the two is what
+/// fixes the old "moving a node renames its whole cluster" mess.
+pub async fn cluster_rename_handler(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<ClusterRenameRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let old_name = path.into_inner();
+    let new_name = body.new_name.trim().to_string();
+    if new_name.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "new cluster name required" }));
+    }
+    if new_name.len() > 64 {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "cluster name too long (max 64 chars)" }));
+    }
+    if new_name == old_name {
+        return HttpResponse::Ok().json(serde_json::json!({ "renamed": 0, "queued": false }));
+    }
+
+    // Migrate cluster-scoped data so monitors / pages / incidents / WolfRun
+    // services follow the rename (relocated here from the per-node PATCH).
+    {
+        let mut config = state.statuspage.config.write().unwrap();
+        let sp_count = config.rename_cluster(&old_name, &new_name);
+        if sp_count > 0 {
+            let _ = config.save();
+            tracing::info!("Cluster rename: {} status-page items '{}' -> '{}'", sp_count, old_name, new_name);
+        }
+    }
+    let wr_count = state.wolfrun.rename_cluster(&old_name, &new_name);
+    if wr_count > 0 {
+        tracing::info!("Cluster rename: {} WolfRun services '{}' -> '{}'", wr_count, old_name, new_name);
+    }
+
+    // Every member: update the local view, then reliably push the new name to
+    // its owner (intent + sweep), so none of them re-assert the old name.
+    let members: Vec<crate::agent::Node> = state.cluster.get_all_nodes().into_iter()
+        .filter(|n| n.cluster_name.as_deref() == Some(old_name.as_str()))
+        .collect();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut renamed = 0usize;
+    let mut queued = false;
+    for node in members {
+        state.cluster.update_node_settings(
+            &node.id, None, None, None, None, None,
+            Some(new_name.clone()), None, None, None, None,
+        );
+        renamed += 1;
+        if !node.is_self && node.node_type == "wolfstack" {
+            // Durable intent + background push — never block the worker on a
+            // member that's slow/unreachable (could be minutes across N nodes).
+            crate::agent::record_identity_intent(&node.id, None, Some(new_name.clone()), ts);
+            if !node.online { queued = true; }
+            let intent = crate::agent::IdentityIntent {
+                display_name: None,
+                cluster_name: Some(new_name.clone()),
+                ts,
+            };
+            let secret = state.cluster_secret.clone();
+            tokio::spawn(async move {
+                let _ = crate::agent::push_identity_to_node(&node, &intent, &secret).await;
+            });
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "renamed": renamed, "queued": queued }))
 }
 
 /// POST /api/cluster/control-plane — receive a peer's control-plane bundle.
@@ -5479,6 +5572,9 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         // peers can decide whether to dial us at our LAN address or
         // route over the public IP.
         site: state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.site),
+        // Self's operator-set display name — gossiped so peers render the
+        // chosen name rather than the OS hostname.
+        display_name: state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.display_name),
         license_key: if crate::compat::platform_ready() {
             std::fs::read_to_string(crate::compat::dm_path()).ok().map(|s| s.trim().to_string())
         } else { None },
@@ -9348,6 +9444,7 @@ fn resolve_target_node(
         self_id: None,
         workload_subnets: Vec::new(),
         site: None,
+        display_name: None,
     })
 }
 
@@ -34561,6 +34658,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         )
         .route("/cluster-home", web::get().to(cluster_browser_homepage))
         .route("/api/agent/cluster-name", web::post().to(agent_set_cluster_name))
+        .route("/api/agent/display-name", web::post().to(agent_set_display_name))
+        .route("/api/clusters/{old}/rename", web::post().to(cluster_rename_handler))
         .route("/api/agent/wolfnet-routes", web::post().to(agent_set_wolfnet_routes))
         .route("/api/wolfnet/used-ips", web::get().to(wolfnet_used_ips_endpoint))
         .route("/api/wolfnet/active-ips", web::get().to(wolfnet_active_ips_endpoint))

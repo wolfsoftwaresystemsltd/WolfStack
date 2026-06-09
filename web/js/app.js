@@ -1930,7 +1930,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'dashboard-sync': 'Dashboard Sync' };
+    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'dashboard-sync': 'Dashboard Sync' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -1988,6 +1988,8 @@ function selectView(page) {
         renderTenants();
     } else if (page === 'fleet-security') {
         renderFleetSecurity();
+    } else if (page === 'fleet-manage') {
+        renderFleetManage();
     } else if (page === 'dashboard-sync') {
         dashboardSyncLoad();
     } else if (page === 'learn') {
@@ -3325,6 +3327,14 @@ window.xoDeletePool = async function(id, name) {
     await xoLoadList();
 };
 
+// The name to show for a node: the operator-set friendly display name when
+// present, otherwise the OS hostname. Single source of truth for node labels.
+function nodeName(node) {
+    if (!node) return '';
+    const dn = (node.display_name || '').trim();
+    return dn || node.hostname || node.id || '';
+}
+
 // ─── Server Tree ───
 function buildServerTree(nodes) {
     allNodes = nodes;
@@ -3431,9 +3441,9 @@ function buildServerTree(nodes) {
                     <div class="server-node-header" data-node-id="${node.id}" onclick="openServerNode('${node.id}')" style="padding-left: 8px;">
                         <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}" onclick="event.stopPropagation(); toggleServerNode('${node.id}')">▶</span>
                         <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
-                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${node.hostname}</span>
+                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(node.hostname || '')}">${escapeHtml(nodeName(node))}</span>
                         <span class="remove-server-btn" onclick="event.stopPropagation(); openNodeSettings('${node.id}')" title="Node settings" style="margin-left:4px;"><span class="ws-icon-clean-wrap" data-icon="settings"></span></span>
-                        ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${node.hostname}')" title="Remove server"><span class="ws-icon-clean-wrap" data-icon="trash"></span></span>`}
+                        ${node.is_self ? '<span class="self-badge">this</span>' : `<span class="remove-server-btn" onclick="event.stopPropagation(); confirmRemoveServer('${node.id}', '${escapeAttr(nodeName(node))}')" title="Remove server"><span class="ws-icon-clean-wrap" data-icon="trash"></span></span>`}
                     </div>
                     <div class="server-node-children ${shouldExpandNode ? 'expanded' : ''}" id="children-${node.id}">
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="dashboard" onclick="selectServerView('${node.id}', 'dashboard')">
@@ -3651,7 +3661,7 @@ function renderDatacenterOverview() {
                 return `<div class="card dc-compact-card dc-card-critical" style="cursor:pointer;opacity:0.7;padding:6px 12px;" onclick="selectServerView('${node.id}', 'dashboard')">
                     <div style="display:flex;align-items:center;gap:8px;">
                         <span class="server-dot offline" style="flex-shrink:0;"></span>
-                        <span style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${node.hostname}</span>
+                        <span style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;" title="${escapeAttr(node.hostname||'')}">${escapeHtml(nodeName(node))}</span>
                         ${pveBadge}
                         <span style="margin-left:auto;font-size:11px;color:var(--danger);flex-shrink:0;">Offline</span>
                     </div>
@@ -3660,7 +3670,7 @@ function renderDatacenterOverview() {
             return `<div class="card dc-compact-card dc-card-critical" style="cursor:pointer;opacity:0.7;" onclick="selectServerView('${node.id}', 'dashboard')">
                 <div style="display:flex;align-items:center;gap:6px;padding:10px 12px;">
                     <span class="server-dot offline" style="flex-shrink:0;"></span>
-                    <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${node.hostname}</span>
+                    <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeAttr(node.hostname||'')}">${escapeHtml(nodeName(node))}</span>
                     ${pveBadge}
                     <span style="margin-left:auto;font-size:11px;color:var(--danger);">Offline</span>
                 </div>
@@ -3707,7 +3717,7 @@ function renderDatacenterOverview() {
             return `<div class="card dc-compact-card${criticalClass}" style="cursor:pointer;padding:6px 12px;" onclick="selectServerView('${node.id}', 'dashboard')">
                 <div style="display:flex;align-items:center;gap:8px;">
                     <span class="server-dot online" style="flex-shrink:0;"></span>
-                    <span style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${node.hostname}</span>
+                    <span style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;" title="${escapeAttr(node.hostname||'')}">${escapeHtml(nodeName(node))}</span>
                     ${pveBadge}
                     <span style="display:inline-flex;align-items:center;gap:10px;margin-left:auto;flex-shrink:0;">
                         ${ledDot('CPU', cpuPct)}
@@ -3722,7 +3732,7 @@ function renderDatacenterOverview() {
         return `<div class="card dc-compact-card${criticalClass}" style="cursor:pointer;" onclick="selectServerView('${node.id}', 'dashboard')">
             <div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);">
                 <span class="server-dot online" style="flex-shrink:0;"></span>
-                <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${node.hostname}</span>
+                <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeAttr(node.hostname||'')}">${escapeHtml(nodeName(node))}</span>
                 ${pveBadge}
                 ${node.is_self ? '<span style="color:var(--accent-light);font-size:10px;">(this)</span>' : ''}
                 <span style="margin-left:auto;font-size:10px;padding:1px 6px;border-radius:3px;background:rgba(16,185,129,0.1);color:var(--success);font-family:\'JetBrains Mono\',monospace;white-space:nowrap;">▲ ${formatUptimeShort(m.uptime_secs)}</span>
@@ -10329,7 +10339,7 @@ function openWsClusterSettings(clusterName) {
     const clusterNodes = allNodes.filter(n => n.node_type !== 'proxmox' && (n.cluster_name || 'WolfStack') === clusterName);
     if (clusterNodes.length === 0) return;
 
-    const nodeNames = clusterNodes.map(n => n.hostname).join(', ');
+    const nodeNames = clusterNodes.map(n => escapeHtml(nodeName(n))).join(', ');
 
     let existing = document.getElementById('ws-settings-modal');
     if (existing) existing.remove();
@@ -10397,18 +10407,29 @@ async function saveWsClusterSettings() {
         return;
     }
 
-    for (const id of nodeIds) {
-        try {
-            await fetch(`/api/nodes/${id}/settings`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ cluster_name: newName })
-            });
-        } catch (e) { /* continue */ }
+    // Group rename via the dedicated endpoint: it renames every member, pushes
+    // the new name reliably to each owner (so none re-assert the old name), and
+    // migrates cluster-scoped status-page / WolfRun data in one shot.
+    try {
+        const resp = await fetch(`/api/clusters/${encodeURIComponent(originalName)}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: newName })
+        });
+        if (resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showToast(data.queued
+                ? `Cluster renamed to "${newName}" — offline nodes apply on reconnect`
+                : `Cluster renamed to "${newName}"`, 'success');
+        } else {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || 'Failed to rename cluster', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to rename cluster: ' + e.message, 'error');
     }
 
     modal.remove();
-    showToast('Cluster renamed to "' + newName + '"', 'success');
     fetchNodes();
 }
 
@@ -10636,25 +10657,25 @@ function openNodeSettings(nodeId) {
     modal.innerHTML = `
         <div class="modal">
             <div class="modal-header">
-                <h3>${node.hostname} — Node Settings</h3>
+                <h3>${escapeHtml(nodeName(node))} — Node Settings</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
             </div>
             <div class="modal-body">
                 <div style="display:grid; grid-template-columns:auto 1fr; gap:8px 16px; margin-bottom:16px; font-size:13px; align-items:center;">
-                    <span style="color:var(--text-muted);">Hostname</span>
-                    ${isSelf
-            ? `<span>${node.hostname} <span style="color:var(--accent-light);font-size:11px;">(this server)</span></span>`
-            : `<input type="text" class="form-control" id="node-settings-hostname" value="${node.hostname}" style="font-size:13px;padding:4px 8px;">`}
+                    <span style="color:var(--text-muted);">Display name</span>
+                    <input type="text" class="form-control" id="node-settings-display-name" value="${escapeHtml(node.display_name || '')}" placeholder="${escapeHtml(node.hostname || '')}" maxlength="64" title="Friendly name shown across WolfStack. Leave empty to use the OS hostname." style="font-size:13px;padding:4px 8px;">
+                    <span style="color:var(--text-muted);">Hostname (OS)</span>
+                    <span style="color:var(--text-secondary);font-size:12px;">${escapeHtml(node.hostname || '')}${isSelf ? ' <span style="color:var(--accent-light);font-size:11px;">(this server)</span>' : ''}</span>
                     <span style="color:var(--text-muted);">Address</span>
                     ${isSelf
-            ? `<span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.address}</span>`
-            : `<input type="text" class="form-control" id="node-settings-address" value="${node.address}" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:4px 8px;">`}
+            ? `<span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${escapeHtml(node.address || '')}</span>`
+            : `<input type="text" class="form-control" id="node-settings-address" value="${escapeAttr(node.address || '')}" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:4px 8px;">`}
                     <span style="color:var(--text-muted);">Port</span>
                     ${isSelf
-            ? `<span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.port}</span>`
-            : `<input type="number" class="form-control" id="node-settings-port" value="${node.port}" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:4px 8px;width:100px;">`}
+            ? `<span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${escapeHtml(String(node.port || ''))}</span>`
+            : `<input type="number" class="form-control" id="node-settings-port" value="${escapeAttr(String(node.port || ''))}" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:4px 8px;width:100px;">`}
                     <span style="color:var(--text-muted);">Node ID</span>
-                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${node.id}</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:12px;">${escapeHtml(node.id || '')}</span>
                     <span style="color:var(--text-muted);">Type</span>
                     <span>${isPve ? 'Proxmox VE' : 'WolfStack'}</span>
                     <span style="color:var(--text-muted);">Status</span>
@@ -10747,6 +10768,7 @@ function openNodeSettings(nodeId) {
     modal._nodeId = nodeId;
     modal._originalClusterName = clusterName;
     modal._originalHostname = node.hostname;
+    modal._originalDisplayName = node.display_name || '';
     modal._originalAddress = node.address;
     modal._originalPort = node.port;
     document.body.appendChild(modal);
@@ -10964,13 +10986,14 @@ async function saveNodeSettings() {
     const updates = {};
     if (newName && newName !== originalName) updates.cluster_name = newName;
 
-    // Hostname, address, port (only present for non-self nodes)
-    const hostnameEl = document.getElementById('node-settings-hostname');
+    // Display name (friendly node name) — empty string clears the override
+    // and falls back to the OS hostname. Sent for self and remote nodes alike.
+    const displayNameEl = document.getElementById('node-settings-display-name');
     const addressEl = document.getElementById('node-settings-address');
     const portEl = document.getElementById('node-settings-port');
-    if (hostnameEl) {
-        const h = hostnameEl.value.trim();
-        if (h && h !== modal._originalHostname) updates.hostname = h;
+    if (displayNameEl) {
+        const dn = displayNameEl.value.trim();
+        if (dn !== (modal._originalDisplayName || '')) updates.display_name = dn;
     }
     if (addressEl) {
         const a = addressEl.value.trim();
@@ -11031,7 +11054,12 @@ async function saveNodeSettings() {
             body: JSON.stringify(updates)
         });
         if (resp.ok) {
-            showToast('Node settings updated', 'success');
+            const data = await resp.json().catch(() => ({}));
+            // The backend queues identity edits (display name / cluster move)
+            // for offline owners and applies them on reconnect.
+            showToast(data.queued
+                ? 'Saved — will apply when the node reconnects'
+                : 'Node settings updated', 'success');
         } else {
             const err = await resp.json().catch(() => ({}));
             showToast(err.error || 'Failed to update settings', 'error');
@@ -11043,6 +11071,153 @@ async function saveNodeSettings() {
     modal.remove();
     fetchNodes();
 }
+
+// ─── Fleet management screen (rename nodes, move between clusters) ───
+// Backed by the same endpoints as the node/cluster settings modals; the
+// backend records a durable intent and reconciles offline nodes on reconnect.
+
+async function renderFleetManage() {
+    const body = document.getElementById('fleet-manage-body');
+    if (!body) return;
+    let nodes;
+    try {
+        const resp = await fetch('/api/nodes');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        nodes = Array.isArray(data) ? data : (data.nodes || []);
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger); padding:20px;">Failed to load fleet: ${escapeHtml(e.message)}</div>`;
+        return;
+    }
+    allNodes = nodes;
+    // Group by cluster (same rule as the sidebar tree).
+    const clusters = {};
+    nodes.forEach(n => {
+        const key = n.cluster_name || 'WolfStack';
+        (clusters[key] = clusters[key] || []).push(n);
+    });
+    const clusterKeys = Object.keys(clusters).sort((a, b) =>
+        a === 'WolfStack' ? -1 : b === 'WolfStack' ? 1 : a.localeCompare(b));
+    // Stash for index-based onclick dispatch (never inject cluster names,
+    // which are operator-controlled, straight into an onclick attribute).
+    window._fleetClusterKeys = clusterKeys;
+
+    if (nodes.length === 0) {
+        body.innerHTML = `<div style="color:var(--text-muted); padding:20px;">No nodes in this fleet yet.</div>`;
+        return;
+    }
+
+    body.innerHTML = clusterKeys.map((cname, ci) => {
+        const members = clusters[cname];
+        return `<div class="card" style="margin-bottom:16px;">
+            <div class="card-body" style="padding:16px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;">
+                    <h3 style="margin:0; font-size:16px;">${escapeHtml(cname)}
+                        <span style="color:var(--text-muted); font-size:12px; font-weight:400;">${members.length} node${members.length === 1 ? '' : 's'}</span>
+                    </h3>
+                    <button class="btn btn-sm" onclick="fleetRenameCluster(${ci})" title="Rename this cluster (all members)">Rename cluster</button>
+                </div>
+                ${members.map(n => fleetNodeRow(n, clusterKeys)).join('')}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function fleetNodeRow(n, clusterKeys) {
+    const cur = n.cluster_name || 'WolfStack';
+    const opts = clusterKeys.map(c =>
+        `<option value="${escapeAttr(c)}"${c === cur ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('');
+    const hasAlias = (n.display_name || '').trim().length > 0;
+    return `<div style="display:flex; align-items:center; gap:10px; padding:8px 4px; border-top:1px solid var(--border);">
+        <span class="server-dot ${n.online ? 'online' : 'offline'}" title="${n.online ? 'online' : 'offline'}" style="flex-shrink:0;"></span>
+        <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeAttr(n.hostname || '')}">
+            <strong>${escapeHtml(nodeName(n))}</strong>
+            ${hasAlias ? `<span style="color:var(--text-muted); font-size:11px;"> · ${escapeHtml(n.hostname || '')}</span>` : ''}
+            ${n.is_self ? '<span class="self-badge" style="margin-left:6px;">this</span>' : ''}
+            ${n.online ? '' : '<span style="color:var(--text-muted); font-size:11px; margin-left:6px;">(offline)</span>'}
+        </span>
+        <button class="btn btn-sm" onclick="fleetRenameNode('${escapeAttr(n.id)}')" title="Set a friendly display name">Rename</button>
+        <select onchange="fleetMoveNode('${escapeAttr(n.id)}', this.value)" title="Move this node to another cluster" style="font-size:12px; padding:3px 6px;">
+            ${opts}
+            <option value="__new__">＋ New cluster…</option>
+        </select>
+    </div>`;
+}
+
+async function fleetRenameNode(id) {
+    const node = (allNodes || []).find(n => n.id === id);
+    const current = node ? (node.display_name || '') : '';
+    const name = await wolfPrompt(
+        'Friendly display name for this node (leave empty to use the OS hostname):',
+        current, 'Rename node',
+        { placeholder: node ? (node.hostname || '') : '', okText: 'Save' });
+    if (name === null) return; // cancelled
+    await fleetSaveNode(id, { display_name: name.trim() });
+}
+
+async function fleetMoveNode(id, target) {
+    if (target === '__new__') {
+        const name = await wolfPrompt('Name of the new cluster to move this node into:', '', 'Move node');
+        if (name === null || !name.trim()) { renderFleetManage(); return; }
+        target = name.trim();
+    }
+    const node = (allNodes || []).find(n => n.id === id);
+    if (node && (node.cluster_name || 'WolfStack') === target) return; // no change
+    await fleetSaveNode(id, { cluster_name: target });
+}
+
+async function fleetSaveNode(id, updates) {
+    try {
+        const resp = await fetch(`/api/nodes/${id}/settings`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
+        if (resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showToast(data.queued ? 'Saved — applies when the node reconnects' : 'Saved', 'success');
+        } else {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || 'Failed to save', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to save: ' + e.message, 'error');
+    }
+    // Refresh the sidebar tree first, then re-render this screen — sequential
+    // so the two /api/nodes fetches don't race over `allNodes`.
+    await fetchNodes();
+    renderFleetManage();
+}
+
+async function fleetRenameCluster(clusterIndex) {
+    const oldName = (window._fleetClusterKeys || [])[clusterIndex];
+    if (!oldName) return;
+    const name = await wolfPrompt(`Rename cluster "${oldName}" — every member node moves with it:`, oldName, 'Rename cluster', { okText: 'Rename' });
+    if (name === null || !name.trim() || name.trim() === oldName) return;
+    try {
+        const resp = await fetch(`/api/clusters/${encodeURIComponent(oldName)}/rename`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_name: name.trim() }),
+        });
+        if (resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showToast(data.queued
+                ? `Renamed to "${name.trim()}" — offline nodes apply on reconnect`
+                : `Cluster renamed to "${name.trim()}"`, 'success');
+        } else {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || 'Failed to rename cluster', 'error');
+        }
+    } catch (e) {
+        showToast('Failed to rename cluster: ' + e.message, 'error');
+    }
+    await fetchNodes();
+    renderFleetManage();
+}
+
+window.renderFleetManage = renderFleetManage;
+window.fleetRenameNode = fleetRenameNode;
+window.fleetMoveNode = fleetMoveNode;
+window.fleetRenameCluster = fleetRenameCluster;
 
 // ─── Modal Confirm / Prompt Dialogs ───
 let _wolfDialogResolve = null;
@@ -62929,6 +63104,10 @@ const APP_DRAWER_TILES = [
     {
         id: 'fleet-security', icon: '', name: 'Fleet Security',
         desc: 'Fleet-wide root-password rotation, lockout policy, blocked IPs, exposed ports — every cluster you manage, one screen.',
+    },
+    {
+        id: 'fleet-manage', icon: '', name: 'Fleet',
+        desc: 'Rename nodes and move them between clusters — reorganise your whole fleet from one screen.',
     },
     {
         id: 'control-panel', icon: '', name: 'Control Panel',

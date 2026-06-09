@@ -1363,6 +1363,20 @@
 
         </div>
 
+        <!-- ═══ Fleet management — rename nodes, move them between clusters ═══ -->
+        <div id="page-fleet-manage" class="page-view" style="display:none;">
+            <div class="card" style="margin-bottom:16px; background:linear-gradient(135deg, rgba(59,130,246,0.10), rgba(16,185,129,0.06)); border-color:rgba(59,130,246,0.25);">
+                <div class="card-body" style="display:flex; align-items:center; justify-content:space-between; padding:22px 28px; flex-wrap:wrap; gap:12px;">
+                    <div>
+                        <h2 style="font-size:22px; margin-bottom:2px; color:var(--text-primary); font-weight:700;">Fleet</h2>
+                        <p style="color:var(--text-secondary); font-size:13px; margin:0;">Give nodes friendly names and move them between clusters. Changes propagate across the fleet — offline nodes apply them when they reconnect.</p>
+                    </div>
+                    <button class="btn btn-sm" onclick="renderFleetManage()" title="Refresh">↻ Refresh</button>
+                </div>
+            </div>
+            <div id="fleet-manage-body"><div style="color:var(--text-muted); padding:20px;">Loading…</div></div>
+        </div>
+
         <div id="page-security" class="page-view" style="display:none;">
             <!-- Security Header -->
             <div class="card" style="margin-bottom:24px; background:linear-gradient(135deg, rgba(34,197,94,0.12), rgba(59,130,246,0.08)); border-color:rgba(34,197,94,0.25);">

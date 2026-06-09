@@ -1745,6 +1745,9 @@ async fn main() -> std::io::Result<()> {
                     // Self's declared site tag — gossiped to peers so
                     // their cluster-sync can choose LAN-dial vs public-dial.
                     site: cluster_clone.get_node(&cluster_clone.self_id).and_then(|n| n.site),
+                    // Self's operator-set display name — gossiped so peers
+                    // show the chosen name, not the OS hostname.
+                    display_name: cluster_clone.get_node(&cluster_clone.self_id).and_then(|n| n.display_name),
                     // Propagate license to cluster nodes
                     license_key: if crate::compat::platform_ready() {
                         std::fs::read_to_string(crate::compat::dm_path()).ok().map(|s| s.trim().to_string())
@@ -1807,6 +1810,22 @@ async fn main() -> std::io::Result<()> {
                 let secret = auth::load_cluster_secret();
                 agent::sweep_push_cluster_names(cluster_sweep.clone(), secret).await;
                 tokio::time::sleep(Duration::from_secs(1800)).await;
+            }
+        });
+
+        // Background: identity-intent reconcile sweep. Re-pushes operator
+        // renames (display_name) and moves (cluster_name) to each owning node
+        // until its self-report confirms the value, then clears the intent.
+        // This is what makes an edit to an offline/blipped node "apply on
+        // reconnect" instead of silently reverting. 60s cadence; first run at
+        // T+20s catches a node that was offline during the edit.
+        let cluster_intents = cluster.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            loop {
+                let secret = auth::load_cluster_secret();
+                agent::sweep_identity_intents(cluster_intents.clone(), secret).await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
         });
 
