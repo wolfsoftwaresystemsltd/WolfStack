@@ -36,7 +36,6 @@
 //! is a follow-up; the duplication on these three POSTURE findings
 //! is what this delta retires.
 
-use std::path::Path;
 use std::time::Duration;
 
 use crate::predictive::{
@@ -74,23 +73,14 @@ pub struct SshdConfig {
     pub root_login: bool,
 }
 
-/// Sample sshd config. Synchronous file read.
+/// Sample sshd config from the EFFECTIVE settings (`sshd -T`), so drop-in files
+/// and Match blocks are honored — a `prohibit-password` drop-in reads as
+/// not-root-login even when the main file still says `yes`.
 pub fn sample_sshd_config_now() -> SshdConfig {
-    let path = Path::new("/etc/ssh/sshd_config");
-    let Ok(text) = std::fs::read_to_string(path) else { return SshdConfig::default() };
-    let mut cfg = SshdConfig::default();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() { continue; }
-        let lower = line.to_ascii_lowercase();
-        if lower.starts_with("permitrootlogin ") && lower.contains(" yes") {
-            cfg.root_login = true;
-        }
-        if lower.starts_with("passwordauthentication ") && lower.contains(" yes") {
-            cfg.password_auth = true;
-        }
+    SshdConfig {
+        root_login: crate::security::sshd_effective("permitrootlogin").as_deref() == Some("yes"),
+        password_auth: crate::security::sshd_effective("passwordauthentication").as_deref() == Some("yes"),
     }
-    cfg
 }
 
 pub async fn sample_sshd_config_now_async(timeout: Duration) -> SshdConfig {
@@ -304,7 +294,12 @@ fn analyze_sshd(
         resource_id: Some("sshd".into()),
     };
 
+    // Proxmox uses root SSH for cluster operations and re-asserts
+    // PermitRootLogin on its own, so the finding is un-actionable there —
+    // suppress it on Proxmox (in addition to the operator ack / proposal
+    // suppression). A prohibit-password drop-in is the way to harden.
     if sshd.root_login
+        && !crate::containers::is_proxmox()
         && !acks.suppresses(FINDING_SSHD_ROOT_LOGIN, &scope)
         && !proposals.is_suppressed(FINDING_SSHD_ROOT_LOGIN, &scope)
     {

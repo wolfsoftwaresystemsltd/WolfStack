@@ -373,7 +373,11 @@ fn sshd_policy_summary() -> Vec<HostFinding> {
         .find(|l| l.starts_with("passwordauthentication "))
         .and_then(|l| l.split_whitespace().nth(1))
         .unwrap_or("?");
-    if permitroot == "yes" {
+    // Proxmox uses root SSH for cluster operations and re-asserts
+    // PermitRootLogin on its own, so the finding is un-actionable there —
+    // suppress it on Proxmox. (A /etc/ssh/sshd_config.d/*.conf drop-in with
+    // `prohibit-password` is the way to harden + survives the reset.)
+    if permitroot == "yes" && !crate::containers::is_proxmox() {
         findings.push(HostFinding {
             severity: "critical".into(),
             title: "SSH allows direct root login".into(),

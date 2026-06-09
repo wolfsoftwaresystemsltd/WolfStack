@@ -359,24 +359,52 @@ fn scan_committed_default_secrets(out: &mut Vec<DependencyCheck>) {
 
 // ─── sshd hardening ─────────────────────────────────────────────
 
-fn scan_sshd_config(out: &mut Vec<DependencyCheck>) {
-    let path = "/etc/ssh/sshd_config";
-    let text = match std::fs::read_to_string(path) { Ok(t) => t, Err(_) => return };
-    // Only flag an explicit "yes" — most distros default to "prohibit-password" (fine) or rely on the OpenSSH default. Users who typed "yes" meant it.
-    let mut root_login_yes = false;
-    let mut password_auth_yes = false;
+/// Effective value of an sshd setting. Prefers `sshd -T` (which honors drop-in
+/// files under /etc/ssh/sshd_config.d/ and Match blocks); falls back to the
+/// FIRST matching line of the raw config (sshd is first-match-wins) only if
+/// `sshd -T` can't run. Lowercased value, or None if neither source has it.
+///
+/// This is what makes a `PermitRootLogin prohibit-password` drop-in clear the
+/// finding even when the main /etc/ssh/sshd_config still says `yes` (e.g.
+/// Proxmox re-asserting it) — the drop-in wins in the effective config.
+pub fn sshd_effective(key: &str) -> Option<String> {
+    if let Ok(out) = std::process::Command::new("sshd").arg("-T").output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let mut parts = line.split_whitespace();
+                if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+                    if k.eq_ignore_ascii_case(key) { return Some(v.to_ascii_lowercase()); }
+                }
+            }
+        }
+    }
+    // Fallback: raw file, first match (Includes are NOT expanded here — that's
+    // exactly why sshd -T is preferred; this only runs if sshd -T is missing).
+    let text = std::fs::read_to_string("/etc/ssh/sshd_config").ok()?;
+    let want = key.to_ascii_lowercase();
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('#') || line.is_empty() { continue; }
         let lower = line.to_ascii_lowercase();
-        if lower.starts_with("permitrootlogin ") && lower.contains(" yes") {
-            root_login_yes = true;
-        }
-        if lower.starts_with("passwordauthentication ") && lower.contains(" yes") {
-            password_auth_yes = true;
+        let mut parts = lower.split_whitespace();
+        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+            if k == want { return Some(v.to_string()); }
         }
     }
-    if root_login_yes {
+    None
+}
+
+fn scan_sshd_config(out: &mut Vec<DependencyCheck>) {
+    // Effective config (sshd -T) so drop-ins / Match blocks are honored.
+    let root_login_yes = sshd_effective("permitrootlogin").as_deref() == Some("yes");
+    let password_auth_yes = sshd_effective("passwordauthentication").as_deref() == Some("yes");
+    // Proxmox uses root SSH for cluster operations (pvecm/corosync) and
+    // re-asserts PermitRootLogin on its own, so the finding is un-actionable
+    // there — suppress it on Proxmox. Operators who want key-only root can drop
+    // a /etc/ssh/sshd_config.d/*.conf with `PermitRootLogin prohibit-password`,
+    // which `sshd_effective` honors and which survives the reset.
+    if root_login_yes && !crate::containers::is_proxmox() {
         out.push(critical(
             "sshd allows root login",
             "/etc/ssh/sshd_config has PermitRootLogin yes — direct root-over-SSH is widely scanned for and trivially brute-forced. Disable it.",
