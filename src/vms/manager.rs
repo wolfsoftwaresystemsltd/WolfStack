@@ -1088,6 +1088,25 @@ impl VmManager {
             }
         }
 
+        // VirtIO-drivers ISO → ide3 (Windows installs whose OS disk is on the
+        // virtio bus need these to see the disk during setup). Read back as
+        // drivers_iso so the editor round-trips it.
+        if let Some(ref drv) = config.drivers_iso {
+            if !drv.trim().is_empty() {
+                args.push("--ide3".to_string());
+                args.push(format!("{},media=cdrom", drv.trim()));
+            }
+        }
+
+        // BIOS: OVMF (UEFI) needs an efidisk0 NVRAM store on the same storage
+        // as the OS disk; SeaBIOS is PVE's default and needs no flag.
+        if config.bios_type == "ovmf" {
+            args.push("--bios".to_string());
+            args.push("ovmf".to_string());
+            args.push("--efidisk0".to_string());
+            args.push(format!("{}:1,efitype=4m", storage));
+        }
+
         // Extra disks — PVE allocates them from the same storage pool as scsi0.
         // scsi0 is taken, so numbering starts at scsi1.
         for (i, vol) in config.extra_disks.iter().enumerate() {
@@ -1384,7 +1403,10 @@ impl VmManager {
                      bridge: Option<String>,
                      bridge_ip_mode: Option<String>,
                      bridge_ip: Option<String>,
-                     bridge_gateway: Option<String>) -> Result<(), String> {
+                     bridge_gateway: Option<String>) -> Result<Option<String>, String> {
+        // Ok(Some(msg)) carries a non-fatal advisory the UI shows alongside
+        // the success toast (e.g. libvirt hardware edits that only take
+        // effect on the VM's next start); Ok(None) is a plain success.
         // On Proxmox, delegate to qm set
         if containers::is_proxmox() {
             let vmid = self.qm_vmid_by_name(name)
@@ -1609,7 +1631,25 @@ impl VmManager {
                     self.cleanup_wolfnet_bridge(&bridge, wolfnet_ip.as_deref());
                 }
             }
-            return Ok(());
+            // Apply the media + BIOS edits that `qm set --cores/...` above
+            // doesn't cover — these used to silently revert on Proxmox the
+            // same way they did on libvirt (no qm set was ever issued, and
+            // the read-back hardcoded them). OS disk bus is intentionally
+            // left to the UI lock (a PVE bus change = risky disk move).
+            let (apply_failures, changed_next_boot) =
+                qm_apply_media_bios(vmid, &iso_path, &drivers_iso, &bios_type);
+            if !apply_failures.is_empty() {
+                return Err(format!(
+                    "Some settings could not be applied to the Proxmox VM:\n  - {}",
+                    apply_failures.join("\n  - ")
+                ));
+            }
+            if changed_next_boot && is_pve_vmid_running(vmid) {
+                return Ok(Some(
+                    "Saved. ISO and BIOS changes take effect the next time this VM is started.".to_string()
+                ));
+            }
+            return Ok(None);
         }
         // On libvirt, delegate to virsh (VM must be stopped for CPU/memory
         // changes). Pre-libvirt native VMs fall through to the JSON config
@@ -1669,11 +1709,32 @@ impl VmManager {
                 // /32 route" — safe; setup_wolfnet_bridge is idempotent.
                 self.reconcile_wolfnet_for_vm(name, &synth, None);
             }
-            // Also persist the network_mode + bridge fields into the
-            // WolfStack JSON sidecar so the editor remembers the choice
-            // across reloads. Libvirt's XML doesn't carry these as
-            // first-class fields, so the sidecar is authoritative for
-            // them.
+            // Push the hardware + primary-NIC edits into the domain's
+            // PERSISTENT config. virt-xml --edit defaults to --define even
+            // for a running VM, so the live guest is untouched and the
+            // change lands on next start — which is why these fields used
+            // to silently revert: the old libvirt branch never wrote them
+            // anywhere libvirt (or our read-back) would see.
+            let (apply_failures, changed_next_boot) = libvirt_apply_devices(
+                name, &net_model, &network_mode, &bridge,
+                &iso_path, &drivers_iso, &os_disk_bus, &bios_type,
+            );
+            // Surface device-apply failures BEFORE persisting the sidecar:
+            // returning a false success is exactly the bug we're fixing, and
+            // we don't want the sidecar to record intent the domain didn't
+            // actually take (which could then read back inconsistently).
+            if !apply_failures.is_empty() {
+                return Err(format!(
+                    "Some settings could not be applied to the libvirt VM:\n  - {}",
+                    apply_failures.join("\n  - ")
+                ));
+            }
+            // Persist the WolfStack-only network fields (cloud-init IP hints,
+            // wolfnet_ip) into the JSON sidecar so the editor remembers them
+            // across reloads — libvirt's XML doesn't carry these as
+            // first-class fields. (mode/bridge are read back from the domain
+            // XML, which we just edited; the sidecar keeps them in sync for
+            // the subprocess fallback path and adoption.)
             if network_mode.is_some() || bridge.is_some()
                 || bridge_ip_mode.is_some() || bridge_ip.is_some() || bridge_gateway.is_some() {
                 let sidecar_path = self.vm_config_path(name);
@@ -1711,7 +1772,19 @@ impl VmManager {
                     .map_err(|_| ())
                     .and_then(|json| fs::write(&sidecar_path, json).map_err(|_| ()));
             }
-            return Ok(());
+            // Hardware/NIC edits land via virt-xml --define (next boot). When
+            // the VM is running, tell the operator so they're not surprised
+            // the change isn't live. Liveness signal: libvirt creates
+            // /var/run/libvirt/qemu/<name>.xml while a domain is running.
+            let running = std::path::Path::new(
+                &format!("/var/run/libvirt/qemu/{}.xml", name)
+            ).exists();
+            if changed_next_boot && running {
+                return Ok(Some(
+                    "Saved. Network and hardware changes take effect the next time this VM is started.".to_string()
+                ));
+            }
+            return Ok(None);
         }
 
         if self.check_running(name) {
@@ -1886,7 +1959,7 @@ impl VmManager {
             self.reconcile_wolfnet_for_vm(name, &config, old_wolfnet_ip.as_deref());
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Bring the libvirt / PVE VM's WolfNet attachment in line with
@@ -3672,6 +3745,16 @@ impl VmManager {
         Ok(())
     }
 
+    /// Which hypervisor backend owns this VM: "proxmox", "libvirt", or
+    /// "native". Lets the editor tailor its UI — e.g. "stop to edit" for
+    /// native (which blocks running-VM edits) vs "applies on next start" for
+    /// PVE/libvirt, and locking the OS-disk-bus field for Proxmox.
+    pub fn vm_platform(&self, name: &str) -> &'static str {
+        if containers::is_proxmox() { "proxmox" }
+        else if containers::is_libvirt() && self.virsh_has_domain(name) { "libvirt" }
+        else { "native" }
+    }
+
     pub fn get_vm(&self, name: &str) -> Option<VmConfig> {
         // On Proxmox, find VM in the qm list output
         if containers::is_proxmox() {
@@ -3966,19 +4049,34 @@ impl VmManager {
         let blklist_text = String::from_utf8_lossy(&blklist.stdout);
         let mut disk_size_gb = 0u32;
         let mut disk_source = String::new();
+        // CD-ROM slots are mapped by index, not "first one with media": slot 0
+        // is the OS-install ISO, slot 1 the VirtIO-drivers ISO — the same
+        // ordering the write path (libvirt_apply_devices) uses, so a saved ISO
+        // round-trips back to the right editor field.
         let mut iso_path: Option<String> = None;
+        let mut drivers_iso: Option<String> = None;
+        let mut cdrom_idx = 0usize;
 
         for line in blklist_text.lines().skip(2) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 4 { continue; }
+            // Need at least Type/Device/Target. An empty cdrom drive may print
+            // no source column at all (3 cols) — keep it so it still counts
+            // toward the cdrom slot index, matching the filesystem read path.
+            if parts.len() < 3 { continue; }
             let device = parts[1]; // disk, cdrom
             let target = parts[2]; // vda, sda
-            let source = parts[3..].join(" ");
-            if source == "-" || source.is_empty() { continue; }
+            let source = if parts.len() > 3 { parts[3..].join(" ") } else { String::new() };
+            let has_src = !(source == "-" || source.is_empty());
 
             if device == "cdrom" {
-                iso_path = Some(source);
-            } else if disk_source.is_empty() {
+                let src = if has_src { Some(source) } else { None };
+                match cdrom_idx {
+                    0 => iso_path = src,
+                    1 => drivers_iso = src,
+                    _ => {}
+                }
+                cdrom_idx += 1;
+            } else if device == "disk" && has_src && disk_source.is_empty() {
                 disk_source = source;
                 disk_size_gb = disk_size_from_virsh(name, target).unwrap_or(0);
             }
@@ -4019,11 +4117,20 @@ impl VmManager {
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
 
-        let bios_type = if dumpxml.contains("OVMF") || dumpxml.contains("ovmf") || dumpxml.contains("AAVMF") || dumpxml.contains("edk2") {
+        let bios_type = if libvirt_xml_is_ovmf(&dumpxml) {
             "ovmf".to_string()
         } else {
             "seabios".to_string()
         };
+
+        // Primary NIC model + OS disk bus come straight from the live XML so
+        // the editor reflects what the operator last saved (these used to be
+        // hardcoded to "virtio", which is why an e1000 / SATA choice reverted).
+        let net_model = libvirt_primary_net_model(&dumpxml)
+            .unwrap_or_else(|| "virtio".to_string());
+        let os_disk_bus = libvirt_primary_disk_target(&dumpxml)
+            .map(|(_, bus)| bus)
+            .unwrap_or_else(|| "virtio".to_string());
 
         let (usb_devices, pci_devices) = parse_libvirt_hostdevs(&dumpxml);
         let (extra_nics, wolfnet_active) = parse_libvirt_extra_nics(&dumpxml);
@@ -4053,9 +4160,9 @@ impl VmManager {
             auto_start,
             wolfnet_ip: None,
             storage_path,
-            os_disk_bus: "virtio".to_string(),
-            net_model: "virtio".to_string(),
-            drivers_iso: None,
+            os_disk_bus,
+            net_model,
+            drivers_iso,
             import_image: None,
             extra_disks: Vec::new(),
             extra_nics,
@@ -4074,20 +4181,16 @@ impl VmManager {
 
         // Overlay adoption sidecar for WolfStack-specific fields that
         // libvirt doesn't carry (wolfnet_ip, extra_disks/nics that the
-        // virsh parse above leaves empty, etc.). Libvirt remains
-        // authoritative for anything libvirt owns — cpu/memory/running
-        // state — so we only backfill gaps.
+        // virsh parse above leaves empty, etc.). Libvirt's domain XML is now
+        // authoritative for everything it owns — cpu/memory/running state,
+        // NIC model, OS disk bus, ISOs, firmware — which the parse above reads
+        // back directly; the sidecar only backfills the gaps libvirt can't
+        // represent.
         if let Ok(text) = fs::read_to_string(self.vm_config_path(name)) {
             if let Ok(sidecar) = serde_json::from_str::<VmConfig>(&text) {
                 if config.wolfnet_ip.is_none() { config.wolfnet_ip = sidecar.wolfnet_ip; }
                 if config.extra_disks.is_empty() { config.extra_disks = sidecar.extra_disks; }
                 if config.extra_nics.is_empty() { config.extra_nics = sidecar.extra_nics; }
-                if !sidecar.net_model.is_empty() && sidecar.net_model != "virtio" {
-                    config.net_model = sidecar.net_model;
-                }
-                if !sidecar.os_disk_bus.is_empty() && sidecar.os_disk_bus != "virtio" {
-                    config.os_disk_bus = sidecar.os_disk_bus;
-                }
                 config.skip_default_nic = sidecar.skip_default_nic;
                 // Network-mode + bridge details: libvirt's domain XML
                 // doesn't carry these as first-class fields the way our
@@ -4139,11 +4242,17 @@ impl VmManager {
             format!("/etc/libvirt/qemu/autostart/{}.xml", name)
         ).is_ok();
 
-        // First <disk device='disk'> block: source file + bus.
+        // First <disk device='disk'> block: source file + bus. CD-ROM slots
+        // are mapped by index (slot 0 = install ISO, slot 1 = VirtIO drivers
+        // ISO) — the same ordering the write path uses, so a saved ISO
+        // round-trips to the right editor field. Empty cdrom drives still
+        // count toward the index so slot 1 doesn't slide into slot 0.
         let mut disk_source = String::new();
         let mut disk_size_gb: u32 = 0;
         let mut iso_path: Option<String> = None;
+        let mut drivers_iso: Option<String> = None;
         let mut os_disk_bus = "virtio".to_string();
+        let mut cdrom_idx = 0usize;
         for block in iter_xml_blocks(&persistent, "disk") {
             // device='disk' or device='cdrom' lives in the opening tag
             let header_end = block.find('>').unwrap_or(block.len());
@@ -4157,10 +4266,15 @@ impl VmManager {
             };
             let source = libvirt_xml_attr_in_block(block, "source", "file")
                 .or_else(|| libvirt_xml_attr_in_block(block, "source", "dev"));
-            let Some(source) = source else { continue; };
-            if device == "cdrom" && iso_path.is_none() {
-                iso_path = Some(source);
-            } else if device == "disk" && disk_source.is_empty() {
+            if device == "cdrom" {
+                match cdrom_idx {
+                    0 => iso_path = source,
+                    1 => drivers_iso = source,
+                    _ => {}
+                }
+                cdrom_idx += 1;
+            } else if disk_source.is_empty() {
+                let Some(source) = source else { continue; };
                 if let Some(bus) = libvirt_xml_attr_in_block(block, "target", "bus") {
                     os_disk_bus = bus;
                 }
@@ -4180,6 +4294,9 @@ impl VmManager {
         // First <interface><mac address='...' /> block.
         let mac_address = iter_xml_blocks(&persistent, "interface")
             .find_map(|block| libvirt_xml_attr_in_block(block, "mac", "address"));
+        // …and its <model type='...'/> — the editor's primary-NIC adapter.
+        let net_model = libvirt_primary_net_model(&persistent)
+            .unwrap_or_else(|| "virtio".to_string());
 
         // <graphics type='vnc' port='N'/>
         let vnc_port = libvirt_xml_attr_in_block(vnc_xml, "graphics", "port")
@@ -4188,8 +4305,7 @@ impl VmManager {
             .map(|p| p as u16);
 
         // BIOS detection — same heuristic as the subprocess path.
-        let bios_type = if persistent.contains("OVMF") || persistent.contains("ovmf")
-            || persistent.contains("AAVMF") || persistent.contains("edk2") {
+        let bios_type = if libvirt_xml_is_ovmf(&persistent) {
             "ovmf".to_string()
         } else {
             "seabios".to_string()
@@ -4227,8 +4343,8 @@ impl VmManager {
             wolfnet_ip: None,
             storage_path,
             os_disk_bus,
-            net_model: "virtio".to_string(),
-            drivers_iso: None,
+            net_model,
+            drivers_iso,
             import_image: None,
             extra_disks: Vec::new(),
             extra_nics,
@@ -4245,18 +4361,15 @@ impl VmManager {
             bridge_gateway: None,
         };
 
-        // Same WolfStack sidecar overlay as the subprocess path.
+        // Same WolfStack sidecar overlay as the subprocess path: the domain
+        // XML is authoritative for libvirt-owned hardware (NIC model, disk
+        // bus, ISOs, firmware), so the sidecar only backfills WolfStack-only
+        // fields libvirt can't carry.
         if let Ok(text) = fs::read_to_string(self.vm_config_path(name)) {
             if let Ok(sidecar) = serde_json::from_str::<VmConfig>(&text) {
                 if config.wolfnet_ip.is_none() { config.wolfnet_ip = sidecar.wolfnet_ip; }
                 if config.extra_disks.is_empty() { config.extra_disks = sidecar.extra_disks; }
                 if config.extra_nics.is_empty() { config.extra_nics = sidecar.extra_nics; }
-                if !sidecar.net_model.is_empty() && sidecar.net_model != "virtio" {
-                    config.net_model = sidecar.net_model;
-                }
-                if !sidecar.os_disk_bus.is_empty() && sidecar.os_disk_bus != "virtio" {
-                    config.os_disk_bus = sidecar.os_disk_bus;
-                }
                 config.skip_default_nic = sidecar.skip_default_nic;
                 if config.network_mode.is_none() { config.network_mode = sidecar.network_mode; }
                 if config.bridge.is_none() { config.bridge = sidecar.bridge; }
@@ -4281,21 +4394,27 @@ impl VmManager {
         let storage_dir = config.storage_path.as_deref().unwrap_or("/var/lib/libvirt/images");
         let disk_path = format!("{}/{}.qcow2", storage_dir, config.name);
 
+        // Honour the operator's NIC-model and OS-disk-bus choices at create
+        // time (not just on edit) so a Windows VM built with e1000 / SATA
+        // comes up that way instead of silently reverting to virtio.
+        let net_model = if config.net_model.trim().is_empty() { "virtio" } else { config.net_model.trim() };
+        let os_bus = if config.os_disk_bus.trim().is_empty() { "virtio" } else { config.os_disk_bus.trim() };
+
         let mut args = vec![
             "--name".to_string(), config.name.clone(),
             "--vcpus".to_string(), config.cpus.to_string(),
             "--memory".to_string(), config.memory_mb.to_string(),
-            "--disk".to_string(), format!("path={},size={},format=qcow2", disk_path, config.disk_size_gb),
+            "--disk".to_string(), format!("path={},size={},format=qcow2,bus={}", disk_path, config.disk_size_gb, os_bus),
             "--os-variant".to_string(), "generic".to_string(),
             "--graphics".to_string(), "vnc,listen=0.0.0.0".to_string(),
             "--noautoconsole".to_string(),
         ];
 
         // Net0 wiring driven by network_mode (mirrors the LXC model):
-        //   • "bridge"  — `--network bridge=<config.bridge>,model=virtio`
-        //   • "wolfnet" — `--network default` (NAT for internet egress)
+        //   • "bridge"  — `--network bridge=<config.bridge>,model=<net_model>`
+        //   • "wolfnet" — primary `--network network=default` (NAT egress)
         //                 PLUS a SECOND NIC on the per-VM WolfNet bridge.
-        //   • "nat"     — `--network default` only (NAT, no WolfNet).
+        //   • "nat"     — `--network network=default` only (NAT, no WolfNet).
         // virt-install's "default" is libvirt's NAT network (192.168.122.x).
         let mode = config.effective_network_mode();
         match mode {
@@ -4303,10 +4422,10 @@ impl VmManager {
                 let bridge = config.bridge.clone()
                     .filter(|b| !b.is_empty())
                     .unwrap_or_else(|| "virbr0".to_string());
-                args.extend(["--network".to_string(), format!("bridge={},model=virtio", bridge)]);
+                args.extend(["--network".to_string(), format!("bridge={},model={}", bridge, net_model)]);
             }
             _ => {
-                args.extend(["--network".to_string(), "default".to_string()]);
+                args.extend(["--network".to_string(), format!("network=default,model={}", net_model)]);
             }
         }
 
@@ -4331,9 +4450,9 @@ impl VmManager {
         if let Some(ref import) = config.import_image {
             if !import.is_empty() {
                 args.push("--import".to_string());
-                // Replace the disk arg with the import image
+                // Replace the disk arg with the import image (keep the bus).
                 if let Some(pos) = args.iter().position(|a| a.starts_with("path=")) {
-                    args[pos] = format!("path={},format=qcow2", import);
+                    args[pos] = format!("path={},format=qcow2,bus={}", import, os_bus);
                 }
             }
         } else if let Some(ref iso) = config.iso_path {
@@ -4357,6 +4476,17 @@ impl VmManager {
             // UEFI flag may already have been appended above; re-emit with
             // the uefi keyword so libvirt picks the right firmware.
             args.extend(["--boot".to_string(), "uefi".to_string()]);
+        }
+
+        // Secondary CD-ROM for the VirtIO drivers ISO — a Windows install
+        // whose OS disk is on the virtio bus needs these drivers loaded
+        // during setup to see the disk. Becomes cdrom slot 1 (the read-back
+        // maps slot 0 → install ISO, slot 1 → drivers ISO).
+        if let Some(ref drv) = config.drivers_iso {
+            if !drv.trim().is_empty() {
+                args.push("--disk".to_string());
+                args.push(format!("device=cdrom,path={}", drv.trim()));
+            }
         }
 
         // Extra disks — virt-install accepts multiple --disk flags. The
@@ -6430,7 +6560,6 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
     let mut disk_size_gb: u32 = 0;
     let mut auto_start = false;
     let mut mac_address: Option<String> = None;
-    let mut iso_path: Option<String> = None;
     let mut storage_path: Option<String> = None;
     let mut bios_type = "seabios".to_string();
     let mut net0_bridge: Option<String> = None;
@@ -6472,14 +6601,6 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
                 if val.contains("bridge=wnbr-") { wolfnet_active = true; }
                 if let Some(pair) = parse_pve_extra_nic(k, val) {
                     extra_nic_pairs.push(pair);
-                }
-            }
-            "ide2" | "cdrom" => {
-                if val.contains("media=cdrom") {
-                    let iso = val.split(',').next().unwrap_or("").trim().to_string();
-                    if !iso.is_empty() {
-                        iso_path = Some(iso);
-                    }
                 }
             }
             "scsi0" | "virtio0" | "ide0" | "sata0" => {
@@ -6532,6 +6653,16 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         }
     };
 
+    // Media + OS-disk bus all flow through the one `pve_cdrom_iso` /
+    // `pve_os_disk_bus` code path the apply side uses, so read and write
+    // agree (and an empty `none,media=cdrom` drive reads back as cleared).
+    // ide2 = install ISO, ide3 = VirtIO-drivers ISO; the legacy `cdrom`
+    // key is still honoured for older configs.
+    let iso_path = pve_cdrom_iso(&main_section, "ide2")
+        .or_else(|| pve_cdrom_iso(&main_section, "cdrom"));
+    let drivers_iso = pve_cdrom_iso(&main_section, "ide3");
+    let os_disk_bus = pve_os_disk_bus(&main_section);
+
     Some(VmConfig {
         name,
         cpus,
@@ -6545,9 +6676,9 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         auto_start,
         wolfnet_ip: None,
         storage_path,
-        os_disk_bus: "virtio".to_string(),
+        os_disk_bus,
         net_model,
-        drivers_iso: None,
+        drivers_iso,
         import_image: None,
         extra_disks: Vec::new(),
         extra_nics,
@@ -6563,6 +6694,149 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         bridge_ip: None,
         bridge_gateway: None,
     })
+}
+
+// ─── Proxmox qemu-server conf helpers (used by update_vm / read-back) ────
+//
+// Mirror the libvirt device-edit helpers: pure parsers over `qm config`
+// output + the on-disk conf (same line shape), unit-tested without a PVE
+// host. Key names (ide2 = install CD, ide3 = VirtIO-drivers CD, efidisk0 =
+// OVMF NVRAM, scsi0/virtio0/sata0/ide0 = OS disk) are taken from this file's
+// own qm_create, which is the authoritative source for how WolfStack lays
+// out a PVE VM.
+
+/// Value of a top-level `key: value` line in a PVE qemu-server conf's MAIN
+/// section (stops at the first `[snapshot]` header). None if absent/empty.
+fn pve_conf_value(conf: &str, key: &str) -> Option<String> {
+    for line in conf.lines() {
+        let line = line.trim();
+        if line.starts_with('[') { break; } // entered a snapshot section
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim() != key { continue; }
+            let v = v.trim();
+            return if v.is_empty() { None } else { Some(v.to_string()) };
+        }
+    }
+    None
+}
+
+/// The ISO volume on a PVE cdrom key (ide2/ide3/…). None if the key is
+/// absent, empty (`none`), or not a cdrom.
+fn pve_cdrom_iso(conf: &str, key: &str) -> Option<String> {
+    let val = pve_conf_value(conf, key)?;
+    if !val.contains("media=cdrom") { return None; }
+    let vol = val.split(',').next().unwrap_or("").trim();
+    if vol.is_empty() || vol == "none" { None } else { Some(vol.to_string()) }
+}
+
+/// True if the VM already has an efidisk0 (NVRAM store required for OVMF).
+fn pve_has_efidisk(conf: &str) -> bool {
+    pve_conf_value(conf, "efidisk0").is_some()
+}
+
+/// Storage pool backing the OS disk (first non-cdrom scsi/virtio/sata/ide
+/// disk), e.g. "local-lvm" from `scsi0: local-lvm:vm-100-disk-0,size=32G`.
+fn pve_os_disk_storage(conf: &str) -> Option<String> {
+    for key in ["scsi0", "virtio0", "sata0", "ide0"] {
+        if let Some(val) = pve_conf_value(conf, key) {
+            if val.contains("media=cdrom") { continue; }
+            let store = val.split(':').next().unwrap_or("").trim();
+            if !store.is_empty() { return Some(store.to_string()); }
+        }
+    }
+    None
+}
+
+/// The OS disk bus in the editor's vocabulary. PVE's scsi0 (virtio-SCSI) and
+/// virtio0 (virtio-blk) are both the paravirtual fast path the editor labels
+/// "VirtIO"; ide0 → "ide", sata0 → "sata". Defaults to "virtio".
+fn pve_os_disk_bus(conf: &str) -> String {
+    for key in ["scsi0", "virtio0", "sata0", "ide0"] {
+        if let Some(val) = pve_conf_value(conf, key) {
+            if val.contains("media=cdrom") { continue; }
+            return match key {
+                "ide0" => "ide",
+                "sata0" => "sata",
+                _ => "virtio", // scsi0 / virtio0
+            }.to_string();
+        }
+    }
+    "virtio".to_string()
+}
+
+/// Apply the operator's Proxmox VM-settings edits that `qm set --cores/...`
+/// doesn't already cover — install ISO (ide2), VirtIO-drivers ISO (ide3),
+/// and BIOS firmware (+ an efidisk0 NVRAM store when switching to OVMF). Each
+/// fires only when it differs from the current `qm config`, mirroring the
+/// libvirt path. OS disk bus is intentionally NOT changed here (it's locked
+/// in the UI for PVE — a bus change means a risky disk detach/reattach).
+/// Returns (failures, changed): failures empty == all applied; changed ==
+/// at least one next-boot-only field changed (drives the running advisory).
+fn qm_apply_media_bios(vmid: u32, iso_path: &Option<String>, drivers_iso: &Option<String>, bios_type: &Option<String>) -> (Vec<String>, bool) {
+    let mut failures: Vec<String> = Vec::new();
+    let mut changed = false;
+    let vmid_str = vmid.to_string();
+
+    // Snapshot the live config once; every diff is computed against it.
+    let conf = Command::new("qm").args(["config", &vmid_str]).output().ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    // Install ISO → ide2 cdrom. Empty clears the media (keeps the drive, so
+    // the `boot order=...;ide2` reference set at create time stays valid).
+    if let Some(iso) = iso_path.as_deref().map(|s| s.trim()) {
+        let cur = pve_cdrom_iso(&conf, "ide2");
+        if iso.is_empty() {
+            if cur.is_some() {
+                let args = vec!["set".into(), vmid_str.clone(), "--ide2".into(), "none,media=cdrom".into()];
+                changed |= run_tool_cmd("qm", &args, "ISO", &mut failures);
+            }
+        } else if cur.as_deref() != Some(iso) {
+            let args = vec!["set".into(), vmid_str.clone(), "--ide2".into(), format!("{},media=cdrom", iso)];
+            changed |= run_tool_cmd("qm", &args, "ISO", &mut failures);
+        }
+    }
+
+    // VirtIO-drivers ISO → ide3 cdrom.
+    if let Some(drv) = drivers_iso.as_deref().map(|s| s.trim()) {
+        let cur = pve_cdrom_iso(&conf, "ide3");
+        if drv.is_empty() {
+            if cur.is_some() {
+                let args = vec!["set".into(), vmid_str.clone(), "--ide3".into(), "none,media=cdrom".into()];
+                changed |= run_tool_cmd("qm", &args, "VirtIO drivers ISO", &mut failures);
+            }
+        } else if cur.as_deref() != Some(drv) {
+            let args = vec!["set".into(), vmid_str.clone(), "--ide3".into(), format!("{},media=cdrom", drv)];
+            changed |= run_tool_cmd("qm", &args, "VirtIO drivers ISO", &mut failures);
+        }
+    }
+
+    // BIOS firmware. Switching to OVMF also needs an efidisk0 for NVRAM if the
+    // VM doesn't have one yet — without it PVE would lose EFI vars every boot.
+    if let Some(bt) = bios_type.as_deref().map(|b| b.trim()).filter(|b| !b.is_empty()) {
+        let cur_bios = pve_conf_value(&conf, "bios").unwrap_or_else(|| "seabios".to_string());
+        if cur_bios != bt {
+            let need_efidisk = bt == "ovmf" && !pve_has_efidisk(&conf);
+            let efidisk_storage = if need_efidisk { pve_os_disk_storage(&conf) } else { None };
+            if need_efidisk && efidisk_storage.is_none() {
+                // Refuse rather than half-apply: switching to OVMF without an
+                // NVRAM store leaves the VM losing EFI vars on every boot.
+                failures.push(
+                    "BIOS type: cannot switch to OVMF — could not find the OS disk's storage pool to create the efidisk0 NVRAM store".to_string()
+                );
+            } else {
+                let mut args = vec!["set".into(), vmid_str.clone(), "--bios".into(), bt.to_string()];
+                if let Some(storage) = efidisk_storage {
+                    args.push("--efidisk0".into());
+                    args.push(format!("{}:1,efitype=4m", storage));
+                }
+                changed |= run_tool_cmd("qm", &args, "BIOS type", &mut failures);
+            }
+        }
+    }
+
+    (failures, changed)
 }
 
 /// Walk every `<interface>` block in a libvirt domain XML and produce
@@ -6604,6 +6878,287 @@ fn parse_libvirt_extra_nics(xml: &str) -> (Vec<NicConfig>, bool) {
         index += 1;
     }
     (nics, wolfnet_active)
+}
+
+// ─── libvirt device-edit helpers (used by update_vm's libvirt branch) ───
+//
+// These build the exact `virt-xml` / `virsh change-media` argv that push an
+// operator's VM-settings edits into an existing libvirt domain's PERSISTENT
+// config. `virt-xml --edit` defaults to `--define` ("--edit implies default
+// output action is --define, even if the VM is running" — man virt-xml), so
+// the running guest is never disturbed and the change takes effect on next
+// start — exactly the semantics the editor's BIOS-change warning already
+// implies. argv are returned as owned Vec<String> so they unit-test without
+// a libvirt host. Syntax verified against the virt-xml / virt-install /
+// virsh man pages (model.type|model, target.bus|bus, --boot uefi[=off],
+// change-media --update|--eject --config).
+
+/// `<model type=...>` of the first `<interface>` block — the editor's
+/// primary NIC, matching parse_libvirt_extra_nics' "index 0 is primary".
+fn libvirt_primary_net_model(xml: &str) -> Option<String> {
+    iter_xml_blocks(xml, "interface").next()
+        .and_then(|b| libvirt_xml_attr_in_block(b, "model", "type"))
+}
+
+/// Every `<disk device='cdrom'>` slot in document order, as
+/// (target-dev, current-source). Slot 0 is the OS-install ISO drive, slot 1
+/// the VirtIO-drivers drive — the SAME index ordering the read-back uses, so
+/// a saved ISO round-trips back to the right editor field.
+fn libvirt_cdrom_slots(xml: &str) -> Vec<(String, Option<String>)> {
+    let mut slots = Vec::new();
+    for block in iter_xml_blocks(xml, "disk") {
+        let header_end = block.find('>').unwrap_or(block.len());
+        let header = &block[..header_end];
+        if !(header.contains("device='cdrom'") || header.contains("device=\"cdrom\"")) {
+            continue;
+        }
+        let dev = libvirt_xml_attr_in_block(block, "target", "dev").unwrap_or_default();
+        let source = libvirt_xml_attr_in_block(block, "source", "file")
+            .or_else(|| libvirt_xml_attr_in_block(block, "source", "dev"));
+        slots.push((dev, source));
+    }
+    slots
+}
+
+/// (target-dev, bus) of the first `<disk device='disk'>` block.
+fn libvirt_primary_disk_target(xml: &str) -> Option<(String, String)> {
+    for block in iter_xml_blocks(xml, "disk") {
+        let header_end = block.find('>').unwrap_or(block.len());
+        let header = &block[..header_end];
+        if header.contains("device='disk'") || header.contains("device=\"disk\"") {
+            let dev = libvirt_xml_attr_in_block(block, "target", "dev")?;
+            let bus = libvirt_xml_attr_in_block(block, "target", "bus")
+                .unwrap_or_else(|| "virtio".to_string());
+            return Some((dev, bus));
+        }
+    }
+    None
+}
+
+/// True when the domain XML selects OVMF/UEFI firmware. Same heuristic the
+/// read-back uses, so "what we detect" and "what we set" stay in sync.
+fn libvirt_xml_is_ovmf(xml: &str) -> bool {
+    xml.contains("OVMF") || xml.contains("ovmf")
+        || xml.contains("AAVMF") || xml.contains("edk2")
+        || xml.contains("firmware='efi'") || xml.contains("firmware=\"efi\"")
+}
+
+/// Canonical libvirt target-dev name for a bus, preserving the disk's slot
+/// letter (vda↔sda↔hda all keep 'a'). virtio → vd*, ide → hd*, everything
+/// else (sata/scsi/usb) → sd* — matching libvirt's own dev-naming.
+fn disk_dev_for_bus(cur_dev: &str, bus: &str) -> String {
+    let letter = cur_dev.chars().rev().find(|c| c.is_ascii_alphabetic()).unwrap_or('a');
+    let prefix = match bus {
+        "virtio" => "vd",
+        "ide" => "hd",
+        _ => "sd", // sata, scsi, usb
+    };
+    format!("{}{}", prefix, letter)
+}
+
+/// `virt-xml <name> --edit 1 --network <opts>` for the primary NIC.
+/// `mode` Some → also (re)write source/type; None → change only the model.
+/// virt-xml --edit leaves unspecified suboptions (incl. the existing MAC)
+/// untouched. Returns None when there is nothing to change.
+fn build_virtxml_network_args(name: &str, mode: Option<&str>, bridge: Option<&str>, model: Option<&str>) -> Option<Vec<String>> {
+    let mut opts: Vec<String> = Vec::new();
+    match mode {
+        Some("bridge") => {
+            let br = bridge.map(|b| b.trim()).filter(|b| !b.is_empty())?;
+            opts.push(format!("bridge={}", br));
+        }
+        // Primary egress NIC is libvirt's default NAT network for both "nat"
+        // and "wolfnet" (the WolfNet bridge NIC is a SEPARATE interface).
+        Some("nat") | Some("wolfnet") => opts.push("network=default".to_string()),
+        Some(_) => return None, // unknown mode — caller validates; ignore
+        None => {}
+    }
+    if let Some(m) = model.map(|m| m.trim()).filter(|m| !m.is_empty()) {
+        opts.push(format!("model={}", m));
+    }
+    if opts.is_empty() { return None; }
+    Some(vec![
+        name.to_string(), "--edit".into(), "1".into(),
+        "--network".into(), opts.join(","),
+    ])
+}
+
+/// `virt-xml <name> --edit target=<cur_dev> --disk target.bus=<bus>,target.dev=<new_dev>`
+fn build_virtxml_disk_bus_args(name: &str, cur_dev: &str, bus: &str) -> Vec<String> {
+    let new_dev = disk_dev_for_bus(cur_dev, bus);
+    vec![
+        name.to_string(),
+        "--edit".into(), format!("target={}", cur_dev),
+        "--disk".into(), format!("target.bus={},target.dev={}", bus, new_dev),
+    ]
+}
+
+/// `virt-xml <name> --edit --boot uefi` (OVMF) or `--boot uefi=off` (SeaBIOS).
+fn build_virtxml_bios_args(name: &str, want_ovmf: bool) -> Vec<String> {
+    let boot = if want_ovmf { "uefi" } else { "uefi=off" };
+    vec![name.to_string(), "--edit".into(), "--boot".into(), boot.to_string()]
+}
+
+/// `virt-xml <name> --add-device --disk device=cdrom,path=<src>` — used when
+/// the operator sets an ISO on a VM that has no matching cdrom slot yet.
+/// libvirt auto-assigns the target dev.
+fn build_virtxml_add_cdrom_args(name: &str, src: &str) -> Vec<String> {
+    vec![
+        name.to_string(), "--add-device".into(),
+        "--disk".into(), format!("device=cdrom,path={}", src),
+    ]
+}
+
+/// `virsh change-media <name> <target> [<src>] (--update|--eject) --config`.
+/// `src` Some → insert/replace (--update covers both per the man page);
+/// None → eject. `--config` only, so the swap is persistent / next-boot and
+/// the running guest's mounted media is left alone.
+fn build_change_media_args(name: &str, target: &str, src: Option<&str>) -> Vec<String> {
+    let mut a = vec!["change-media".to_string(), name.to_string(), target.to_string()];
+    match src {
+        Some(s) => { a.push(s.to_string()); a.push("--update".into()); }
+        None => a.push("--eject".into()),
+    }
+    a.push("--config".into());
+    a
+}
+
+/// Run `cmd args`, returning true on exit-0. On failure, push a
+/// "<field>: <reason>" line onto `failures` (ENOENT → the tool isn't
+/// installed, surfaced honestly rather than swallowed).
+fn run_tool_cmd(cmd: &str, args: &[String], field: &str, failures: &mut Vec<String>) -> bool {
+    match Command::new(cmd).args(args).output() {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            failures.push(format!("{}: {}", field, String::from_utf8_lossy(&o.stderr).trim()));
+            false
+        }
+        Err(e) => {
+            failures.push(format!("{}: {} unavailable ({})", field, cmd, e));
+            false
+        }
+    }
+}
+
+/// Decide the `virt-xml` argv (if any) to bring the primary NIC into line
+/// with the requested mode/bridge/model, given the current domain XML. Pure
+/// so the diffing logic is unit-tested without a libvirt host; returns None
+/// when nothing needs to change. The primary NIC is interface 1 (virt-xml is
+/// 1-indexed); the WolfNet NIC (`wnbr-*`) is always a SECOND interface and is
+/// filtered out so we never mistake it for the primary and clobber it.
+fn libvirt_primary_nic_edit(cur_xml: &str, name: &str, req_mode: Option<&str>, req_bridge: Option<&str>, req_model: Option<&str>) -> Option<Vec<String>> {
+    let cur_model = libvirt_primary_net_model(cur_xml);
+    let cur_bridge = iter_xml_blocks(cur_xml, "interface").next()
+        .and_then(|b| libvirt_xml_attr_in_block(b, "source", "bridge"))
+        .filter(|b| !b.starts_with("wnbr-"));
+    // Current primary source → normalized (mode, bridge): a non-virbr0 bridge
+    // is "bridge"; everything else (virbr0 / network=default / user) is "nat".
+    let (cur_mode, cur_br): (&str, Option<String>) = match cur_bridge.as_deref() {
+        Some(b) if b != "virbr0" => ("bridge", Some(b.to_string())),
+        _ => ("nat", None),
+    };
+    let req_mode = req_mode.filter(|s| !s.is_empty());
+    // "wolfnet" and "nat" both leave the PRIMARY on the default NAT net (the
+    // WolfNet bridge NIC is reconciled separately as a second interface).
+    let (want_mode, want_br): (&str, Option<String>) = match req_mode {
+        Some("bridge") => ("bridge", req_bridge.map(|b| b.trim().to_string()).filter(|b| !b.is_empty())),
+        Some("nat") | Some("wolfnet") => ("nat", None),
+        _ => (cur_mode, cur_br.clone()), // no mode change requested
+    };
+    let source_changed = req_mode.is_some() && (want_mode != cur_mode || want_br != cur_br);
+    let model_changed = req_model.filter(|m| !m.is_empty())
+        .map(|m| Some(m) != cur_model.as_deref()).unwrap_or(false);
+    let mode_for_build = if source_changed { Some(want_mode) } else { None };
+    let model_for_build = if model_changed { req_model } else { None };
+    build_virtxml_network_args(name, mode_for_build, want_br.as_deref(), model_for_build)
+}
+
+/// Push the operator's libvirt VM-settings edits — primary NIC model +
+/// mode/bridge, OS-install + VirtIO-drivers ISOs, OS disk bus, BIOS firmware
+/// — into the domain's PERSISTENT config. Only fields whose Option is Some
+/// AND whose value differs from the current domain XML trigger a command
+/// (mirrors the Proxmox path's "skip when nothing would change"). Returns
+/// (failures, changed_next_boot): `failures` is empty when everything
+/// applied; `changed_next_boot` is true when at least one next-boot-only
+/// field actually changed (drives the running-VM advisory).
+#[allow(clippy::too_many_arguments)]
+fn libvirt_apply_devices(
+    name: &str,
+    net_model: &Option<String>, network_mode: &Option<String>, bridge: &Option<String>,
+    iso_path: &Option<String>, drivers_iso: &Option<String>,
+    os_disk_bus: &Option<String>, bios_type: &Option<String>,
+) -> (Vec<String>, bool) {
+    let mut failures: Vec<String> = Vec::new();
+    let mut changed = false;
+
+    // Snapshot the persistent XML once; every diff is computed against it.
+    let cur_xml = Command::new("virsh").args(["dumpxml", "--inactive", name]).output().ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    // ── Primary NIC: mode/bridge + model (no-op-safe: the pure helper
+    //    returns None when nothing differs from the current domain XML) ──
+    if let Some(args) = libvirt_primary_nic_edit(
+        &cur_xml, name, network_mode.as_deref(), bridge.as_deref(), net_model.as_deref(),
+    ) {
+        changed |= run_tool_cmd("virt-xml", &args, "network adapter", &mut failures);
+    }
+
+    // ── OS disk bus (only when it actually differs) ────────────────────
+    let disk_bus_edit = os_disk_bus.as_deref().map(|b| b.trim()).filter(|b| !b.is_empty())
+        .and_then(|bus| libvirt_primary_disk_target(&cur_xml)
+            .filter(|(_, cur_bus)| cur_bus.as_str() != bus)
+            .map(|(cur_dev, _)| build_virtxml_disk_bus_args(name, &cur_dev, bus)));
+    if let Some(args) = disk_bus_edit {
+        changed |= run_tool_cmd("virt-xml", &args, "OS disk bus", &mut failures);
+    }
+
+    // ── BIOS firmware (SeaBIOS ↔ OVMF) ─────────────────────────────────
+    if let Some(bt) = bios_type.as_deref().map(|b| b.trim()).filter(|b| !b.is_empty()) {
+        let want_ovmf = bt == "ovmf";
+        if want_ovmf != libvirt_xml_is_ovmf(&cur_xml) {
+            let args = build_virtxml_bios_args(name, want_ovmf);
+            changed |= run_tool_cmd("virt-xml", &args, "BIOS type", &mut failures);
+        }
+    }
+
+    // ── CD-ROM media: slot 0 = install ISO, slot 1 = VirtIO drivers ISO ─
+    let slots = libvirt_cdrom_slots(&cur_xml);
+    let apply_cdrom = |idx: usize, want: &str, field: &str, failures: &mut Vec<String>, changed: &mut bool| {
+        match slots.get(idx) {
+            Some((dev, cur_src)) => {
+                if want.is_empty() {
+                    // Clear the slot only if it currently holds media.
+                    if cur_src.is_some() {
+                        let args = build_change_media_args(name, dev, None);
+                        *changed |= run_tool_cmd("virsh", &args, field, failures);
+                    }
+                } else if cur_src.as_deref() != Some(want) {
+                    let args = build_change_media_args(name, dev, Some(want));
+                    *changed |= run_tool_cmd("virsh", &args, field, failures);
+                }
+            }
+            None => {
+                // No such slot. Add a cdrom only when setting a non-empty ISO.
+                // (A drivers-ISO add on a VM with zero cdrom slots lands as the
+                // first cdrom and would read back as the install ISO — rare, as
+                // libvirt VMs are created with the install cdrom already.)
+                if !want.is_empty() {
+                    let args = build_virtxml_add_cdrom_args(name, want);
+                    *changed |= run_tool_cmd("virt-xml", &args, field, failures);
+                }
+            }
+        }
+    };
+    if let Some(iso) = iso_path.as_deref() {
+        apply_cdrom(0, iso.trim(), "ISO", &mut failures, &mut changed);
+    }
+    if let Some(drv) = drivers_iso.as_deref() {
+        apply_cdrom(1, drv.trim(), "VirtIO drivers ISO", &mut failures, &mut changed);
+    }
+
+    (failures, changed)
 }
 
 /// Parse a single `netN: <value>` line value into a NicConfig. Returns
@@ -7162,6 +7717,201 @@ mod libvirt_xml_tests {
         assert!(blocks[0].contains("foo='1'"));
         assert!(blocks[1].contains("foo='2'"));
     }
+
+    // A VM with TWO cdrom drives (install ISO + VirtIO drivers) and an
+    // e1000 NIC — exercises the slot-ordering the editor depends on.
+    const SAMPLE_TWO_CDROM: &str = r#"<domain type='kvm'>
+  <os><type machine='pc-i440fx-9.0'>hvm</type></os>
+  <devices>
+    <disk type='file' device='disk'>
+      <source file='/var/lib/libvirt/images/win.qcow2'/>
+      <target dev='sda' bus='sata'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <source file='/media/Win11.iso'/>
+      <target dev='sdb' bus='sata'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <source file='/share/virtio-win.iso'/>
+      <target dev='sdc' bus='sata'/>
+    </disk>
+    <interface type='network'>
+      <mac address='52:54:00:00:60:e8'/>
+      <source network='default'/>
+      <model type='e1000'/>
+    </interface>
+  </devices>
+</domain>"#;
+
+    #[test]
+    fn primary_net_model_reads_first_interface() {
+        assert_eq!(libvirt_primary_net_model(SAMPLE).as_deref(), Some("virtio"));
+        assert_eq!(libvirt_primary_net_model(SAMPLE_TWO_CDROM).as_deref(), Some("e1000"));
+        assert_eq!(libvirt_primary_net_model("<domain/>"), None);
+    }
+
+    #[test]
+    fn cdrom_slots_are_index_ordered() {
+        // SAMPLE: one cdrom with media.
+        let one = libvirt_cdrom_slots(SAMPLE);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0], ("sda".to_string(), Some("/var/lib/iso/debian-12.iso".to_string())));
+        // Two cdroms: slot 0 = install ISO, slot 1 = drivers ISO.
+        let two = libvirt_cdrom_slots(SAMPLE_TWO_CDROM);
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0], ("sdb".to_string(), Some("/media/Win11.iso".to_string())));
+        assert_eq!(two[1], ("sdc".to_string(), Some("/share/virtio-win.iso".to_string())));
+    }
+
+    #[test]
+    fn cdrom_slots_counts_empty_drive() {
+        let xml = r#"<domain><devices>
+            <disk device='cdrom'><target dev='sda' bus='sata'/></disk>
+            <disk device='cdrom'><source file='/d.iso'/><target dev='sdb' bus='sata'/></disk>
+        </devices></domain>"#;
+        let slots = libvirt_cdrom_slots(xml);
+        // An empty drive still occupies slot 0 so the drivers ISO stays in 1.
+        assert_eq!(slots[0], ("sda".to_string(), None));
+        assert_eq!(slots[1], ("sdb".to_string(), Some("/d.iso".to_string())));
+    }
+
+    #[test]
+    fn primary_disk_target_reads_dev_and_bus() {
+        assert_eq!(libvirt_primary_disk_target(SAMPLE), Some(("vda".to_string(), "virtio".to_string())));
+        assert_eq!(libvirt_primary_disk_target(SAMPLE_TWO_CDROM), Some(("sda".to_string(), "sata".to_string())));
+    }
+
+    #[test]
+    fn ovmf_detection() {
+        assert!(libvirt_xml_is_ovmf(SAMPLE)); // has OVMF_CODE loader
+        assert!(!libvirt_xml_is_ovmf(SAMPLE_TWO_CDROM)); // plain i440fx/SeaBIOS
+        assert!(libvirt_xml_is_ovmf("<os firmware='efi'/>"));
+    }
+
+    #[test]
+    fn disk_dev_name_preserves_slot_letter() {
+        assert_eq!(disk_dev_for_bus("vda", "sata"), "sda");
+        assert_eq!(disk_dev_for_bus("vda", "ide"), "hda");
+        assert_eq!(disk_dev_for_bus("sdb", "virtio"), "vdb");
+        assert_eq!(disk_dev_for_bus("hda", "scsi"), "sda");
+    }
+
+    #[test]
+    fn virtxml_network_args_bridge_and_model() {
+        let args = build_virtxml_network_args("win", Some("bridge"), Some("vmbr0"), Some("e1000")).unwrap();
+        assert_eq!(args, vec!["win", "--edit", "1", "--network", "bridge=vmbr0,model=e1000"]);
+    }
+
+    #[test]
+    fn virtxml_network_args_nat_uses_default_network() {
+        let args = build_virtxml_network_args("win", Some("nat"), None, None).unwrap();
+        assert_eq!(args, vec!["win", "--edit", "1", "--network", "network=default"]);
+        // wolfnet keeps the PRIMARY on the default NAT net too.
+        let wn = build_virtxml_network_args("win", Some("wolfnet"), None, Some("virtio")).unwrap();
+        assert_eq!(wn[4], "network=default,model=virtio");
+    }
+
+    #[test]
+    fn virtxml_network_args_model_only() {
+        // No mode change → only the model is rewritten, source/MAC untouched.
+        let args = build_virtxml_network_args("win", None, None, Some("rtl8139")).unwrap();
+        assert_eq!(args, vec!["win", "--edit", "1", "--network", "model=rtl8139"]);
+    }
+
+    #[test]
+    fn virtxml_network_args_none_when_nothing_to_do() {
+        // bridge mode without a bridge name can't be applied.
+        assert!(build_virtxml_network_args("win", Some("bridge"), None, Some("e1000")).is_none());
+        // no mode and no model → nothing to change.
+        assert!(build_virtxml_network_args("win", None, None, None).is_none());
+    }
+
+    #[test]
+    fn virtxml_disk_bus_args() {
+        let args = build_virtxml_disk_bus_args("win", "vda", "sata");
+        assert_eq!(args, vec!["win", "--edit", "target=vda", "--disk", "target.bus=sata,target.dev=sda"]);
+    }
+
+    #[test]
+    fn virtxml_bios_args() {
+        assert_eq!(build_virtxml_bios_args("win", true), vec!["win", "--edit", "--boot", "uefi"]);
+        assert_eq!(build_virtxml_bios_args("win", false), vec!["win", "--edit", "--boot", "uefi=off"]);
+    }
+
+    #[test]
+    fn virtxml_add_cdrom_args() {
+        assert_eq!(
+            build_virtxml_add_cdrom_args("win", "/media/d.iso"),
+            vec!["win", "--add-device", "--disk", "device=cdrom,path=/media/d.iso"]
+        );
+    }
+
+    #[test]
+    fn change_media_args_update_and_eject() {
+        assert_eq!(
+            build_change_media_args("win", "sdb", Some("/media/w.iso")),
+            vec!["change-media", "win", "sdb", "/media/w.iso", "--update", "--config"]
+        );
+        assert_eq!(
+            build_change_media_args("win", "sdb", None),
+            vec!["change-media", "win", "sdb", "--eject", "--config"]
+        );
+    }
+
+    // Primary NIC currently on a real LAN bridge (vmbr0), virtio model.
+    const NIC_ON_VMBR0: &str = r#"<domain><devices>
+        <interface type='bridge'><mac address='52:54:00:11:22:33'/>
+          <source bridge='vmbr0'/><model type='virtio'/></interface>
+    </devices></domain>"#;
+    // Misordered domain whose FIRST interface is the WolfNet NIC — the filter
+    // must stop us treating it as the primary.
+    const WNBR_FIRST: &str = r#"<domain><devices>
+        <interface type='bridge'><source bridge='wnbr-vm1'/><model type='virtio'/></interface>
+        <interface type='network'><source network='default'/><model type='virtio'/></interface>
+    </devices></domain>"#;
+
+    // helper: the joined --network opts string the builder emits (args[4]).
+    fn nic_opts(v: &Option<Vec<String>>) -> Option<&str> {
+        v.as_ref().map(|a| a[4].as_str())
+    }
+
+    #[test]
+    fn nic_edit_nat_to_bridge() {
+        // SAMPLE_TWO_CDROM is on network=default (nat) with e1000.
+        let edit = libvirt_primary_nic_edit(SAMPLE_TWO_CDROM, "win", Some("bridge"), Some("vmbr0"), Some("e1000"));
+        // mode changes; model unchanged (already e1000) so only the bridge is set.
+        assert_eq!(nic_opts(&edit), Some("bridge=vmbr0"));
+    }
+
+    #[test]
+    fn nic_edit_bridge_to_nat_and_wolfnet() {
+        let to_nat = libvirt_primary_nic_edit(NIC_ON_VMBR0, "win", Some("nat"), None, None);
+        assert_eq!(nic_opts(&to_nat), Some("network=default"));
+        // wolfnet keeps the PRIMARY on the default NAT net too.
+        let to_wn = libvirt_primary_nic_edit(NIC_ON_VMBR0, "win", Some("wolfnet"), None, None);
+        assert_eq!(nic_opts(&to_wn), Some("network=default"));
+    }
+
+    #[test]
+    fn nic_edit_model_only_when_mode_unchanged() {
+        // nat→nat, but adapter virtio→e1000... here current is e1000, ask virtio.
+        let edit = libvirt_primary_nic_edit(SAMPLE_TWO_CDROM, "win", Some("nat"), None, Some("virtio"));
+        assert_eq!(nic_opts(&edit), Some("model=virtio"));
+    }
+
+    #[test]
+    fn nic_edit_noop_when_nothing_changes() {
+        // Same mode (nat) and same model (e1000) → no command.
+        assert!(libvirt_primary_nic_edit(SAMPLE_TWO_CDROM, "win", Some("nat"), None, Some("e1000")).is_none());
+    }
+
+    #[test]
+    fn nic_edit_ignores_wolfnet_first_interface() {
+        // First interface is wnbr-* — filtered out, so the primary reads as
+        // "nat"; asking for wolfnet is therefore a no-op (we must NOT rewrite
+        // the WolfNet NIC).
+        assert!(libvirt_primary_nic_edit(WNBR_FIRST, "win", Some("wolfnet"), None, None).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -7220,5 +7970,56 @@ memory: 1024
         // total (doesn't panic) when /etc/pve isn't present.
         assert!(qm_vmid_by_name_filesystem("nonexistent-vm").is_none()
             || qm_vmid_by_name_filesystem("nonexistent-vm").is_some());
+    }
+
+    // A Windows VM with install ISO (ide2), VirtIO-drivers ISO (ide3), OVMF
+    // + efidisk0, and a SATA OS disk — exercises every new read/apply helper.
+    const WIN_CONF: &str = "\
+name: win11
+cores: 4
+memory: 8192
+bios: ovmf
+efidisk0: local-lvm:vm-200-disk-1,efitype=4m,size=4M
+net0: e1000=AA:BB:CC:00:11:22,bridge=vmbr0
+sata0: local-lvm:vm-200-disk-0,size=64G
+ide2: local:iso/Win11.iso,media=cdrom
+ide3: local:iso/virtio-win.iso,media=cdrom
+[snapshot_pre]
+ide2: local:iso/OLD.iso,media=cdrom
+";
+
+    #[test]
+    fn pve_helpers_read_media_bios_disk() {
+        assert_eq!(pve_cdrom_iso(WIN_CONF, "ide2").as_deref(), Some("local:iso/Win11.iso"));
+        assert_eq!(pve_cdrom_iso(WIN_CONF, "ide3").as_deref(), Some("local:iso/virtio-win.iso"));
+        assert!(pve_has_efidisk(WIN_CONF));
+        assert_eq!(pve_conf_value(WIN_CONF, "bios").as_deref(), Some("ovmf"));
+        assert_eq!(pve_os_disk_storage(WIN_CONF).as_deref(), Some("local-lvm"));
+        assert_eq!(pve_os_disk_bus(WIN_CONF), "sata");
+        // The snapshot section's ide2 must NOT leak into the main-section read.
+        assert_ne!(pve_cdrom_iso(WIN_CONF, "ide2").as_deref(), Some("local:iso/OLD.iso"));
+    }
+
+    #[test]
+    fn pve_helpers_handle_empty_and_absent() {
+        let conf = "\
+scsi0: local-lvm:vm-1-disk-0,size=32G
+ide2: none,media=cdrom
+";
+        assert_eq!(pve_cdrom_iso(conf, "ide2"), None);     // `none` = empty drive
+        assert_eq!(pve_cdrom_iso(conf, "ide3"), None);     // absent
+        assert!(!pve_has_efidisk(conf));
+        assert_eq!(pve_os_disk_bus(conf), "virtio");       // scsi0 → virtio class
+        assert_eq!(pve_os_disk_storage(conf).as_deref(), Some("local-lvm"));
+    }
+
+    #[test]
+    fn parse_pve_conf_reads_drivers_iso_and_bus() {
+        let vm = parse_pve_qemu_conf(200, WIN_CONF).expect("parse");
+        assert_eq!(vm.iso_path.as_deref(), Some("local:iso/Win11.iso"));
+        assert_eq!(vm.drivers_iso.as_deref(), Some("local:iso/virtio-win.iso"));
+        assert_eq!(vm.os_disk_bus, "sata");
+        assert_eq!(vm.net_model, "e1000");
+        assert_eq!(vm.bios_type, "ovmf");
     }
 }

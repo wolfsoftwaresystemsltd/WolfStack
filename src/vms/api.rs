@@ -419,7 +419,9 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
                             body.bridge_ip_mode.clone(),
                             body.bridge_ip.clone(),
                             body.bridge_gateway.clone()) {
-        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true })),
+        // Some(msg) is a non-fatal advisory (e.g. libvirt hardware edits that
+        // apply on next boot) the UI shows next to the success toast.
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
 }
@@ -428,9 +430,24 @@ async fn get_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<St
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
     let manager = state.vms.lock().unwrap();
-    
+
     match manager.get_vm(&name) {
-        Some(vm) => HttpResponse::Ok().json(vm),
+        Some(vm) => {
+            // Attach the hypervisor backend so the editor can tailor its UI
+            // (running-VM note wording, Proxmox OS-disk-bus lock).
+            let platform = manager.vm_platform(&name);
+            match serde_json::to_value(&vm) {
+                Ok(mut v) => {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("platform".to_string(), serde_json::json!(platform));
+                    }
+                    HttpResponse::Ok().json(v)
+                }
+                // Should never happen for a well-formed VmConfig; degrade
+                // gracefully to the raw VM rather than an empty body.
+                Err(_) => HttpResponse::Ok().json(vm),
+            }
+        }
         None => HttpResponse::NotFound().json(serde_json::json!({ "error": "VM not found" })),
     }
 }

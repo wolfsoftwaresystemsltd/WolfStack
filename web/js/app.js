@@ -26454,9 +26454,22 @@ async function showVmSettings(name) {
             volumesHtml = '<div style="color:var(--text-muted); font-size:13px; padding:8px;">No extra volumes attached</div>';
         }
 
+        // Running-VM note (platform-aware): native blocks edits while on;
+        // Proxmox/libvirt save now but apply hardware changes on next start.
+        const vmPlatform = vm.platform || '';
+        const runBannerColor = vmPlatform === 'native' ? 'var(--warning, #f59e0b)' : 'var(--accent)';
+        const runBannerMsg = vmPlatform === 'native'
+            ? 'This VM is <strong>running</strong>. Stop it before editing — saving is rejected while it is powered on.'
+            : 'This VM is <strong>running</strong>. Changes are saved now, but hardware edits (network, ISO, disk bus, BIOS) take effect on the next restart.';
+        const runningNote = vm.running ? `
+            <div role="status" style="margin:-24px -24px 0 -24px; padding:11px 24px; background:var(--bg-secondary); border-bottom:1px solid var(--border); border-left:3px solid ${runBannerColor}; color:var(--text-primary); font-size:12.5px; line-height:1.45;">
+                <strong style="color:${runBannerColor};">●</strong> ${runBannerMsg}
+            </div>` : '';
+
         body.innerHTML = `
+            ${runningNote}
             <!-- Tab Nav -->
-            <div style="display:flex; border-bottom:1px solid var(--border); background:var(--bg-secondary); margin:-24px -24px 16px -24px;">
+            <div style="display:flex; border-bottom:1px solid var(--border); background:var(--bg-secondary); margin:${vm.running ? '0' : '-24px'} -24px 16px -24px;">
                 <button class="vms-tab-btn active" data-stab="1" onclick="switchVmSettingsTab(1)"
                     style="flex:1; padding:10px 16px; border:none; background:none; color:var(--text-primary); font-size:13px; font-weight:600; cursor:pointer; border-bottom:2px solid var(--accent); transition:all .2s;">
                     General
@@ -26593,11 +26606,12 @@ async function showVmSettings(name) {
                     </div>
                     <div class="form-group" style="margin-top:12px;">
                         <label>OS Disk Bus</label>
-                        <select class="form-control" id="edit-vm-os-bus" style="font-size:13px;">
+                        <select class="form-control" id="edit-vm-os-bus" style="font-size:13px;"${vm.platform === 'proxmox' ? ' disabled title="Managed by Proxmox — the OS disk uses virtio-SCSI. Change the bus from the Proxmox UI."' : ''}>
                             <option value="virtio"${vm.os_disk_bus === 'virtio' ? ' selected' : ''}>VirtIO (fastest)</option>
                             <option value="ide"${vm.os_disk_bus === 'ide' ? ' selected' : ''}>IDE (Windows)</option>
                             <option value="sata"${vm.os_disk_bus === 'sata' ? ' selected' : ''}>SATA</option>
                         </select>
+                        ${vm.platform === 'proxmox' ? '<small style="color:var(--text-muted);">Managed by Proxmox (virtio-SCSI). Change the disk bus from the Proxmox UI.</small>' : ''}
                     </div>
                     <div class="form-group" style="margin-top:12px;">
                         <label>BIOS Type</label>
@@ -26984,7 +26998,9 @@ async function saveVmSettings(name) {
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast('VM settings saved', 'success');
+            // Backend may return a non-fatal advisory (e.g. libvirt hardware
+            // edits that only take effect on the VM's next start).
+            showToast(data.message || 'VM settings saved', 'success');
             closeContainerDetail();
             loadVms();
         } else {
