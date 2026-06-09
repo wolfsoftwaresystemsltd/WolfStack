@@ -5318,7 +5318,8 @@ async function fetchNodes() {
         } else {
             for (var i = 0; i < nodes.length; i++) {
                 var old = allNodes.find(function (n) { return n.id === nodes[i].id; });
-                if (!old || old.hostname !== nodes[i].hostname || old.cluster_name !== nodes[i].cluster_name) {
+                if (!old || old.hostname !== nodes[i].hostname || old.cluster_name !== nodes[i].cluster_name
+                    || old.display_name !== nodes[i].display_name) {
                     structureChanged = true;
                     break;
                 }
