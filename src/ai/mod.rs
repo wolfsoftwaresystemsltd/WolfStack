@@ -323,6 +323,9 @@ impl AiConfig {
                 !self.cloudflare_account_id.trim().is_empty()
                     && !self.cloudflare_api_key.is_empty()
             }
+            // Claude Code CLI uses the operator's Pro/Max subscription via the
+            // local `claude` login — no API key to store here.
+            "claude-cli" => true,
             _ => !self.active_key().is_empty(),
         }
     }
@@ -338,7 +341,7 @@ impl AiConfig {
         }
         // Validate provider exists
         match self.provider.as_str() {
-            "claude" | "gemini" | "openai" | "openrouter" | "cloudflare" | "local" => {}
+            "claude" | "claude-cli" | "gemini" | "openai" | "openrouter" | "cloudflare" | "local" => {}
             _ => return Err(format!("Invalid provider: {}", self.provider)),
         }
 
@@ -348,6 +351,15 @@ impl AiConfig {
             "claude" => {
                 if !model_lower.contains("claude") {
                     return Err(format!("Model '{}' is not a Claude model (expected claude-*)", self.model));
+                }
+            }
+            "claude-cli" => {
+                // The `claude` CLI accepts full ids (claude-opus-4-8) and the
+                // short aliases opus/sonnet/haiku — allow both.
+                let ok = model_lower.contains("claude")
+                    || matches!(model_lower.as_str(), "opus" | "sonnet" | "haiku");
+                if !ok {
+                    return Err(format!("Model '{}' isn't a Claude Code model (use claude-* or opus/sonnet/haiku)", self.model));
                 }
             }
             "gemini" => {
@@ -874,6 +886,9 @@ impl AiAgent {
                 "local" => {
                     call_local_with_tools(&self.client, &config.local_url, &config.local_api_key, &config.model, &system_prompt, &history, &current_msg).await?
                 }
+                "claude-cli" => {
+                    call_claude_cli(&config.model, &system_prompt, &history, &current_msg).await?
+                }
                 _ => {
                     call_claude(&self.client, &config.claude_api_key, &config.model, &system_prompt, &history, &current_msg).await?
                 }
@@ -1362,6 +1377,19 @@ impl AiAgent {
                     .unwrap_or_default();
                 Ok(models)
             }
+            "claude-cli" => {
+                // Claude Code CLI uses the subscription login, not an API key —
+                // return a curated static list (short aliases + full ids) rather
+                // than calling the Anthropic API (which we have no key for here).
+                Ok(vec![
+                    "sonnet".to_string(),
+                    "opus".to_string(),
+                    "haiku".to_string(),
+                    "claude-opus-4-8".to_string(),
+                    "claude-sonnet-4-6".to_string(),
+                    "claude-haiku-4-5".to_string(),
+                ])
+            }
             _ => {
                 // Claude models API
                 let resp = self.client.get("https://api.anthropic.com/v1/models")
@@ -1483,6 +1511,7 @@ impl AiAgent {
                 call_local(&self.client, &url, &config.cloudflare_api_key, &config.model, system, &[], &prompt).await
             }
             "local" => call_local(&self.client, &config.local_url, &config.local_api_key, &config.model, system, &[], &prompt).await,
+            "claude-cli" => call_claude_cli(&config.model, system, &[], &prompt).await,
             _ => call_claude(&self.client, &config.claude_api_key, &config.model, system, &[], &prompt).await,
         };
 
@@ -1740,6 +1769,7 @@ impl AiAgent {
                 call_local(&self.client, &url, &config.cloudflare_api_key, &config.model, system, &[], issue_description).await
             }
             "local" => call_local(&self.client, &config.local_url, &config.local_api_key, &config.model, system, &[], issue_description).await,
+            "claude-cli" => call_claude_cli(&config.model, system, &[], issue_description).await,
             _ => call_claude(&self.client, &config.claude_api_key, &config.model, system, &[], issue_description).await,
         };
 
@@ -3238,6 +3268,99 @@ async fn call_local_no_tools(
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| format!("Unexpected local AI response format: {}", text.chars().take(200).collect::<String>()))
+}
+
+/// Run the local `claude` CLI (Claude Code) as a one-shot completion backend,
+/// using the operator's Pro/Max subscription instead of the Anthropic API.
+///
+/// SECURITY: `--allowedTools ""` disables ALL of Claude Code's built-in tools
+/// (Bash/Edit/Read/…) so the model can ONLY return text — it can never run a
+/// command on the host. WolfStack's own confirmed [EXEC] protocol stays the
+/// only execution path. `-p` enables no tools by default; the empty allow-list
+/// is belt-and-suspenders.
+///
+/// Auth lives in the invoking user's `~/.claude`. WolfStack runs as root, so
+/// the operator must have run `sudo claude login` first (surfaced in the UI).
+async fn call_claude_cli(
+    model: &str,
+    system: &str,
+    history: &[ChatMessage],
+    user_msg: &str,
+) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+
+    // Claude Code's -p mode takes a single prompt (read from stdin when piped).
+    // Fold the system prompt + prior turns + the new message into one block; the
+    // system prompt already carries WolfStack's [EXEC]/[READ]/… tool-tag
+    // instructions, which the model emits as plain text for our existing loop.
+    let mut prompt = String::with_capacity(system.len() + user_msg.len() + 256);
+    prompt.push_str(system);
+    prompt.push_str("\n\n");
+    for m in history {
+        prompt.push_str(if m.role == "assistant" { "Assistant: " } else { "User: " });
+        prompt.push_str(&m.content);
+        prompt.push('\n');
+    }
+    prompt.push_str("\nUser: ");
+    prompt.push_str(user_msg);
+    prompt.push_str("\n\nAssistant:");
+
+    // Claude Code caps piped stdin at 10 MB — fail clearly rather than let the
+    // CLI die mid-pipe with a confusing non-zero exit.
+    if prompt.len() > 9_000_000 {
+        return Err("Prompt too large for the Claude Code CLI (10 MB stdin limit) — switch to an API provider or trim context.".to_string());
+    }
+
+    let mdl = if model.trim().is_empty() { "sonnet" } else { model.trim() };
+
+    let mut child = tokio::process::Command::new("claude")
+        .arg("-p")
+        .arg("--model").arg(mdl)
+        .arg("--allowedTools").arg("")        // no tools — text only (security)
+        .arg("--output-format").arg("text")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)                   // a timed-out `claude` is reaped, not orphaned
+        .spawn()
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound {
+            "The `claude` CLI isn't installed on this node. Install Claude Code and run `sudo claude login` (WolfStack runs as root, so root needs the session).".to_string()
+        } else {
+            format!("Failed to launch `claude`: {}", e)
+        })?;
+
+    // Write stdin from a separate task so it streams CONCURRENTLY with draining
+    // stdout/stderr — writing the whole prompt before reading output can
+    // deadlock on a full pipe buffer. Dropping the handle closes stdin (EOF).
+    let stdin = child.stdin.take();
+    let prompt_bytes = prompt.into_bytes();
+    let writer = tokio::spawn(async move {
+        if let Some(mut si) = stdin {
+            let _ = si.write_all(&prompt_bytes).await;
+            let _ = si.shutdown().await;
+        }
+    });
+
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(180), child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => { writer.abort(); return Err(format!("claude CLI error: {}", e)); }
+        Err(_) => { writer.abort(); return Err("claude CLI timed out after 180s.".to_string()); }
+    };
+    let _ = writer.await;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let hint = if stderr.contains("login") || stderr.contains("auth") || stderr.contains("Invalid API key") {
+            " — looks like an auth problem. Run `sudo claude login` so root (which WolfStack runs as) has a Claude Code session."
+        } else { "" };
+        return Err(format!("claude CLI failed: {}{}", stderr.trim(), hint));
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() {
+        return Err("claude CLI returned an empty response.".to_string());
+    }
+    Ok(text)
 }
 
 async fn call_claude(

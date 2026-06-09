@@ -126,6 +126,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route("/{name}/volumes", web::post().to(add_volume))
             .route("/{name}/volumes/{vol}", web::delete().to(remove_volume))
             .route("/{name}/volumes/{vol}/resize", web::post().to(resize_volume))
+            .route("/{name}/vnc-password", web::get().to(vm_vnc_password))
             .route("/{name}", web::put().to(update_vm))
             .route("/{name}", web::delete().to(delete_vm))
             .route("/{name}", web::get().to(get_vm))
@@ -258,6 +259,12 @@ struct CreateVmRequest {
     /// BIOS type: "seabios" (legacy) or "ovmf" (UEFI/EFI)
     #[serde(default = "default_bios_type")]
     bios_type: String,
+    /// Boot device order — see `VmConfig::boot_order`. Empty = backend default.
+    #[serde(default)]
+    boot_order: Vec<String>,
+    /// Allow external VNC clients (native QEMU) — see `VmConfig::vnc_external`.
+    #[serde(default)]
+    vnc_external: bool,
     /// Primary-NIC network mode: "wolfnet" | "bridge" | "nat". Backwards-
     /// compatible: omit and the manager derives mode from `wolfnet_ip`.
     #[serde(default)]
@@ -306,6 +313,8 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     config.net_model = body.net_model.clone();
     config.drivers_iso = body.drivers_iso.clone();
     config.bios_type = body.bios_type.clone();
+    config.boot_order = body.boot_order.clone();
+    config.vnc_external = body.vnc_external;
 
     // Network mode + bridge fields. Validate mode at the boundary so a
     // typo in the request can't silently fall through to the default
@@ -380,6 +389,8 @@ struct UpdateVmRequest {
     drivers_iso: Option<String>,
     auto_start: Option<bool>,
     bios_type: Option<String>,
+    boot_order: Option<Vec<String>>,
+    vnc_external: Option<bool>,
     extra_nics: Option<Vec<super::manager::NicConfig>>,
     usb_devices: Option<Vec<UsbDevice>>,
     pci_devices: Option<Vec<PciDevice>>,
@@ -418,7 +429,9 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
                             body.bridge.clone(),
                             body.bridge_ip_mode.clone(),
                             body.bridge_ip.clone(),
-                            body.bridge_gateway.clone()) {
+                            body.bridge_gateway.clone(),
+                            body.boot_order.clone(),
+                            body.vnc_external) {
         // Some(msg) is a non-fatal advisory (e.g. libvirt hardware edits that
         // apply on next boot) the UI shows next to the success toast.
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": msg })),
@@ -578,6 +591,29 @@ async fn vm_logs(req: HttpRequest, state: web::Data<AppState>, path: web::Path<S
         .unwrap_or_else(|_| "No logs available for this VM.".to_string());
 
     HttpResponse::Ok().json(serde_json::json!({ "name": name, "logs": log_content }))
+}
+
+/// GET /api/vms/{name}/vnc-password — the external-VNC password for a VM
+/// started with `vnc_external`. Authed. `null` when the VM isn't running
+/// externally. Read from the runtime file (never the config), so it stays out
+/// of config exports/backups. The browser console uses it to auth; the editor
+/// shows it so the operator can connect an external VNC client.
+async fn vm_vnc_password(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let (password, port, external) = {
+        let manager = state.vms.lock().unwrap();
+        let pw = manager.read_runtime_vnc_password(&name);
+        let vm = manager.get_vm(&name);
+        let port = vm.as_ref().and_then(|v| v.vnc_port);
+        let external = vm.as_ref().map(|v| v.vnc_external).unwrap_or(false);
+        (pw, port, external)
+    };
+    HttpResponse::Ok().json(serde_json::json!({
+        "password": password,
+        "vnc_port": port,
+        "external": external,
+    }))
 }
 
 /// GET /api/vms/{name}/serial-status — is this VM wired up for a serial

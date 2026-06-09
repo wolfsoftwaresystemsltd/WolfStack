@@ -11964,6 +11964,13 @@ pub async fn ai_models(
             }
             Err(e) => HttpResponse::Ok().json(serde_json::json!({ "models": ["llama3", "mistral"], "error": format!("Cannot reach {}: {}", url, e) })),
         }
+    } else if provider == "claude-cli" {
+        // Claude Code CLI has no API key (it uses the local subscription login)
+        // — return its curated static model list directly.
+        match state.ai_agent.list_models(provider, "").await {
+            Ok(models) => HttpResponse::Ok().json(serde_json::json!({ "models": models })),
+            Err(e) => HttpResponse::Ok().json(serde_json::json!({ "models": [], "error": e })),
+        }
     } else {
         let api_key = match provider {
             "gemini" => &config.gemini_api_key,

@@ -186,6 +186,21 @@ pub struct VmConfig {
     /// BIOS type: "seabios" (legacy) or "ovmf" (UEFI/EFI)
     #[serde(default = "default_bios_type")]
     pub bios_type: String,
+    /// Boot device order — entries from {"disk","cdrom","usb","network"}, most
+    /// preferred first. EMPTY (the default for existing configs) means "use the
+    /// backend's historical default" (disk first, CD fallback) so upgrading a
+    /// node never changes how its existing VMs boot. "usb" boots from a
+    /// passed-through USB device (native QEMU / libvirt; a Proxmox limitation).
+    #[serde(default)]
+    pub boot_order: Vec<String>,
+    /// Allow EXTERNAL VNC clients (native QEMU only). Default false = today's
+    /// behaviour exactly: VNC is reachable only through WolfStack's session-
+    /// authed browser proxy. When true, the VM starts with a generated VNC
+    /// password (`-object secret`) AND a tagged iptables ACCEPT opens the raw
+    /// VNC port, so an external client (e.g. TigerVNC) can connect with the
+    /// password. Opt-in because exposing a VNC port is a posture change.
+    #[serde(default)]
+    pub vnc_external: bool,
     /// Node that currently owns this VM. Populated when the VM is created
     /// and rewritten when it's migrated; lets the cluster view render VMs
     /// as first-class members under the right host without a manual Scan
@@ -243,6 +258,148 @@ pub struct VmConfig {
 fn default_net_model() -> String { "virtio".to_string() }
 fn default_bios_type() -> String { "seabios".to_string() }
 
+// ─── Boot-order helpers (pure, unit-tested) ─────────────────────────────
+//
+// A logical boot order (entries from "disk"/"cdrom"/"usb"/"network") is mapped
+// to each hypervisor's own syntax. An EMPTY order means "keep the backend's
+// historical default" so upgrading never changes how existing VMs boot
+// (Golden Rule). "usb" boots from a passed-through USB device — supported on
+// native QEMU via device bootindex; a documented limitation on libvirt/Proxmox.
+
+/// True when the order asks to boot a passed-through USB device first. Native
+/// QEMU drives this with `bootindex=0` on the usb-host device; mixing that with
+/// `-boot order=` is ignored by firmware, so the caller omits `-boot order`.
+pub fn boot_order_usb_first(boot_order: &[String]) -> bool {
+    boot_order.first().map(|s| s.eq_ignore_ascii_case("usb")).unwrap_or(false)
+}
+
+/// QEMU `-boot order=` value for a logical order. `None` when USB leads (use
+/// the device bootindex instead). Empty order → the historical default
+/// (`order=cd` with install media present, else `order=c`).
+fn qemu_boot_order_arg(boot_order: &[String], has_boot_media: bool) -> Option<String> {
+    let default = || if has_boot_media { "order=cd".to_string() } else { "order=c".to_string() };
+    if boot_order.is_empty() { return Some(default()); }
+    if boot_order_usb_first(boot_order) { return None; }
+    let mut letters = String::new();
+    for e in boot_order {
+        match e.to_ascii_lowercase().as_str() {
+            "disk" if !letters.contains('c') => letters.push('c'),
+            "cdrom" if !letters.contains('d') => letters.push('d'),
+            "network" if !letters.contains('n') => letters.push('n'),
+            _ => {} // "usb" rides on bootindex; unknown ignored
+        }
+    }
+    Some(if letters.is_empty() { default() } else { format!("order={}", letters) })
+}
+
+/// virt-install `--boot` device list (e.g. "hd,cdrom"). Empty → historical
+/// default. USB is dropped (virt-install can't express USB boot — surfaced as
+/// a libvirt limitation), so a usb-only order falls back to the default.
+fn libvirt_boot_order_arg(boot_order: &[String], has_boot_media: bool) -> String {
+    let default = || if has_boot_media { "hd,cdrom".to_string() } else { "hd".to_string() };
+    if boot_order.is_empty() { return default(); }
+    let mut devs: Vec<&str> = Vec::new();
+    for e in boot_order {
+        let d = match e.to_ascii_lowercase().as_str() {
+            "disk" => "hd",
+            "cdrom" => "cdrom",
+            "network" => "network",
+            _ => continue, // usb unsupported here
+        };
+        if !devs.contains(&d) { devs.push(d); }
+    }
+    if devs.is_empty() { default() } else { devs.join(",") }
+}
+
+/// Proxmox `qm --boot order=` value, mapping logical devices to PVE keys
+/// (disk→scsi0, cdrom→ide2, network→net0). Empty → historical default. USB is
+/// dropped (PVE can't boot passthrough USB), so a usb-only order falls back.
+fn pve_boot_order_arg(boot_order: &[String]) -> String {
+    let default = || "order=scsi0;ide2".to_string();
+    if boot_order.is_empty() { return default(); }
+    let mut keys: Vec<&str> = Vec::new();
+    for e in boot_order {
+        let k = match e.to_ascii_lowercase().as_str() {
+            "disk" => "scsi0",
+            "cdrom" => "ide2",
+            "network" => "net0",
+            _ => continue, // usb unsupported on PVE
+        };
+        if !keys.contains(&k) { keys.push(k); }
+    }
+    if keys.is_empty() { default() } else { format!("order={}", keys.join(";")) }
+}
+
+// ─── External-VNC helpers (native QEMU; opt-in via VmConfig::vnc_external) ───
+
+/// 8-char VNC password (RFB DES auth truncates to 8 bytes anyway). Ambiguous
+/// glyphs (0/O/1/l/I) are excluded so the operator can read it off the UI.
+fn gen_vnc_password() -> String {
+    use rand::Rng;
+    const CHARS: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..8).map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char).collect()
+}
+
+/// Write the VNC password to a 0600 file QEMU reads via `-object secret,...,
+/// file=…`. Keeping it out of the command line stops it leaking through `ps`.
+fn write_vnc_passfile(path: &str, pw: &str) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true).create(true).truncate(true).mode(0o600)
+        .open(path).map_err(|e| format!("VNC passfile {}: {}", path, e))?;
+    f.write_all(pw.as_bytes()).map_err(|e| format!("VNC passfile write: {}", e))?;
+    // mode() only applies on creation — re-assert 0600 in case the file pre-existed
+    // with looser perms (defensive; the password must never be world-readable).
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
+}
+
+/// Open the raw VNC port to external clients. Inserted at the TOP of INPUT so
+/// it takes effect regardless of the host's firewall (ufw/firewalld/raw) or
+/// default policy. Tagged with the VM name so stop can remove exactly this
+/// rule. Idempotent (deletes any prior identical rule first).
+fn vnc_firewall_open(port: u16, name: &str) {
+    let comment = format!("wolfstack-vnc-{}", name);
+    let p = port.to_string();
+    let _ = std::process::Command::new("iptables")
+        .args(["-D", "INPUT", "-p", "tcp", "--dport", &p, "-j", "ACCEPT", "-m", "comment", "--comment", &comment]).output();
+    let _ = std::process::Command::new("iptables")
+        .args(["-I", "INPUT", "1", "-p", "tcp", "--dport", &p, "-j", "ACCEPT", "-m", "comment", "--comment", &comment]).output();
+}
+
+/// Remove the external-VNC ACCEPT rule for a VM's port (best-effort, loops to
+/// clear any duplicates from repeated starts).
+fn vnc_firewall_close(port: u16, name: &str) {
+    let comment = format!("wolfstack-vnc-{}", name);
+    let p = port.to_string();
+    for _ in 0..4 {
+        let ok = std::process::Command::new("iptables")
+            .args(["-D", "INPUT", "-p", "tcp", "--dport", &p, "-j", "ACCEPT", "-m", "comment", "--comment", &comment])
+            .output().map(|o| o.status.success()).unwrap_or(false);
+        if !ok { break; }
+    }
+}
+
+/// Close any external-VNC ACCEPT rules tagged for this VM whose port ISN'T the
+/// one now in use — reaps orphans left by a crash / force-kill / out-of-band
+/// stop before a fresh start opens a (possibly different, autoport) port. This
+/// is what stops a stale rule from later exposing an unrelated VM that libvirt
+/// hands the freed port to. Parses `iptables -S INPUT` for our comment tag.
+fn vnc_firewall_reap_stale(name: &str, keep_port: u16) {
+    let comment = format!("wolfstack-vnc-{}", name);
+    if let Ok(out) = std::process::Command::new("iptables").args(["-S", "INPUT"]).output() {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if !line.contains(&comment) { continue; }
+            let port = line.split_whitespace()
+                .skip_while(|t| *t != "--dport").nth(1)
+                .and_then(|p| p.parse::<u16>().ok());
+            if let Some(p) = port { if p != keep_port { vnc_firewall_close(p, name); } }
+        }
+    }
+}
+
 impl VmConfig {
     pub fn new(name: String, cpus: u32, memory_mb: u32, disk_size_gb: u32) -> Self {
         VmConfig {
@@ -268,6 +425,8 @@ impl VmConfig {
             pci_devices: Vec::new(),
             vmid: None,
             bios_type: "seabios".to_string(),
+            boot_order: Vec::new(),
+            vnc_external: false,
             host_id: None,
             skip_default_nic: false,
             network_mode: None,
@@ -751,6 +910,8 @@ impl VmManager {
                     pci_devices,
                     vmid: Some(vmid),
                     bios_type: "seabios".to_string(),
+                    boot_order: Vec::new(),
+                    vnc_external: false,
                     host_id: Some(crate::agent::self_node_id()),
                     skip_default_nic: false,
                     network_mode: derived_mode,
@@ -1084,7 +1245,10 @@ impl VmManager {
                 // manually detach the ISO to stop the installer launching
                 // again on every reboot.
                 args.push("--boot".to_string());
-                args.push("order=scsi0;ide2".to_string());
+                // Operator-set boot order (disk/cdrom/network) mapped to PVE
+                // keys; passthrough-USB boot is a Proxmox limitation, so "usb"
+                // falls back to the default here.
+                args.push(pve_boot_order_arg(&config.boot_order));
             }
         }
 
@@ -1403,7 +1567,9 @@ impl VmManager {
                      bridge: Option<String>,
                      bridge_ip_mode: Option<String>,
                      bridge_ip: Option<String>,
-                     bridge_gateway: Option<String>) -> Result<Option<String>, String> {
+                     bridge_gateway: Option<String>,
+                     boot_order: Option<Vec<String>>,
+                     vnc_external: Option<bool>) -> Result<Option<String>, String> {
         // Ok(Some(msg)) carries a non-fatal advisory the UI shows alongside
         // the success toast (e.g. libvirt hardware edits that only take
         // effect on the VM's next start); Ok(None) is a plain success.
@@ -1715,10 +1881,40 @@ impl VmManager {
             // change lands on next start — which is why these fields used
             // to silently revert: the old libvirt branch never wrote them
             // anywhere libvirt (or our read-back) would see.
-            let (apply_failures, changed_next_boot) = libvirt_apply_devices(
+            let (apply_failures, mut changed_next_boot) = libvirt_apply_devices(
                 name, &net_model, &network_mode, &bridge,
                 &iso_path, &drivers_iso, &os_disk_bus, &bios_type,
             );
+            // External-VNC toggle for libvirt: rewrite the domain's graphics so
+            // the next start listens on 0.0.0.0 + a password (external) or stays
+            // localhost-only (default). virt-xml --edit --graphics mirrors the
+            // create syntax; --define means it applies on next start, like
+            // native. Non-fatal: a parser hiccup must not abort the whole edit.
+            if let Some(want_external) = vnc_external {
+                // Only rewrite the graphics when the external state actually
+                // changes — otherwise every unrelated edit-save would churn the
+                // VNC password. Compare against the PERSISTENT (inactive) config,
+                // because that's what `virt-xml --edit` mutates; the live domain
+                // still shows the pre-toggle graphics until the next start, so
+                // comparing live would refire on every save of a running VM.
+                let is_external = {
+                    let xml = Command::new("virsh").args(["dumpxml", "--inactive", name]).output().ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+                    libvirt_xml_is_external_vnc(&xml)
+                };
+                if want_external != is_external {
+                    let graphics = if want_external {
+                        format!("vnc,listen=0.0.0.0,password={}", gen_vnc_password())
+                    } else {
+                        "vnc,listen=127.0.0.1,password=".to_string()
+                    };
+                    match Command::new("virt-xml").args([name, "--edit", "--graphics", &graphics]).output() {
+                        Ok(o) if o.status.success() => { changed_next_boot = true; }
+                        Ok(o) => warn!("virt-xml graphics edit for VM '{}' failed: {}", name, String::from_utf8_lossy(&o.stderr).trim()),
+                        Err(e) => warn!("virt-xml graphics edit for VM '{}' could not run: {}", name, e),
+                    }
+                }
+            }
             // Surface device-apply failures BEFORE persisting the sidecar:
             // returning a false success is exactly the bug we're fixing, and
             // we don't want the sidecar to record intent the domain didn't
@@ -1846,6 +2042,16 @@ impl VmManager {
         }
         if let Some(ref bt) = bios_type {
             if !bt.is_empty() { config.bios_type = bt.clone(); }
+        }
+        // Boot order persists to the native VM's JSON config and is applied on
+        // the next start (start_vm rebuilds the qemu boot args from it).
+        if let Some(bo) = boot_order {
+            config.boot_order = bo;
+        }
+        // External-VNC toggle also applies on next start (password + port open
+        // are wired in start_vm). Editing it on a running VM doesn't reach in.
+        if let Some(ve) = vnc_external {
+            config.vnc_external = ve;
         }
 
         // Primary-NIC network mode + bridge details. Each field is independently
@@ -2224,6 +2430,17 @@ impl VmManager {
             let output = Command::new("virsh").args(["start", name]).output()
                 .map_err(|e| format!("Failed to run virsh start: {}", e))?;
             if output.status.success() {
+                // External VNC (libvirt): the domain listens on 0.0.0.0 with a
+                // password (set at create); open the firewall for the now-
+                // assigned (autoport) VNC port so external clients can reach it.
+                let (external, port) = self.libvirt_vnc_info(name);
+                if external {
+                    if let Some(p) = port {
+                        vnc_firewall_reap_stale(name, p);  // clear any orphan from a prior autoport
+                        vnc_firewall_open(p, name);
+                        info!("Opened libvirt VNC port {} for external clients (VM '{}')", p, name);
+                    }
+                }
                 return Ok(());
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2298,9 +2515,30 @@ impl VmManager {
         let vnc_num: u16 = rng.gen_range(10..99); 
         let vnc_port: u16 = 5900 + vnc_num;
         let ws_port: u16 = 6080 + vnc_num;  // WebSocket port for noVNC
-        let vnc_arg = format!("0.0.0.0:{},websocket={}", vnc_num, ws_port);
-        
-        write_log(&format!("VNC display :{} (port {}), WebSocket port {}", vnc_num, vnc_port, ws_port));
+
+        // External VNC (opt-in). When on, generate a password QEMU reads from a
+        // 0600 secret file and append `password-secret=` to the -vnc arg; the
+        // raw port is opened to external clients after a successful start. When
+        // off (the default), behaviour is exactly as before — no password, no
+        // open port, reachable only via WolfStack's authed browser proxy.
+        let vnc_passfile = format!("/var/lib/wolfstack/vms/{}.vncpass", name);
+        // The password is written to the 0600 passfile here and read back on
+        // demand from there; we don't keep it in a variable past this point.
+        let (vnc_arg, vnc_secret_obj): (String, Option<String>) =
+            if config.vnc_external {
+                let pw = gen_vnc_password();
+                write_vnc_passfile(&vnc_passfile, &pw)?;
+                (
+                    format!("0.0.0.0:{},password-secret=vncsec,websocket={}", vnc_num, ws_port),
+                    Some(format!("secret,id=vncsec,file={},format=raw", vnc_passfile)),
+                )
+            } else {
+                let _ = std::fs::remove_file(&vnc_passfile); // clear any stale secret
+                (format!("0.0.0.0:{},websocket={}", vnc_num, ws_port), None)
+            };
+
+        write_log(&format!("VNC display :{} (port {}), WebSocket port {}{}", vnc_num, vnc_port, ws_port,
+            if config.vnc_external { " — EXTERNAL (password-protected, port opened)" } else { "" }));
 
         // Check if KVM is available
         let kvm_available = std::path::Path::new("/dev/kvm").exists();
@@ -2355,6 +2593,11 @@ impl VmManager {
         // stale socket from a previous run so server=on can bind fresh.
         let serial_sock = format!("/var/lib/wolfstack/vms/{}.serial.sock", name);
         let _ = std::fs::remove_file(&serial_sock);
+
+        // External-VNC password secret must be declared before -vnc references it.
+        if let Some(ref secret) = vnc_secret_obj {
+            cmd.arg("-object").arg(secret);
+        }
 
         cmd.arg("-name").arg(name)
            .arg("-m").arg(format!("{}M", config.memory_mb))
@@ -2647,16 +2890,20 @@ impl VmManager {
         }
 
         // Boot order: always explicit so OVMF (UEFI) doesn't default to PXE.
-        // When boot media is present (install ISO), put the disk first with
-        // CD/USB as fallback (`cd` = c then d). On first boot the disk is
-        // empty so SeaBIOS/OVMF falls through to the install media; after
-        // install the disk has a bootloader and is preferred — no need to
-        // manually detach the ISO to stop the installer launching again.
-        if has_boot_media {
-            cmd.arg("-boot").arg("order=cd");  // Disk first, CD/USB fallback
-        } else {
-            cmd.arg("-boot").arg("order=c");   // Disk only
+        // Default (empty boot_order) keeps the historical behaviour — disk
+        // first, CD/USB fallback when install media is present. An operator-set
+        // order is mapped to `-boot order=` letters; when "usb" leads, we emit
+        // NO `-boot order` and instead put bootindex=0 on the usb-host device
+        // (in append_qemu_passthrough_args) — firmware ignores `-boot order`
+        // once any device carries a bootindex.
+        if let Some(boot_arg) = qemu_boot_order_arg(&config.boot_order, has_boot_media) {
+            cmd.arg("-boot").arg(boot_arg);
         }
+        write_log(&format!("Boot order: {}", if config.boot_order.is_empty() {
+            "default (disk, then CD)".to_string()
+        } else {
+            config.boot_order.join(" → ")
+        }));
 
         // USB/PCI passthrough — append -device usb-host,... and -device vfio-pci,...
         // for each configured device. The native path already has `-usb` on the
@@ -2756,12 +3003,29 @@ impl VmManager {
 
         write_log(&format!("VM started successfully. VNC :{} (port {}), noVNC WS :{}", vnc_num, vnc_port, ws_port));
 
-        // Save runtime port info so frontend can connect
+        // External VNC: open the raw port now that QEMU is up and listening.
+        if config.vnc_external {
+            // Reap a stale rule from a prior run that was force-killed (not
+            // stopped cleanly): the old runtime.json still holds its randomized
+            // port, so close that rule before opening the new one. (The new
+            // runtime.json with the new port is written just below.)
+            if let Some(old_port) = self.read_runtime_vnc_port(name) {
+                if old_port != vnc_port { vnc_firewall_close(old_port, name); }
+            }
+            vnc_firewall_open(vnc_port, name);
+            write_log(&format!("Opened VNC port {} to external clients (password-protected)", vnc_port));
+        }
+
+        // Save runtime port info so frontend can connect. The VNC password is
+        // deliberately NOT here — runtime.json is world-readable (0644). It
+        // lives only in the 0600 `.vncpass` secret file, read on demand by the
+        // authed `/api/vms/{name}/vnc-password` endpoint.
         let runtime = serde_json::json!({
             "vnc_port": vnc_port,
             "vnc_ws_port": ws_port,
             "vnc_display": vnc_num,
             "kvm": kvm_available,
+            "vnc_external": config.vnc_external,
         });
         let runtime_path = self.base_dir.join(format!("{}.runtime.json", name));
         let _ = fs::write(&runtime_path, runtime.to_string());
@@ -3697,15 +3961,23 @@ impl VmManager {
         // force = `virsh destroy` (immediate). Only for libvirt-owned
         // domains — pre-libvirt native VMs fall through to pkill below.
         if containers::is_libvirt() && self.virsh_has_domain(name) {
+            // Capture the external-VNC port while the domain is still running
+            // (vncdisplay needs it up) so we can close the firewall hole after.
+            let (external, vnc_port) = self.libvirt_vnc_info(name);
+            let close_fw = || {
+                if external { if let Some(p) = vnc_port { vnc_firewall_close(p, name); } }
+            };
             let (action, label) = if force { ("destroy", "virsh destroy") } else { ("shutdown", "virsh shutdown") };
             let output = Command::new("virsh").args([action, name]).output()
                 .map_err(|e| format!("Failed to run {}: {}", label, e))?;
             if output.status.success() {
+                close_fw();
                 return Ok(());
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
             // "domain is not running" is not an error — VM is already stopped
             if stderr.contains("not running") || stderr.contains("not found") {
+                close_fw();
                 return Ok(());
             }
             return Err(format!("{} failed: {}", label, stderr.trim()));
@@ -3737,6 +4009,14 @@ impl VmManager {
             }
             self.cleanup_extra_nic_taps(name, &config.extra_nics);
         }
+
+        // External VNC: close the firewall hole and remove the password secret.
+        // Read the port from the runtime BEFORE we delete that file. (No-op for
+        // non-external VMs — no matching rule/file exists.)
+        if let Some(vnc_port) = self.read_runtime_vnc_port(name) {
+            vnc_firewall_close(vnc_port, name);
+        }
+        let _ = fs::remove_file(self.base_dir.join(format!("{}.vncpass", name)));
 
         // Clean up runtime file
         let _ = fs::remove_file(self.base_dir.join(format!("{}.runtime.json", name)));
@@ -3924,6 +4204,46 @@ impl VmManager {
         let content = fs::read_to_string(&runtime_path).ok()?;
         let runtime: serde_json::Value = serde_json::from_str(&content).ok()?;
         runtime.get("vnc_ws_port").and_then(|v| v.as_u64()).map(|v| v as u16)
+    }
+
+    /// Read the external-VNC password. Native QEMU keeps it in the 0600
+    /// `.vncpass` file; libvirt keeps it in the domain XML (`<graphics passwd>`,
+    /// root-readable), read back via `virsh dumpxml`. NEVER from runtime.json
+    /// (0644) or the WolfStack config — so it can't land in a world-readable
+    /// file or a config export. None for VMs without external VNC.
+    pub fn read_runtime_vnc_password(&self, name: &str) -> Option<String> {
+        // Native: the 0600 passfile.
+        let passfile = self.base_dir.join(format!("{}.vncpass", name));
+        if let Ok(pw) = fs::read_to_string(&passfile) {
+            let pw = pw.trim();
+            if !pw.is_empty() { return Some(pw.to_string()); }
+        }
+        // libvirt: the domain XML graphics password.
+        if crate::containers::is_libvirt() {
+            let xml = Command::new("virsh").args(["dumpxml", name]).output().ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())?;
+            if let Some(pw) = libvirt_xml_attr_in_block(&xml, "graphics", "passwd") {
+                if !pw.is_empty() { return Some(pw); }
+            }
+        }
+        None
+    }
+
+    /// For a libvirt VM: (external?, vnc_port). "External" means WolfStack-
+    /// managed external VNC — graphics listen on 0.0.0.0 AND a password is set.
+    /// Requiring the password is what stops a pre-existing legacy VM (old
+    /// WolfStack defaulted libvirt to 0.0.0.0 with NO password) from being
+    /// mistaken for external and having its UNAUTHENTICATED VNC port opened.
+    /// Port from `virsh vncdisplay`.
+    fn libvirt_vnc_info(&self, name: &str) -> (bool, Option<u16>) {
+        let xml = Command::new("virsh").args(["dumpxml", name]).output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        let port = Command::new("virsh").args(["vncdisplay", name]).output().ok()
+            .and_then(|o| {
+                let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                t.rsplit(':').next().and_then(|n| n.parse::<u16>().ok()).map(|n| 5900 + n)
+            });
+        (libvirt_xml_is_external_vnc(&xml), port)
     }
 
     // ─── Libvirt VM Management (virsh) ───
@@ -4170,6 +4490,10 @@ impl VmManager {
             pci_devices,
             vmid: None,
             bios_type,
+            boot_order: Vec::new(),
+            // External VNC = WolfStack-managed (0.0.0.0 + password); read from the
+            // domain XML so the toggle reflects reality and re-saving can't flip it.
+            vnc_external: libvirt_xml_is_external_vnc(&dumpxml),
             host_id: Some(crate::agent::self_node_id()),
             skip_default_nic: false,
             network_mode: derived_mode,
@@ -4352,6 +4676,12 @@ impl VmManager {
             pci_devices,
             vmid: None,
             bios_type,
+            boot_order: Vec::new(),
+            // External VNC = WolfStack-managed (0.0.0.0 + password). Read back
+            // from the domain XML so the editor toggle is honest (re-saving an
+            // external VM must not flip it off). A legacy 0.0.0.0-no-password VM
+            // reads as NOT external, so it's never auto-exposed.
+            vnc_external: libvirt_xml_is_external_vnc(&persistent),
             host_id: Some(crate::agent::self_node_id()),
             skip_default_nic: false,
             network_mode: derived_mode,
@@ -4400,13 +4730,25 @@ impl VmManager {
         let net_model = if config.net_model.trim().is_empty() { "virtio" } else { config.net_model.trim() };
         let os_bus = if config.os_disk_bus.trim().is_empty() { "virtio" } else { config.os_disk_bus.trim() };
 
+        // VNC graphics: default to localhost-only (reachable solely through
+        // WolfStack's authed browser proxy) — this fixes the long-standing
+        // libvirt default of listening on 0.0.0.0 with NO password. When the
+        // operator opts into external VNC, listen on all interfaces with a
+        // generated password (mirrors the native-QEMU path). The password
+        // persists in the domain XML and is read back via `virsh dumpxml`.
+        let libvirt_graphics = if config.vnc_external {
+            format!("vnc,listen=0.0.0.0,password={}", gen_vnc_password())
+        } else {
+            "vnc,listen=127.0.0.1".to_string()
+        };
+
         let mut args = vec![
             "--name".to_string(), config.name.clone(),
             "--vcpus".to_string(), config.cpus.to_string(),
             "--memory".to_string(), config.memory_mb.to_string(),
             "--disk".to_string(), format!("path={},size={},format=qcow2,bus={}", disk_path, config.disk_size_gb, os_bus),
             "--os-variant".to_string(), "generic".to_string(),
-            "--graphics".to_string(), "vnc,listen=0.0.0.0".to_string(),
+            "--graphics".to_string(), libvirt_graphics,
             "--noautoconsole".to_string(),
         ];
 
@@ -4464,7 +4806,10 @@ impl VmManager {
                 // after the OS is installed. Telling libvirt to prefer
                 // hd lets the empty-disk first-boot fall through to the
                 // CD, then subsequent boots find the bootloader on disk.
-                args.extend(["--boot".to_string(), "hd,cdrom".to_string()]);
+                // Honour an operator-set boot order (disk/cdrom/network); USB
+                // boot isn't expressible via virt-install --boot (libvirt
+                // limitation) so it falls back to the default here.
+                args.extend(["--boot".to_string(), libvirt_boot_order_arg(&config.boot_order, true)]);
             } else {
                 return Err("An ISO or import image is required to create a VM via libvirt".to_string());
             }
@@ -4511,6 +4856,19 @@ impl VmManager {
         if !config.usb_devices.is_empty() || !config.pci_devices.is_empty() {
             if let Err(e) = super::passthrough::apply_libvirt_passthrough(&config.name, config) {
                 warn!("Failed to attach passthrough devices to libvirt VM {}: {}", config.name, e);
+            }
+        }
+
+        // virt-install auto-starts the domain; if the operator opted into
+        // external VNC the graphics already listen on 0.0.0.0 with a password,
+        // so open the firewall for the assigned VNC port now.
+        if config.vnc_external {
+            let (external, port) = self.libvirt_vnc_info(&config.name);
+            if external {
+                if let Some(p) = port {
+                    vnc_firewall_reap_stale(&config.name, p);
+                    vnc_firewall_open(p, &config.name);
+                }
             }
         }
 
@@ -4772,6 +5130,8 @@ impl VmManager {
             pci_devices,
             vmid: None,
             bios_type: discovered.bios_type,
+            boot_order: Vec::new(),
+            vnc_external: false,
             host_id: Some(crate::agent::self_node_id()),
             skip_default_nic: false,
             // Adopted VMs default to "nat" — the libvirt sidecar overlay
@@ -6686,6 +7046,8 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         pci_devices,
         vmid: Some(vmid),
         bios_type,
+        boot_order: Vec::new(),
+        vnc_external: false,
         host_id: Some(crate::agent::self_node_id()),
         skip_default_nic: false,
         network_mode: derived_mode,
@@ -7321,6 +7683,28 @@ impl<'a> Iterator for XmlBlockIter<'a> {
 /// `userid='X'`. (libvirt domain XML doesn't currently have any such
 /// pairs; harden anyway because the same helper is reused for any
 /// future call sites.)
+/// True when a libvirt domain XML describes WolfStack-managed EXTERNAL VNC:
+/// the *VNC* graphics device listens on 0.0.0.0 AND has a password. The
+/// password is the key discriminator — a legacy VM left on 0.0.0.0 with NO
+/// password must NOT count as external (else we'd open its unauthenticated
+/// port). Evaluated WITHIN the single `type='vnc'` graphics block so a second
+/// graphics device (e.g. SPICE on a different listen/passwd) can't cross-wire
+/// the decision. Handles both `<graphics … listen='0.0.0.0'>` and the nested
+/// `<listen address='0.0.0.0'/>` forms.
+fn libvirt_xml_is_external_vnc(xml: &str) -> bool {
+    for block in iter_xml_blocks(xml, "graphics") {
+        let header_end = block.find('>').unwrap_or(block.len());
+        let header = &block[..header_end];
+        if !(header.contains("type='vnc'") || header.contains("type=\"vnc\"")) { continue; }
+        let listens_all = libvirt_xml_attr_in_block(block, "graphics", "listen").as_deref() == Some("0.0.0.0")
+            || libvirt_xml_attr_in_block(block, "listen", "address").as_deref() == Some("0.0.0.0");
+        let has_password = libvirt_xml_attr_in_block(block, "graphics", "passwd")
+            .map(|p| !p.is_empty()).unwrap_or(false);
+        return listens_all && has_password;
+    }
+    false
+}
+
 fn libvirt_xml_attr_in_block(block: &str, inner_tag: &str, attr: &str) -> Option<String> {
     let needle_space = format!("<{} ", inner_tag);
     let needle_close = format!("<{}>", inner_tag);
@@ -7592,6 +7976,64 @@ mod tap_gateway_tests {
 #[cfg(test)]
 mod libvirt_xml_tests {
     use super::*;
+
+    #[test]
+    fn boot_order_empty_keeps_historical_default() {
+        // Golden Rule: an existing VM (empty boot_order) boots exactly as before.
+        assert_eq!(qemu_boot_order_arg(&[], true).as_deref(), Some("order=cd"));
+        assert_eq!(qemu_boot_order_arg(&[], false).as_deref(), Some("order=c"));
+        assert_eq!(libvirt_boot_order_arg(&[], true), "hd,cdrom");
+        assert_eq!(pve_boot_order_arg(&[]), "order=scsi0;ide2");
+        assert!(!boot_order_usb_first(&[]));
+    }
+
+    #[test]
+    fn boot_order_usb_first_drives_bootindex() {
+        let o = vec!["usb".to_string(), "disk".to_string()];
+        assert!(boot_order_usb_first(&o));
+        // QEMU: no `-boot order` when USB leads — the device bootindex wins.
+        assert_eq!(qemu_boot_order_arg(&o, true), None);
+        // libvirt can't express USB boot — usb is dropped, leaving disk→hd.
+        assert_eq!(libvirt_boot_order_arg(&o, true), "hd");
+    }
+
+    #[test]
+    fn libvirt_external_vnc_requires_listen_all_and_password() {
+        // Legacy 0.0.0.0 with NO password must NOT read as external (else its
+        // unauthenticated VNC port would get auto-opened). Flat + nested forms.
+        assert!(!libvirt_xml_is_external_vnc("<graphics type='vnc' port='5901' autoport='yes' listen='0.0.0.0'/>"));
+        assert!(!libvirt_xml_is_external_vnc("<graphics type='vnc' port='5901'><listen type='address' address='0.0.0.0'/></graphics>"));
+        // Localhost-only (the new default) → not external.
+        assert!(!libvirt_xml_is_external_vnc("<graphics type='vnc' port='5901' listen='127.0.0.1'/>"));
+        // WolfStack-managed external (0.0.0.0 + password), flat + nested → external.
+        assert!(libvirt_xml_is_external_vnc("<graphics type='vnc' port='5901' listen='0.0.0.0' passwd='abc12345'/>"));
+        assert!(libvirt_xml_is_external_vnc("<graphics type='vnc' port='5901' passwd='abc12345'><listen type='address' address='0.0.0.0'/></graphics>"));
+    }
+
+    #[test]
+    fn libvirt_external_vnc_ignores_other_graphics_devices() {
+        // SPICE exposed+passworded must NOT make a localhost VNC read external.
+        assert!(!libvirt_xml_is_external_vnc(
+            "<graphics type='spice' listen='0.0.0.0' passwd='spicepw1'/><graphics type='vnc' port='5901' listen='127.0.0.1'/>"));
+        // VNC external behind a localhost SPICE listed first → still external.
+        assert!(libvirt_xml_is_external_vnc(
+            "<graphics type='spice' listen='127.0.0.1'/><graphics type='vnc' port='5901' listen='0.0.0.0' passwd='abc12345'/>"));
+        // No VNC device at all → not external.
+        assert!(!libvirt_xml_is_external_vnc("<graphics type='spice' listen='0.0.0.0' passwd='spicepw1'/>"));
+    }
+
+    #[test]
+    fn boot_order_disk_cdrom_network_mapping() {
+        let o = vec!["cdrom".to_string(), "disk".to_string()];
+        assert_eq!(qemu_boot_order_arg(&o, true).as_deref(), Some("order=dc"));
+        assert_eq!(libvirt_boot_order_arg(&o, true), "cdrom,hd");
+        assert_eq!(pve_boot_order_arg(&o), "order=ide2;scsi0");
+        let net = vec!["network".to_string(), "disk".to_string()];
+        assert_eq!(qemu_boot_order_arg(&net, false).as_deref(), Some("order=nc"));
+        assert_eq!(pve_boot_order_arg(&net), "order=net0;scsi0");
+        // Case-insensitive + dedup.
+        assert_eq!(qemu_boot_order_arg(&["DISK".to_string(), "disk".to_string()], false).as_deref(), Some("order=c"));
+    }
 
     const SAMPLE: &str = r#"<domain type='kvm'>
   <name>my-vm</name>

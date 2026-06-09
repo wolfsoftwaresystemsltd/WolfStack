@@ -414,7 +414,13 @@ pub fn usb_device_present_on_host(vendor_id: &str, product_id: &str) -> bool {
 /// configured passthrough device. The caller is responsible for having `-usb`
 /// already on the command line (the native start path already does).
 pub fn append_qemu_passthrough_args(cmd: &mut Command, config: &VmConfig) -> Result<(), String> {
-    for u in &config.usb_devices {
+    // When the operator asked to boot a passed-through USB first, the FIRST
+    // usb-host device gets bootindex=0 so SeaBIOS/OVMF tries it before the disk
+    // (which has no bootindex and follows in the firmware's default order). This
+    // is the safe "boot the USB installer, fall back to disk" case without
+    // restructuring the disk devices.
+    let usb_boot = super::manager::boot_order_usb_first(&config.boot_order);
+    for (i, u) in config.usb_devices.iter().enumerate() {
         // All usb-host devices attach to the xhci bus (see manager.rs VM
         // startup). xhci handles every USB speed from low through superspeed+
         // so UVC webcams, USB 3 storage, HID, everything works.
@@ -437,6 +443,7 @@ pub fn append_qemu_passthrough_args(cmd: &mut Command, config: &VmConfig) -> Res
             }
             format!("usb-host,bus=xhci.0,vendorid=0x{},productid=0x{}", u.vendor_id, u.product_id)
         };
+        let spec = if usb_boot && i == 0 { format!("{},bootindex=0", spec) } else { spec };
         cmd.arg("-device").arg(spec);
     }
 

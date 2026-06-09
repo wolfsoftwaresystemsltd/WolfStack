@@ -170,7 +170,18 @@
             // Native QEMU VMs — proxy through WolfStack to avoid mixed-content issues
             const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const proxyUrl = `${wsProtocol}://${window.location.host}/ws/vm-vnc/${encodeURIComponent(vmName)}`;
-            connectProxiedVNC(proxyUrl, '', true);
+            // An external-VNC VM has a password; fetch it so the console auths
+            // seamlessly. None/empty (the default) → connect without a password,
+            // exactly as before. If the fetch fails the RFB credentials prompt
+            // is the fallback, so this never makes a console worse.
+            let ticket = vncTicket;
+            if (!ticket) {
+                try {
+                    const r = await fetch(`/api/vms/${encodeURIComponent(vmName)}/vnc-password`, { credentials: 'include' });
+                    if (r.ok) { const d = await r.json(); if (d && d.password) ticket = d.password; }
+                } catch (e) { /* fall through to no-password / prompt */ }
+            }
+            connectProxiedVNC(proxyUrl, ticket, true);
         } else {
             document.getElementById('status-overlay').innerHTML =
                 '<p style="color:#fca5a5;">No VNC connection parameters specified.<br>The VM may not be running.</p>';

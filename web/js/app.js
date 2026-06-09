@@ -9282,6 +9282,8 @@ async function createVm() {
                 drivers_iso: driversIso,
                 import_image: importImage,
                 bios_type: biosType,
+                boot_order: collectBootOrder('new-vm'),
+                vnc_external: !!(document.getElementById('new-vm-vnc-external') || {}).checked,
                 extra_disks: extraDisks,
                 extra_nics: collectExtraNics('new-vm-extra-nics'),
                 network_mode: netFields.network_mode,
@@ -26582,6 +26584,29 @@ async function showVmLogs(name) {
     }
 }
 
+// Boot-order control: four "1st→4th boot device" dropdowns. Empty array =
+// backend default. Shared by the VM editor and the create form (prefix differs).
+const BOOT_DEV_LABELS = { '': '—', disk: 'Disk', cdrom: 'CD-ROM', usb: 'USB', network: 'Network' };
+function bootOrderSelectsHtml(prefix, current) {
+    current = Array.isArray(current) ? current : [];
+    const opts = (sel) => Object.keys(BOOT_DEV_LABELS).map(v =>
+        `<option value="${v}"${sel === v ? ' selected' : ''}>${BOOT_DEV_LABELS[v]}</option>`).join('');
+    return [0, 1, 2, 3].map(i =>
+        `<select class="form-control" id="${prefix}-boot-${i}" style="font-size:12px; width:auto; padding:3px 6px;">${opts(current[i] || '')}</select>`
+    ).join('');
+}
+// Read the four selects in order, dropping blanks + duplicates → ordered array.
+function collectBootOrder(prefix) {
+    const seen = new Set();
+    const out = [];
+    for (let i = 0; i < 4; i++) {
+        const el = document.getElementById(`${prefix}-boot-${i}`);
+        const v = el ? el.value : '';
+        if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+    }
+    return out;
+}
+
 async function showVmSettings(name) {
     const modal = document.getElementById('container-detail-modal');
     const title = document.getElementById('container-detail-title');
@@ -26797,6 +26822,23 @@ async function showVmSettings(name) {
                         </select>
                         <small style="color:var(--text-muted);">Changing BIOS type on an existing VM requires reinstalling the OS</small>
                     </div>
+                    <div class="form-group" style="margin-top:12px;">
+                        <label>Boot order</label>
+                        <div style="display:flex; gap:6px; flex-wrap:wrap;">${bootOrderSelectsHtml('edit-vm', vm.boot_order)}</div>
+                        <small style="color:var(--text-muted);">1st → 4th boot device. "USB" boots a passed-through USB device (native QEMU; a Proxmox/libvirt limitation). Applies on next start.</small>
+                    </div>
+                    ${vm.platform === 'proxmox' ? `
+                    <div class="form-group" style="margin-top:12px;">
+                        <label>External VNC</label>
+                        <small style="color:var(--text-muted);">Proxmox manages this VM's display — use the built-in console button. A persistent external raw-VNC port is a Proxmox limitation, so the toggle doesn't apply here.</small>
+                    </div>` : `
+                    <div class="form-group" style="margin-top:12px;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="edit-vm-vnc-external" ${vm.vnc_external ? 'checked' : ''} style="width:auto;">
+                            Allow external VNC clients
+                        </label>
+                        <small style="color:var(--text-muted);">Opens the VNC port to the network and sets a VNC password so a desktop VNC client (e.g. TigerVNC) can connect. Off = console only through this UI (the default; the VNC port stays bound to localhost). Applies on next start. <span id="edit-vm-vnc-pass"></span></small>
+                    </div>`}
                 </div>
             </div>
 
@@ -26853,6 +26895,25 @@ async function showVmSettings(name) {
         if (editNetPlaceholder) {
             editNetPlaceholder.innerHTML = buildVmNetSection('edit-vm');
             await wireVmNetSection('edit-vm', vm);
+        }
+        // External-VNC: show the live password (running VMs only) so the operator
+        // can point a desktop VNC client at host:<port>. Fetched from the authed
+        // endpoint, never embedded in the config.
+        if (vm.vnc_external) {
+            const passEl = document.getElementById('edit-vm-vnc-pass');
+            if (passEl) {
+                try {
+                    const r = await fetch(`/api/vms/${encodeURIComponent(vm.name)}/vnc-password`, { credentials: 'include' });
+                    if (r.ok) {
+                        const d = await r.json();
+                        if (d && d.password) {
+                            passEl.innerHTML = `<br>VNC client → <code>${escapeHtml(window.location.hostname)}:${d.vnc_port || ''}</code> &nbsp; password <code>${escapeHtml(d.password)}</code>`;
+                        } else {
+                            passEl.innerHTML = '<br>Password is generated when the VM next starts.';
+                        }
+                    }
+                } catch (e) { /* leave blank */ }
+            }
         }
         // Stash the VM's current passthrough selection + load host devices
         window._editVmPassthrough = {
@@ -27162,6 +27223,8 @@ async function saveVmSettings(name) {
                 net_model: netModel,
                 drivers_iso: driversIso,
                 bios_type: biosType,
+                boot_order: collectBootOrder('edit-vm'),
+                vnc_external: !!(document.getElementById('edit-vm-vnc-external') || {}).checked,
                 extra_nics: collectExtraNics('edit-vm-extra-nics'),
                 usb_devices: passthrough.usb_devices,
                 pci_devices: passthrough.pci_devices,
@@ -31087,6 +31150,12 @@ function onAiProviderChange() {
     if (oaFields) oaFields.style.display = provider === 'openai' ? '' : 'none';
     const cfFields = document.getElementById('ai-cloudflare-fields');
     if (cfFields) cfFields.style.display = provider === 'cloudflare' ? '' : 'none';
+    // Claude Code CLI: no API key (uses the local `claude` login) — hide the
+    // key field and show the setup note instead.
+    const cliFields = document.getElementById('ai-claude-cli-fields');
+    if (cliFields) cliFields.style.display = provider === 'claude-cli' ? '' : 'none';
+    const claudeKeyGroup = document.getElementById('ai-claude-key-group');
+    if (claudeKeyGroup) claudeKeyGroup.style.display = provider === 'claude-cli' ? 'none' : '';
     fetchAiModels(provider, '');
 }
 

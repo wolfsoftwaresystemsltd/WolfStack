@@ -6130,7 +6130,8 @@
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label>Provider</label>
                                     <select id="ai-provider" class="form-control" onchange="onAiProviderChange()">
-                                        <option value="claude">Claude (Anthropic)</option>
+                                        <option value="claude">Claude (Anthropic API)</option>
+                                        <option value="claude-cli">Claude Code CLI (Pro/Max subscription)</option>
                                         <option value="gemini">Gemini (Google)</option>
                                         <option value="openai">ChatGPT (OpenAI)</option>
                                         <option value="openrouter">OpenRouter (100+ models)</option>
@@ -6138,10 +6139,20 @@
                                         <option value="local">Local AI (Ollama / LM Studio / LocalAI)</option>
                                     </select>
                                 </div>
-                                <div class="form-group" style="margin-bottom:16px;">
+                                <div class="form-group" id="ai-claude-key-group" style="margin-bottom:16px;">
                                     <label>Claude API Key</label>
                                     <input type="password" id="ai-claude-key" class="form-control"
                                         placeholder="sk-ant-...">
+                                </div>
+                                <div id="ai-claude-cli-fields" style="display:none; margin-bottom:16px;">
+                                    <div style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; background:rgba(99,102,241,0.08); font-size:13px; line-height:1.5;">
+                                        <strong>Uses your Claude Pro/Max subscription</strong> via the local <code>claude</code> CLI — no API key, no per-use cost.
+                                        <ul style="margin:8px 0 0 18px; padding:0;">
+                                            <li>Install <strong>Claude Code</strong> on this node, then run <code>sudo claude login</code> (WolfStack runs as root, so root needs the session).</li>
+                                            <li>Set the <strong>Model</strong> below to <code>opus</code>, <code>sonnet</code>, or <code>haiku</code> (or a full <code>claude-*</code> id).</li>
+                                            <li>The assistant runs with <strong>all Claude Code tools disabled</strong> — it only returns text; WolfStack's own confirmed command flow is unchanged.</li>
+                                        </ul>
+                                    </div>
                                 </div>
                                 <div class="form-group" style="margin-bottom:16px;">
                                     <label>Gemini API Key</label>
@@ -9573,6 +9584,23 @@ region = us-east-1"></textarea>
                                 <option value="ovmf">OVMF (UEFI/EFI)</option>
                             </select>
                             <small style="color:var(--text-muted);">UEFI required for modern OSes, GPT disks, and Secure Boot. Legacy BIOS for older systems.</small>
+                        </div>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label>Boot order</label>
+                            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                <select id="new-vm-boot-0" class="form-control" style="font-size:12px; width:auto; padding:3px 6px;"><option value="">—</option><option value="disk">Disk</option><option value="cdrom">CD-ROM</option><option value="usb">USB</option><option value="network">Network</option></select>
+                                <select id="new-vm-boot-1" class="form-control" style="font-size:12px; width:auto; padding:3px 6px;"><option value="">—</option><option value="disk">Disk</option><option value="cdrom">CD-ROM</option><option value="usb">USB</option><option value="network">Network</option></select>
+                                <select id="new-vm-boot-2" class="form-control" style="font-size:12px; width:auto; padding:3px 6px;"><option value="">—</option><option value="disk">Disk</option><option value="cdrom">CD-ROM</option><option value="usb">USB</option><option value="network">Network</option></select>
+                                <select id="new-vm-boot-3" class="form-control" style="font-size:12px; width:auto; padding:3px 6px;"><option value="">—</option><option value="disk">Disk</option><option value="cdrom">CD-ROM</option><option value="usb">USB</option><option value="network">Network</option></select>
+                            </div>
+                            <small style="color:var(--text-muted);">Leave blank for the default (disk, then CD). "USB" boots a passed-through USB device (native QEMU; not on Proxmox/libvirt).</small>
+                        </div>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                                <input type="checkbox" id="new-vm-vnc-external" style="width:auto;">
+                                Allow external VNC clients
+                            </label>
+                            <small style="color:var(--text-muted);">Opens the VNC port to the network and sets a VNC password so a desktop VNC client (e.g. TigerVNC) can connect. Off = console only through this UI (native QEMU only).</small>
                         </div>
                         <div class="form-group" style="margin-top:12px;">
                             <label>Installation ISO (Optional)</label>
