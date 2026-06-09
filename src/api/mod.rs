@@ -3941,8 +3941,11 @@ pub async fn cluster_rename_handler(
 
     // Every member: update the local view, then reliably push the new name to
     // its owner (intent + sweep), so none of them re-assert the old name.
+    // Case-insensitive match: a rename of "Minio" must also catch a node whose
+    // stored name drifted to "minio" (same cluster) and unify them all to the
+    // operator's typed `new_name` — this is what heals an existing case split.
     let members: Vec<crate::agent::Node> = state.cluster.get_all_nodes().into_iter()
-        .filter(|n| n.cluster_name.as_deref() == Some(old_name.as_str()))
+        .filter(|n| crate::agent::cluster_eq(n.cluster_name.as_deref(), Some(old_name.as_str())))
         .collect();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);

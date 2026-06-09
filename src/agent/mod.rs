@@ -248,6 +248,20 @@ pub struct Node {
 
 fn default_node_type() -> String { "wolfstack".to_string() }
 
+/// Case-insensitive equality for optional cluster names (`None == None`).
+/// A cluster name is an identifier, so "minio" and "Minio" are the SAME
+/// cluster — comparing them case-sensitively made same-cluster nodes split
+/// into two groups and let gossip flip-flop a node between the two cases
+/// (each node kept re-asserting its own stored case). Matching/adoption goes
+/// through this; the operator's typed case is still what gets stored + shown.
+pub fn cluster_eq(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Read this node's ID from the persisted file (cheap, no state needed)
 pub fn self_node_id() -> String {
     std::fs::read_to_string(&crate::paths::get().node_id_file)
@@ -1809,7 +1823,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             let nodes_r = cluster.nodes.read().unwrap();
                                             nodes_r.get(&cluster.self_id).and_then(|n| n.cluster_name.clone())
                                         };
-                                        if current_cluster.as_deref() != Some(gossiped_cluster) {
+                                        // Case-insensitive: a peer gossiping a different-CASE
+                                        // spelling of our own cluster must NOT flip us — only a
+                                        // genuinely different name (a real rename) is adopted.
+                                        if !cluster_eq(current_cluster.as_deref(), Some(gossiped_cluster.as_str())) {
 
                                             let mut nodes_w = cluster.nodes.write().unwrap();
                                             if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
@@ -1866,7 +1883,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         || existing.port != known.port
                                         || existing.pve_token != known.pve_token
                                         || existing.pve_fingerprint != known.pve_fingerprint
-                                        || existing.cluster_name != known.cluster_name
+                                        // Case-insensitive: a different-CASE spelling of the same
+                                        // cluster isn't a change (prevents the gossip flip-flop that
+                                        // kept a node bouncing between e.g. "minio" and "Minio").
+                                        || !cluster_eq(existing.cluster_name.as_deref(), known.cluster_name.as_deref())
                                         // Only a Some gossiped display name counts as a change —
                                         // a None from an older peer must never clear an operator-set name.
                                         || (known.display_name.is_some() && existing.display_name != known.display_name)
@@ -2201,6 +2221,19 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
 #[cfg(test)]
 mod convergence_tests {
     use super::*;
+
+    #[test]
+    fn cluster_names_match_case_insensitively() {
+        // Same cluster regardless of case — this is what stops "minio" and
+        // "Minio" from splitting into two groups / flip-flopping via gossip.
+        assert!(cluster_eq(Some("minio"), Some("Minio")));
+        assert!(cluster_eq(Some("Minio"), Some("MINIO")));
+        assert!(cluster_eq(None, None));
+        // Genuinely different names are still different (a real rename).
+        assert!(!cluster_eq(Some("Minio"), Some("Dodgy")));
+        assert!(!cluster_eq(Some("Minio"), None));
+        assert!(!cluster_eq(None, Some("Minio")));
+    }
 
     #[test]
     fn identity_intent_serde_defaults_golden_rule() {
