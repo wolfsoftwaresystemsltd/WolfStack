@@ -64270,7 +64270,7 @@ async function gwOpenDetail(id) {
                         <div>Windows: <code>\\\\${escapeHtml(ip)}\\${escapeHtml(g.name)}</code></div>
                     ` : ''}
                     ${(g.protocols || []).includes('nfs') ? `
-                        <div>NFS:     <code>sudo mount -t nfs ${escapeHtml(ip)}:/${escapeHtml(g.name)} /mnt</code></div>
+                        <div>NFS:     <code>sudo mount -t nfs ${escapeHtml(ip)}:/exports/${escapeHtml(g.name)} /mnt</code></div>
                     ` : ''}
                 </div>
                 ${g.runtime && g.runtime.last_error ? `
