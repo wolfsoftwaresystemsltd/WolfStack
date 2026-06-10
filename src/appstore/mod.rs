@@ -2217,6 +2217,10 @@ pub fn prepare_install(
                     .collect();
 
                 let mut create_args = format!("docker create --name {} -it --restart unless-stopped", shell_escape(&sidecar_name));
+                // DNS: inject real upstream servers to avoid 127.0.0.53 stub problem
+                for dns in crate::containers::docker_dns::get_docker_dns_servers() {
+                    create_args.push_str(&format!(" --dns {}", shell_escape(&dns)));
+                }
                 for flag in &port_flags {
                     create_args.push_str(flag);
                 }
@@ -2375,6 +2379,10 @@ pub fn prepare_install(
                 .collect();
 
             let mut create_args = format!("docker create --name {} -it --restart unless-stopped", shell_escape(container_name));
+            // DNS: inject real upstream servers to avoid 127.0.0.53 stub problem
+            for dns in crate::containers::docker_dns::get_docker_dns_servers() {
+                create_args.push_str(&format!(" --dns {}", shell_escape(&dns)));
+            }
             // Resource limits (validated: memory must be digits+unit, cpu must be a number)
             if let Some(mem) = memory_limit {
                 let mem = mem.trim();
