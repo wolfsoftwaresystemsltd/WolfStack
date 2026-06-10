@@ -499,25 +499,29 @@ fn remediate_masked_units(units: &[String]) -> RemediationOutcome {
 /// — we check `iptables -C` before insert, so a re-tick doesn't
 /// stack duplicate rules.
 fn remediate_c2_block(ip: &str) -> RemediationOutcome {
-    // Never firewall a WolfStack cluster node, even a C2-flagged one — the same
-    // guard kernel_block_ip enforces (this path inserts iptables DROP directly,
-    // so it must check too). A genuinely compromised peer must be removed from
-    // the cluster, not left in a half-blocked state that breaks the mesh.
-    // Record the refusal so it shows in the Security banner (code review,
-    // 2026-06-08).
-    if crate::auth::is_protected_node_ip(ip) {
+    // Never firewall a WolfStack-managed address, even a C2-flagged one — the
+    // same guard kernel_block_ip enforces (this path inserts iptables DROP
+    // directly, so it must check too). Covers cluster nodes AND local
+    // container-bridge IPs: a compromised peer must be removed from the
+    // cluster, and a compromised container must be stopped/quarantined —
+    // neither is left in a half-blocked state. Record the refusal so it shows
+    // in the Security banner (code review 2026-06-08; workload subnets added
+    // 2026-06-10).
+    if crate::auth::is_protected_address(ip) {
         crate::auth::record_protected_block(ip);
         tracing::error!(
             "compromise_indicators: REFUSED C2 iptables block of {} — it is a \
-             WolfStack cluster node (auto-whitelisted); remove it from the \
-             cluster to block it", ip
+             WolfStack-managed address (a cluster node or a local container \
+             bridge); remove the node from the cluster or stop the container \
+             instead", ip
         );
         return RemediationOutcome {
             action: "block C2 IP at iptables".into(),
             ok: false,
             detail: format!(
-                "REFUSED: {} is a WolfStack cluster node (auto-whitelisted); \
-                 remove it from the cluster to block it", ip
+                "REFUSED: {} is a WolfStack-managed address (a cluster node or \
+                 a local container bridge); remove the node from the cluster \
+                 or stop the container instead", ip
             ),
         };
     }

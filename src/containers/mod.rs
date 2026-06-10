@@ -1255,12 +1255,16 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
         }
     }
 
-    // VM WolfNet IPs. Not gated by running_only: per-platform VM run-state
-    // detection (qemu pgrep / virsh / qm) lives in the vms module and is
-    // deferred — VMs are treated as always-advertised here. VM IPs are
-    // unique per allocation, so this only matters for a VM that has moved
-    // between hosts (a separate migrate path); the start-time conflict
-    // check still covers VM starts via /api/wolfnet/active-ips.
+    // VM WolfNet IPs. In active-only mode gate by per-platform run state
+    // (PVE pidfiles / virsh / qemu pgrep) — the same reasoning as the LXC
+    // gate above. Counting every VM config as active had two real failures:
+    // a stopped VM's IP kept attracting cluster routes, and the start-time
+    // conflict check matched the VM's OWN config file, so any wolfnet_ip a
+    // VM was given reported "already in use: active on this node" and the
+    // VM could never start (klasSponsor 2026-06-10). Probe failure → None
+    // → count every config, mirroring the LXC fallback. In used
+    // (allocation) mode count them all so stopped VMs' IPs stay reserved.
+    let vm_running = if running_only { crate::vms::manager::running_vm_names() } else { None };
     let vm_dir = std::path::Path::new("/var/lib/wolfstack/vms");
     if let Ok(entries) = std::fs::read_dir(vm_dir) {
         for entry in entries.flatten() {
@@ -1268,6 +1272,15 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(running) = vm_running.as_ref() {
+                            // Gate only when the config names the VM (it
+                            // always does — VmConfig serializes `name`);
+                            // an unnamed config stays advertised, fail-open.
+                            let name = vm.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            if !name.is_empty() && !running.contains(name) {
+                                continue;
+                            }
+                        }
                         if let Some(ip_str) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
                             ips.push(ip_str.to_string());
                         }

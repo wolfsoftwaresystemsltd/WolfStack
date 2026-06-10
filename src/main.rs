@@ -815,6 +815,23 @@ async fn main() -> std::io::Result<()> {
                 });
             }));
         }
+        // Populate the protected-address guards BEFORE re-applying persisted
+        // kernel blocks. Without this, restore_persisted_lockouts() raced the
+        // 10s protection task below: it ran while both guard sets were still
+        // empty, so a persisted lockout for a container IP (or a peer node)
+        // was re-applied with INPUT+FORWARD DROP on every restart — the
+        // klasSponsor "wolfstack made iptables rules to drop traffic from
+        // those containers" symptom returning after each upgrade (round 3,
+        // 2026-06-10). Heals newly-protected node IPs immediately instead of
+        // 10s later, then sweeps stale WolfStack-shaped DROP rules left in
+        // the kernel by versions that predate the guard.
+        crate::auth::set_protected_workload_subnets(
+            networking::collect_workload_subnets(),
+        );
+        for ip in crate::auth::set_protected_node_ips(app_state.cluster.wolfstack_node_ips()) {
+            crate::auth::kernel_unblock_ip(&ip);
+        }
+        crate::auth::sweep_protected_drop_rules();
         // Restore kernel iptables rules for any non-expired lockouts
         // from the previous WolfStack process. Kernel rules survive a
         // service restart; this keeps our in-memory state aligned.
@@ -851,16 +868,22 @@ async fn main() -> std::io::Result<()> {
                     // Also exempt this host's own container/workload bridges
                     // (docker0/br-*/lxcbr*/virbr*) so the auto-block never
                     // firewalls a local container (klasSponsor 2026-06-08).
-                    crate::auth::set_protected_workload_subnets(
+                    let subnets_changed = crate::auth::set_protected_workload_subnets(
                         crate::networking::collect_workload_subnets(),
                     );
                     let newly = crate::auth::set_protected_node_ips(cluster.wolfstack_node_ips());
-                    // Heal a pre-existing bad ban (the one klas hit before this
-                    // shipped). One-shot per newly-protected IP; iptables -D is a
-                    // sync subprocess, so off the executor.
-                    if !newly.is_empty() {
+                    // Heal pre-existing bad bans (the ones klas hit before this
+                    // shipped). One-shot per newly-protected IP, plus a sweep of
+                    // stale WolfStack-shaped DROP rules whenever a workload
+                    // bridge appears (Docker starting late, a new compose
+                    // network). iptables is a sync subprocess, so off the
+                    // executor.
+                    if !newly.is_empty() || subnets_changed {
                         tokio::task::spawn_blocking(move || {
                             for ip in newly { crate::auth::kernel_unblock_ip(&ip); }
+                            if subnets_changed {
+                                crate::auth::sweep_protected_drop_rules();
+                            }
                         }).await.ok();
                     }
                     // Alert once per new refused-block event.

@@ -7561,6 +7561,86 @@ fn parse_pve_extra_nic(key: &str, val: &str) -> Option<(usize, NicConfig)> {
     }))
 }
 
+/// The set of VM names currently RUNNING on this host, across whichever
+/// hypervisor backends are present — the VM counterpart of the LXC
+/// `lxc_running_names` probe in containers/. Used by the WolfNet
+/// advertisement scan so a stopped VM's IP is neither advertised for
+/// routing nor counted by the start-time conflict check. (Counting every
+/// VM config as "active" made a VM start conflict with its OWN config
+/// file — any wolfnet_ip it was given reported "already in use: active
+/// on this node"; klasSponsor 2026-06-10.) Returns None when run-state
+/// can't be determined at all; callers fall back to counting every VM
+/// rather than dropping a running VM's route on a tooling hiccup.
+pub fn running_vm_names() -> Option<std::collections::HashSet<String>> {
+    let mut set = std::collections::HashSet::new();
+    if crate::containers::is_proxmox() {
+        // Filesystem-direct: /etc/pve/qemu-server/*.conf names plus the
+        // qemu-server pidfile run-state — the same sources get_vm /
+        // qm_list_all read. Unreadable dir → indeterminate. Early return
+        // (no pgrep supplement) mirrors get_vm(): on a PVE host WolfStack
+        // only ever manages VMs through qm, never bare qemu processes.
+        if !pve_qemu_server_dir_readable() {
+            return None;
+        }
+        for vm in qm_list_via_filesystem() {
+            if vm.running {
+                set.insert(vm.name);
+            }
+        }
+        return Some(set);
+    }
+    if crate::containers::is_libvirt() {
+        // One subprocess for every libvirt domain. A virsh failure makes
+        // the WHOLE probe indeterminate (not a partial native-only set):
+        // None is the safe direction — every VM stays advertised — at the
+        // cost of the start-time conflict check transiently counting
+        // stopped VMs again until virsh recovers.
+        match Command::new("virsh").args(["list", "--name", "--state-running"]).output() {
+            Ok(o) if o.status.success() => {
+                for name in String::from_utf8_lossy(&o.stdout).lines() {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        set.insert(name.to_string());
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    // Native QEMU processes — also covers pre-libvirt VMs on libvirt hosts
+    // (mirrors get_vm()'s fall-through). One pgrep for ALL VMs instead of
+    // check_running()'s per-name probe. Native starts pass a plain
+    // `-name <vm>` (start_vm); libvirt-spawned qemu uses
+    // `-name guest=<vm>,debug-threads=on` — handle both shapes.
+    match Command::new("pgrep").args(["-a", "-f", "qemu-system"]).output() {
+        Ok(o) => {
+            // pgrep exits 1 with no matches — that's a definitive
+            // "no native VMs running", not a probe failure.
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let mut toks = line.split_whitespace();
+                while let Some(t) = toks.next() {
+                    if t != "-name" {
+                        continue;
+                    }
+                    if let Some(v) = toks.next() {
+                        let v = v.strip_prefix("guest=").unwrap_or(v);
+                        let v = v.split(',').next().unwrap_or(v);
+                        if !v.is_empty() {
+                            set.insert(v.to_string());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // pgrep itself couldn't run — we can't see native VMs, and a
+        // partial (libvirt-only) answer could blackhole a running
+        // native VM's route. Indeterminate.
+        Err(_) => return None,
+    }
+    Some(set)
+}
+
 /// True if /var/run/qemu-server/<vmid>.pid points at a live process.
 /// Replaces the per-VM `qm status <vmid>` subprocess.
 fn is_pve_vmid_running(vmid: u32) -> bool {
