@@ -9185,6 +9185,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                             <select class="form-control" id="mount-type" onchange="onMountTypeChange()">
                                 <option value="s3"><span class="ws-icon-clean-wrap" data-icon="cloud"></span> S3 / Object Storage</option>
                                 <option value="nfs"><span class="ws-icon-clean-wrap" data-icon="database"></span> NFS Share</option>
+                                <option value="smb"><span class="ws-icon-clean-wrap" data-icon="database"></span> SMB / CIFS Share</option>
                                 <option value="directory"><span class="ws-icon-clean-wrap" data-icon="folder"></span> Directory (bind mount)</option>
                                 <option value="wolfdisk">WolfDisk</option>
                                 <option value="sshfs"><span class="ws-icon-clean-wrap" data-icon="key"></span> SSHFS (SSH Filesystem)</option>
@@ -9252,6 +9253,39 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                     <label>NFS Options</label>
                                     <input type="text" class="form-control" id="nfs-options" value="rw,soft,timeo=50"
                                         placeholder="rw,soft,timeo=50">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- SMB/CIFS Fields -->
+                        <div id="smb-fields" style="grid-column: 1 / -1; display:none;">
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>SMB Source</label>
+                                    <input type="text" class="form-control" id="smb-source"
+                                        placeholder="//192.168.1.100/share">
+                                    <small style="color:var(--text-muted); font-size:11px;">Format: //server/share
+                                        (Windows-style \\server\share also accepted)</small>
+                                </div>
+                                <div class="form-group">
+                                    <label>Username (optional)</label>
+                                    <input type="text" class="form-control" id="smb-username"
+                                        placeholder="Leave blank for guest access">
+                                </div>
+                                <div class="form-group">
+                                    <label>Password</label>
+                                    <input type="password" class="form-control" id="smb-password" placeholder="">
+                                </div>
+                                <div class="form-group">
+                                    <label>Domain / Workgroup (optional)</label>
+                                    <input type="text" class="form-control" id="smb-domain" placeholder="WORKGROUP">
+                                </div>
+                                <div class="form-group">
+                                    <label>Extra Options (optional)</label>
+                                    <input type="text" class="form-control" id="smb-extra-options"
+                                        placeholder="vers=2.1,sec=ntlmssp">
+                                    <small style="color:var(--text-muted); font-size:11px;">Appended after the
+                                        defaults (vers=3.0, uid=0); later values win</small>
                                 </div>
                             </div>
                         </div>
@@ -9434,6 +9468,43 @@ region = us-east-1"></textarea>
                                     <label>NFS Options</label>
                                     <input type="text" class="form-control" id="edit-nfs-options"
                                         placeholder="rw,soft,timeo=50">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- SMB/CIFS Edit Fields -->
+                        <div id="edit-smb-fields" style="grid-column: 1 / -1; display:none;">
+                            <div
+                                style="display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px;">
+                                <div
+                                    style="grid-column:1/-1; font-weight:600; font-size:13px; color:var(--text-primary); margin-bottom:4px;">
+                                    <span class="ws-icon-clean-wrap" data-icon="database"></span> SMB / CIFS Configuration</div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>SMB Source</label>
+                                    <input type="text" class="form-control" id="edit-smb-source"
+                                        placeholder="//192.168.1.100/share">
+                                    <small style="color:var(--text-muted); font-size:11px;">Format:
+                                        //server/share</small>
+                                </div>
+                                <div class="form-group">
+                                    <label>Username</label>
+                                    <input type="text" class="form-control" id="edit-smb-username"
+                                        placeholder="Blank = guest access">
+                                </div>
+                                <div class="form-group">
+                                    <label>Password</label>
+                                    <input type="password" class="form-control" id="edit-smb-password"
+                                        placeholder="Leave blank to keep unchanged">
+                                </div>
+                                <div class="form-group">
+                                    <label>Domain / Workgroup</label>
+                                    <input type="text" class="form-control" id="edit-smb-domain"
+                                        placeholder="WORKGROUP">
+                                </div>
+                                <div class="form-group">
+                                    <label>Extra Options</label>
+                                    <input type="text" class="form-control" id="edit-smb-options"
+                                        placeholder="vers=2.1,sec=ntlmssp">
                                 </div>
                             </div>
                         </div>

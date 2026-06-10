@@ -6455,8 +6455,8 @@ async function _doCephDeleteFs(name) {
 
 // ─── Storage Manager ───
 
-const MOUNT_TYPE_ICONS = { s3: '☁️', nfs: '🗄️', directory: '📁', wolfdisk: '🐺' };
-const MOUNT_TYPE_LABELS = { s3: 'S3', nfs: 'NFS', directory: 'Directory', wolfdisk: 'WolfDisk' };
+const MOUNT_TYPE_ICONS = { s3: '☁️', nfs: '🗄️', smb: '🗄️', directory: '📁', wolfdisk: '🐺', sshfs: '🔑' };
+const MOUNT_TYPE_LABELS = { s3: 'S3', nfs: 'NFS', smb: 'SMB/CIFS', directory: 'Directory', wolfdisk: 'WolfDisk', sshfs: 'SSHFS' };
 let allStorageMounts = [];  // cache for edit modal
 
 async function loadStorageMounts() {
@@ -6575,6 +6575,7 @@ function onMountTypeChange() {
     const type = document.getElementById('mount-type').value;
     document.getElementById('s3-fields').style.display = type === 's3' ? 'block' : 'none';
     document.getElementById('nfs-fields').style.display = type === 'nfs' ? 'block' : 'none';
+    document.getElementById('smb-fields').style.display = type === 'smb' ? 'block' : 'none';
     document.getElementById('dir-fields').style.display = type === 'directory' ? 'block' : 'none';
     document.getElementById('wolfdisk-fields').style.display = type === 'wolfdisk' ? 'block' : 'none';
     document.getElementById('sshfs-fields').style.display = type === 'sshfs' ? 'block' : 'none';
@@ -6594,6 +6595,8 @@ async function createStorageMount() {
     let source = '';
     let s3_config = null;
     let nfs_options = null;
+    let smb_config = null;
+    let smb_options = null;
 
     if (type === 's3') {
         const bucket = document.getElementById('s3-bucket').value.trim();
@@ -6613,6 +6616,16 @@ async function createStorageMount() {
         source = document.getElementById('nfs-source').value.trim();
         nfs_options = document.getElementById('nfs-options').value.trim() || null;
         if (!source) return showModal('NFS source is required (e.g. 192.168.1.100:/data)');
+    } else if (type === 'smb') {
+        source = document.getElementById('smb-source').value.trim();
+        if (!source) return showModal('SMB source is required (e.g. //192.168.1.100/share)');
+        // Blank username = guest mount (backend falls back to -o guest).
+        smb_config = {
+            username: document.getElementById('smb-username').value.trim(),
+            password: document.getElementById('smb-password').value,
+            domain: document.getElementById('smb-domain').value.trim(),
+        };
+        smb_options = document.getElementById('smb-extra-options').value.trim() || null;
     } else if (type === 'directory') {
         source = document.getElementById('dir-source').value.trim();
         if (!source) return showModal('Source directory is required');
@@ -6626,7 +6639,7 @@ async function createStorageMount() {
         if (sshKey) nfs_options = sshKey; // reuse nfs_options field for SSH key path
     }
 
-    const payload = { name, type, source, mount_point, global, auto_mount, s3_config, nfs_options, do_mount: true };
+    const payload = { name, type, source, mount_point, global, auto_mount, s3_config, nfs_options, smb_config, smb_options, do_mount: true };
 
     try {
         const resp = await fetch(apiUrl('/api/storage/mounts'), {
@@ -6845,6 +6858,7 @@ function openEditMount(id) {
     // Hide all type-specific sections
     document.getElementById('edit-s3-fields').style.display = 'none';
     document.getElementById('edit-nfs-fields').style.display = 'none';
+    document.getElementById('edit-smb-fields').style.display = 'none';
     document.getElementById('edit-dir-fields').style.display = 'none';
     document.getElementById('edit-wolfdisk-fields').style.display = 'none';
 
@@ -6862,6 +6876,18 @@ function openEditMount(id) {
         document.getElementById('edit-nfs-fields').style.display = 'block';
         document.getElementById('edit-nfs-source').value = m.source || '';
         document.getElementById('edit-nfs-options').value = m.nfs_options || '';
+    } else if (m.type === 'smb') {
+        document.getElementById('edit-smb-fields').style.display = 'block';
+        const smb = m.smb_config || {};
+        document.getElementById('edit-smb-source').value = m.source || '';
+        document.getElementById('edit-smb-username').value = smb.username || '';
+        // Password is never echoed back — blank means "keep unchanged"
+        // (the backend treats the ••••••• sentinel as no-change, same as S3).
+        document.getElementById('edit-smb-password').value = '';
+        document.getElementById('edit-smb-password').placeholder =
+            smb.username ? 'Leave blank to keep unchanged' : 'Enter password (blank = guest)';
+        document.getElementById('edit-smb-domain').value = smb.domain || '';
+        document.getElementById('edit-smb-options').value = m.smb_options || '';
     } else if (m.type === 'directory') {
         document.getElementById('edit-dir-fields').style.display = 'block';
         document.getElementById('edit-dir-source').value = m.source || '';
@@ -6902,6 +6928,16 @@ async function saveStorageMountEdit() {
     } else if (type === 'nfs') {
         payload.source = document.getElementById('edit-nfs-source').value.trim();
         payload.nfs_options = document.getElementById('edit-nfs-options').value.trim();
+    } else if (type === 'smb') {
+        payload.source = document.getElementById('edit-smb-source').value.trim();
+        payload.smb_options = document.getElementById('edit-smb-options').value.trim();
+        const smbPass = document.getElementById('edit-smb-password').value;
+        payload.smb_config = {
+            username: document.getElementById('edit-smb-username').value.trim(),
+            // Sentinel = keep stored password (update_mount skips ••••••••).
+            password: smbPass || '••••••••',
+            domain: document.getElementById('edit-smb-domain').value.trim(),
+        };
     } else if (type === 'directory') {
         payload.source = document.getElementById('edit-dir-source').value.trim();
     } else if (type === 'wolfdisk') {
