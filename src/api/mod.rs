@@ -9125,16 +9125,33 @@ pub(crate) async fn wolfnet_ip_active_elsewhere(state: &web::Data<AppState>, ip:
         if hit { return Some("this node".to_string()); }
     }
 
-    // Snapshot peer targets, dropping the lock before any await.
+    // Snapshot peer targets, dropping the lock before any await. Scope to
+    // THIS node's cluster only: a WolfNet mesh is cluster-wide, not
+    // fleet-wide — control-plane replication makes every node see the whole
+    // fleet, and separate clusters' meshes legitimately reuse the same
+    // 10.x address space. Checking fleet-wide refused to start an LXC
+    // because an unrelated cluster's workload held the same IP on a
+    // DIFFERENT mesh (operator, 2026-06-10). cluster_eq is case-insensitive
+    // and treats None==None, so an unnamed/standalone fleet keeps the old
+    // behaviour rather than becoming more permissive than its mesh.
     let targets: Vec<(String, String, u16)> = match state.cluster.nodes.read() {
-        Ok(nodes) => nodes.values()
-            .filter(|n| !n.is_self && n.online)
-            .map(|n| (
-                if n.hostname.is_empty() { n.address.clone() } else { n.hostname.clone() },
-                n.address.clone(),
-                n.port,
-            ))
-            .collect(),
+        Ok(nodes) => {
+            let self_cluster: Option<String> = nodes
+                .get(&state.cluster.self_id)
+                .and_then(|n| n.cluster_name.clone());
+            nodes.values()
+                .filter(|n| !n.is_self && n.online)
+                .filter(|n| crate::agent::cluster_eq(
+                    self_cluster.as_deref(),
+                    n.cluster_name.as_deref(),
+                ))
+                .map(|n| (
+                    if n.hostname.is_empty() { n.address.clone() } else { n.hostname.clone() },
+                    n.address.clone(),
+                    n.port,
+                ))
+                .collect()
+        }
         Err(_) => return None,
     };
 
