@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.37.1: heal stale container-IP kernel blocks + VM WolfNet IP self-conflict fix** _(2026-06-10 — [`4d181da`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4d181da98f93515093b950af9336e0c10958a4b7))_
 - **v24.35.0: SSH root-login finding reads effective config (sshd -T) + suppresses on Proxmox** _(2026-06-09 — [`da0b52f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/da0b52fcd7e16afffd11529b716f01d5b1a61bbe))_
 - **v24.35.0: VM external-VNC (native+libvirt, opt-in + password), boot order/USB boot, Claude Code CLI provider** _(2026-06-09 — [`49a889c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/49a889c9026f59f009e382f674130e03fbc04ebd))_
 - **v24.34.2: cluster names are case-insensitive — fixes the minio/Minio split + rename revert** _(2026-06-09 — [`6bdd0ee`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6bdd0ee681182841f690e7315aff8aa6a5a2106e))_
