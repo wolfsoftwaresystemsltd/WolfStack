@@ -62,8 +62,101 @@ pub fn require_nfs_server() -> Result<(), NfsError> {
     Ok(())
 }
 
+/// Root under which gateways get their human-friendly export paths.
+/// Clients mount `host:/exports/<name>` instead of the internal
+/// `/var/lib/wolfstack/gateways/<uuid>/share` (wabil 2026-06-10: "works,
+/// but looks messy"). A bind mount links the friendly path to the
+/// gateway's share dir. Deliberately NOT `/<name>` at filesystem root —
+/// a share named `etc` or `usr` would shadow a system directory.
+/// `/exports` is the conventional NFS root on most distros; we only ever
+/// create/remove our own `<name>` entries under it, so coexistence with
+/// operator-managed exports is safe.
+const EXPORTS_ROOT: &str = "/exports";
+/// Prefix guard for cleanup — we never unmount anything outside it.
+const EXPORTS_PREFIX: &str = "/exports/";
+
+/// The friendly path a gateway's NFS export is published at.
+/// `g.name` is already restricted to [A-Za-z0-9_-] by gateway::validate,
+/// but sanitise() guards the path component anyway.
+pub fn friendly_export_path(g: &Gateway) -> PathBuf {
+    PathBuf::from(EXPORTS_ROOT).join(sanitise(&g.name))
+}
+
+/// Extract the exported path from a previously-written exports.d file body
+/// (first whitespace-delimited token of the first non-comment line). Used to
+/// unmount a stale friendly bind when a gateway is renamed or removed.
+fn exported_path_in(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .and_then(|l| l.split_whitespace().next())
+        .map(str::to_string)
+}
+
+/// Unmount + remove the friendly bind a gateway's existing exports.d file
+/// points at, if any. Only ever touches paths under /exports/ — the old
+/// pre-friendly exports pointed at the gateway share dir, which belongs to
+/// the orchestrator's mount lifecycle, not ours.
+fn cleanup_friendly_bind(gateway_id: &str) {
+    let path = export_path(gateway_id);
+    let Ok(body) = std::fs::read_to_string(&path) else { return };
+    let Some(old) = exported_path_in(&body) else { return };
+    if !old.starts_with(EXPORTS_PREFIX) {
+        return;
+    }
+    drop_friendly_bind(&old);
+}
+
+/// Lazy-unmount a friendly bind and remove its (empty) directory,
+/// surfacing a failed umount in the log instead of silently leaving a
+/// stale mount behind.
+fn drop_friendly_bind(path: &str) {
+    match Command::new("umount").args(["-l", path]).output() {
+        Ok(o) if !o.status.success() => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            // "not mounted" is the normal already-clean case — only real
+            // failures are worth the operator's attention.
+            if !err.contains("not mounted") {
+                tracing::warn!("gateway nfs: umount {} failed: {}", path, err.trim());
+            }
+        }
+        Err(e) => tracing::warn!("gateway nfs: could not run umount {}: {}", path, e),
+        _ => {}
+    }
+    // Only an empty dir is removed — remove_dir refuses otherwise.
+    let _ = std::fs::remove_dir(path);
+}
+
+/// Idempotent `mount --bind src dst`. Same /proc/mounts is-a-mountpoint
+/// check the orchestrator's share bind uses.
+fn ensure_friendly_bind(src: &Path, dst: &Path) -> Result<(), NfsError> {
+    std::fs::create_dir_all(dst)?;
+    if let Ok(content) = std::fs::read_to_string("/proc/mounts") {
+        let dst_str = dst.to_string_lossy().to_string();
+        if content.lines().any(|l| {
+            let mut it = l.split_whitespace();
+            let _ = it.next();
+            it.next() == Some(dst_str.as_str())
+        }) {
+            return Ok(());
+        }
+    }
+    let out = Command::new("mount")
+        .args(["--bind", &src.to_string_lossy(), &dst.to_string_lossy()])
+        .output()?;
+    if !out.status.success() {
+        return Err(NfsError::WriteFailed(format!(
+            "bind {} -> {} failed: {}",
+            src.display(), dst.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 pub fn write_gateway_export(g: &Gateway, share_path: &Path) -> Result<(), NfsError> {
     if !g.protocols.contains(&Protocol::Nfs) {
+        cleanup_friendly_bind(&g.id);
         let _ = std::fs::remove_file(export_path(&g.id));
         let _ = reload_exports();
         return Ok(());
@@ -71,6 +164,7 @@ pub fn write_gateway_export(g: &Gateway, share_path: &Path) -> Result<(), NfsErr
     // NFS auth in v1.0 is IP-based only. `users` and `ad` skip NFS
     // export with a clear reason; SMB still works for those gateways.
     if !matches!(g.auth, AuthConfig::Anonymous { .. }) {
+        cleanup_friendly_bind(&g.id);
         let _ = std::fs::remove_file(export_path(&g.id));
         let _ = reload_exports();
         return Err(NfsError::Skipped(
@@ -78,8 +172,22 @@ pub fn write_gateway_export(g: &Gateway, share_path: &Path) -> Result<(), NfsErr
         ));
     }
     require_nfs_server()?;
+
+    // Publish at the friendly path: bind share/ → /exports/<name> and
+    // export THAT. Order is swap-then-drop: bind the NEW path and write +
+    // reload the export FIRST, and only then remove a stale previous bind
+    // (rename / upgrade from the internal-path era). If any step fails, the
+    // old bind and old exports file are untouched and clients keep working;
+    // the next apply retries the whole sequence (code review 2026-06-10).
+    let friendly = friendly_export_path(g);
+    let previous = std::fs::read_to_string(export_path(&g.id))
+        .ok()
+        .and_then(|body| exported_path_in(&body));
+
+    ensure_friendly_bind(share_path, &friendly)?;
+
     std::fs::create_dir_all(EXPORTS_DIR)?;
-    let body = render(g, share_path);
+    let body = render(g, &friendly);
     let path = export_path(&g.id);
     std::fs::write(&path, body).map_err(|e| NfsError::WriteFailed(e.to_string()))?;
     #[cfg(unix)]
@@ -88,10 +196,20 @@ pub fn write_gateway_export(g: &Gateway, share_path: &Path) -> Result<(), NfsErr
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
     }
     reload_exports()?;
+
+    // New path is live — now drop the stale one, if the name changed.
+    if let Some(old) = previous {
+        if old != friendly.to_string_lossy() && old.starts_with(EXPORTS_PREFIX) {
+            drop_friendly_bind(&old);
+        }
+    }
     Ok(())
 }
 
 pub fn remove_gateway_export(gateway_id: &str) -> Result<(), NfsError> {
+    // Drop the friendly bind BEFORE the exports file — the file is how we
+    // know which /exports/<name> belongs to this gateway.
+    cleanup_friendly_bind(gateway_id);
     let path = export_path(gateway_id);
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -219,6 +337,27 @@ mod tests {
             "fsid must never be the pseudo-root 0: {}", out);
         assert!(out.contains("rw,sync,no_subtree_check,all_squash,anonuid=65534,anongid=65534"),
             "expected exact anonymous-rw option set: {}", out);
+    }
+
+    #[test]
+    fn friendly_path_and_old_path_parsing() {
+        // The published path is /exports/<name> — never the internal
+        // gateway dir, never filesystem root (a share named `etc` must not
+        // shadow /etc).
+        let g = nfs_gateway(true);
+        assert_eq!(friendly_export_path(&g), Path::new("/exports/media"));
+        let mut odd = nfs_gateway(true);
+        odd.name = "weird name!".into();
+        assert_eq!(friendly_export_path(&odd), Path::new("/exports/weird_name_"));
+
+        // Old-path extraction for rename/remove cleanup: first token of the
+        // first non-comment line; header and blank lines skipped.
+        let body = "# WolfStack gateway: media (g1)\n/exports/media *(rw,sync)\n";
+        assert_eq!(exported_path_in(body).as_deref(), Some("/exports/media"));
+        let legacy = "# header\n/var/lib/wolfstack/gateways/g1/share 10.0.0.0/24(ro)\n";
+        assert_eq!(exported_path_in(legacy).as_deref(),
+            Some("/var/lib/wolfstack/gateways/g1/share"));
+        assert_eq!(exported_path_in("# only comments\n"), None);
     }
 
     #[test]

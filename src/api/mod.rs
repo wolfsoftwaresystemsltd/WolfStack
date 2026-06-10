@@ -31110,8 +31110,40 @@ pub async fn gateways_create(req: HttpRequest, state: web::Data<AppState>, body:
     if let Err(errs) = crate::gateway::validate(&g) {
         return HttpResponse::BadRequest().json(serde_json::json!({ "errors": errs }));
     }
+    if let Some(resp) = reject_duplicate_gateway_name(&state, &g) { return resp; }
     gateway_audit(&state, &actor, "info", "Share created", &format!("'{}' on {}", g.name, state.node_id));
     apply_and_persist(&state, g, &id).await
+}
+
+/// 400 when another gateway on the SAME node already uses this name
+/// (case-insensitive). Names key real namespaces — the samba `[name]`
+/// section and the `/exports/<name>` NFS bind — so two same-named shares
+/// on one node would silently serve each other's data. Different nodes
+/// may reuse a name freely.
+fn reject_duplicate_gateway_name(
+    state: &web::Data<AppState>,
+    g: &crate::gateway::Gateway,
+) -> Option<HttpResponse> {
+    // Tight lock scope: just the O(n) scan (n = this node's shares, tiny);
+    // the response is built after the guard is dropped.
+    let clash = {
+        let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
+        s.gateways.values().any(|other| {
+            other.id != g.id
+                && other.origin_node_id == g.origin_node_id
+                && other.name.eq_ignore_ascii_case(&g.name)
+        })
+    };
+    if clash {
+        return Some(HttpResponse::BadRequest().json(serde_json::json!({
+            "errors": [format!(
+                "a share named '{}' already exists on this node — share names \
+                 must be unique per node (they become the SMB share name and \
+                 the /exports/<name> NFS path)", g.name
+            )]
+        })));
+    }
+    None
 }
 
 /// PUT /api/gateways/{id} — full replace.
@@ -31139,6 +31171,7 @@ pub async fn gateways_update(req: HttpRequest, state: web::Data<AppState>, path:
     if let Err(errs) = crate::gateway::validate(&g) {
         return HttpResponse::BadRequest().json(serde_json::json!({ "errors": errs }));
     }
+    if let Some(resp) = reject_duplicate_gateway_name(&state, &g) { return resp; }
     gateway_audit(&state, &actor, "info", "Share updated", &format!("'{}'", g.name));
     apply_and_persist(&state, g, &id).await
 }
