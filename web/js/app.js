@@ -20696,11 +20696,18 @@ function getContainerView(type) {
 
 function setContainerView(type, view) {
     savePref(`wolfstack_view_${type}`, view);
+    // A table↔card switch is a pure presentation flip — both layouts are
+    // already rendered on every load/poll (renderX + renderXCards), so
+    // applyContainerView just toggles which one is visible.
     applyContainerView(type);
-    // Re-render the current data
-    if (type === 'docker') loadDockerContainers();
-    else if (type === 'lxc') loadLxcContainers();
-    else if (type === 'vms') loadVms();
+    // Docker and LXC must NOT re-fetch on a toggle: their loaders fire the
+    // heavy /api/containers/updates/summary (a docker exec per running
+    // container), and re-firing it on every toggle churned the connection
+    // pool / actix workers enough to trip the connection-lost banner (Gary
+    // KO4BSR 2026-06-10). Their 15s poll timers keep the data live.
+    // VMs have no poll timer and loadVms() is cheap (VM list only, no update
+    // summary), so a toggle is the VM view's only refresh trigger — keep it.
+    if (type === 'vms') loadVms();
 }
 
 function applyContainerView(type) {

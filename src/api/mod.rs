@@ -5256,26 +5256,40 @@ fn quick_container_update_count(runtime: &str, container: &str) -> (String, usiz
 /// POST /api/containers/updates/summary — quick update count for all running containers
 pub async fn container_updates_summary(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let docker = containers::docker_list_all();
-    let lxc = containers::lxc_list_all();
 
-    // Collect running containers to check
-    let running: Vec<(String, String)> = docker.iter().chain(lxc.iter())
-        .filter(|c| c.state == "running")
-        .map(|c| (c.runtime.clone(), c.name.clone()))
-        .collect();
-
-    // Check all containers in parallel using thread::scope
-    let results_vec: Vec<(String, String, usize)> = std::thread::scope(|s| {
-        let handles: Vec<_> = running.iter().map(|(runtime, name)| {
-            let runtime = runtime.clone();
-            let name = name.clone();
-            s.spawn(move || {
-                let (pm, count) = quick_container_update_count(&runtime, &name);
-                (format!("{}:{}", runtime, name), pm, count)
-            })
-        }).collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    // ENTIRE body is blocking: docker_list_all/lxc_list_all shell out, and the
+    // thread::scope below joins one `docker exec` probe per running container.
+    // Running it directly on the actix worker pegged a worker for the whole
+    // enumeration; enough concurrent calls (the periodic poll + the old
+    // reload-on-view-toggle) starved the workers so /api/ping couldn't be
+    // served, tripping the connection-lost banner (Gary KO4BSR 2026-06-10).
+    // web::block moves it to the blocking threadpool so async workers stay
+    // free to answer the heartbeat. (The frontend also no longer re-fires
+    // this on a card/table toggle.)
+    let results_vec: Vec<(String, String, usize)> = web::block(move || {
+        let docker = containers::docker_list_all();
+        let lxc = containers::lxc_list_all();
+        let running: Vec<(String, String)> = docker.iter().chain(lxc.iter())
+            .filter(|c| c.state == "running")
+            .map(|c| (c.runtime.clone(), c.name.clone()))
+            .collect();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = running.iter().map(|(runtime, name)| {
+                let runtime = runtime.clone();
+                let name = name.clone();
+                s.spawn(move || {
+                    let (pm, count) = quick_container_update_count(&runtime, &name);
+                    (format!("{}:{}", runtime, name), pm, count)
+                })
+            }).collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        })
+    }).await.unwrap_or_else(|e| {
+        // Blocking-pool failure (a panic in the enumeration). Degrade to an
+        // empty map rather than 500 — the UI just shows no update badges —
+        // but log it so a real regression isn't swallowed silently.
+        tracing::warn!("container_updates_summary: enumeration failed: {}", e);
+        Vec::new()
     });
 
     let mut results = serde_json::Map::new();

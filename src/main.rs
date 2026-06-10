@@ -3549,6 +3549,16 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .app_data(app_state.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                     .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
+                    // Cache-Control: no-cache on every response that doesn't set
+                    // its own (DefaultHeaders never overwrites an explicit one).
+                    // actix_files sends ETag/Last-Modified but NO Cache-Control,
+                    // so browsers heuristically cached app.js/index.html for
+                    // hours-days and operators ran a STALE UI after every
+                    // upgrade (Gary KO4BSR 2026-06-10: phantom "connection
+                    // lost" banner from a cached pre-fix heartbeat). no-cache
+                    // means revalidate-always: unchanged files are still cheap
+                    // 304s via ETag; changed files arrive immediately.
+                    .wrap(actix_web::middleware::DefaultHeaders::new().add(("Cache-Control", "no-cache")))
                     .configure(api::configure);
                 if agent_mode {
                     app.default_service(web::to(agent_index_handler))
@@ -3586,6 +3596,9 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                             .app_data(app_state2.clone())
                             .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                             .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
+                            // Same stale-UI guard as the primary listeners — see
+                            // the comment there (Gary KO4BSR 2026-06-10).
+                            .wrap(actix_web::middleware::DefaultHeaders::new().add(("Cache-Control", "no-cache")))
                             .configure(api::configure);
                         if agent_mode {
                             app.default_service(web::to(agent_index_handler))
@@ -3665,6 +3678,16 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .app_data(app_state.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                     .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
+                    // Cache-Control: no-cache on every response that doesn't set
+                    // its own (DefaultHeaders never overwrites an explicit one).
+                    // actix_files sends ETag/Last-Modified but NO Cache-Control,
+                    // so browsers heuristically cached app.js/index.html for
+                    // hours-days and operators ran a STALE UI after every
+                    // upgrade (Gary KO4BSR 2026-06-10: phantom "connection
+                    // lost" banner from a cached pre-fix heartbeat). no-cache
+                    // means revalidate-always: unchanged files are still cheap
+                    // 304s via ETag; changed files arrive immediately.
+                    .wrap(actix_web::middleware::DefaultHeaders::new().add(("Cache-Control", "no-cache")))
                     .configure(api::configure);
                 if agent_mode {
                     app.default_service(web::to(agent_index_handler))
