@@ -342,6 +342,15 @@ pub fn release_port_53(upstream: Option<&str>) -> Result<String, String> {
         return Err(format!("systemctl restart failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()));
     }
+
+    // Update Docker's daemon.json with the new upstream DNS and ensure
+    // outbound NAT/FORWARD rules are intact — the resolv.conf rewrite
+    // above may have changed the upstream that Docker containers see.
+    if crate::containers::docker_dns::ensure_docker_dns() {
+        crate::containers::docker_dns::reload_docker_if_needed();
+    }
+    crate::containers::docker_dns::ensure_docker_outbound();
+
     Ok(format!("Port 53 released. Host DNS routed to {}. Undo with Restore.", upstream_val))
 }
 
@@ -377,6 +386,14 @@ pub fn restore() -> Result<String, String> {
     if systemd_resolved_active() {
         let _ = Command::new("systemctl").args(["restart", "systemd-resolved"]).output();
     }
+
+    // Update Docker's daemon.json — the real upstream may have changed
+    // back now that the stub listener is restored.
+    if crate::containers::docker_dns::ensure_docker_dns() {
+        crate::containers::docker_dns::reload_docker_if_needed();
+    }
+    crate::containers::docker_dns::ensure_docker_outbound();
+
     Ok("Host DNS restored. Stub listener back on 127.0.0.53.".into())
 }
 

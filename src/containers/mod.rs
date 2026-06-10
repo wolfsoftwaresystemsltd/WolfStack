@@ -8,6 +8,7 @@
 //! LXC: communicates via lxc-* CLI commands
 //! WolfNet: Optional overlay network integration for container networking
 
+pub mod docker_dns;
 pub mod image_watcher;
 pub mod lxc_storage;
 
@@ -1427,6 +1428,14 @@ pub fn ensure_docker_wolfnet_network() -> Result<(), String> {
     // Enable per-interface forwarding so containers can route to WolfNet
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.wolfnet0.forwarding=1"]).output();
     let _ = Command::new("sysctl").args(["-w", "net.ipv4.conf.docker0.forwarding=1"]).output();
+
+    // Ensure Docker DNS is configured (fixes 127.0.0.53 stub problem)
+    // and outbound NAT/FORWARD rules are intact for Docker bridges.
+    if docker_dns::ensure_docker_dns() {
+        docker_dns::reload_docker_if_needed();
+    }
+    docker_dns::ensure_docker_outbound();
+
     Ok(())
 }
 
@@ -8912,6 +8921,14 @@ pub fn docker_create_with_cmd(name: &str, image: &str, ports: &[String], env: &[
             args.push("--cpus".to_string());
             args.push(cpu.to_string());
         }
+    }
+
+    // Inject real DNS servers — on systemd-resolved hosts,
+    // /etc/resolv.conf points at 127.0.0.53 which is unreachable
+    // from inside containers. Use the host's actual upstream DNS.
+    for dns in docker_dns::get_docker_dns_servers() {
+        args.push("--dns".to_string());
+        args.push(dns);
     }
 
     // Add volume mounts (-v host:container or -v named_volume:container)

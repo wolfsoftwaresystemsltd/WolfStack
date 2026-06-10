@@ -222,6 +222,29 @@ elif command -v firewall-cmd &> /dev/null; then
     firewall-cmd --reload 2>/dev/null && \
     echo "✓ Firewall: Closed port $WS_PORT/tcp (firewalld)" || true
 fi
+# ─── Clean up Docker daemon.json DNS config ─────────────────────────────────
+# WolfStack writes "dns" into /etc/docker/daemon.json so containers get real
+# upstream DNS instead of the broken 127.0.0.53 stub. Remove our key but
+# preserve any other settings the operator configured.
+DAEMON_JSON="/etc/docker/daemon.json"
+if [ -f "$DAEMON_JSON" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import json, sys, os
+try:
+    with open('$DAEMON_JSON') as f: cfg = json.load(f)
+    if 'dns' in cfg:
+        del cfg['dns']
+        if cfg:
+            with open('$DAEMON_JSON', 'w') as f: json.dump(cfg, f, indent=2)
+        else:
+            os.remove('$DAEMON_JSON')
+        print('done')
+except Exception:
+    pass
+" 2>/dev/null | grep -q done && echo "✓ Removed WolfStack DNS config from $DAEMON_JSON"
+    fi
+fi
 
 # ─── Purge config and data (optional) ───────────────────────────────────────
 if [ "$PURGE" = true ]; then

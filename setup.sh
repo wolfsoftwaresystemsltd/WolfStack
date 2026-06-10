@@ -1029,6 +1029,49 @@ if ! command -v docker >/dev/null 2>&1; then
         systemctl enable docker 2>/dev/null || true
         systemctl start docker 2>/dev/null || true
         echo "✓ Docker installed"
+
+        # ─── Configure Docker DNS ────────────────────────────────────
+        # systemd-resolved puts 127.0.0.53 in /etc/resolv.conf which
+        # is unreachable from inside Docker containers (their own
+        # loopback). Detect the real upstream nameservers and write
+        # them to daemon.json so containers get working DNS.
+        WS_DOCKER_DNS=""
+        if command -v resolvectl >/dev/null 2>&1; then
+            WS_DOCKER_DNS=$(resolvectl status 2>/dev/null \
+                | grep -E 'DNS Servers?:' | head -3 \
+                | sed 's/.*: *//' | tr ' ' '\n' \
+                | grep -vE '^127\.' | head -3 | tr '\n' ' ')
+        fi
+        if [ -z "$(echo "$WS_DOCKER_DNS" | xargs)" ]; then
+            WS_DOCKER_DNS=$(grep '^nameserver' /etc/resolv.conf 2>/dev/null \
+                | awk '{print $2}' | grep -vE '^127\.' | head -3 | tr '\n' ' ')
+        fi
+        WS_DOCKER_DNS=$(echo "$WS_DOCKER_DNS" | xargs)  # trim
+        [ -z "$WS_DOCKER_DNS" ] && WS_DOCKER_DNS="8.8.8.8 1.1.1.1"
+
+        # Build JSON array: "8.8.8.8 1.1.1.1" → ["8.8.8.8","1.1.1.1"]
+        WS_DNS_JSON=$(echo "$WS_DOCKER_DNS" | tr ' ' '\n' | grep -v '^$' \
+            | sed 's/.*/"&"/' | paste -sd, | sed 's/.*/[&]/')
+
+        DAEMON_JSON="/etc/docker/daemon.json"
+        mkdir -p /etc/docker
+        if [ -f "$DAEMON_JSON" ] && command -v python3 >/dev/null 2>&1 \
+            && python3 -c "import json; json.load(open('$DAEMON_JSON'))" 2>/dev/null; then
+            # Merge into existing daemon.json — preserve other keys
+            python3 -c "
+import json, sys
+try:
+    with open('$DAEMON_JSON') as f: cfg = json.load(f)
+    cfg['dns'] = json.loads('$WS_DNS_JSON')
+    with open('$DAEMON_JSON', 'w') as f: json.dump(cfg, f, indent=2)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || echo "{\"dns\": $WS_DNS_JSON}" > "$DAEMON_JSON"
+        else
+            echo "{\"dns\": $WS_DNS_JSON}" > "$DAEMON_JSON"
+        fi
+        systemctl restart docker 2>/dev/null || true
+        echo "  ✓ Docker DNS configured ($WS_DOCKER_DNS)"
     else
         echo ""
         echo "  ⚠ Docker could not be installed automatically."
