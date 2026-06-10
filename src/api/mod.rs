@@ -21,7 +21,7 @@ use crate::auth::SessionManager;
 use crate::appstore;
 
 
-mod pve_console;
+pub mod pve_console;
 pub mod container_vnc;
 mod cluster_browser_proxy;
 

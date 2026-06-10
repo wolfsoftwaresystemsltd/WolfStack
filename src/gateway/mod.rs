@@ -202,8 +202,6 @@ pub struct GatewayOptions {
     pub recycle_bin: bool,
     #[serde(default)]
     pub smb_encrypt: SmbEncrypt,
-    #[serde(default)]
-    pub nfs_version: NfsVersion,
     /// CIDR allowlist. Empty = allow any.
     #[serde(default)]
     pub allow_hosts: Vec<String>,
@@ -234,14 +232,12 @@ pub enum SmbEncrypt {
     Off,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum NfsVersion {
-    V3,
-    #[default]
-    V4,
-    V4_2,
-}
+// NfsVersion was removed 2026-06-10: per-export version pinning doesn't exist
+// in exports(5) — the `vers=N` option it drove made exportfs reject the whole
+// export file (`unknown keyword "vers=4"`, wabil). Which NFS versions nfsd
+// serves is a server-wide [nfsd] /etc/nfs.conf concern, and the default
+// (v3+v4) covers all clients. Saved gateway configs that still carry an
+// `nfs_version` key load fine — serde ignores unknown fields.
 
 // ─── Runtime status (not persisted) ───
 

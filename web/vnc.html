@@ -143,6 +143,11 @@
         const host = params.get('host') || window.location.hostname;
         const wsPath = params.get('ws_path') || '';
         const vncTicket = params.get('ticket') || '';
+        // Node id when the VM lives on ANOTHER cluster node. The websocket and
+        // the password fetch must then go through this (admin) node's
+        // remote-console / node-proxy routes — the session cookie only
+        // authenticates here, and the VM doesn't exist here locally.
+        const nodeId = params.get('node') || '';
 
         document.getElementById('vm-name').textContent = vmName;
         document.title = `${vmName} — VNC Console`;
@@ -167,17 +172,28 @@
             const wsUrl = `${wsProtocol}://${window.location.host}${wsPath}`;
             connectProxiedVNC(wsUrl, vncTicket, isContainerVnc);
         } else if (wsPort) {
-            // Native QEMU VMs — proxy through WolfStack to avoid mixed-content issues
+            // Native QEMU / libvirt VMs — proxy through WolfStack to avoid
+            // mixed-content issues. When the VM is on another node, go through
+            // the remote-console bridge on THIS node (cluster-secret-authed
+            // hop) — connecting straight to /ws/vm-vnc here found no such VM
+            // and the console died with "Connection lost" (klasSponsor
+            // 2026-06-10).
             const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-            const proxyUrl = `${wsProtocol}://${window.location.host}/ws/vm-vnc/${encodeURIComponent(vmName)}`;
+            const proxyUrl = nodeId
+                ? `${wsProtocol}://${window.location.host}/ws/remote-console/${encodeURIComponent(nodeId)}/vm-vnc/${encodeURIComponent(vmName)}`
+                : `${wsProtocol}://${window.location.host}/ws/vm-vnc/${encodeURIComponent(vmName)}`;
             // An external-VNC VM has a password; fetch it so the console auths
             // seamlessly. None/empty (the default) → connect without a password,
             // exactly as before. If the fetch fails the RFB credentials prompt
-            // is the fallback, so this never makes a console worse.
+            // is the fallback, so this never makes a console worse. Remote VMs
+            // fetch via the node proxy for the same reason as the websocket.
             let ticket = vncTicket;
             if (!ticket) {
+                const passUrl = nodeId
+                    ? `/api/nodes/${encodeURIComponent(nodeId)}/proxy/vms/${encodeURIComponent(vmName)}/vnc-password`
+                    : `/api/vms/${encodeURIComponent(vmName)}/vnc-password`;
                 try {
-                    const r = await fetch(`/api/vms/${encodeURIComponent(vmName)}/vnc-password`, { credentials: 'include' });
+                    const r = await fetch(passUrl, { credentials: 'include' });
                     if (r.ok) { const d = await r.json(); if (d && d.password) ticket = d.password; }
                 } catch (e) { /* fall through to no-password / prompt */ }
             }

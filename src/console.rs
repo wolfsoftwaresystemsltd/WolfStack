@@ -717,6 +717,11 @@ pub async fn remote_console_ws(
     };
 
     if node.is_self {
+        // vm-vnc has its own dedicated handler (native-QEMU WS / libvirt
+        // raw-TCP bridge) — the generic console handler doesn't know it.
+        if ctype == "vm-vnc" {
+            return crate::api::pve_console::vm_vnc_ws(req, body, web::Path::from(name), state).await;
+        }
         return console_ws(req, web::Path::from((ctype, name)), body, state).await;
     }
 
@@ -751,6 +756,12 @@ async fn remote_console_bridge(
         "lxc-vnc" => format!("/ws/container-vnc/lxc/{}", encoded_name),
         "docker-vnc" => format!("/ws/container-vnc/docker/{}", encoded_name),
         "pct-vnc" => format!("/ws/container-vnc/pct/{}", encoded_name),
+        // Native-QEMU / libvirt VM consoles. Without this arm a VM console
+        // opened from another node fell through to the generic console
+        // handler and died — the browser showed a blank "Connection lost"
+        // while opening it on the VM's own node worked (klasSponsor
+        // 2026-06-10).
+        "vm-vnc" => format!("/ws/vm-vnc/{}", encoded_name),
         _ => format!("/ws/console/{}/{}", ctype, encoded_name),
     };
     // v23.12: wss-first chain. The pre-v23.12 list included a

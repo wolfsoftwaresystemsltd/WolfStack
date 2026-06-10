@@ -1898,7 +1898,12 @@ impl VmManager {
                 // still shows the pre-toggle graphics until the next start, so
                 // comparing live would refire on every save of a running VM.
                 let is_external = {
-                    let xml = Command::new("virsh").args(["dumpxml", "--inactive", name]).output().ok()
+                    // --security-info is REQUIRED: without it libvirt redacts the
+                    // <graphics passwd> attribute from dumpxml output, and
+                    // libvirt_xml_is_external_vnc demands a password to call a VM
+                    // external. Redacted XML read as "not external", so every
+                    // edit-save of an external VM regenerated its VNC password.
+                    let xml = Command::new("virsh").args(["dumpxml", "--inactive", "--security-info", name]).output().ok()
                         .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
                     libvirt_xml_is_external_vnc(&xml)
                 };
@@ -4218,9 +4223,13 @@ impl VmManager {
             let pw = pw.trim();
             if !pw.is_empty() { return Some(pw.to_string()); }
         }
-        // libvirt: the domain XML graphics password.
+        // libvirt: the domain XML graphics password. --security-info is
+        // REQUIRED — without it libvirt redacts passwd from dumpxml, this
+        // returned None, the browser console had no ticket to auth with
+        // ("Connection lost"), and the editor had no password to show
+        // (klasSponsor 2026-06-10).
         if crate::containers::is_libvirt() {
-            let xml = Command::new("virsh").args(["dumpxml", name]).output().ok()
+            let xml = Command::new("virsh").args(["dumpxml", "--security-info", name]).output().ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())?;
             if let Some(pw) = libvirt_xml_attr_in_block(&xml, "graphics", "passwd") {
                 if !pw.is_empty() { return Some(pw); }
@@ -4236,7 +4245,10 @@ impl VmManager {
     /// mistaken for external and having its UNAUTHENTICATED VNC port opened.
     /// Port from `virsh vncdisplay`.
     fn libvirt_vnc_info(&self, name: &str) -> (bool, Option<u16>) {
-        let xml = Command::new("virsh").args(["dumpxml", name]).output().ok()
+        // --security-info: see read_runtime_vnc_password — without it the
+        // redacted passwd made every VM read as NOT external, so virsh start
+        // never opened the firewall port for an external-VNC VM.
+        let xml = Command::new("virsh").args(["dumpxml", "--security-info", name]).output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
         let port = Command::new("virsh").args(["vncdisplay", name]).output().ok()
             .and_then(|o| {
@@ -4432,8 +4444,11 @@ impl VmManager {
         let storage_path = Path::new(&disk_source).parent()
             .map(|p| p.to_string_lossy().to_string());
 
-        // Detect UEFI/OVMF from dumpxml, and parse <hostdev> nodes for USB/PCI passthrough
-        let dumpxml = Command::new("virsh").args(["dumpxml", name]).output().ok()
+        // Detect UEFI/OVMF from dumpxml, and parse <hostdev> nodes for USB/PCI
+        // passthrough. --security-info so the <graphics passwd> attribute is
+        // present — the vnc_external field below requires it (redacted XML read
+        // every VM as not-external).
+        let dumpxml = Command::new("virsh").args(["dumpxml", "--security-info", name]).output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
 

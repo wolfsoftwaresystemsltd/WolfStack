@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{AuthConfig, Gateway, NfsVersion, Protocol};
+use super::{AuthConfig, Gateway, Protocol};
 
 const EXPORTS_DIR: &str = "/etc/exports.d";
 
@@ -114,21 +114,23 @@ fn render(g: &Gateway, share_path: &Path) -> String {
     let writable = matches!(g.auth, AuthConfig::Anonymous { writable: true })
         && !g.options.readonly;
     let rw = if writable { "rw" } else { "ro" };
-    let mut opts = vec![
+    // exports(5) options ONLY. Two earlier options broke every export:
+    //   • `vers=N` is a CLIENT mount / nfsd-server setting, not an exports
+    //     keyword — exportfs refused the whole file with `unknown keyword
+    //     "vers=4"` (wabil, 2026-06-10). Version selection is server-wide
+    //     ([nfsd] in /etc/nfs.conf); Linux nfsd serves v3+v4 by default, so
+    //     clients of either version work without us pinning anything.
+    //   • `fsid=0` declares THE NFSv4 pseudo-root — two gateways would both
+    //     claim it, and it remaps the v4 mount path to `server:/` instead of
+    //     the real share path. Modern nfsd needs neither.
+    let opts = [
         rw,
         "sync",
         "no_subtree_check",
         "all_squash",
         "anonuid=65534",
         "anongid=65534",
-        "fsid=0", // makes this a root-of-namespace export for NFSv4
     ];
-    let nfsver = match g.options.nfs_version {
-        NfsVersion::V3   => "vers=3",
-        NfsVersion::V4   => "vers=4",
-        NfsVersion::V4_2 => "vers=4.2",
-    };
-    opts.push(nfsver);
 
     // CIDR allowlist. If empty, export to the world (with a warning
     // the UI surfaces). If specified, one line per allowed range.
@@ -155,6 +157,56 @@ fn reload_exports() -> Result<(), NfsError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::{GatewayMode, GatewayOptions, ModePolicy, sources::Source};
+
+    fn nfs_gateway(writable: bool) -> Gateway {
+        Gateway {
+            id: "g1".into(),
+            name: "media".into(),
+            cluster: String::new(),
+            mode: GatewayMode::Single,
+            protocols: vec![Protocol::Nfs],
+            sources: vec![Source::Local { node_id: "node-a".into(), path: "/srv/media".into() }],
+            origin_node_id: "node-a".into(),
+            serve_nodes: vec![],
+            auth: AuthConfig::Anonymous { writable },
+            policy: ModePolicy::Single,
+            options: GatewayOptions::default(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn render_emits_only_valid_exports_options() {
+        // `vers=` and `fsid=0` once made exportfs reject the whole file with
+        // `unknown keyword "vers=4"` (wabil, 2026-06-10) — they must never
+        // come back. Only exports(5) keywords are allowed here.
+        let g = nfs_gateway(true);
+        let out = render(&g, Path::new("/srv/media"));
+        assert!(!out.contains("vers="), "vers= is not an exports(5) option: {}", out);
+        assert!(!out.contains("fsid="), "fsid=0 conflicts across gateways: {}", out);
+        assert!(out.contains("/srv/media *("), "world export when no allowlist: {}", out);
+        assert!(out.contains("rw,sync,no_subtree_check,all_squash,anonuid=65534,anongid=65534"),
+            "expected exact anonymous-rw option set: {}", out);
+    }
+
+    #[test]
+    fn render_readonly_and_allowlist() {
+        let mut g = nfs_gateway(false);
+        g.options.allow_hosts = vec!["10.0.0.0/24".into(), "192.168.1.5".into()];
+        let out = render(&g, Path::new("/srv/media"));
+        // Read-only auth → ro, one line per allowed range, no world export.
+        assert!(out.contains("/srv/media 10.0.0.0/24(ro,"), "{}", out);
+        assert!(out.contains("/srv/media 192.168.1.5(ro,"), "{}", out);
+        assert!(!out.contains("*("), "allowlist must suppress the world export: {}", out);
+    }
 }
 
 #[derive(Default, Debug, Clone, serde::Serialize)]

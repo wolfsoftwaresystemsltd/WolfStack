@@ -5641,11 +5641,18 @@ function renderVms(vms) {
         const statusText = vm.running ? 'Running' : 'Stopped';
         const statusColor = vm.running ? 'var(--success)' : 'var(--danger)';
 
-        // Determine the correct host for VNC connections (remote node vs local)
+        // Determine the correct host for VNC connections (remote node vs local).
+        // vncNodeParam routes vnc.html's websocket + password fetch through
+        // THIS node's remote-console bridge / node proxy when the VM lives on
+        // another node — a direct /ws/vm-vnc here finds no such VM.
         let vncHost = window.location.hostname;
+        let vncNodeParam = '';
         if (currentNodeId) {
             const node = allNodes.find(n => n.id === currentNodeId);
-            if (node && !node.is_self) vncHost = node.address;
+            if (node && !node.is_self) {
+                vncHost = node.address;
+                vncNodeParam = `&node=${encodeURIComponent(currentNodeId)}`;
+            }
         }
 
         // Browser-console link works for any VM the backend can
@@ -5655,7 +5662,7 @@ function renderVms(vms) {
         const vncBridgePort = vm.vnc_ws_port || vm.vnc_port;
         const vncText = (vm.running && vm.vnc_port)
             ? (vncBridgePort
-                ? `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vncBridgePort}&host=${encodeURIComponent(vncHost)}" target="_blank"
+                ? `<a href="/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vncBridgePort}&host=${encodeURIComponent(vncHost)}${vncNodeParam}" target="_blank"
                     class="badge" style="cursor:pointer; text-decoration:none; background:rgba(234,179,8,0.15); color:#eab308;" title="Open console in browser">:${vm.vnc_port}</a>`
                 : `<span class="badge" style="background:rgba(234,179,8,0.15); color:#eab308;" title="Connect with VNC client to port ${vm.vnc_port}">:${vm.vnc_port}</span>`)
             : '—';
@@ -20903,12 +20910,18 @@ function vmCardHtml(vm) {
     const isRunning = vm.running;
     const borderColor = isRunning ? '#10b981' : '#6b7280';
     let vncHost = window.location.hostname;
+    let vncNodeParam = '';
     if (currentNodeId) {
         const node = allNodes.find(n => n.id === currentNodeId);
-        if (node && !node.is_self) vncHost = node.address;
+        if (node && !node.is_self) {
+            vncHost = node.address;
+            // Route the console through this node's remote-console bridge —
+            // the VM doesn't exist locally here (see vnc.html node param).
+            vncNodeParam = `&node=${encodeURIComponent(currentNodeId)}`;
+        }
     }
     const vncBridgePort2 = vm.vnc_ws_port || vm.vnc_port;
-    const vncLink = (vm.running && vncBridgePort2) ? `/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vncBridgePort2}&host=${encodeURIComponent(vncHost)}` : '';
+    const vncLink = (vm.running && vncBridgePort2) ? `/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vncBridgePort2}&host=${encodeURIComponent(vncHost)}${vncNodeParam}` : '';
 
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
@@ -26541,14 +26554,17 @@ async function _runVncInstall(runtime, name, displayName, mode, desktop, extras)
 
 function openVmVnc(name, wsPort) {
     let host = window.location.hostname;
-    // For remote nodes, connect to the node actually running the VM
+    let nodeParam = '';
+    // For remote nodes, route via this node's remote-console bridge — the
+    // VM doesn't exist locally here (see vnc.html node param).
     if (currentNodeId) {
         const node = allNodes.find(n => n.id === currentNodeId);
         if (node && !node.is_self) {
             host = node.address;
+            nodeParam = `&node=${encodeURIComponent(currentNodeId)}`;
         }
     }
-    window.open(`/vnc.html?name=${encodeURIComponent(name)}&port=${wsPort}&host=${host}`,
+    window.open(`/vnc.html?name=${encodeURIComponent(name)}&port=${wsPort}&host=${encodeURIComponent(host)}${nodeParam}`,
         'vnc_' + name, 'width=1024,height=768,menubar=no,toolbar=no');
 }
 
@@ -26903,11 +26919,20 @@ async function showVmSettings(name) {
             const passEl = document.getElementById('edit-vm-vnc-pass');
             if (passEl) {
                 try {
-                    const r = await fetch(`/api/vms/${encodeURIComponent(vm.name)}/vnc-password`, { credentials: 'include' });
+                    // apiUrl() routes via the node proxy when this VM lives on
+                    // a remote node — a bare fetch here found no such VM.
+                    const r = await fetch(apiUrl(`/api/vms/${encodeURIComponent(vm.name)}/vnc-password`), { credentials: 'include' });
                     if (r.ok) {
                         const d = await r.json();
                         if (d && d.password) {
-                            passEl.innerHTML = `<br>VNC client → <code>${escapeHtml(window.location.hostname)}:${d.vnc_port || ''}</code> &nbsp; password <code>${escapeHtml(d.password)}</code>`;
+                            // External clients connect to the node that RUNS the
+                            // VM — not necessarily the node serving this page.
+                            let vncClientHost = window.location.hostname;
+                            if (currentNodeId) {
+                                const vncNode = allNodes.find(n => n.id === currentNodeId);
+                                if (vncNode && !vncNode.is_self) vncClientHost = vncNode.address;
+                            }
+                            passEl.innerHTML = `<br>VNC client → <code>${escapeHtml(vncClientHost)}:${d.vnc_port || ''}</code> &nbsp; password <code>${escapeHtml(d.password)}</code>`;
                         } else {
                             passEl.innerHTML = '<br>Password is generated when the VM next starts.';
                         }
@@ -34406,11 +34431,17 @@ function fleetOpenConsole(nodeId, type, name) {
 // Fleet VNC opener — connects to the correct host for remote VMs
 function fleetOpenVnc(nodeId, name, wsPort) {
     var host = window.location.hostname;
+    var nodeParam = '';
     if (nodeId && nodeId !== 'local') {
         var node = allNodes.find(function (n) { return n.id === nodeId; });
-        if (node && !node.is_self) host = node.address;
+        if (node && !node.is_self) {
+            host = node.address;
+            // Remote VM — route via this node's remote-console bridge
+            // (see vnc.html node param).
+            nodeParam = '&node=' + encodeURIComponent(nodeId);
+        }
     }
-    window.open('/vnc.html?name=' + encodeURIComponent(name) + '&port=' + wsPort + '&host=' + encodeURIComponent(host),
+    window.open('/vnc.html?name=' + encodeURIComponent(name) + '&port=' + wsPort + '&host=' + encodeURIComponent(host) + nodeParam,
         'vnc_' + name, 'width=1024,height=768,menubar=no,toolbar=no');
 }
 
