@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.37.6: stop spurious connection-lost banner on Docker view toggle** _(2026-06-10 — [`883bb23`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/883bb23775a0d51fd340304de596a1cbb43af387))_
 - **v24.37.5: NFS shares get a unique per-share fsid + export-options field** _(2026-06-10 — [`aa755b5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aa755b514644240669098f98f9aed2a8315f8665))_
 - **v24.37.4: SMB/CIFS storage mounts in the UI** _(2026-06-10 — [`501e247`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/501e24774758297ce9aa56f1383c4ec2c5fb6373))_
 - **v24.37.3: Secrets Manager works in Docker Compose + Alpine phantom-update fix** _(2026-06-10 — [`f001aa8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f001aa83e9c4406a9b80240359dacec967b509b0))_
