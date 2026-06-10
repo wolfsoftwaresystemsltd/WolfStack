@@ -33,7 +33,7 @@ jobs:
     # runner for the full 6-hour GitHub default.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -84,7 +84,7 @@ jobs:
           chmod +x dist/wolfstack-${{ matrix.arch }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: wolfstack-${{ matrix.arch }}
           path: dist/wolfstack-${{ matrix.arch }}
@@ -97,7 +97,7 @@ jobs:
       id-token: write       # cosign keyless OIDC + attest provenance
       attestations: write   # actions/attest-build-provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Need full history so we can extract the release commit body
           # for release notes, and regenerate CHANGELOG.md.
@@ -108,7 +108,7 @@ jobs:
         run: echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*\"\(.*\)\".*/\1/')" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -122,7 +122,7 @@ jobs:
         # Run BEFORE cosign signing so subject-path matches just the
         # binaries (not the .cosign.bundle files that signing produces).
         # Provenance covers both x86_64 and aarch64 in one attestation.
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: |
             dist/wolfstack-x86_64
