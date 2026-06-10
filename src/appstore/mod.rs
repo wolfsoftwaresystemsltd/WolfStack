@@ -722,6 +722,7 @@ fn install_compose(
         let file = appstore_compose_file(stack_name);
         let _ = std::process::Command::new("docker")
             .args(["compose", "-f", &file.to_string_lossy(), "down", "-v", "--remove-orphans"])
+            .envs(crate::api::compose_secrets_env())
             .current_dir(&dir)
             .output();
         let _ = std::fs::remove_dir_all(&dir);
@@ -739,6 +740,7 @@ fn uninstall_compose(stack_name: &str) -> Result<String, String> {
         // modal so the user has acknowledged the data loss.
         let out = std::process::Command::new("docker")
             .args(["compose", "-f", &file.to_string_lossy(), "down", "-v", "--remove-orphans"])
+            .envs(crate::api::compose_secrets_env())
             .current_dir(appstore_compose_dir(stack_name))
             .output()
             .map_err(|e| format!("docker compose down failed to start: {}", e))?;
@@ -759,8 +761,12 @@ fn uninstall_compose(stack_name: &str) -> Result<String, String> {
 
 fn compose_up(stack_name: &str) -> Result<(), String> {
     let file = appstore_compose_file(stack_name);
+    // Secrets-Manager entries ride in as process env so `${KEY}` references
+    // in the compose YAML resolve — same injection as the Compose page
+    // (api::compose_secrets_env), no divergence between the two surfaces.
     let out = std::process::Command::new("docker")
         .args(["compose", "-f", &file.to_string_lossy(), "up", "-d", "--remove-orphans"])
+        .envs(crate::api::compose_secrets_env())
         .current_dir(appstore_compose_dir(stack_name))
         .output()
         .map_err(|e| format!("docker compose up failed to start: {}", e))?;

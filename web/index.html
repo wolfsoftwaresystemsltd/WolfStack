@@ -4763,6 +4763,14 @@
                         <button class="btn btn-sm btn-primary" onclick="showSecretCreate()" style="font-size:12px;">+ Add Secret</button>
                     </div>
                 </div>
+                <div class="card-body" style="padding-top:0; font-size:12px; color: var(--text-muted);">
+                    Reference a secret anywhere in a Docker Compose file as <code>${KEY}</code> — for example
+                    <code>environment:</code> → <code>MYSQL_ROOT_PASSWORD=${DB_PASSWORD}</code>. WolfStack injects
+                    the value when the stack is deployed, so it never gets written into the stack folder or the
+                    <code>.env</code> file. Keys must be valid environment-variable names
+                    (letters, digits, underscores; not starting with a digit). Secrets are stored per node — define
+                    them on the node the stack runs on.
+                </div>
             </div>
 
             <div class="card">

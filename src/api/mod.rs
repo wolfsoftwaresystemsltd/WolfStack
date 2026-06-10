@@ -5238,7 +5238,12 @@ fn quick_container_update_count(runtime: &str, container: &str) -> (String, usiz
         "dnf"    => "dnf check-update --quiet 2>/dev/null | grep -c '^\\S'",
         "yum"    => "yum check-update --quiet 2>/dev/null | grep -c '^\\S'",
         "pacman" => "pacman -Qu 2>/dev/null | grep -c .",
-        "apk"    => "apk version -l '<' 2>/dev/null | grep -c .",
+        // `apk version` ALWAYS prints an `Installed: Available:` header line,
+        // even with zero upgrades — counting it showed a phantom "1 update"
+        // on every up-to-date Alpine container, and Apply (which correctly
+        // did nothing) could never clear it (JJ, 2026-06-10; verified in a
+        // live alpine:latest container). tail -n +2 drops the header.
+        "apk"    => "apk version -l '<' 2>/dev/null | tail -n +2 | grep -c .",
         _ => return (pm.to_string(), 0),
     };
     let out = container_exec_cmd(runtime, container, &["sh", "-c", cmd]).output();
@@ -5308,7 +5313,10 @@ pub async fn container_updates_check(req: HttpRequest, state: web::Data<AppState
         }
         "apk" => {
             let _ = container_exec_cmd(&runtime, &container, &["sh", "-c", "apk update 2>/dev/null"]).output();
-            container_exec_cmd(&runtime, &container, &["sh", "-c", "apk version -l '<' 2>/dev/null"])
+            // tail -n +2 drops apk's unconditional `Installed: Available:`
+            // header — without this the modal rendered the header as a
+            // phantom single "update" with blank columns (JJ, 2026-06-10).
+            container_exec_cmd(&runtime, &container, &["sh", "-c", "apk version -l '<' 2>/dev/null | tail -n +2"])
                 .output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
         }
         _ => String::new(),
@@ -29272,6 +29280,7 @@ async fn compose_list_stacks(
             // Get stack status via docker compose ps
             let status = Command::new("docker")
                 .args(["compose", "-f", &compose_file.to_string_lossy(), "ps", "--format", "json"])
+                .envs(compose_secrets_env())
                 .current_dir(&path)
                 .output();
 
@@ -29370,6 +29379,7 @@ async fn compose_delete_stack(
     let compose_file = compose_file_in(&dir);
     match Command::new("docker")
         .args(["compose", "-f", &compose_file.to_string_lossy(), "down", "--remove-orphans"])
+        .envs(compose_secrets_env())
         .current_dir(&dir)
         .output()
     {
@@ -29475,6 +29485,7 @@ async fn compose_up(
 
     let output = Command::new("docker")
         .args(["compose", "-f", &compose_file.to_string_lossy(), "up", "-d", "--remove-orphans"])
+        .envs(compose_secrets_env())
         .current_dir(&dir)
         .output();
 
@@ -29510,6 +29521,7 @@ async fn compose_down(
 
     let output = Command::new("docker")
         .args(["compose", "-f", &compose_file.to_string_lossy(), "down", "--remove-orphans"])
+        .envs(compose_secrets_env())
         .current_dir(&dir)
         .output();
 
@@ -29544,6 +29556,7 @@ async fn compose_pull(
 
     let output = Command::new("docker")
         .args(["compose", "-f", &compose_file.to_string_lossy(), "pull"])
+        .envs(compose_secrets_env())
         .current_dir(&dir)
         .output();
 
@@ -29578,6 +29591,7 @@ async fn compose_restart(
 
     let output = Command::new("docker")
         .args(["compose", "-f", &compose_file.to_string_lossy(), "restart"])
+        .envs(compose_secrets_env())
         .current_dir(&dir)
         .output();
 
@@ -29630,6 +29644,7 @@ async fn compose_logs(
 
     let output = Command::new("docker")
         .args(&cmd_args)
+        .envs(compose_secrets_env())
         .current_dir(&dir)
         .output();
 
@@ -29662,6 +29677,7 @@ async fn compose_validate(
     let file_str = compose_file.to_string_lossy().into_owned();
     let output = Command::new("docker")
         .args(["compose", "-f", &file_str, "config", "--quiet"])
+        .envs(compose_secrets_env())
         .current_dir(&dir)
         .output();
 
@@ -29689,6 +29705,61 @@ fn load_secrets() -> Vec<SecretEntry> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// True if `k` can be a POSIX environment-variable name — what `docker
+/// compose` can interpolate via `${k}`. Secrets with other names (spaces,
+/// dashes, leading digit) are skipped rather than passed as malformed env
+/// entries.
+fn is_valid_env_var_name(k: &str) -> bool {
+    let mut chars = k.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Variables that change how the `docker` subprocess itself behaves rather
+/// than feed the stack. A secret with one of these names must never be
+/// injected — `PATH=` would strip the CLI's lookup path, `DOCKER_HOST` would
+/// redirect the daemon connection, `LD_PRELOAD` would inject a library into
+/// the docker client. Self-inflicted-only (the operator writes the store),
+/// but cheap to make impossible (code review 2026-06-10).
+const COMPOSE_ENV_DENYLIST: &[&str] = &[
+    "PATH", "HOME", "SHELL", "IFS",
+    "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
+    "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_API_VERSION",
+    "COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES",
+];
+
+/// Environment pairs for `docker compose` subprocesses: every Secrets-Manager
+/// entry whose key is a valid env-var name (and not on the denylist above).
+/// Compose resolves `${KEY}` in the YAML (and `.env`-style references) from
+/// the process environment, so injecting the store here makes
+/// `environment: - DB_PASSWORD=${DB_PASSWORD}` work without ever writing the
+/// secret to disk next to the stack. Process env outranks the stack's `.env`
+/// file in compose's precedence, so a stale blank `KEY=` line in `.env`
+/// can't shadow a real secret. Secrets are per-node — a stack only sees the
+/// store of the node it runs on. Note a secret used via `environment:` ends
+/// up in the container's env like any other env var (visible to `docker
+/// inspect`) — inherent to env-var secrets, not to this injection.
+/// (Gary KO4BSR 2026-06-10: secrets referenced from compose came through
+/// blank because nothing ever injected them.)
+pub(crate) fn compose_secrets_env() -> Vec<(String, String)> {
+    load_secrets()
+        .into_iter()
+        .filter(|s| is_injectable_secret_key(&s.key))
+        .map(|s| (s.key, s.value))
+        .collect()
+}
+
+/// Combined gate for `compose_secrets_env` — a valid env-var name that isn't
+/// a behaviour-altering variable. Split out so it's unit-testable without
+/// touching the on-disk store.
+fn is_injectable_secret_key(k: &str) -> bool {
+    is_valid_env_var_name(k) && !COMPOSE_ENV_DENYLIST.contains(&k)
 }
 
 fn save_secrets(secrets: &[SecretEntry]) -> Result<(), String> {
@@ -35844,6 +35915,42 @@ pub fn configure_statuspage_only(cfg: &mut web::ServiceConfig) {
         .route("/", web::get().to(statuspage_public_index))
         .route("/status", web::get().to(statuspage_public_index))
         .route("/status/{slug}", web::get().to(statuspage_public_page_dedicated));
+}
+
+#[cfg(test)]
+mod compose_secrets_tests {
+    use super::{is_injectable_secret_key, is_valid_env_var_name};
+
+    #[test]
+    fn env_var_name_filter() {
+        // Valid POSIX env names — what docker compose can interpolate.
+        assert!(is_valid_env_var_name("DB_PASSWORD"));
+        assert!(is_valid_env_var_name("_private"));
+        assert!(is_valid_env_var_name("key2"));
+        // Invalid: empty, leading digit, dashes, spaces, dots, unicode.
+        assert!(!is_valid_env_var_name(""));
+        assert!(!is_valid_env_var_name("2fast"));
+        assert!(!is_valid_env_var_name("my-secret"));
+        assert!(!is_valid_env_var_name("my secret"));
+        assert!(!is_valid_env_var_name("api.key"));
+        assert!(!is_valid_env_var_name("clé"));
+    }
+
+    #[test]
+    fn behaviour_altering_vars_never_injected() {
+        // A secret named like these would change how the docker subprocess
+        // runs (redirect the daemon, strip PATH, preload a library) — the
+        // denylist must keep them out of the injected env.
+        for k in ["PATH", "HOME", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                  "DOCKER_HOST", "DOCKER_CONFIG", "COMPOSE_FILE"] {
+            assert!(!is_injectable_secret_key(k), "{} must be denied", k);
+        }
+        // Normal secrets still pass; the denylist is exact-match (case-
+        // sensitive, like the environment itself) so DB_PATH etc. are fine.
+        assert!(is_injectable_secret_key("DB_PASSWORD"));
+        assert!(is_injectable_secret_key("DB_PATH"));
+        assert!(is_injectable_secret_key("docker_host_token"));
+    }
 }
 
 #[cfg(test)]
