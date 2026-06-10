@@ -202,6 +202,14 @@ pub struct GatewayOptions {
     pub recycle_bin: bool,
     #[serde(default)]
     pub smb_encrypt: SmbEncrypt,
+    /// Extra exports(5) options appended verbatim to the NFS export's
+    /// option list (e.g. "no_root_squash" or a pinned "fsid=7"). Validated
+    /// at save time — exports(5) option charset only, so it can't break the
+    /// `path host(opts)` line shape or inject another export line. An
+    /// operator-supplied `fsid=` here overrides the auto-generated
+    /// per-gateway one.
+    #[serde(default)]
+    pub nfs_extra_options: String,
     /// CIDR allowlist. Empty = allow any.
     #[serde(default)]
     pub allow_hosts: Vec<String>,
@@ -389,6 +397,25 @@ pub fn validate(g: &Gateway) -> Result<(), Vec<String>> {
             errs.push(format!("source {}: {}", i, e));
         }
     }
+    // Extra NFS export options feed the /etc/exports.d option list inside
+    // `path host(opts)` — restrict to the exports(5) option charset so a
+    // value can never close the paren, add whitespace, or inject a new
+    // export line. Commas separate options; '=' for key=value; the rest
+    // covers option values like uuids and squash ids.
+    {
+        let extra = g.options.nfs_extra_options.trim();
+        if !extra.is_empty()
+            && !extra.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, ',' | '=' | '_' | '-' | '.' | ':' | '@' | '/')
+            })
+        {
+            errs.push(
+                "nfs extra options may only contain letters, digits and , = _ - . : @ / \
+                 (no spaces, quotes or parentheses — see man exports)"
+                    .into(),
+            );
+        }
+    }
     // Auth checks
     match &g.auth {
         AuthConfig::Anonymous { .. } => {}
@@ -475,6 +502,25 @@ mod tests {
     fn validate_accepts_minimum_valid_gateway() {
         let g = ok_gateway("ops");
         assert!(validate(&g).is_ok());
+    }
+
+    #[test]
+    fn validate_nfs_extra_options_charset() {
+        // Legal exports(5) option lists pass…
+        for ok in ["", "no_root_squash", "fsid=7", "sec=sys,anonuid=1000", "fsid=abc-123"] {
+            let mut g = ok_gateway("ops");
+            g.options.nfs_extra_options = ok.into();
+            assert!(validate(&g).is_ok(), "should accept {:?}", ok);
+        }
+        // …anything that could break the `path host(opts)` line shape or
+        // inject a second export line does not.
+        for bad in ["rw) /etc *(rw", "a b", "opt\nnewline", "x;y", "\"quoted\"", "rw)("] {
+            let mut g = ok_gateway("ops");
+            g.options.nfs_extra_options = bad.into();
+            let errs = validate(&g).unwrap_err();
+            assert!(errs.iter().any(|e| e.contains("nfs extra options")),
+                "should reject {:?}: {:?}", bad, errs);
+        }
     }
 
     #[test]

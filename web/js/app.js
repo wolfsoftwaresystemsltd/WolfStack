@@ -63836,7 +63836,7 @@ function gwOpenWizard() {
         auth_mode: 'anonymous',
         anon_writable: false,
         users: [],
-        options: { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP' },
+        options: { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '' },
     };
     gwRenderWizard();
 }
@@ -63857,7 +63857,7 @@ function gwOpenEdit(g) {
         anon_writable: !!auth.writable,
         users: (auth.users || []).map(u => ({ username: u.username, writable: !!u.writable })),
         options: Object.assign(
-            { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP' },
+            { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '' },
             g.options || {}
         ),
     };
@@ -64115,6 +64115,16 @@ function gwWizardStep3() {
         <input class="form-control" style="width:100%;" placeholder="Allowed CIDRs (comma-separated). Empty = anyone on the LAN."
             value="${escapeAttr((d.options.allow_hosts || []).join(', '))}"
             oninput="_gwWizardData.options.allow_hosts=this.value.split(',').map(s=>s.trim()).filter(Boolean);">
+
+        <h4 style="margin:14px 0 8px;">NFS export options (advanced)</h4>
+        <input class="form-control" style="width:100%;" placeholder="Extra exports(5) options, e.g. no_root_squash or fsid=7"
+            value="${escapeAttr(d.options.nfs_extra_options || '')}"
+            oninput="_gwWizardData.options.nfs_extra_options=this.value.trim();">
+        <small style="color:var(--text-muted);font-size:11px;display:block;margin-top:2px;">
+            Appended to the export's option list (NFS only). WolfStack already sets a unique
+            <code>fsid</code> per share automatically; supply your own <code>fsid=</code> here only to
+            override it. Comma-separated, no spaces — see <code>man exports</code>.
+        </small>
 
         <h4 style="margin:14px 0 8px;">SMB workgroup</h4>
         <input class="form-control" style="width:100%;" placeholder="WORKGROUP" value="${escapeAttr(d.options.smb_workgroup || 'WORKGROUP')}"

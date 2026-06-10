@@ -110,27 +110,45 @@ fn sanitise(s: &str) -> String {
         .collect()
 }
 
+/// Deterministic per-gateway filesystem id for the export. exports(5)
+/// accepts `fsid=<uuid>`; without SOME fsid, filesystems that lack a usable
+/// UUID (tmpfs, overlayfs, some btrfs/ZFS layouts) refuse to export at all
+/// ("requires fsid", wabil 2026-06-10 round 2). UUIDv5 of the gateway id is
+/// stable across restarts/re-renders (a changing fsid would invalidate
+/// client mounts) and unique per gateway — unlike the old hardcoded
+/// `fsid=0`, which declared every gateway to be THE NFSv4 pseudo-root.
+fn gateway_fsid(gateway_id: &str) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, gateway_id.as_bytes()).to_string()
+}
+
 fn render(g: &Gateway, share_path: &Path) -> String {
     let writable = matches!(g.auth, AuthConfig::Anonymous { writable: true })
         && !g.options.readonly;
     let rw = if writable { "rw" } else { "ro" };
-    // exports(5) options ONLY. Two earlier options broke every export:
-    //   • `vers=N` is a CLIENT mount / nfsd-server setting, not an exports
-    //     keyword — exportfs refused the whole file with `unknown keyword
-    //     "vers=4"` (wabil, 2026-06-10). Version selection is server-wide
-    //     ([nfsd] in /etc/nfs.conf); Linux nfsd serves v3+v4 by default, so
-    //     clients of either version work without us pinning anything.
-    //   • `fsid=0` declares THE NFSv4 pseudo-root — two gateways would both
-    //     claim it, and it remaps the v4 mount path to `server:/` instead of
-    //     the real share path. Modern nfsd needs neither.
-    let opts = [
-        rw,
-        "sync",
-        "no_subtree_check",
-        "all_squash",
-        "anonuid=65534",
-        "anongid=65534",
+    // exports(5) options ONLY — `vers=N` is a CLIENT mount / nfsd-server
+    // setting, not an exports keyword; exportfs refused the whole file with
+    // `unknown keyword "vers=4"` (wabil, 2026-06-10). Version selection is
+    // server-wide ([nfsd] in /etc/nfs.conf); Linux nfsd serves v3+v4 by
+    // default, so clients of either version work without us pinning anything.
+    let mut opts: Vec<String> = vec![
+        rw.to_string(),
+        "sync".to_string(),
+        "no_subtree_check".to_string(),
+        "all_squash".to_string(),
+        "anonuid=65534".to_string(),
+        "anongid=65534".to_string(),
     ];
+    // Operator escape hatch — appended verbatim (validated at save time by
+    // gateway::validate; charset-restricted so it can't break the
+    // `path host(opts)` line shape or inject a second export line).
+    let extra = g.options.nfs_extra_options.trim();
+    // Our deterministic fsid, unless the operator pinned their own.
+    if !extra.split(',').any(|o| o.trim_start().starts_with("fsid=")) {
+        opts.push(format!("fsid={}", gateway_fsid(&g.id)));
+    }
+    if !extra.is_empty() {
+        opts.push(extra.to_string());
+    }
 
     // CIDR allowlist. If empty, export to the world (with a warning
     // the UI surfaces). If specified, one line per allowed range.
@@ -185,16 +203,49 @@ mod tests {
 
     #[test]
     fn render_emits_only_valid_exports_options() {
-        // `vers=` and `fsid=0` once made exportfs reject the whole file with
-        // `unknown keyword "vers=4"` (wabil, 2026-06-10) — they must never
-        // come back. Only exports(5) keywords are allowed here.
+        // `vers=` once made exportfs reject the whole file with `unknown
+        // keyword "vers=4"` (wabil, 2026-06-10) — it must never come back.
         let g = nfs_gateway(true);
         let out = render(&g, Path::new("/srv/media"));
         assert!(!out.contains("vers="), "vers= is not an exports(5) option: {}", out);
-        assert!(!out.contains("fsid="), "fsid=0 conflicts across gateways: {}", out);
         assert!(out.contains("/srv/media *("), "world export when no allowlist: {}", out);
+        // Deterministic per-gateway fsid (round 2: some filesystems refuse
+        // to export without one) — present, stable, and never the v4
+        // pseudo-root fsid=0 that conflicted across gateways.
+        let fsid = gateway_fsid(&g.id);
+        assert!(out.contains(&format!("anongid=65534,fsid={})", fsid)),
+            "expected fsid after the fixed option set: {}", out);
+        assert!(!out.contains("fsid=0,") && !out.contains("fsid=0)"),
+            "fsid must never be the pseudo-root 0: {}", out);
         assert!(out.contains("rw,sync,no_subtree_check,all_squash,anonuid=65534,anongid=65534"),
             "expected exact anonymous-rw option set: {}", out);
+    }
+
+    #[test]
+    fn gateway_fsid_is_stable_and_unique() {
+        // Stable across calls (a changing fsid invalidates client mounts)…
+        assert_eq!(gateway_fsid("g1"), gateway_fsid("g1"));
+        // …and unique per gateway (the whole point vs the old fsid=0).
+        assert_ne!(gateway_fsid("g1"), gateway_fsid("g2"));
+        // Parseable UUID shape for exports(5) fsid=uuid.
+        assert!(uuid::Uuid::parse_str(&gateway_fsid("g1")).is_ok());
+    }
+
+    #[test]
+    fn render_extra_options_and_fsid_override() {
+        // Extra options are appended after the fixed set + auto fsid.
+        let mut g = nfs_gateway(true);
+        g.options.nfs_extra_options = "no_root_squash".into();
+        let out = render(&g, Path::new("/srv/media"));
+        assert!(out.contains(",no_root_squash)"), "extra options appended: {}", out);
+        assert!(out.contains("fsid="), "auto fsid still present: {}", out);
+
+        // An operator-pinned fsid= suppresses the auto-generated one —
+        // two fsid keys in one option list would be ambiguous.
+        g.options.nfs_extra_options = "fsid=7,no_root_squash".into();
+        let out = render(&g, Path::new("/srv/media"));
+        assert!(out.contains(",fsid=7,no_root_squash)"), "pinned fsid kept: {}", out);
+        assert_eq!(out.matches("fsid=").count(), 1, "exactly one fsid: {}", out);
     }
 
     #[test]
