@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.38.2: Dynu DNS-01 support + fix issuance for ALL community DNS plugins** _(2026-06-11 — [`a350569`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a3505696ca00d93d395324fd7224fe1f54dd2673))_
 - **v24.38.1: reboot no longer hangs unmounting WebUI network mounts** _(2026-06-11 — [`837f84a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/837f84ab6c7de576e730fbde9c42772f1d59829c))_
 - **v24.38.0: Unraid integration + zero-warnings policy** _(2026-06-11 — [`8d2885d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d2885d8e0671b2ebff845d7bd60d0da3fe18bb1))_
 - **v24.37.9: fstab mounts can order after WebUI auto-mounts (wolfstack-mounts.target)** _(2026-06-11 — [`f5343d4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f5343d4de3bfc8e0f968e24b4be70997287ccd70))_
