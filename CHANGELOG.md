@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.37.9: fstab mounts can order after WebUI auto-mounts (wolfstack-mounts.target)** _(2026-06-11 — [`f5343d4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f5343d4de3bfc8e0f968e24b4be70997287ccd70))_
 - **v24.37.8: NFS shares publish at host:/exports/<name>** _(2026-06-10 — [`b242f27`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b242f276d7ebd7c26fca8fa4ad56e030b21bc53e))_
 - **v24.37.7: WolfNet IP conflict check is cluster-scoped, not fleet-wide** _(2026-06-10 — [`81c318c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/81c318ca87fc6ccd3b7122a9a7dee2c63d941ce3))_
 - **v24.37.6: stop spurious connection-lost banner on Docker view toggle** _(2026-06-10 — [`883bb23`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/883bb23775a0d51fd340304de596a1cbb43af387))_
