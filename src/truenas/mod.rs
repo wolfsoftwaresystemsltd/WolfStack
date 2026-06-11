@@ -56,8 +56,9 @@ pub struct TrueNasInstance {
     pub id: String,
     /// Friendly label shown in the UI (e.g. "atlas").
     pub label: String,
-    /// Optional cluster tag — shows under that cluster's Storage view; empty =
-    /// visible on every cluster.
+    /// Cluster this instance belongs to — strictly one cluster's Storage view
+    /// (v24.38.4). None/empty only on pre-tagging configs; the startup
+    /// self-heal adopts those into this node's own cluster.
     #[serde(default)]
     pub cluster: Option<String>,
     /// Base API URL including the version prefix, e.g.
@@ -563,6 +564,22 @@ impl TrueNasStore {
         self.save()
     }
 
+    /// One-time self-heal: instances registered before strict cluster
+    /// scoping (v24.38.4) have no cluster tag. An instance lives in THIS
+    /// node's store and this node belongs to exactly one cluster — so that
+    /// cluster is the only correct home. Runs at startup; returns adoptions.
+    pub fn adopt_unassigned_into_cluster(&mut self, cluster_label: &str) -> usize {
+        let mut n = 0;
+        for i in self.instances.iter_mut() {
+            if i.cluster.as_deref().is_none_or(str::is_empty) {
+                i.cluster = Some(cluster_label.to_string());
+                n += 1;
+            }
+        }
+        if n > 0 { let _ = self.save(); }
+        n
+    }
+
     /// Re-tag instances when a WolfStack cluster is renamed (case-insensitive
     /// match, same rule as `agent::cluster_eq`). Untagged instances (visible on
     /// every cluster) are untouched. Returns how many changed.
@@ -612,5 +629,43 @@ mod tests {
     #[test]
     fn url_segment_encoding_escapes_at_and_slash() {
         assert_eq!(urlencoding_encode("vault/projects@daily-1"), "vault%2Fprojects%40daily-1");
+    }
+}
+
+#[cfg(test)]
+mod cluster_scoping_tests {
+    use super::*;
+
+    fn inst(cluster: Option<&str>) -> TrueNasInstance {
+        TrueNasInstance {
+            id: "t1".into(), label: "atlas".into(), cluster: cluster.map(String::from),
+            api_url: "https://10.0.0.2/api/v2.0".into(), api_key_enc: String::new(),
+            pool_name: String::new(), insecure_tls: true, cache_ttl_secs: 300,
+            last_seen: String::new(), status: String::new(),
+        }
+    }
+
+    #[test]
+    fn adoption_claims_only_unassigned() {
+        let mut store = TrueNasStore { instances: vec![
+            inst(None), inst(Some("")), inst(Some("Rivendell")),
+        ], path: "/nonexistent/wolfstack-test/truenas.json".into() };
+        // save() will fail (no /etc/wolfstack in tests) — adoption counting
+        // and tagging happen before the write and are what's under test.
+        let n = store.adopt_unassigned_into_cluster("Shire");
+        assert_eq!(n, 2);
+        assert_eq!(store.instances[0].cluster.as_deref(), Some("Shire"));
+        assert_eq!(store.instances[1].cluster.as_deref(), Some("Shire"));
+        // An instance that already belongs to a cluster is never stolen.
+        assert_eq!(store.instances[2].cluster.as_deref(), Some("Rivendell"));
+    }
+
+    #[test]
+    fn adoption_is_idempotent() {
+        let mut store = TrueNasStore {
+            instances: vec![inst(Some("Shire"))],
+            path: "/nonexistent/wolfstack-test/truenas.json".into(),
+        };
+        assert_eq!(store.adopt_unassigned_into_cluster("Shire"), 0);
     }
 }

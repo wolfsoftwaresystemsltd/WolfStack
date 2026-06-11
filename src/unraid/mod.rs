@@ -62,8 +62,9 @@ pub struct UnraidInstance {
     pub id: String,
     /// Friendly label shown in the UI (e.g. "tower").
     pub label: String,
-    /// Optional cluster tag — shows under that cluster's Storage view; empty =
-    /// visible on every cluster.
+    /// Cluster this instance belongs to — strictly one cluster's Storage view
+    /// (v24.38.4). None/empty only on pre-tagging configs; the startup
+    /// self-heal adopts those into this node's own cluster.
     #[serde(default)]
     pub cluster: Option<String>,
     /// Base server URL, e.g. `https://10.2.0.40` or `http://tower.lan`
@@ -600,6 +601,22 @@ impl UnraidStore {
         self.instances.retain(|i| i.id != id);
         if self.instances.len() == before { return Err(format!("instance {} not found", id)); }
         self.save()
+    }
+
+    /// One-time self-heal: instances registered before strict cluster
+    /// scoping (v24.38.4) have no cluster tag. An instance lives in THIS
+    /// node's store and this node belongs to exactly one cluster — so that
+    /// cluster is the only correct home. Runs at startup; returns adoptions.
+    pub fn adopt_unassigned_into_cluster(&mut self, cluster_label: &str) -> usize {
+        let mut n = 0;
+        for i in self.instances.iter_mut() {
+            if i.cluster.as_deref().is_none_or(str::is_empty) {
+                i.cluster = Some(cluster_label.to_string());
+                n += 1;
+            }
+        }
+        if n > 0 { let _ = self.save(); }
+        n
     }
 
     /// Re-tag instances when a WolfStack cluster is renamed (case-insensitive

@@ -2864,7 +2864,7 @@
                 <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
                     <div>
                         <h2 style="margin:0;display:flex;align-items:center;gap:10px;">
-                            <span style="font-size:28px;"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></span>Shares on this node
+                            <span style="font-size:28px;"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></span><span id="gw-page-title">Shares on this node</span>
                         </h2>
                         <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;">
                             Re-export anything this node can reach — host paths, Docker volumes, LXC mountpoints,
@@ -2873,7 +2873,7 @@
                     </div>
                     <div style="display:flex;gap:8px;align-items:center;">
                         <button class="btn btn-sm" onclick="gwLoad()" title="Refresh"><span class="ws-icon-clean-wrap" data-icon="refresh"></span></button>
-                        <button class="btn btn-sm btn-primary" onclick="gwOpenWizard()">+ New Share</button>
+                        <button class="btn btn-sm btn-primary" id="gw-new-share-btn" onclick="gwOpenWizard()">+ New Share</button>
                     </div>
                 </div>
             </div>
@@ -7189,16 +7189,18 @@ dns_cloudflare_api_token = your_token_here"
             </div>
         </div>
 
-        <!-- ═══ TrueNAS (cluster Storage integration) ═══ -->
-        <div id="page-truenas" class="page-view" style="display:none;">
+        <!-- ═══ Cluster Storage — ONE page; a tab per NAS integration ═══ -->
+        <div id="page-cluster-storage" class="page-view" style="display:none;">
+            <div style="display:flex;gap:4px;border-bottom:1px solid var(--border-color,#333);margin-bottom:16px;">
+                <button id="cstor-tab-truenas" class="cstor-tab" onclick="clusterStorageSwitch('truenas')"
+                        style="background:none;border:none;border-bottom:2px solid transparent;color:var(--text-muted);padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;">TrueNAS</button>
+                <button id="cstor-tab-unraid" class="cstor-tab" onclick="clusterStorageSwitch('unraid')"
+                        style="background:none;border:none;border-bottom:2px solid transparent;color:var(--text-muted);padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;">Unraid</button>
+            </div>
             <div id="truenas-body">
                 <div style="color:var(--text-muted);text-align:center;padding:48px;">Loading…</div>
             </div>
-        </div>
-
-        <!-- ═══ Unraid Page (per-cluster, mirrors TrueNAS) ═══ -->
-        <div id="page-unraid" class="page-view" style="display:none;">
-            <div id="unraid-body">
+            <div id="unraid-body" style="display:none;">
                 <div style="color:var(--text-muted);text-align:center;padding:48px;">Loading…</div>
             </div>
         </div>

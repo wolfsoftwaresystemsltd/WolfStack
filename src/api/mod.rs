@@ -32565,7 +32565,11 @@ pub async fn truenas_register(
     let mut inst = crate::truenas::TrueNasInstance {
         id: String::new(),
         label: r.label.trim().to_string(),
-        cluster: r.cluster.filter(|c| !c.trim().is_empty()),
+        // Strict cluster scoping (v24.38.4): a registration is never
+        // cluster-less. Omitted/blank (older UI, raw API calls) defaults to
+        // this node's own cluster — the instance lives in this node's store.
+        cluster: r.cluster.filter(|c| !c.trim().is_empty())
+            .or_else(|| Some(crate::agent::ClusterState::self_cluster_label())),
         api_url: r.api_url.trim().trim_end_matches('/').to_string(),
         api_key_enc: crate::truenas::obfuscate_key(r.api_key.trim()),
         pool_name: r.pool_name.trim().to_string(),
@@ -32780,7 +32784,11 @@ pub async fn unraid_register(
     let mut inst = crate::unraid::UnraidInstance {
         id: String::new(),
         label: r.label.trim().to_string(),
-        cluster: r.cluster.filter(|c| !c.trim().is_empty()),
+        // Strict cluster scoping (v24.38.4): a registration is never
+        // cluster-less. Omitted/blank (older UI, raw API calls) defaults to
+        // this node's own cluster — the instance lives in this node's store.
+        cluster: r.cluster.filter(|c| !c.trim().is_empty())
+            .or_else(|| Some(crate::agent::ClusterState::self_cluster_label())),
         api_url: r.api_url.trim().trim_end_matches('/').to_string(),
         api_key_enc: crate::unraid::obfuscate_key(r.api_key.trim()),
         insecure_tls: r.insecure_tls,

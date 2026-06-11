@@ -709,6 +709,20 @@ async fn main() -> std::io::Result<()> {
         // handler (gossip self-adoption / agent push have no AppState).
         networking::register_shared_wireguard_bridges(app_state.wireguard_bridges.clone());
 
+        // Strict cluster scoping self-heal (v24.38.4): NAS instances
+        // registered before cluster tags existed are unassigned. They live
+        // in THIS node's store, and this node belongs to exactly one
+        // cluster — adopt them into it so every Storage page is strictly
+        // one cluster's view. One-time per instance; no-op once tagged.
+        {
+            let label = agent::ClusterState::self_cluster_label();
+            let tn = truenas::TrueNasStore::load().adopt_unassigned_into_cluster(&label);
+            let ur = unraid::UnraidStore::load().adopt_unassigned_into_cluster(&label);
+            if tn + ur > 0 {
+                tracing::info!("storage scoping: adopted {} TrueNAS + {} Unraid unassigned instance(s) into cluster '{}'", tn, ur, label);
+            }
+        }
+
         // Wire fleet-wide lockout propagation hooks into the limiter.
         // The limiter calls these whenever a lock/unlock happens —
         // regardless of whether the source was the WolfStack web UI,

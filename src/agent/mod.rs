@@ -1119,6 +1119,12 @@ impl ClusterState {
     }
 
     /// Load persisted self cluster_name from disk
+    /// This node's cluster DISPLAY label — the persisted name, or the
+    /// "WolfStack" default an unassigned node is grouped under everywhere.
+    pub fn self_cluster_label() -> String {
+        Self::load_self_cluster_name().unwrap_or_else(|| "WolfStack".to_string())
+    }
+
     fn load_self_cluster_name() -> Option<String> {
         if let Ok(data) = std::fs::read_to_string(&Self::self_cluster_file()) {
             if let Ok(name) = serde_json::from_str::<String>(&data) {

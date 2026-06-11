@@ -2133,7 +2133,7 @@ function selectServerView(nodeId, view) {
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
     if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadZfsStatus(), loadDiskInfo()]).finally(() => hidePageLoadingOverlay(el));
-    if (view === 'shares') gwLoad().finally(() => hidePageLoadingOverlay(el));
+    if (view === 'shares') { _gwClusterMode = null; gwLoad().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'syslogs') { loadSystemLogs(); hidePageLoadingOverlay(el); }
     if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'networking') loadNetworking().finally(() => hidePageLoadingOverlay(el));
@@ -3412,11 +3412,11 @@ function buildServerTree(nodes) {
                     <span class="icon ws-icon-clean-wrap" data-icon="save" style="font-size:15px;"></span> <span style="font-weight:600;">Backups</span>
                 </a>
 
-                <a class="nav-item server-child-item truenas-cluster-item" data-cluster="${escapedName}" data-view="truenas" onclick="showTrueNasForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon ws-icon-clean-wrap" data-icon="database" style="font-size:15px;"></span> <span style="font-weight:600;">Storage</span>
+                <a class="nav-item server-child-item shares-cluster-item" data-cluster="${escapedName}" data-view="shares-cluster" onclick="showSharesForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
+                    <span class="icon ws-icon-clean-wrap" data-icon="folder-open" style="font-size:15px;"></span> <span style="font-weight:600;">Shares</span>
                 </a>
-                <a class="nav-item server-child-item unraid-cluster-item" data-cluster="${escapedName}" data-view="unraid" onclick="showUnraidForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon ws-icon-clean-wrap" data-icon="database" style="font-size:15px;"></span> <span style="font-weight:600;">Unraid</span>
+                <a class="nav-item server-child-item storage-cluster-item" data-cluster="${escapedName}" data-view="cluster-storage" onclick="showClusterStorage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
+                    <span class="icon ws-icon-clean-wrap" data-icon="database" style="font-size:15px;"></span> <span style="font-weight:600;">Storage</span>
                 </a>
 
                 <a class="nav-item server-child-item k8s-cluster-item" data-cluster="${escapedName}" data-view="kubernetes" onclick="showK8sClusterPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
@@ -29378,21 +29378,60 @@ function tnArg(s) {
 // the backend already rejects non-http(s) api_url via validate_outbound_url).
 function tnHttpUrl(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
 
-function showTrueNasForCluster(clusterName) {
+// ─── Cluster Storage — ONE page, a tab per NAS integration ───
+// The sidebar's per-cluster "Storage" entry opens page-cluster-storage,
+// which hosts every integration (TrueNAS, Unraid, future Synology/…) as
+// tabs over their own body divs. Remembers the last tab within the session.
+function showClusterStorage(clusterName) {
     closeSidebarMobile();
-    truenasCurrentCluster = clusterName;
-    currentPage = 'truenas';
+    window._storageCluster = clusterName;
+    currentPage = 'cluster-storage';
     currentNodeId = null;
     currentComponent = null;
     document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
-    const el = document.getElementById('page-truenas');
+    const el = document.getElementById('page-cluster-storage');
     if (el) el.style.display = 'block';
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    const item = document.querySelector(`.truenas-cluster-item[data-cluster="${CSS.escape(clusterName)}"]`);
+    const item = document.querySelector(`.storage-cluster-item[data-cluster="${CSS.escape(clusterName)}"]`);
     if (item) item.classList.add('active');
     const t = document.getElementById('page-title');
     if (t) t.textContent = `Storage — ${clusterName}`;
-    loadTrueNasInstances();
+    clusterStorageSwitch(window._clusterStorageTab || 'truenas');
+}
+window.showClusterStorage = showClusterStorage;
+
+// Activate one provider tab: highlight it, show its body, load its data.
+function clusterStorageSwitch(provider) {
+    window._clusterStorageTab = provider;
+    const tabs = { truenas: 'cstor-tab-truenas', unraid: 'cstor-tab-unraid' };
+    for (const [name, id] of Object.entries(tabs)) {
+        const btn = document.getElementById(id);
+        if (!btn) continue;
+        const on = name === provider;
+        btn.style.borderBottomColor = on ? 'var(--primary-color, #3b82f6)' : 'transparent';
+        btn.style.color = on ? 'var(--text-primary, #fff)' : 'var(--text-muted)';
+    }
+    const tnBody = document.getElementById('truenas-body');
+    const urBody = document.getElementById('unraid-body');
+    if (tnBody) tnBody.style.display = provider === 'truenas' ? '' : 'none';
+    if (urBody) urBody.style.display = provider === 'unraid' ? '' : 'none';
+    const cluster = window._storageCluster;
+    if (!cluster) return;
+    if (provider === 'unraid') {
+        unraidCurrentCluster = cluster;
+        loadUnraidInstances();
+    } else {
+        truenasCurrentCluster = cluster;
+        loadTrueNasInstances();
+    }
+}
+window.clusterStorageSwitch = clusterStorageSwitch;
+
+// Kept as named entry points (exported + linked from docs/old onclicks):
+// they're now thin wrappers that open the hub on the right tab.
+function showTrueNasForCluster(clusterName) {
+    window._clusterStorageTab = 'truenas';
+    showClusterStorage(clusterName);
 }
 
 async function loadTrueNasInstances() {
@@ -29401,9 +29440,12 @@ async function loadTrueNasInstances() {
     try {
         const r = await tnFetch('/api/truenas/instances');
         const all = r.ok ? await r.json() : [];
-        // Show servers tagged for this cluster + untagged (visible everywhere).
+        // Strictly this cluster's servers (case-insensitive, like cluster_eq).
+        // Untagged = legacy pre-tagging instances: keep them visible (they'd
+        // otherwise vanish on upgrade); editing one adopts this cluster.
+        const tnWanted = (truenasCurrentCluster || '').toLowerCase();
         window._tnInstances = (Array.isArray(all) ? all : []).filter(i =>
-            !i.cluster || i.cluster === truenasCurrentCluster);
+            !i.cluster || i.cluster.toLowerCase() === tnWanted);
     } catch (_) {
         window._tnInstances = [];
     }
@@ -29565,7 +29607,7 @@ function truenasRenderIntegrations(c, inst) {
 function truenasRenderSettings(c) {
     const rows = window._tnInstances.map(i => `
         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--border);">
-            <div><strong>${escapeHtml(i.label)}</strong> <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(i.api_url)}${i.cluster ? ' · ' + escapeHtml(i.cluster) : ' · all clusters'}</span>
+            <div><strong>${escapeHtml(i.label)}</strong> <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(i.api_url)}${i.cluster ? ' · ' + escapeHtml(i.cluster) : ' · <span style="color:#f59e0b;">not yet assigned to a cluster — edit &amp; save to assign it here</span>'}</span>
                 <div style="font-size:11px;color:var(--text-muted);">pool: ${escapeHtml(i.pool_name || '(first)')} · TLS: ${i.insecure_tls ? 'insecure' : 'verified'} · ${i.status ? escapeHtml(i.status) : 'untested'}</div></div>
             <div style="display:flex;gap:6px;">
                 <button class="btn btn-sm" onclick="truenasTest('${tnArg(i.id)}')" style="font-size:11px;">Test</button>
@@ -29598,7 +29640,6 @@ function truenasServerModal(id) {
         ${f('API URL', 'tn-f-url', inst?.api_url, 'https://10.2.0.153/api/v2.0')}
         ${f('API key' + (inst ? ' (leave blank to keep current)' : ''), 'tn-f-key', '', inst ? '••••••••' : 'paste the TrueNAS API key', 'password')}
         ${f('Pool name', 'tn-f-pool', inst?.pool_name, 'vault (blank = first pool)')}
-        ${f('Cluster tag (blank = all clusters)', 'tn-f-cluster', inst?.cluster || truenasCurrentCluster, truenasCurrentCluster)}
         <label style="display:flex;align-items:center;gap:8px;margin:10px 0;font-size:13px;cursor:pointer;"><input id="tn-f-insecure" type="checkbox" ${inst ? (inst.insecure_tls ? 'checked' : '') : 'checked'}> Accept self-signed TLS (TrueNAS default)</label>
         ${f('Cache TTL (seconds)', 'tn-f-ttl', String(inst?.cache_ttl_secs || 300), '300')}
         <div id="tn-modal-err" role="alert" style="display:none;color:var(--danger-color,#ef4444);font-size:12px;margin-bottom:8px;"></div>
@@ -29621,7 +29662,9 @@ async function truenasSaveServer(id) {
         api_url: val('tn-f-url'),
         api_key: val('tn-f-key'),
         pool_name: val('tn-f-pool'),
-        cluster: val('tn-f-cluster') || null,
+        // Cluster storage is strictly per-cluster: saving from this page
+        // tags the instance to it (legacy untagged instances adopt it on edit).
+        cluster: truenasCurrentCluster,
         insecure_tls: document.getElementById('tn-f-insecure')?.checked || false,
         cache_ttl_secs: parseInt(val('tn-f-ttl'), 10) || 300,
     };
@@ -29730,20 +29773,8 @@ function urFetch(path, opts) { return fetch(apiUrl(path), opts); }
 function urHttpUrl(u) { return /^https?:\/\//i.test(u || '') ? u : ''; }
 
 function showUnraidForCluster(clusterName) {
-    closeSidebarMobile();
-    unraidCurrentCluster = clusterName;
-    currentPage = 'unraid';
-    currentNodeId = null;
-    currentComponent = null;
-    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
-    const el = document.getElementById('page-unraid');
-    if (el) el.style.display = 'block';
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    const item = document.querySelector(`.unraid-cluster-item[data-cluster="${CSS.escape(clusterName)}"]`);
-    if (item) item.classList.add('active');
-    const t = document.getElementById('page-title');
-    if (t) t.textContent = `Unraid — ${clusterName}`;
-    loadUnraidInstances();
+    window._clusterStorageTab = 'unraid';
+    showClusterStorage(clusterName);
 }
 
 async function loadUnraidInstances() {
@@ -29752,8 +29783,9 @@ async function loadUnraidInstances() {
     try {
         const r = await urFetch('/api/unraid/instances');
         const all = r.ok ? await r.json() : [];
+        const urWanted = (unraidCurrentCluster || '').toLowerCase();
         window._urInstances = (Array.isArray(all) ? all : []).filter(i =>
-            !i.cluster || i.cluster === unraidCurrentCluster);
+            !i.cluster || i.cluster.toLowerCase() === urWanted);
     } catch (_) {
         window._urInstances = [];
     }
@@ -29936,7 +29968,7 @@ async function unraidLoadParity(id) {
 function unraidRenderSettings(c) {
     const rows = window._urInstances.map(i => `
         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--border);">
-            <div><strong>${escapeHtml(i.label)}</strong> <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(i.api_url)}${i.cluster ? ' · ' + escapeHtml(i.cluster) : ' · all clusters'}</span>
+            <div><strong>${escapeHtml(i.label)}</strong> <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(i.api_url)}${i.cluster ? ' · ' + escapeHtml(i.cluster) : ' · <span style="color:#f59e0b;">not yet assigned to a cluster — edit &amp; save to assign it here</span>'}</span>
                 <div style="font-size:11px;color:var(--text-muted);">TLS: ${i.insecure_tls ? 'insecure' : 'verified'} · ${i.status ? escapeHtml(i.status) : 'untested'}</div></div>
             <div style="display:flex;gap:6px;">
                 <button class="btn btn-sm" onclick="unraidTest('${tnArg(i.id)}')" style="font-size:11px;">Test</button>
@@ -29964,7 +29996,6 @@ function unraidServerModal(id) {
         ${f('Label', 'ur-f-label', inst?.label, 'tower')}
         ${f('Server URL (LAN IP/hostname, not myunraid.net)', 'ur-f-url', inst?.api_url, 'https://10.2.0.40')}
         ${f('API key' + (inst ? ' (leave blank to keep current)' : ''), 'ur-f-key', '', inst ? '••••••••' : 'paste the Unraid API key', 'password')}
-        ${f('Cluster tag (blank = all clusters)', 'ur-f-cluster', inst?.cluster || unraidCurrentCluster, unraidCurrentCluster)}
         <label style="display:flex;align-items:center;gap:8px;margin:10px 0;font-size:13px;cursor:pointer;"><input id="ur-f-insecure" type="checkbox" ${inst ? (inst.insecure_tls ? 'checked' : '') : 'checked'}> Accept self-signed TLS</label>
         ${f('Cache TTL (seconds)', 'ur-f-ttl', String(inst?.cache_ttl_secs || 300), '300')}
         <div id="ur-modal-err" role="alert" style="display:none;color:var(--danger-color,#ef4444);font-size:12px;margin-bottom:8px;"></div>
@@ -29986,7 +30017,7 @@ async function unraidSaveServer(id) {
         label: val('ur-f-label'),
         api_url: val('ur-f-url'),
         api_key: val('ur-f-key'),
-        cluster: val('ur-f-cluster') || null,
+        cluster: unraidCurrentCluster,
         insecure_tls: document.getElementById('ur-f-insecure')?.checked || false,
         cache_ttl_secs: parseInt(val('ur-f-ttl'), 10) || 300,
     };
@@ -64027,11 +64058,72 @@ const _gwState = {
     status:   { smb: { installed: false, running: false }, nfs: { installed: false, running: false } },
     loading:  false,
 };
+// Cluster name when viewing the cluster-aggregated Shares rollup (sidebar →
+// cluster → Shares); null in the normal per-node view. Cluster mode is
+// read-only — every row links to its owner node's Shares view to manage.
+let _gwClusterMode = null;
+
+function showSharesForCluster(clusterName) {
+    closeSidebarMobile();
+    _gwClusterMode = clusterName;
+    currentPage = 'shares';
+    currentNodeId = null;
+    currentComponent = null;
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-shares');
+    if (el) el.style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const item = document.querySelector(`.shares-cluster-item[data-cluster="${CSS.escape(clusterName)}"]`);
+    if (item) item.classList.add('active');
+    const t = document.getElementById('page-title');
+    if (t) t.textContent = `Shares — ${clusterName}`;
+    gwLoad();
+}
+window.showSharesForCluster = showSharesForCluster;
 
 async function gwLoad() {
     _gwState.loading = true;
     const list = document.getElementById('gw-list');
     if (list) list.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:30px;">Loading shares…</div>';
+
+    // Adapt the shared page chrome to the mode.
+    const pageTitle = document.getElementById('gw-page-title');
+    if (pageTitle) pageTitle.textContent = _gwClusterMode ? 'Shares across this cluster' : 'Shares on this node';
+    const newBtn = document.getElementById('gw-new-share-btn');
+    if (newBtn) newBtn.style.display = _gwClusterMode ? 'none' : '';
+
+    if (_gwClusterMode) {
+        // Cluster rollup — /api/gateways/cluster fans out to every online
+        // node from the node we're logged into and tags each share with its
+        // origin node. Read-only here; click a row to manage on its node.
+        try {
+            const r = await fetch('/api/gateways/cluster');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const data = await r.json();
+            const all = Array.isArray(data) ? data : (data.gateways || []);
+            // The endpoint aggregates the WHOLE fleet (plus federated
+            // clusters). Resolve each share's origin node — peers report
+            // their global self_id, local rows the node record id — and keep
+            // only shares served by members of the cluster being viewed.
+            const wanted = _gwClusterMode.toLowerCase();
+            _gwState.gateways = all.filter(g => {
+                const n = (allNodes || []).find(x =>
+                    x.id === g.origin_node_id || x.self_id === g.origin_node_id);
+                if (!n) return false; // federated/unknown origin — other clusters
+                if (((n.cluster_name || 'WolfStack')).toLowerCase() !== wanted) return false;
+                g._nodeId = n.id;
+                g._nodeLabel = n.display_name || n.hostname || n.id;
+                return true;
+            });
+        } catch (e) {
+            if (list) list.innerHTML = `<div style="color:var(--danger,#ef4444);padding:20px;">Failed to load: ${escapeHtml(e.message || String(e))}</div>`;
+            _gwState.loading = false;
+            return;
+        }
+        _gwState.loading = false;
+        gwRender();
+        return;
+    }
 
     // Per-node — Shares is scoped to currentNodeId. apiUrl() proxies
     // to the right node automatically, so /api/gateways always returns
@@ -64060,8 +64152,15 @@ async function gwLoad() {
 
 function gwRender() {
     const list = document.getElementById('gw-list');
-    const statusBox = document.getElementById('gw-daemon-status');
+    let statusBox = document.getElementById('gw-daemon-status');
     if (!list) return;
+
+    // The daemon banner reports THIS node's samba/nfs state — meaningless
+    // in the cluster rollup, where every row may live on a different node.
+    if (_gwClusterMode && statusBox) {
+        statusBox.innerHTML = '';
+        statusBox = null;
+    }
 
     // Daemon-status banner — flag missing samba/nfs-kernel-server so
     // operators get a clear "install this" prompt with a one-click
@@ -64097,13 +64196,15 @@ function gwRender() {
         list.innerHTML = `
             <div class="card"><div class="card-body" style="text-align:center;padding:40px 20px;">
                 <div style="font-size:48px;line-height:1;margin-bottom:12px;"></div>
-                <h3 style="margin:0 0 8px;">No shares on this node yet</h3>
+                <h3 style="margin:0 0 8px;">${_gwClusterMode ? `No shares in ${escapeHtml(_gwClusterMode)} yet` : 'No shares on this node yet'}</h3>
                 <p style="color:var(--text-muted);max-width:520px;margin:0 auto 18px;">
-                    Create a share to expose any storage on this node — local dirs, Docker volumes,
+                    ${_gwClusterMode
+                        ? 'Shares are created per node — open a node in the sidebar and pick <strong>Shares</strong> to create one. Every share in this cluster then shows up here.'
+                        : `Create a share to expose any storage on this node — local dirs, Docker volumes,
                     LXC mountpoints, VM disk dirs, WolfDisk volumes, or CephFS — as an SMB or NFS
-                    network share to your LAN.
+                    network share to your LAN.`}
                 </p>
-                <button class="btn btn-primary" onclick="gwOpenWizard()">+ New Share</button>
+                ${_gwClusterMode ? '' : '<button class="btn btn-primary" onclick="gwOpenWizard()">+ New Share</button>'}
             </div></div>
         `;
         return;
@@ -64133,13 +64234,23 @@ function gwRenderRow(g) {
     const sourceLabel = (g.sources && g.sources[0]) ? gwSourceLabel(g.sources[0]) : '(no source)';
     const sessions = g.runtime && g.runtime.active_sessions ? `${g.runtime.active_sessions} sessions` : '';
     const safeId = escapeAttr(g.id);
+    // Cluster rollup: the detail/edit APIs live on the share's OWNER node,
+    // so the row badges its node and clicking jumps to that node's Shares
+    // view (which handles management) instead of opening the local detail.
+    const nodeBadge = (_gwClusterMode && g._nodeLabel)
+        ? `<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(168,85,247,0.15);color:#a855f7;border:1px solid rgba(168,85,247,0.3);" title="Served by this node">${escapeHtml(g._nodeLabel)}</span>`
+        : '';
+    const rowOnclick = (_gwClusterMode && g._nodeId)
+        ? `selectServerView('${escapeAttr(g._nodeId)}', 'shares')`
+        : `gwOpenDetail('${safeId}')`;
     return `
-        <div class="card" style="cursor:pointer;" onclick="gwOpenDetail('${safeId}')">
+        <div class="card" style="cursor:pointer;" onclick="${rowOnclick}" ${_gwClusterMode ? 'title="Open this share\'s node to manage it"' : ''}>
             <div class="card-body" style="display:flex;align-items:center;gap:14px;padding:14px 18px;">
                 <div style="font-size:24px;"></div>
                 <div style="flex:1;min-width:0;">
                     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                         <strong style="font-size:14px;">${escapeHtml(g.name)}</strong>
+                        ${nodeBadge}
                         ${protos}
                         ${gwTierBadge(g.performance_tier)}
                     </div>
