@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.38.4: cluster Storage is ONE page, strictly ONE cluster + cluster Shares view** _(2026-06-11 — [`8877764`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8877764d183d9d693a4b2ed4e12b8bca3fb61262))_
 - **v24.38.3: fleet screen — moves no longer revert, renames carry every resource** _(2026-06-11 — [`394a18b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/394a18bfd47ea0995658e09a0d3bb4251a6b7606))_
 - **v24.38.2: Dynu DNS-01 support + fix issuance for ALL community DNS plugins** _(2026-06-11 — [`a350569`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a3505696ca00d93d395324fd7224fe1f54dd2673))_
 - **v24.38.1: reboot no longer hangs unmounting WebUI network mounts** _(2026-06-11 — [`837f84a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/837f84ab6c7de576e730fbde9c42772f1d59829c))_
