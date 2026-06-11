@@ -704,6 +704,11 @@ async fn main() -> std::io::Result<()> {
             antivirus: Arc::new(antivirus::AntivirusState::load()),
         });
 
+        // Let the networking module refresh the live bridge map when a
+        // cluster rename re-keys a WireGuard bridge from outside an HTTP
+        // handler (gossip self-adoption / agent push have no AppState).
+        networking::register_shared_wireguard_bridges(app_state.wireguard_bridges.clone());
+
         // Wire fleet-wide lockout propagation hooks into the limiter.
         // The limiter calls these whenever a lock/unlock happens —
         // regardless of whether the source was the WolfStack web UI,

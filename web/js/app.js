@@ -11209,9 +11209,18 @@ async function fleetMoveNode(id, target) {
         const name = await wolfPrompt('Name of the new cluster to move this node into:', '', 'Move node');
         if (name === null || !name.trim()) { renderFleetManage(); return; }
         target = name.trim();
+        // Cluster names are case-insensitive on the backend. If the typed
+        // name matches an existing cluster in a different case (e.g. "MINIO"
+        // when "Minio" exists), snap to the existing spelling — otherwise the
+        // sidebar (which groups by exact string) shows a split cluster until
+        // gossip heals it.
+        const existing = (window._fleetClusterKeys || []).find(
+            k => k.toLowerCase() === target.toLowerCase());
+        if (existing) target = existing;
     }
     const node = (allNodes || []).find(n => n.id === id);
-    if (node && (node.cluster_name || 'WolfStack') === target) return; // no change
+    const cur = node ? (node.cluster_name || 'WolfStack') : null;
+    if (cur !== null && cur.toLowerCase() === target.toLowerCase()) return; // no change (case-insensitive)
     await fleetSaveNode(id, { cluster_name: target });
 }
 
@@ -11242,6 +11251,16 @@ async function fleetRenameCluster(clusterIndex) {
     if (!oldName) return;
     const name = await wolfPrompt(`Rename cluster "${oldName}" — every member node moves with it:`, oldName, 'Rename cluster', { okText: 'Rename' });
     if (name === null || !name.trim() || name.trim() === oldName) return;
+    // Renaming onto another existing cluster MERGES the two groups — that's a
+    // legitimate operation, but never one to do by accident.
+    const collision = (window._fleetClusterKeys || []).find(
+        k => k !== oldName && k.toLowerCase() === name.trim().toLowerCase());
+    if (collision) {
+        const ok = await wolfConfirm(
+            `A cluster named "${collision}" already exists. Renaming "${oldName}" to it will MERGE the two clusters — all nodes end up in one group. Continue?`,
+            'Merge clusters', { okText: 'Merge', danger: true });
+        if (!ok) return;
+    }
     try {
         const resp = await fetch(`/api/clusters/${encodeURIComponent(oldName)}/rename`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },

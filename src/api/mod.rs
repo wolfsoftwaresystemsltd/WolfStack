@@ -3857,13 +3857,25 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
 pub async fn agent_set_cluster_name(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
     if let Err(e) = require_cluster_auth(&req, &state) { return e; }
     if let Some(name) = body.get("cluster_name").and_then(|v| v.as_str()) {
-
         let mut nodes = state.cluster.nodes.write().unwrap();
+        let old = nodes.get(&state.cluster.self_id).and_then(|n| n.cluster_name.clone());
         if let Some(n) = nodes.get_mut(&state.cluster.self_id) {
             n.cluster_name = Some(name.to_string());
         }
         drop(nodes);
         crate::agent::ClusterState::save_self_cluster_name(name);
+        // If this push is a cluster RENAME (our name actually changed), bring
+        // this node's local cluster-tagged stores (TrueNAS/Unraid/Galera/
+        // WolfScale/WG-bridge) along. A node with no assignment displayed
+        // under the default "WolfStack" group, so its local tags were created
+        // with that label. Sync file I/O — off the worker.
+        let old_label = old.unwrap_or_else(|| "WolfStack".to_string());
+        if !crate::agent::cluster_eq(Some(&old_label), Some(name)) {
+            let new_name = name.to_string();
+            let _ = web::block(move || {
+                crate::agent::migrate_local_cluster_tags(&old_label, &new_name)
+            }).await;
+        }
         HttpResponse::Ok().json(serde_json::json!({ "updated": true, "cluster_name": name }))
     } else {
         HttpResponse::BadRequest().json(serde_json::json!({ "error": "cluster_name required" }))
@@ -3939,13 +3951,47 @@ pub async fn cluster_rename_handler(
         tracing::info!("Cluster rename: {} WolfRun services '{}' -> '{}'", wr_count, old_name, new_name);
     }
 
+    // Gateways (SMB/NFS shares) carry a cluster tag too. Their store
+    // replicates fleet-wide on its own, so re-tag once here and push —
+    // every node converges without per-member work.
+    let gw_count = {
+        let mut store = state.gateways.write().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0usize;
+        for g in store.gateways.values_mut() {
+            if !g.cluster.is_empty() && g.cluster.eq_ignore_ascii_case(&old_name) {
+                g.cluster = new_name.clone();
+                n += 1;
+            }
+        }
+        if n > 0 { let _ = store.save(); }
+        n
+    };
+    if gw_count > 0 {
+        invalidate_gateway_cluster_cache(&state);
+        push_to_peers(&state).await;
+        tracing::info!("Cluster rename: {} gateways '{}' -> '{}'", gw_count, old_name, new_name);
+    }
+
+    // This node's own cluster-tagged stores (TrueNAS/Unraid/Galera/WolfScale/
+    // WG-bridge). Remote members migrate their own when the new name reaches
+    // them (push receiver or gossip self-adoption). Sync file I/O — off the
+    // worker.
+    {
+        let (o, nn) = (old_name.clone(), new_name.clone());
+        let _ = web::block(move || crate::agent::migrate_local_cluster_tags(&o, &nn)).await;
+    }
+
     // Every member: update the local view, then reliably push the new name to
     // its owner (intent + sweep), so none of them re-assert the old name.
     // Case-insensitive match: a rename of "Minio" must also catch a node whose
     // stored name drifted to "minio" (same cluster) and unify them all to the
     // operator's typed `new_name` — this is what heals an existing case split.
+    // cluster_rename_member_matches: case-insensitive name match, PLUS nodes
+    // with NO cluster assigned when renaming the default "WolfStack" group —
+    // they display under that group everywhere, so the rename must take them
+    // along or the group visibly splits.
     let members: Vec<crate::agent::Node> = state.cluster.get_all_nodes().into_iter()
-        .filter(|n| crate::agent::cluster_eq(n.cluster_name.as_deref(), Some(old_name.as_str())))
+        .filter(|n| crate::agent::cluster_rename_member_matches(n.cluster_name.as_deref(), &old_name))
         .collect();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);

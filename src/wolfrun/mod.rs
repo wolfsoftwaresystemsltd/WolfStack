@@ -324,7 +324,8 @@ impl WolfRunState {
         let mut svcs = self.services.write().unwrap();
         let mut count = 0;
         for svc in svcs.iter_mut() {
-            if svc.cluster_name == old_name {
+            // Case-insensitive, like every cluster-name comparison.
+            if svc.cluster_name.eq_ignore_ascii_case(old_name) {
                 svc.cluster_name = new_name.to_string();
                 count += 1;
             }

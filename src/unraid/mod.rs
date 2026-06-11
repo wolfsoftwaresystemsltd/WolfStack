@@ -602,6 +602,21 @@ impl UnraidStore {
         self.save()
     }
 
+    /// Re-tag instances when a WolfStack cluster is renamed (case-insensitive
+    /// match, same rule as `agent::cluster_eq`). Untagged instances (visible on
+    /// every cluster) are untouched. Returns how many changed.
+    pub fn rename_cluster(&mut self, old_name: &str, new_name: &str) -> usize {
+        let mut n = 0;
+        for i in self.instances.iter_mut() {
+            if i.cluster.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(old_name)) {
+                i.cluster = Some(new_name.to_string());
+                n += 1;
+            }
+        }
+        if n > 0 { let _ = self.save(); }
+        n
+    }
+
     pub fn update_status(&mut self, id: &str, status: &str) {
         if let Some(i) = self.instances.iter_mut().find(|i| i.id == id) {
             i.status = status.to_string();

@@ -3801,6 +3801,52 @@ pub fn save_wireguard_bridges(bridges: &std::collections::HashMap<String, WireGu
         .map_err(|e| format!("Failed to write {}: {}", WG_BRIDGE_CONFIG, e))
 }
 
+/// The live in-memory bridge map (the one AppState serves requests from).
+/// Registered once at startup so disk-side mutations made outside an HTTP
+/// handler — the cluster-rename re-key below, which can fire from the gossip
+/// poll loop with no AppState in reach — can refresh it. Without the refresh
+/// the renamed bridge 404s under its new cluster name until restart.
+static WG_BRIDGES_SHARED: std::sync::OnceLock<
+    std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, WireGuardBridge>>>,
+> = std::sync::OnceLock::new();
+
+pub fn register_shared_wireguard_bridges(
+    map: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, WireGuardBridge>>>,
+) {
+    let _ = WG_BRIDGES_SHARED.set(map);
+}
+
+/// Re-key a cluster's WireGuard bridge when the WolfStack cluster is renamed
+/// (case-insensitive). No-op if a bridge already exists under the new name —
+/// renaming must never clobber an existing bridge. Returns 1 if moved.
+pub fn rename_wireguard_bridge_cluster(old_name: &str, new_name: &str) -> usize {
+    let mut bridges = load_wireguard_bridges();
+    let old_key = match bridges.keys().find(|k| k.eq_ignore_ascii_case(old_name)).cloned() {
+        Some(k) => k,
+        None => return 0,
+    };
+    if bridges.keys().any(|k| k.eq_ignore_ascii_case(new_name)) {
+        tracing::warn!(
+            "cluster rename: WireGuard bridge for '{}' NOT re-keyed — a bridge already exists for '{}'",
+            old_key, new_name
+        );
+        return 0;
+    }
+    if let Some(mut b) = bridges.remove(&old_key) {
+        b.cluster = new_name.to_string();
+        bridges.insert(new_name.to_string(), b.clone());
+        let _ = save_wireguard_bridges(&bridges);
+        // Keep the live request-serving map in step with the disk write.
+        if let Some(shared) = WG_BRIDGES_SHARED.get() {
+            let mut live = shared.write().unwrap_or_else(|e| e.into_inner());
+            live.remove(&old_key);
+            live.insert(new_name.to_string(), b);
+        }
+        return 1;
+    }
+    0
+}
+
 /// Initialize a WireGuard bridge for a cluster
 pub fn init_wireguard_bridge(cluster: &str, listen_port: u16) -> Result<WireGuardBridge, String> {
     // Install wireguard-tools if needed

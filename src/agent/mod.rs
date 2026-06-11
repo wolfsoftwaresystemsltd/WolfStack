@@ -262,6 +262,45 @@ pub fn cluster_eq(a: Option<&str>, b: Option<&str>) -> bool {
     }
 }
 
+/// True when `node_cluster` belongs to the display group `old_name` for the
+/// purposes of a GROUP rename. Beyond the case-insensitive name match, a node
+/// with NO cluster assigned (`None`) displays under the default "WolfStack"
+/// group in every UI — so renaming that group must take the unassigned nodes
+/// along, or they reappear in a freshly-respawned "WolfStack" group and the
+/// cluster visibly splits (fleet-screen audit, 2026-06-11).
+pub fn cluster_rename_member_matches(node_cluster: Option<&str>, old_name: &str) -> bool {
+    cluster_eq(node_cluster, Some(old_name))
+        || (node_cluster.is_none() && old_name.eq_ignore_ascii_case("WolfStack"))
+}
+
+/// Migrate every NODE-LOCAL cluster-tagged store from `old_name` to
+/// `new_name` when a WolfStack cluster is renamed: TrueNAS + Unraid
+/// instances, Galera + WolfScale cluster definitions, and the cluster's
+/// WireGuard bridge. Called wherever a node learns its cluster was renamed —
+/// the rename handler (locally), the `/api/agent/cluster-name` receiver
+/// (pushed members, incl. offline ones via the intent sweep), and the gossip
+/// self-adoption path — so per-node files converge on every member without a
+/// separate fan-out. Gateways are NOT here: their store replicates fleet-wide
+/// on its own, so the rename handler re-tags them exactly once. Status-page +
+/// WolfRun data live in AppState and are migrated by the handler as before.
+/// Alert-log entries keep their historical cluster stamp on purpose — they
+/// record where an alert happened at the time, not a live grouping.
+pub fn migrate_local_cluster_tags(old_name: &str, new_name: &str) -> usize {
+    let mut n = 0;
+    n += crate::truenas::TrueNasStore::load().rename_cluster(old_name, new_name);
+    n += crate::unraid::UnraidStore::load().rename_cluster(old_name, new_name);
+    n += crate::galera::rename_wolfstack_cluster_tags(old_name, new_name);
+    n += crate::wolfscale::rename_wolfstack_cluster_tags(old_name, new_name);
+    n += crate::networking::rename_wireguard_bridge_cluster(old_name, new_name);
+    if n > 0 {
+        tracing::info!(
+            "cluster rename: migrated {} local cluster tag(s) '{}' -> '{}'",
+            n, old_name, new_name
+        );
+    }
+    n
+}
+
 /// Read this node's ID from the persisted file (cheap, no state needed)
 pub fn self_node_id() -> String {
     std::fs::read_to_string(&crate::paths::get().node_id_file)
@@ -1419,7 +1458,10 @@ fn identity_intent_confirmed(intent: &IdentityIntent, cur_display: Option<&str>,
     let cn_ok = match &intent.cluster_name {
         None => true,
         Some(v) if v.is_empty() => cur_cluster.is_none(),
-        Some(v) => cur_cluster == Some(v.as_str()),
+        // Case-insensitive, like every other cluster-name comparison: a node
+        // that converged via a different-case gossip path must still satisfy
+        // the intent, or the sweep re-pushes forever.
+        Some(v) => cluster_eq(cur_cluster, Some(v.as_str())),
     };
     dn_ok && cn_ok
 }
@@ -1799,6 +1841,14 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
 
                             // Merge known_nodes (gossip) — mirror node settings from remote
                             let current_nodes = cluster.get_all_nodes();
+                            // Pending identity edits (display name / cluster move) made on
+                            // THIS node that their owner hasn't confirmed yet. While such an
+                            // intent is open, a peer that still gossips the OLD value must
+                            // not revert our local view — the operator just made the edit
+                            // and the sweep is still pushing it to the owner. Without this
+                            // guard, moving an OFFLINE node visibly snapped back in the UI
+                            // on the next 10s poll of any peer (fleet audit, 2026-06-11).
+                            let pending_intents = load_identity_intents();
                             let self_hostname = hostname::get()
                                 .map(|h| h.to_string_lossy().to_string())
                                 .unwrap_or_default();
@@ -1834,6 +1884,16 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             }
                                             drop(nodes_w);
                                             ClusterState::save_self_cluster_name(gossiped_cluster);
+                                            // Our cluster changed (a rename/move learned via
+                                            // gossip before the direct push landed) — bring this
+                                            // node's local cluster-tagged stores along, same as
+                                            // the /api/agent/cluster-name receiver does. Without
+                                            // this, a member that converges via gossip first
+                                            // would satisfy the admin's intent sweep and the
+                                            // push (which carries the migration) never fires.
+                                            let old_label = current_cluster
+                                                .unwrap_or_else(|| "WolfStack".to_string());
+                                            migrate_local_cluster_tags(&old_label, gossiped_cluster);
                                         }
                                     }
                                     // Same gossip-adoption safety net for the display name an
@@ -1874,6 +1934,23 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 let existing_by_id = current_nodes.iter().find(|n| n.id == known.id);
 
                                 if let Some(existing) = existing_by_id {
+                                    // While an unconfirmed local intent covers a field, ignore
+                                    // what peers gossip for it and keep our own (already-edited)
+                                    // value — the intent sweep converges the owner, and the
+                                    // intent clears once the owner self-reports the new value.
+                                    let intent = pending_intents.get(&known.id);
+                                    let eff_cluster: Option<String> =
+                                        if intent.is_some_and(|i| i.cluster_name.is_some()) {
+                                            existing.cluster_name.clone()
+                                        } else {
+                                            known.cluster_name.clone()
+                                        };
+                                    let eff_display: Option<String> =
+                                        if intent.is_some_and(|i| i.display_name.is_some()) {
+                                            existing.display_name.clone()
+                                        } else {
+                                            known.display_name.clone()
+                                        };
                                     // Node already known — update its settings to mirror the source.
                                     // A wildcard (0.0.0.0) gossiped address doesn't count as a
                                     // change — it's preserved below — so don't let it trigger a
@@ -1886,10 +1963,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         // Case-insensitive: a different-CASE spelling of the same
                                         // cluster isn't a change (prevents the gossip flip-flop that
                                         // kept a node bouncing between e.g. "minio" and "Minio").
-                                        || !cluster_eq(existing.cluster_name.as_deref(), known.cluster_name.as_deref())
+                                        || !cluster_eq(existing.cluster_name.as_deref(), eff_cluster.as_deref())
                                         // Only a Some gossiped display name counts as a change —
                                         // a None from an older peer must never clear an operator-set name.
-                                        || (known.display_name.is_some() && existing.display_name != known.display_name)
+                                        || (eff_display.is_some() && existing.display_name != eff_display)
                                     {
 
 
@@ -1911,13 +1988,13 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             } else {
                                                 None
                                             },
-                                            known.cluster_name.clone(),
+                                            eff_cluster,
                                             None,  // don't propagate login_disabled via gossip
                                             None,  // don't propagate update_script via gossip
                                             None,  // site is propagated via StatusReport, not nested gossip
                                             // Mirror the gossiped display name (None = leave
                                             // untouched, so an older peer can't wipe it).
-                                            known.display_name.clone(),
+                                            eff_display,
                                         );
                                     }
                                 } else {
@@ -2404,5 +2481,27 @@ mod convergence_tests {
         let remove = ClusterState::plan_prune(nodes);
         assert_eq!(remove.len(), 1);
         assert!(remove.contains(&"x2".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod fleet_rename_tests {
+    use super::*;
+
+    #[test]
+    fn rename_member_match_is_case_insensitive() {
+        assert!(cluster_rename_member_matches(Some("minio"), "Minio"));
+        assert!(cluster_rename_member_matches(Some("Minio"), "Minio"));
+        assert!(!cluster_rename_member_matches(Some("Prod"), "Minio"));
+    }
+
+    #[test]
+    fn renaming_default_group_takes_unassigned_nodes_along() {
+        // A node with no cluster displays under "WolfStack" in every UI, so
+        // renaming that group must include it — otherwise the group splits.
+        assert!(cluster_rename_member_matches(None, "WolfStack"));
+        assert!(cluster_rename_member_matches(None, "wolfstack"));
+        // …but renaming any OTHER cluster must not grab unassigned nodes.
+        assert!(!cluster_rename_member_matches(None, "Minio"));
     }
 }

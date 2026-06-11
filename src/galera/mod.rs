@@ -212,6 +212,21 @@ pub fn delete_cluster(id: &str) -> Result<(), String> {
 
 // ── Secrets (AES-256-GCM via at_rest_crypto, same as DNS/edge stores) ──
 
+/// Re-tag stored clusters when a WolfStack cluster is renamed
+/// (case-insensitive; empty/unscoped tags untouched). Returns changes.
+pub fn rename_wolfstack_cluster_tags(old_name: &str, new_name: &str) -> usize {
+    let mut cfg = load_config();
+    let mut n = 0;
+    for c in cfg.clusters.iter_mut() {
+        if !c.cluster.is_empty() && c.cluster.eq_ignore_ascii_case(old_name) {
+            c.cluster = new_name.to_string();
+            n += 1;
+        }
+    }
+    if n > 0 { let _ = save_config(&cfg); }
+    n
+}
+
 pub fn enc_secret(plain: &str) -> String {
     crate::at_rest_crypto::encrypt(plain.as_bytes(), GALERA_SECRET_PURPOSE).unwrap_or_default()
 }

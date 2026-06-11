@@ -254,22 +254,25 @@ impl StatusPageConfig {
     /// Rename all cluster references from old_name to new_name.
     /// Called when the cluster name is changed so monitors, pages,
     /// and incidents don't become orphaned under the old name.
+    /// Case-insensitive on `old_name`, like every cluster-name comparison —
+    /// a rename of "Minio" must also collect items whose stored tag drifted
+    /// to "minio".
     pub fn rename_cluster(&mut self, old_name: &str, new_name: &str) -> usize {
         let mut count = 0;
         for m in &mut self.monitors {
-            if m.cluster == old_name {
+            if m.cluster.eq_ignore_ascii_case(old_name) {
                 m.cluster = new_name.to_string();
                 count += 1;
             }
         }
         for p in &mut self.pages {
-            if p.cluster == old_name {
+            if p.cluster.eq_ignore_ascii_case(old_name) {
                 p.cluster = new_name.to_string();
                 count += 1;
             }
         }
         for i in &mut self.incidents {
-            if i.cluster == old_name {
+            if i.cluster.eq_ignore_ascii_case(old_name) {
                 i.cluster = new_name.to_string();
                 count += 1;
             }
