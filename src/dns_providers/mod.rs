@@ -56,6 +56,7 @@ pub const KNOWN_PLUGINS: &[&str] = &[
     "vultr",
     "njalla",
     "dnsimple",
+    "dynu",
 ];
 
 pub fn is_known_plugin(plugin: &str) -> bool {

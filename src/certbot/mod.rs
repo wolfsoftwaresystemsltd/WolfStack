@@ -753,12 +753,19 @@ pub fn issue_via_provider(
     if dry_run {
         cmd.arg("--dry-run");
     }
-    // certbot DNS plugins follow a fixed naming convention:
-    //   --dns-<plugin>                      → use this plugin
-    //   --dns-<plugin>-credentials <path>   → INI file path
-    // Plugin is whitelisted (dns_providers::KNOWN_PLUGINS), so the
-    // string interpolation here can't introduce a new flag.
-    cmd.arg(format!("--dns-{}", provider.plugin));
+    // Select the plugin via `--authenticator dns-<plugin>` — the canonical
+    // mechanism that works for BOTH certbot's own plugins and third-party
+    // ones. The old bare `--dns-<plugin>` toggle only exists for stock
+    // plugins; for every community plugin (porkbun/hetzner/njalla/godaddy/
+    // namecheap/vultr/dynu) argparse rejected it as an "ambiguous option"
+    // prefix of --dns-<plugin>-credentials, so issuance through those
+    // providers could never have worked (verified live in a venv with
+    // certbot 5.x + the porkbun/hetzner/dynu plugins, 2026-06-11).
+    // The `--dns-<plugin>-credentials` flag is plugin-option machinery and
+    // exists for all plugins. Plugin is whitelisted
+    // (dns_providers::KNOWN_PLUGINS), so the string interpolation here
+    // can't introduce a new flag.
+    cmd.arg("--authenticator").arg(format!("dns-{}", provider.plugin));
     cmd.arg(format!("--dns-{}-credentials", provider.plugin)).arg(&creds.path);
 
     let out = cmd.output().map_err(|e| format!("spawn certbot: {e}"))?;
@@ -1066,6 +1073,14 @@ pub const PLUGIN_PACKAGES: &[PluginPackages] = &[
         // Alpine edge/testing only.
         apk: None,
         pipx: Some("certbot-dns-njalla") },
+    PluginPackages { plugin: "dynu",
+        // Community plugin only — no distro packages anywhere. PyPI
+        // `certbot-dns-dynu` (verified 2026-06-11): authenticator name
+        // `dns-dynu` matches our --dns-{plugin} argv builder; credentials
+        // INI key is `dns_dynu_auth_token` (token from the Dynu control
+        // panel → API Credentials). Requires certbot >= 2.0.
+        apt: None, dnf: None, pacman: None, zypper: None, apk: None,
+        pipx: Some("certbot-dns-dynu") },
     PluginPackages { plugin: "dnsimple",
         apt:    Some("python3-certbot-dns-dnsimple"),
         dnf:    Some("python3-certbot-dns-dnsimple"),
@@ -1389,7 +1404,7 @@ pub fn snap_status() -> SnapStatus {
 ///   certbot-dns-cloudflare, certbot-dns-route53, certbot-dns-google,
 ///   certbot-dns-digitalocean, certbot-dns-linode, certbot-dns-ovh,
 ///   certbot-dns-rfc2136, certbot-dns-gandi, certbot-dns-dnsimple
-/// Community plugins (godaddy/namecheap/porkbun/vultr/njalla/hetzner)
+/// Community plugins (godaddy/namecheap/porkbun/vultr/njalla/hetzner/dynu)
 /// are NOT in the snap store — None.
 pub fn build_snap_install_command(plugin: &str) -> Option<String> {
     // Subset of KNOWN_PLUGINS that has a snap.
@@ -2284,7 +2299,7 @@ mod tests {
     #[test]
     fn build_snap_install_command_returns_none_for_community_plugins() {
         // The community plugins aren't in the snap store.
-        for p in ["godaddy", "namecheap", "porkbun", "vultr", "njalla", "hetzner"] {
+        for p in ["godaddy", "namecheap", "porkbun", "vultr", "njalla", "hetzner", "dynu"] {
             assert!(build_snap_install_command(p).is_none(),
                 "no snap should exist for community plugin '{}'", p);
         }
