@@ -180,6 +180,83 @@ pub fn list_mounts() -> Vec<StorageMount> {
 
 // ─── Mount Operations ───
 
+// ─── Shutdown ordering for WebUI network mounts ─────────────────────────────
+// The boot half of mount ordering is wolfstack-mounts.target (see
+// auto_mount_all). This is the SHUTDOWN half (wabil 2026-06-11): once a
+// mergerfs pool reliably mounts over WebUI NFS/CIFS branches at boot, reboot
+// hangs appeared — systemd tried to unmount a branch while the pool still
+// held it (busy), retried, and by then the network was down so a hard NFS
+// unmount hung to its timeout. WolfStack's mounts are runtime units with no
+// dependencies, so nothing ordered pool-before-branches or
+// branches-before-network-teardown.
+//
+// Fix: after a successful NETWORK mount, write a runtime drop-in for its
+// .mount unit (in /run/systemd/system — per-boot, nothing persists):
+//   • Before=wolfstack-mounts.target → reversed at shutdown, anything
+//     ordered on the target (the pool) unmounts BEFORE the branch.
+//   • After=network-online/network.target → reversed at shutdown, the
+//     branch unmounts while the network is still up.
+// Boot-safety: these orderings are inert at boot — the units activate from
+// WolfStack's own mount(8) calls, not from a systemd transaction, and
+// neither target orders back onto them, so no cycle is possible.
+const MOUNT_DROPIN_BODY: &str = "\
+[Unit]
+# Written at mount time by WolfStack (storage manager). Ensures this network
+# mount is unmounted BEFORE the network goes down at shutdown, and BEFORE
+# wolfstack-mounts.target stops - so a pool layered over it (mergerfs etc.,
+# ordered on the target) unmounts first and never leaves the branch busy.
+After=network-online.target network.target
+Before=wolfstack-mounts.target
+";
+
+/// Mount types that live over the network and need shutdown ordering.
+fn is_network_mount(t: &MountType) -> bool {
+    matches!(t, MountType::Nfs | MountType::Smb | MountType::Sshfs | MountType::S3)
+}
+
+/// The systemd unit name for a mountpoint (via systemd-escape, the only
+/// correct escaper). None on non-systemd hosts or escape failure.
+fn mount_unit_name(mount_point: &str) -> Option<String> {
+    if !std::path::Path::new("/run/systemd/system").exists() {
+        return None;
+    }
+    let out = Command::new("systemd-escape")
+        .args(["-p", "--suffix=mount", mount_point])
+        .output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// Write the shutdown-ordering drop-in for a mounted network mount and
+/// daemon-reload so the runtime unit picks it up. Skips the reload when the
+/// drop-in already matches (wolfstack restarts within one boot).
+fn write_mount_shutdown_dropin(mount_point: &str) {
+    let Some(unit) = mount_unit_name(mount_point) else { return };
+    let dir = format!("/run/systemd/system/{}.d", unit);
+    let path = format!("{}/wolfstack.conf", dir);
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(MOUNT_DROPIN_BODY) {
+        return;
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if std::fs::write(&path, MOUNT_DROPIN_BODY).is_ok() {
+        let _ = Command::new("systemctl").arg("daemon-reload").output();
+    }
+}
+
+/// Remove the drop-in when the mount is unmounted/deleted.
+fn remove_mount_shutdown_dropin(mount_point: &str) {
+    let Some(unit) = mount_unit_name(mount_point) else { return };
+    let dir = format!("/run/systemd/system/{}.d", unit);
+    if std::path::Path::new(&dir).exists() && std::fs::remove_dir_all(&dir).is_ok() {
+        let _ = Command::new("systemctl").arg("daemon-reload").output();
+    }
+}
+
 /// Mount a storage entry by ID
 pub fn mount_storage(id: &str) -> Result<String, String> {
     let mut config = load_config();
@@ -212,6 +289,12 @@ pub fn mount_storage(id: &str) -> Result<String, String> {
             config.mounts[idx].error_message = None;
             config.mounts[idx].enabled = true;
             save_config(&config)?;
+            // Network mounts get a shutdown-ordering drop-in (see the block
+            // comment above mount_storage) so reboots don't hang on a busy
+            // or post-network unmount.
+            if is_network_mount(&config.mounts[idx].mount_type) {
+                write_mount_shutdown_dropin(&config.mounts[idx].mount_point);
+            }
 
             Ok(msg)
         }
@@ -270,6 +353,7 @@ pub fn unmount_storage(id: &str) -> Result<String, String> {
             config.mounts[idx].status = "unmounted".to_string();
             config.mounts[idx].error_message = None;
             save_config(&config)?;
+            remove_mount_shutdown_dropin(&config.mounts[idx].mount_point);
 
             Ok("Unmounted successfully".to_string())
         }
@@ -279,6 +363,7 @@ pub fn unmount_storage(id: &str) -> Result<String, String> {
             let _ = Command::new("umount").args(["-l", &config.mounts[idx].mount_point]).output();
             config.mounts[idx].status = "unmounted".to_string();
             save_config(&config)?;
+            remove_mount_shutdown_dropin(&config.mounts[idx].mount_point);
             Ok(format!("Unmounted (lazy): {}", err))
         }
         Err(e) => Err(format!("Failed to unmount: {}", e)),
@@ -2385,5 +2470,33 @@ mod mounts_target_tests {
         // A bounded wait — an absent/broken wolfstack must not hang boot
         // ordering forever (dependants should also use nofail).
         assert!(MOUNTS_WAIT_UNIT.contains("TimeoutStartSec="));
+    }
+}
+
+#[cfg(test)]
+mod mount_dropin_tests {
+    use super::*;
+
+    #[test]
+    fn network_mount_classification() {
+        // Network types need the shutdown-ordering drop-in…
+        assert!(is_network_mount(&MountType::Nfs));
+        assert!(is_network_mount(&MountType::Smb));
+        assert!(is_network_mount(&MountType::Sshfs));
+        assert!(is_network_mount(&MountType::S3));
+        // …local ones must not get one: a bind mount ordered after
+        // network-online would needlessly couple local storage to the
+        // network at shutdown. WolfDisk's own daemon manages its lifecycle.
+        assert!(!is_network_mount(&MountType::Directory));
+        assert!(!is_network_mount(&MountType::Wolfdisk));
+    }
+
+    #[test]
+    fn dropin_orders_against_both_halves() {
+        // Shutdown contract: pool (on the target) unmounts before the branch,
+        // branch unmounts before the network goes down.
+        assert!(MOUNT_DROPIN_BODY.contains("Before=wolfstack-mounts.target"));
+        assert!(MOUNT_DROPIN_BODY.contains("After=network-online.target network.target"));
+        assert!(MOUNT_DROPIN_BODY.starts_with("[Unit]\n"));
     }
 }
