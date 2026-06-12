@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.39.1: top-bar cluster + node switcher — hop nodes from any page** _(2026-06-12 — [`751c61c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/751c61c621c4e296f40f8db5b71c1675f6a1a262))_
 - **v24.39.0: IPv6 phase 1+2 — manage WolfStack over IPv6, securely** _(2026-06-12 — [`3fcb748`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3fcb748ac3648c07f3e31f71ca62cb04f92509cc))_
 - **v24.38.6: stop spamming the journal — log state changes, not heartbeats** _(2026-06-12 — [`1ea9d54`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1ea9d54c3d981efcbff2a3aa2acb2ac8da8dcaa1))_
 - **v24.38.5: readable muted text on every theme + installer URL fixes** _(2026-06-12 — [`8f47ee9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8f47ee94b4f501bfb671cad0143c2e47af87bcd3))_
