@@ -45,7 +45,7 @@
     --border-light: #2a3660;
     --text-primary: #e8ecf4;
     --text-secondary: #8892a8;
-    --text-muted: #5a6378;
+    --text-muted: #717c95;
     /* `--text` is an alias for `--text-primary`. Inline styles in app.js /
        index.html reference `var(--text, #fff)`; without this alias `--text`
        was undefined everywhere except the glass/trek themes, so the #fff/#eee
@@ -89,7 +89,7 @@
     --border-light: #cdd0d9;
     --text-primary: #1a1d2e;
     --text-secondary: #5a5f72;
-    --text-muted: #8b90a0;
+    --text-muted: #6a6f81;
     --accent: #dc2626;
     --accent-light: #b91c1c;
     --accent-glow: rgba(220, 38, 38, 0.1);
@@ -121,7 +121,7 @@
     --border-light: #2a2a3e;
     --text-primary: #e4e4f0;
     --text-secondary: #8888a8;
-    --text-muted: #555570;
+    --text-muted: #737394;
     --accent: #06b6d4;
     --accent-light: #22d3ee;
     --accent-glow: rgba(6, 182, 212, 0.12);
@@ -153,7 +153,7 @@
     --border-light: #47607a;
     --text-primary: #dce3eb;
     --text-secondary: #8fa4b8;
-    --text-muted: #607588;
+    --text-muted: #7c91a3;
     --accent: #3ba4c4;
     --accent-light: #5fc3e0;
     --accent-glow: rgba(59, 164, 196, 0.12);
@@ -185,7 +185,7 @@
     --border-light: #366048;
     --text-primary: #d8eedc;
     --text-secondary: #88b098;
-    --text-muted: #5a7868;
+    --text-muted: #668976;
     --accent: #22c55e;
     --accent-light: #4ade80;
     --accent-glow: rgba(34, 197, 94, 0.12);
@@ -221,7 +221,7 @@
     --border-light: #4a2880;
     --text-primary: #fffce0;
     --text-secondary: #00f0ff;
-    --text-muted: #7a6680;
+    --text-muted: #88728e;
     --accent: #ff007a;
     --accent-light: #ff4da6;
     --accent-glow: rgba(255, 0, 122, 0.28);
@@ -258,7 +258,7 @@
     --border-light: #d1d1d6;
     --text-primary: #1c1c1e;
     --text-secondary: #3c3c43;
-    --text-muted: #8e8e93;
+    --text-muted: #6d6d73;
     --accent: #007aff;
     --accent-light: #5ac8fa;
     --accent-glow: rgba(0, 122, 255, 0.14);
@@ -290,7 +290,7 @@
     --border-light: #403820;
     --text-primary: #f0d890;
     --text-secondary: #b8a060;
-    --text-muted: #786840;
+    --text-muted: #8a784a;
     --accent: #f0a000;
     --accent-light: #ffc040;
     --accent-glow: rgba(240, 160, 0, 0.12);
@@ -366,7 +366,7 @@
     --border-light: #2b3a48;
     --text-primary: #cdd6e0;
     --text-secondary: #7e8c9b;
-    --text-muted: #4d5965;
+    --text-muted: #6a7b8c;
     --accent: #4ea7d4;
     --accent-light: #86ccea;
     --accent-glow: rgba(78, 167, 212, 0.18);
@@ -765,7 +765,7 @@
     --border-light: #501c2c;
     --text-primary: #f0dde2;
     --text-secondary: #b08090;
-    --text-muted: #704858;
+    --text-muted: #9f697f;
     --accent: #dc2626;
     --accent-light: #f87171;
     --accent-glow: rgba(220, 38, 38, 0.18);
@@ -797,7 +797,7 @@
     --border-light: #264022;
     --text-primary: #33ff00;
     --text-secondary: #22aa00;
-    --text-muted: #156600;
+    --text-muted: #1c8900;
     --accent: #33ff00;
     --accent-light: #66ff44;
     --accent-glow: rgba(51, 255, 0, 0.12);
@@ -926,7 +926,7 @@
     --border-light: #3a3a3a;
     --text-primary: #f5f5f5;
     --text-secondary: #a0a0a0;
-    --text-muted: #666666;
+    --text-muted: #7d7d7d;
     --accent: #00d4aa;
     --accent-light: #33e8c0;
     --accent-glow: rgba(0, 212, 170, 0.12);
@@ -963,7 +963,7 @@
     --border-light: #404040;
     --text-primary: #e1e1e1;
     --text-secondary: #999999;
-    --text-muted: #606060;
+    --text-muted: #7e7e7e;
     --accent: #bb86fc;
     --accent-light: #d0a8ff;
     --accent-glow: rgba(187, 134, 252, 0.12);
@@ -1000,7 +1000,7 @@
     --border-light: #484f58;
     --text-primary: #c9d1d9;
     --text-secondary: #8b949e;
-    --text-muted: #545d68;
+    --text-muted: #727f8d;
     --accent: #58a6ff;
     --accent-light: #79c0ff;
     --accent-glow: rgba(88, 166, 255, 0.12);
@@ -1037,7 +1037,7 @@
     --border-light: #574c68;
     --text-primary: #dcd7e8;
     --text-secondary: #9d94b0;
-    --text-muted: #6a6080;
+    --text-muted: #877d9e;
     --accent: #9d7cd8;
     --accent-light: #b99aee;
     --accent-glow: rgba(157, 124, 216, 0.12);
@@ -1074,7 +1074,7 @@
     --border-light: #a8c4d8;
     --text-primary: #0c4a6e;
     --text-secondary: #3a6e8a;
-    --text-muted: #7498b0;
+    --text-muted: #50758e;
     --accent: #0284c7;
     --accent-light: #0369a1;
     --accent-glow: rgba(2, 132, 199, 0.1);

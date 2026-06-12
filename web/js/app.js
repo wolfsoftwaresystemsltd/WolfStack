@@ -27342,9 +27342,9 @@ async function saveVmSettings(name) {
 
 const installCmds = {
     wolfnet: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash',
-    wolfproxy: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh | sudo bash',
-    wolfserve: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh | sudo bash',
-    wolfdisk: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | sudo bash',
+    wolfproxy: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh | sudo bash',
+    wolfserve: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh | sudo bash',
+    wolfdisk: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh | sudo bash',
     wolfscale: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh | sudo bash',
 };
 
