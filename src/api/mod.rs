@@ -5616,6 +5616,202 @@ pub async fn cert_restart_service(
     }
 }
 
+// ─── Local Certificate Authority (internal-domain certs) ─────────────
+// For domains that can't use public ACME (*.ai.home, *.lab.lan …):
+// generate one root CA, install it once per device, then issue
+// CA-signed leaf certs that are trusted automatically. Pairs with the
+// WolfRouter wildcard-DNS + proxy editor for an all-in-one local stack.
+
+/// A leaf cert/key path is only safe if it has no `..` traversal segment —
+/// the file write runs as root, so an unvalidated path could clobber any
+/// file on the box.
+fn local_ca_path_is_safe(p: &str) -> bool {
+    !p.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// GET /api/certificates/local-ca — does the local CA exist + basic info.
+pub async fn local_ca_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let info = web::block(|| {
+        use openssl::nid::Nid;
+        let exists = crate::local_ca::ca_exists();
+        let mut info = serde_json::json!({ "exists": exists, "cert_path": crate::local_ca::ca_cert_path() });
+        if exists {
+            if let Ok(pem) = crate::local_ca::ca_cert_pem() {
+                if let Ok(cert) = openssl::x509::X509::from_pem(&pem) {
+                    let cn = cert.subject_name().entries_by_nid(Nid::COMMONNAME).next()
+                        .and_then(|e| e.data().as_utf8().ok().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    info["subject"] = serde_json::json!(cn);
+                    info["not_after"] = serde_json::json!(cert.not_after().to_string());
+                }
+            }
+        }
+        info
+    }).await.unwrap_or_else(|_| serde_json::json!({ "exists": false }));
+    HttpResponse::Ok().json(info)
+}
+
+#[derive(Deserialize)]
+pub struct LocalCaInitRequest { #[serde(default)] pub label: Option<String> }
+
+/// POST /api/certificates/local-ca/init — generate the root CA (idempotent;
+/// a no-op if it already exists). 4096-bit RSA, so off the runtime.
+pub async fn local_ca_init(req: HttpRequest, state: web::Data<AppState>, body: web::Json<LocalCaInitRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let label = body.label.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "WolfStack".to_string());
+    match web::block(move || crate::local_ca::ensure_ca(&label)).await {
+        Ok(Ok(_)) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true, "cert_path": crate::local_ca::ca_cert_path(),
+            "message": "Local CA ready. Download the CA certificate and install it in your devices' trust stores so every issued cert is trusted automatically."
+        })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("ca gen task: {}", e) })),
+    }
+}
+
+/// GET /api/certificates/local-ca/download — the root CA cert for trust-store
+/// install. Public half only; the CA private key never leaves the host.
+pub async fn local_ca_download(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(crate::local_ca::ca_cert_pem).await {
+        Ok(Ok(pem)) => HttpResponse::Ok()
+            .insert_header(("Content-Type", "application/x-pem-file"))
+            .insert_header(("Content-Disposition", "attachment; filename=\"wolfstack-local-ca.pem\""))
+            .body(pem),
+        Ok(Err(e)) => {
+            tracing::warn!("local CA download: {}", e);
+            HttpResponse::NotFound().json(serde_json::json!({ "error": "Local CA not initialised yet — run init first" }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LocalCaIssueRequest {
+    pub domain: String,
+    #[serde(default)] pub cert_path: Option<String>,
+    #[serde(default)] pub key_path: Option<String>,
+}
+
+/// POST /api/certificates/local-ca/issue — issue a leaf cert for `domain`
+/// (SAN covers `domain` + `*.domain`) signed by the local CA, written to
+/// disk. Auto-creates the CA if absent. Returns the cert/key paths to
+/// reference in the WolfRouter proxy editor's ssl_certificate fields.
+pub async fn local_ca_issue(req: HttpRequest, state: web::Data<AppState>, body: web::Json<LocalCaIssueRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let domain = body.domain.trim().trim_start_matches("*.").trim_start_matches('.').to_string();
+    if domain.is_empty() || domain.contains('/') || domain.contains('#') || domain.chars().any(|c| c.is_whitespace()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "domain must be a bare domain like ai.home (no slashes, '#', or spaces)" }));
+    }
+    let safe = domain.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-', "_");
+    let cert_path = body.cert_path.clone().filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("{}/issued/{}.crt", crate::local_ca::ca_dir(), safe));
+    let key_path = body.key_path.clone().filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("{}/issued/{}.key", crate::local_ca::ca_dir(), safe));
+    // Operator-supplied paths are written as root — reject traversal.
+    if !local_ca_path_is_safe(&cert_path) || !local_ca_path_is_safe(&key_path) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "cert_path / key_path must not contain '..'" }));
+    }
+    let (d, cp, kp) = (domain.clone(), cert_path.clone(), key_path.clone());
+    let res = web::block(move || -> Result<(), String> {
+        crate::local_ca::ensure_ca("WolfStack")?;
+        let (cert_pem, key_pem) = crate::local_ca::issue_leaf(&d, &[])?;
+        if let Some(parent) = std::path::Path::new(&cp).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+            #[cfg(unix)]
+            { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)); }
+        }
+        crate::local_ca::write_secret_file(&kp, &key_pem)?; // 0600, no umask race
+        std::fs::write(&cp, &cert_pem).map_err(|e| format!("write cert: {}", e))?;
+        Ok(())
+    }).await;
+    match res {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true, "domain": domain, "cert_path": cert_path, "key_path": key_path,
+            "message": format!("Issued a CA-signed cert for {0} and *.{0}. Point your proxy vhost's ssl_certificate / ssl_certificate_key at these paths.", domain)
+        })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("issue task: {}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LocalPublishRequest {
+    pub domain: String,
+    pub backend: String,
+}
+
+/// POST /api/local-publish — one action: issue a local-CA cert for `domain`
+/// AND create a managed reverse-proxy vhost (HTTPS, websocket-ready,
+/// HTTP→HTTPS redirect) for it pointing at `backend`. With a
+/// `*.<domain> → this host` wildcard-DNS entry, the result is a trusted
+/// internal service at https://<domain> — the all-in-one local stack.
+/// Targets the local host's managed proxy.
+pub async fn local_publish(req: HttpRequest, state: web::Data<AppState>, body: web::Json<LocalPublishRequest>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let domain = body.domain.trim().trim_start_matches("*.").trim_start_matches('.').to_string();
+    if domain.is_empty() || domain.contains('/') || domain.contains('#') || domain.chars().any(|c| c.is_whitespace()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "domain must be a bare domain like sonarr.ai.home (no slashes, '#', or spaces)" }));
+    }
+    // Default to http:// when no scheme is given — apps speak plain HTTP behind the proxy.
+    let raw = body.backend.trim();
+    let backend = if raw.contains("://") { raw.to_string() } else { format!("http://{}", raw) };
+    // Strict allowlist — `backend` is interpolated into nginx `proxy_pass`,
+    // so a stray `;` `{` `}` or space could inject or break the config.
+    let backend_ok = !backend.is_empty()
+        && backend.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/'));
+    if !backend_ok {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "backend must be host:port or http(s)://host:port (letters, digits, . - _ : / only)"
+        }));
+    }
+    let safe = domain.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-', "_");
+    let cert_path = format!("{}/issued/{}.crt", crate::local_ca::ca_dir(), safe);
+    let key_path = format!("{}/issued/{}.key", crate::local_ca::ca_dir(), safe);
+    let (d, bp, cp, kp, dom) = (domain.clone(), backend.clone(), cert_path.clone(), key_path.clone(), domain.clone());
+    let res = web::block(move || -> Result<String, String> {
+        use crate::configurator::{nginx, ExecTarget};
+        crate::local_ca::ensure_ca("WolfStack")?;
+        let (cert_pem, key_pem) = crate::local_ca::issue_leaf(&d, &[])?;
+        if let Some(parent) = std::path::Path::new(&cp).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+            #[cfg(unix)]
+            { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)); }
+        }
+        crate::local_ca::write_secret_file(&kp, &key_pem)?; // 0600, no umask race
+        std::fs::write(&cp, &cert_pem).map_err(|e| format!("write cert: {}", e))?;
+        let params = nginx::NginxSiteParams {
+            server_name: dom.clone(),
+            listen_port: 443,
+            ssl: true,
+            ssl_cert: Some(cp.clone()),
+            ssl_key: Some(kp.clone()),
+            proxy_pass: Some(bp.clone()),
+            root: None,
+        };
+        let cfg = nginx::generate_site_config(&params);
+        let target = ExecTarget::Host;
+        // Write → enable → reload so the vhost is actually LIVE (save_site
+        // alone only writes the file). enable_site is a no-op where sites
+        // are served directly; reload validates + activates and surfaces a
+        // bad config as an error instead of a false "Live" claim.
+        nginx::save_site(&target, &dom, &cfg)?;
+        let _ = nginx::enable_site(&target, &dom);
+        nginx::reload(&target).map_err(|e| format!("proxy reload failed (cert + vhost written, but not active): {}", e))?;
+        Ok("vhost saved, enabled and proxy reloaded".to_string())
+    }).await;
+    match res {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true, "domain": domain, "backend": backend,
+            "url": format!("https://{}", domain), "cert_path": cert_path,
+            "message": format!("Published https://{} → {} ({}). Existing vhost for this domain is replaced.", domain, backend, msg)
+        })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("publish task: {}", e) })),
+    }
+}
+
 // ─── Agent API (server-to-server, no auth required) ───
 
 /// GET /api/agent/status — return this node's status (for remote polling)
@@ -34557,6 +34753,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/certificates/install", web::post().to(install_certificate))
         .route("/api/certificates/self-signed", web::post().to(create_self_signed_certificate))
         .route("/api/certificates/restart-service", web::post().to(cert_restart_service))
+        .route("/api/certificates/local-ca", web::get().to(local_ca_status))
+        .route("/api/certificates/local-ca/init", web::post().to(local_ca_init))
+        .route("/api/certificates/local-ca/download", web::get().to(local_ca_download))
+        .route("/api/certificates/local-ca/issue", web::post().to(local_ca_issue))
+        .route("/api/local-publish", web::post().to(local_publish))
         // Containers
         .route("/api/containers/status", web::get().to(container_runtime_status))
         .route("/api/containers/install", web::post().to(install_container_runtime))

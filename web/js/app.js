@@ -9782,12 +9782,99 @@ function prepareCertUpdate(certPath, keyPath) {
     document.getElementById('cert-install-cert')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+// ─── Local Certificate Authority (internal-domain certs) ───
+async function loadLocalCa() {
+    const statusEl = document.getElementById('local-ca-status');
+    const dlBtn = document.getElementById('local-ca-download-btn');
+    const issueWrap = document.getElementById('local-ca-issue-wrap');
+    if (!statusEl) return;
+    try {
+        const resp = await fetch(apiUrl('/api/certificates/local-ca'));
+        const d = await resp.json();
+        if (d.exists) {
+            statusEl.innerHTML = '<span style="color:var(--success,#22c55e);">✓ Local CA active.</span> Install the CA cert on your devices, then issue certs below.'
+                + (d.not_after ? ' <span style="color:var(--text-muted);">Expires ' + escapeHtmlSafe(d.not_after) + '.</span>' : '');
+            if (dlBtn) dlBtn.style.display = '';
+            if (issueWrap) issueWrap.style.display = '';
+        } else {
+            statusEl.innerHTML = '<span style="color:var(--text-muted);">No local CA yet. Generate one to start issuing trusted internal certs.</span>';
+            if (dlBtn) dlBtn.style.display = 'none';
+            if (issueWrap) issueWrap.style.display = 'none';
+        }
+    } catch (e) {
+        statusEl.textContent = 'Could not load local CA status.';
+    }
+}
+
+async function generateLocalCa() {
+    showToast('Generating local CA (4096-bit — takes a moment)…', 'info');
+    try {
+        const resp = await fetch(apiUrl('/api/certificates/local-ca/init'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+        });
+        const d = await resp.json();
+        if (resp.ok) { showToast(d.message || 'Local CA ready.', 'success'); loadLocalCa(); }
+        else { showToast(d.error || 'Failed to generate local CA.', 'error'); }
+    } catch (e) { showToast('Failed to generate local CA: ' + e.message, 'error'); }
+}
+
+function downloadLocalCa() {
+    window.location.href = apiUrl('/api/certificates/local-ca/download');
+}
+
+async function issueLocalCaCert() {
+    const domain = (document.getElementById('local-ca-domain')?.value || '').trim();
+    const out = document.getElementById('local-ca-issue-result');
+    if (!domain) { showToast('Enter a domain to issue a cert for.', 'error'); return; }
+    showToast('Issuing certificate for ' + domain + '…', 'info');
+    try {
+        const resp = await fetch(apiUrl('/api/certificates/local-ca/issue'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain: domain })
+        });
+        const d = await resp.json();
+        if (resp.ok) {
+            showToast(d.message || 'Certificate issued.', 'success');
+            if (out) out.innerHTML =
+                '<div style="color:var(--success,#22c55e);">✓ Issued for <strong>' + escapeHtmlSafe(d.domain) + '</strong> and *.' + escapeHtmlSafe(d.domain) + '</div>'
+                + '<div style="font-family:var(--font-mono); margin-top:4px;">cert: ' + escapeHtmlSafe(d.cert_path) + '<br>key:&nbsp; ' + escapeHtmlSafe(d.key_path) + '</div>'
+                + '<div style="color:var(--text-muted); margin-top:4px;">Set these as the proxy vhost\'s ssl_certificate / ssl_certificate_key for this domain.</div>';
+        } else {
+            showToast(d.error || 'Failed to issue cert.', 'error');
+            if (out) out.innerHTML = '<span style="color:var(--danger,#ef4444);">' + escapeHtmlSafe(d.error || 'Failed') + '</span>';
+        }
+    } catch (e) { showToast('Failed to issue cert: ' + e.message, 'error'); }
+}
+
+async function publishLocalService() {
+    const domain = (document.getElementById('local-pub-domain')?.value || '').trim();
+    const backend = (document.getElementById('local-pub-backend')?.value || '').trim();
+    const out = document.getElementById('local-pub-result');
+    if (!domain || !backend) { showToast('Enter both a domain and a backend.', 'error'); return; }
+    showToast('Publishing ' + domain + '…', 'info');
+    try {
+        const resp = await fetch(apiUrl('/api/local-publish'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain: domain, backend: backend })
+        });
+        const d = await resp.json();
+        if (resp.ok) {
+            showToast(d.message || 'Published.', 'success');
+            if (out) out.innerHTML = '<span style="color:var(--success,#22c55e);">✓ Live at <strong>' + escapeHtmlSafe(d.url) + '</strong> → ' + escapeHtmlSafe(d.backend) + '</span>'
+                + '<div style="color:var(--text-muted); margin-top:4px;">Make sure DNS resolves ' + escapeHtmlSafe(d.domain) + ' to this host (a <code>*.</code> wildcard in WolfRouter DNS covers it), and that the CA is trusted on your device.</div>';
+        } else {
+            showToast(d.error || 'Failed to publish.', 'error');
+            if (out) out.innerHTML = '<span style="color:var(--danger,#ef4444);">' + escapeHtmlSafe(d.error || 'Failed') + '</span>';
+        }
+    } catch (e) { showToast('Failed to publish: ' + e.message, 'error'); }
+}
+
 async function loadCertificates() {
     // Refresh DNS providers in parallel so the request-cert form's
     // DNS-01 dropdown is populated by the time the user clicks the radio.
     if (typeof loadDnsProviders === 'function') {
         loadDnsProviders().catch(function () { /* non-fatal */ });
     }
+    if (typeof loadLocalCa === 'function') { loadLocalCa().catch(function () {}); }
     const el = document.getElementById('cert-list');
     if (!el) return;
     try {
