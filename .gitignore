@@ -1,5 +1,8 @@
 /target
-Cargo.lock
+# Cargo.lock IS committed — wolfstack is a binary, so the lockfile must be
+# tracked for reproducible CI builds. Floating deps drifted `time` onto a
+# version that broke `cookie` 0.16.2 on rustc 1.96 and failed the v24.39.0
+# release; pinning prevents that class of failure.
 *.swp
 *.swo
 *~

@@ -47,7 +47,10 @@ jobs:
         # ~2 minutes instead of 20.
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo check
+        # --locked: build the exact committed Cargo.lock, never re-resolve to
+        # "latest compatible". A float drifted `time` onto a version that broke
+        # `cookie` 0.16.2 on rustc 1.96 and failed the v24.39.0 release.
+        run: cargo check --locked
 
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
