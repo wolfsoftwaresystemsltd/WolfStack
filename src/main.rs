@@ -83,6 +83,7 @@ mod antivirus;
 mod abuse_report;
 mod diag;
 mod netaddr;
+mod local_ca;
 #[allow(dead_code)]
 mod integrations;
 
