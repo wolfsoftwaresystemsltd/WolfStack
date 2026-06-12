@@ -2333,10 +2333,24 @@ pub fn run_validation_and_store(state: &RouterState, self_node_id: &str) {
             }
         }
     } else {
-        tracing::info!(
-            "WolfRouter validation: all {} config item(s) on this node look healthy",
-            report.ok_count
-        );
+        // "All healthy" every 5 minutes is a heartbeat, not news. Speak at
+        // INFO on the first validation after start and on the recovery
+        // transition (unhealthy -> healthy); steady-state health is DEBUG.
+        let prev_unhealthy = state.last_validation.read().unwrap().as_ref()
+            .map(|r| r.warning_count + r.error_count > 0);
+        match prev_unhealthy {
+            Some(true) => tracing::info!(
+                "WolfRouter validation: recovered — all {} config item(s) on this node look healthy",
+                report.ok_count
+            ),
+            None => tracing::info!(
+                "WolfRouter validation: all {} config item(s) on this node look healthy",
+                report.ok_count
+            ),
+            Some(false) => tracing::debug!(
+                "WolfRouter validation: still healthy ({} item(s))", report.ok_count
+            ),
+        }
     }
     *state.last_validation.write().unwrap() = Some(report);
 }

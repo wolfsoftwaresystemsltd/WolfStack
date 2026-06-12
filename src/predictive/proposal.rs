@@ -260,6 +260,13 @@ impl ProposalStore {
     /// On update of a `Pending` entry: `created_at` is preserved
     /// (so the inbox shows "this has been a problem for N days"),
     /// `updated_at`/`severity`/`evidence`/`why` are refreshed.
+    /// True when a proposal with this dedup key already exists (any
+    /// status). Lets callers tell a genuinely NEW upsert from a refresh
+    /// of a standing one — the orchestrator logs only the former.
+    pub fn contains_key(&self, key: &(String, ProposalScope)) -> bool {
+        self.proposals.iter().any(|p| p.dedup_key() == *key)
+    }
+
     pub fn upsert(&mut self, incoming: Proposal) -> String {
         let key = incoming.dedup_key();
         if let Some(existing) = self.proposals.iter_mut()

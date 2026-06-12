@@ -379,14 +379,27 @@ pub async fn tick(
     //    intent — see ProposalStore::upsert), then resolve cleared.
     let upserted = new_proposals.len();
     let mut s = lock_write(proposals, "proposals");
+    let mut fresh = 0usize;
     for p in new_proposals {
+        if !s.contains_key(&p.dedup_key()) {
+            fresh += 1;
+        }
         s.upsert(p);
     }
     let resolved = s.auto_resolve_cleared(&covered, &emitted);
-    if upserted > 0 || resolved > 0 {
+    // A standing condition re-emits the same proposals every tick — that's
+    // a refresh, not news, and logging it 12x/hour is journal spam. INFO
+    // only when something actually appeared or cleared; the steady-state
+    // refresh drops to DEBUG. (Persistence below still keys off upserted,
+    // so refreshed timestamps/evidence keep being saved.)
+    if fresh > 0 || resolved > 0 {
         tracing::info!(
-            "predictive tick: upserted {} proposal(s), auto-resolved {} cleared",
-            upserted, resolved,
+            "predictive tick: {} new proposal(s), {} refreshed, auto-resolved {} cleared",
+            fresh, upserted - fresh, resolved,
+        );
+    } else if upserted > 0 {
+        tracing::debug!(
+            "predictive tick: refreshed {} standing proposal(s)", upserted,
         );
     }
     if upserted > 0 || resolved > 0 {

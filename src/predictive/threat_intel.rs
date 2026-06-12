@@ -880,10 +880,28 @@ fn sync_ipset_to_feed() -> RemediationOutcome {
         };
     }
     let kept = entries.iter().filter(|e| !allow.contains(*e)).count();
-    tracing::warn!(
-        "threat_intel: synced ipset to {} entries ({} auto-allowlisted, {} feed entries skipped by allowlist)",
-        kept, auto_count, skipped_by_allow,
-    );
+    // State-change logging: this sync runs every enforcement tick and almost
+    // always lands on identical numbers — that's a heartbeat, not news (it
+    // was a WARN on every tick; operator: "we are really spamming the logs").
+    // INFO when the counts actually change (or on the first sync after
+    // start), DEBUG for the steady state.
+    {
+        static LAST_SYNC: std::sync::Mutex<Option<(usize, usize, u32)>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST_SYNC.lock().unwrap_or_else(|e| e.into_inner());
+        let now = (kept, auto_count, skipped_by_allow);
+        if *last != Some(now) {
+            tracing::info!(
+                "threat_intel: synced ipset to {} entries ({} auto-allowlisted, {} feed entries skipped by allowlist)",
+                kept, auto_count, skipped_by_allow,
+            );
+            *last = Some(now);
+        } else {
+            tracing::debug!(
+                "threat_intel: ipset sync unchanged ({} entries)", kept,
+            );
+        }
+    }
     RemediationOutcome {
         action,
         ok: true,
