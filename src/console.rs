@@ -770,10 +770,11 @@ async fn remote_console_bridge(
     // fast and the loop falls through to ws://addr:port for legacy
     // pre-v23.11 peers running `--no-tls`. Self-signed peers still
     // bind it, so ws://addr:port+1 still resolves where applicable.
+    let remote_host_url = crate::netaddr::bracket_host(&remote_host);
     let urls = vec![
-        format!("wss://{}:{}{}", remote_host, remote_port, ws_path),
-        format!("ws://{}:{}{}", remote_host, remote_port + 1, ws_path),
-        format!("ws://{}:{}{}", remote_host, remote_port, ws_path),
+        format!("wss://{}:{}{}", remote_host_url, remote_port, ws_path),
+        format!("ws://{}:{}{}", remote_host_url, remote_port + 1, ws_path),
+        format!("ws://{}:{}{}", remote_host_url, remote_port, ws_path),
     ];
 
     // Build TLS connector that accepts self-signed certs (native-tls)

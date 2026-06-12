@@ -82,6 +82,7 @@ mod scan_detector;
 mod antivirus;
 mod abuse_report;
 mod diag;
+mod netaddr;
 #[allow(dead_code)]
 mod integrations;
 
@@ -100,7 +101,7 @@ struct Cli {
     #[arg(short, long)]
     port: Option<u16>,
 
-    /// Bind address
+    /// Bind address (IPv4 or IPv6 — e.g. 0.0.0.0, 192.168.1.5, ::, 2001:db8::1)
     #[arg(short, long, default_value = "0.0.0.0")]
     bind: String,
 
@@ -452,7 +453,7 @@ async fn main() -> std::io::Result<()> {
     info!("  ──────────────────────────────────");
     info!("  Node ID:    {}", node_id);
     info!("  Hostname:   {}", hostname);
-    info!("  Dashboard:  http://{}:{}", cli.bind, api_port);
+    info!("  Dashboard:  http://{}", netaddr::host_port(&cli.bind, api_port));
     info!("  (C)Copyright Wolf Software Systems Ltd — https://wolf.uk.com");
     info!("  By Paul Clevett and my mate Claude - I have Autism");
     // Seed LXC storage paths from any mounted storage that has LXC containers
@@ -3549,12 +3550,12 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             info!("     Cert: {} ({})", cert_path,
                 if cert_is_self_signed { "self-signed" } else { "CA-signed" });
             info!("     Key:  {}", key_path);
-            info!("     HTTPS: https://{}:{}", cli.bind, api_port);
+            info!("     HTTPS: https://{}", netaddr::host_port(&cli.bind, api_port));
             match inter_node_port {
-                Some(p) => info!("     HTTP (inter-node legacy + cluster-home): http://{}:{}", cli.bind, p),
+                Some(p) => info!("     HTTP (inter-node legacy + cluster-home): http://{}", netaddr::host_port(&cli.bind, p)),
                 None => info!("     HTTP (inter-node): not bound — CA-signed cert means peers use HTTPS"),
             }
-            info!("     Status pages: http://{}:{}", cli.bind, status_port);
+            info!("     Status pages: http://{}", netaddr::host_port(&cli.bind, status_port));
             info!("");
 
             // Clone web_dir for status-page closure (always needed) + the
@@ -3563,7 +3564,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             let app_state2 = app_state.clone();
             let app_state3 = app_state.clone();
 
-            let https_bind = format!("{}:{}", cli.bind, api_port);
+            let https_bind = netaddr::host_port(&cli.bind, api_port);
             let https_server = HttpServer::new(move || {
                 let app = App::new()
                     .app_data(app_state.clone())
@@ -3610,7 +3611,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             // optional future cleanly).
             let http_server_opt = match inter_node_port {
                 Some(p) => {
-                    let http_bind = format!("{}:{}", cli.bind, p);
+                    let http_bind = netaddr::host_port(&cli.bind, p);
                     let srv = HttpServer::new(move || {
                         let app = App::new()
                             .app_data(app_state2.clone())
@@ -3643,7 +3644,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             };
 
             // Dedicated status page listener — plain HTTP on the configured status port
-            let sp_bind = format!("{}:{}", cli.bind, status_port);
+            let sp_bind = netaddr::host_port(&cli.bind, status_port);
             let sp_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state3.clone())
@@ -3685,8 +3686,8 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             } else {
                 info!("  ⚡ HTTP mode (no TLS certificates found)");
             }
-            info!("     Dashboard: http://{}:{}", cli.bind, api_port);
-            info!("     Status pages: http://{}:{}", cli.bind, status_port);
+            info!("     Dashboard: http://{}", netaddr::host_port(&cli.bind, api_port));
+            info!("     Status pages: http://{}", netaddr::host_port(&cli.bind, status_port));
             info!("     Tip: Use the Certificates page to request a Let's Encrypt certificate");
             info!("");
 
@@ -3723,11 +3724,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             .keep_alive(std::time::Duration::from_secs(2))
             .client_request_timeout(std::time::Duration::from_secs(3))
             .client_disconnect_timeout(std::time::Duration::from_millis(500))
-            .bind(format!("{}:{}", cli.bind, api_port))?
+            .bind(netaddr::host_port(&cli.bind, api_port))?
             .run();
 
             // Dedicated status page listener — plain HTTP on the configured status port
-            let sp_bind = format!("{}:{}", cli.bind, status_port);
+            let sp_bind = netaddr::host_port(&cli.bind, status_port);
             let sp_server = HttpServer::new(move || {
                 App::new()
                     .app_data(app_state2.clone())
@@ -3761,10 +3762,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
 /// behaviour returned `http://addr:port+1` for TLS peers, which broke
 /// against CA-signed-cert nodes that no longer bind the second listener.
 fn node_api_url(node: &crate::agent::Node, path: &str) -> String {
+    let host = netaddr::bracket_host(&node.address);
     if node.tls {
-        format!("https://{}:{}{}", node.address, node.port, path)
+        format!("https://{}:{}{}", host, node.port, path)
     } else {
-        format!("http://{}:{}{}", node.address, node.port, path)
+        format!("http://{}:{}{}", host, node.port, path)
     }
 }
 
@@ -3819,9 +3821,9 @@ async fn gather_reboot_reason_remote(
     // HTTPS-first for TLS peers (client must accept self-signed); plain
     // HTTP on the main port for legacy `--no-tls` peers.
     let urls: Vec<String> = if tls {
-        vec![format!("https://{}:{}/api/ai/exec", address, port)]
+        vec![format!("https://{}:{}/api/ai/exec", netaddr::bracket_host(address), port)]
     } else {
-        vec![format!("http://{}:{}/api/ai/exec", address, port)]
+        vec![format!("http://{}:{}/api/ai/exec", netaddr::bracket_host(address), port)]
     };
 
     let mut result = String::new();

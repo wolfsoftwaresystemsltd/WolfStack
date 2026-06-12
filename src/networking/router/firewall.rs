@@ -415,9 +415,53 @@ fn cidr_matches_ip(cidr: &str, ip: &str) -> bool {
     (ip_u32 & mask_u32) == (addr_u32 & mask_u32)
 }
 
+/// Build the ip6tables-save-format companion for the filter table.
+///
+/// Deliberately does NOT declare or append to the built-in chains
+/// (INPUT/FORWARD/OUTPUT). We always restore with `-n` (noflush), and
+/// verified on this host's iptables-nft backend that under `-n`:
+///   * a built-in chain is NOT flushed, so any `-A INPUT -j …` line
+///     APPENDS — applying the companion N times would leave N duplicate
+///     `-j WOLFROUTER_IN` jumps in INPUT (the actual bug; operator rules
+///     in INPUT are untouched precisely because INPUT is never flushed);
+///   * a user chain declared `:WOLFROUTER_IN - [0:0]` IS flushed and
+///     refilled wholesale — exactly the v4 lifecycle we want.
+/// So: declare/refill only OUR chains here, and let `apply_v6_companion`
+/// add the built-in→WOLFROUTER jumps idempotently (`-C` probe, `-I 1` on
+/// miss). That keeps operator/`kernel_block_ip` v6 rules in the built-in
+/// chains intact and the jump count pinned at exactly one.
+///
+/// Content: the same state/loopback accepts as v4 plus the threat-intel
+/// v6 chain when enforcement is active. NO user rules — those compile to
+/// iptables semantics only (v6 routing is future work) — so this ruleset
+/// can never lock an operator out: with threat-intel off it is pure
+/// no-op scaffolding, and re-applying it on a threat-intel disable is
+/// precisely what removes the stale v6 DROP rules.
+pub fn build_ruleset_v6() -> String {
+    let mut out = String::new();
+    out.push_str("*filter\n");
+    for chain in FILTER_CHAINS {
+        out.push_str(&format!(":{} - [0:0]\n", chain));
+    }
+    for ch in FILTER_CHAINS {
+        out.push_str(&format!(
+            "-A {} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n", ch
+        ));
+        out.push_str(&format!("-A {} -i lo -j ACCEPT\n", ch));
+    }
+    out.push_str(&crate::threat_intel::firewall::ip6tables_lines());
+    out.push_str("COMMIT\n");
+    out
+}
+
 /// Apply a ruleset. `test_only = true` runs `iptables-restore --test`
 /// without swapping. Returns the previous ruleset (as iptables-save
 /// text) on success so callers can stash it for rollback.
+///
+/// Every real (non-test) apply also applies the v6 companion ruleset —
+/// see `build_ruleset_v6`. A v6 failure never fails the v4 apply: hosts
+/// without ip6tables (or with a v6-less kernel) must keep working exactly
+/// as before, and the companion contains no user rules to lose.
 pub fn apply(ruleset: &str, test_only: bool) -> Result<String, String> {
     // Dump current filter table for rollback.
     let current = dump_filter_table().unwrap_or_default();
@@ -436,10 +480,88 @@ pub fn apply(ruleset: &str, test_only: bool) -> Result<String, String> {
     }
 
     info!("WolfRouter firewall applied ({} bytes)", ruleset.len());
+    apply_v6_companion();
     Ok(current)
 }
 
-/// Revert to a previously-captured iptables-save dump.
+/// Apply the v6 companion. Best-effort by design (see `apply`): a
+/// failure is loud only when threat-intel v6 enforcement is supposed to
+/// be live — then the operator must know the v6 blocklist is NOT being
+/// enforced — and a debug whisper otherwise (logged once per state
+/// change, not per apply).
+///
+/// Sequence, chosen so operator ip6tables rules are never touched:
+/// 1. Flush OUR chains with `ip6tables -F` (legacy ip6tables-restore
+///    --noflush does NOT flush declared chains, so without this, rules
+///    inside our chains would duplicate on every apply there; under nft
+///    it's a harmless double-flush).
+/// 2. `ip6tables-restore -n` the companion (declares/refills our chains
+///    only — never the built-ins).
+/// 3. Idempotently ensure the single jump from each built-in chain into
+///    the matching WOLFROUTER chain (`-C` probe, `-I 1` on miss) — the
+///    same pattern `insert_drop_rule` uses.
+fn apply_v6_companion() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static V6_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
+
+    let ruleset_v6 = build_ruleset_v6();
+    let ti_active = ruleset_v6.contains(crate::threat_intel::CHAIN_NAME);
+
+    // Step 1 — flush our own chains (ignore errors: first run, no chains
+    // yet; missing binary surfaces in step 2). The threat-intel chain is
+    // flushed too so a disable empties it even on legacy ip6tables.
+    for chain in FILTER_CHAINS.iter().copied().chain([crate::threat_intel::CHAIN_NAME]) {
+        let _ = Command::new("ip6tables").args(["-F", chain]).output();
+    }
+
+    // Step 2 — restore our chains.
+    let restored = matches!(run_restore_cmd("ip6tables-restore", &ruleset_v6, false), Ok(true));
+
+    // Step 3 — single jump from each built-in into our chain.
+    let mut jumps_ok = restored;
+    if restored {
+        for (builtin, ours) in [
+            ("INPUT", "WOLFROUTER_IN"),
+            ("FORWARD", "WOLFROUTER_FWD"),
+            ("OUTPUT", "WOLFROUTER_OUT"),
+        ] {
+            let present = Command::new("ip6tables")
+                .args(["-C", builtin, "-j", ours])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !present {
+                let ins = Command::new("ip6tables")
+                    .args(["-I", builtin, "1", "-j", ours])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !ins { jumps_ok = false; }
+            }
+        }
+    }
+
+    if jumps_ok {
+        if V6_FAIL_LOGGED.swap(false, Ordering::Relaxed) {
+            info!("ip6tables v6 companion recovered — v6 enforcement restored");
+        }
+    } else if !V6_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
+        if ti_active {
+            warn!(
+                "ip6tables apply failed — threat-intel v6 blocklist is NOT \
+                 enforced on this host (v4 enforcement unaffected). Install \
+                 ip6tables or disable IPv6 to silence this."
+            );
+        } else {
+            tracing::debug!("ip6tables unavailable — v6 companion skipped");
+        }
+    }
+}
+
+/// Revert to a previously-captured iptables-save dump. v4 only by
+/// design: the v6 companion carries no user rules (it tracks the
+/// threat-intel config, which a rules rollback doesn't change), so
+/// there is nothing v6-side for a safe-mode revert to undo.
 pub fn revert(previous: &str) -> Result<(), String> {
     if !run_restore(previous, false)? {
         return Err("Failed to revert firewall to previous state".into());
@@ -466,8 +588,14 @@ pub fn dump_filter_table() -> Result<String, String> {
 
 /// Run iptables-restore on the given input. Returns true on success.
 fn run_restore(input: &str, test_only: bool) -> Result<bool, String> {
+    run_restore_cmd("iptables-restore", input, test_only)
+}
+
+/// Run the given restore binary (iptables-restore / ip6tables-restore)
+/// on the input. Returns true on success.
+fn run_restore_cmd(restore_bin: &str, input: &str, test_only: bool) -> Result<bool, String> {
     use std::io::Write;
-    let mut cmd = Command::new("iptables-restore");
+    let mut cmd = Command::new(restore_bin);
     if test_only { cmd.arg("--test"); }
     // -n = don't flush other tables. Critical: we're only writing
     // *filter, and we don't want to wipe out *nat (DNAT/SNAT rules
@@ -523,6 +651,36 @@ mod preflight_tests {
 
     fn flag(rule: &str, ports: &[u16]) -> bool {
         rule_matches_any_port(rule, ports)
+    }
+
+    #[test]
+    fn v6_companion_is_scaffolding_plus_threat_intel_only() {
+        let rs = build_ruleset_v6();
+        assert!(rs.starts_with("*filter\n"));
+        assert!(rs.ends_with("COMMIT\n"));
+        // The companion must NEVER declare the built-in chains: under
+        // iptables-nft, restore --noflush flushes every chain named in
+        // the file — declaring INPUT/FORWARD would wipe operator v6
+        // rules and kernel_block_ip's own v6 DROPs on every apply.
+        for builtin in [":INPUT", ":FORWARD", ":OUTPUT",
+                        "-A INPUT", "-A FORWARD", "-A OUTPUT"] {
+            assert!(
+                !rs.contains(builtin),
+                "v6 companion must not touch built-in chain ({builtin})"
+            );
+        }
+        for chain in FILTER_CHAINS {
+            assert!(rs.contains(&format!(":{} - [0:0]", chain)));
+        }
+        assert!(rs.contains("-A WOLFROUTER_IN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"));
+        // The ONLY permissible DROPs are threat-intel ipset matches — user
+        // rules are v4-only and must never leak into the companion.
+        for line in rs.lines().filter(|l| l.contains("-j DROP")) {
+            assert!(
+                line.contains("--match-set"),
+                "unexpected non-threat-intel DROP in v6 companion: {line}"
+            );
+        }
     }
 
     #[test]

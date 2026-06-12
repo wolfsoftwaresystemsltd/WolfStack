@@ -269,7 +269,7 @@ fn identify(title: Option<&str>, server: Option<&str>) -> (String, &'static str,
 /// Probe a single host:port. 2 s timeout — most responsive services
 /// answer in under 100 ms; missing services timeout but don't pile up.
 fn probe(ip: &str, port: u16, scheme: &str) -> Option<DiscoveredService> {
-    let url = format!("{}://{}:{}/", scheme, ip, port);
+    let url = format!("{}://{}:{}/", scheme, crate::netaddr::bracket_host(ip), port);
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         // Cluster web apps almost always have self-signed or PVE certs.
@@ -298,7 +298,7 @@ fn probe(ip: &str, port: u16, scheme: &str) -> Option<DiscoveredService> {
     Some(DiscoveredService {
         id: id_for(ip, port),
         name: name.clone(),
-        url: format!("{}://{}:{}", scheme, ip, port),
+        url: format!("{}://{}:{}", scheme, crate::netaddr::bracket_host(ip), port),
         host_ip: ip.to_string(),
         port,
         scheme: scheme.to_string(),

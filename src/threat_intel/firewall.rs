@@ -63,10 +63,11 @@ pub fn iptables_lines_v4() -> String {
     out
 }
 
-/// Same for ip6tables. WolfRouter's current build_ruleset is IPv4-only,
-/// but we expose this for when v6 lands. Empty when disabled or dry-run.
-/// Same src/dst dual-direction matching as the IPv4 version.
-#[allow(dead_code)]
+/// Same for ip6tables — consumed by `router::firewall::build_ruleset_v6`,
+/// which is applied alongside every v4 apply so the v6 blocklist ipset is
+/// actually enforced (without this, a blocklisted host could simply
+/// connect over v6). Empty when disabled or dry-run. Same src/dst
+/// dual-direction matching as the IPv4 version.
 pub fn ip6tables_lines() -> String {
     let cfg = super::ThreatIntelConfig::load();
     if !super::enforcement_active(&cfg) {

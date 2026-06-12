@@ -440,15 +440,16 @@ async fn pve_bridge(
         }
     }).collect();
     // Node shell vs guest terminal have different WebSocket URLs
+    let pve_ws_host = crate::netaddr::bracket_host(&pve_host);
     let pve_ws_url = if guest_type == "node" {
         format!(
             "wss://{}:{}/api2/json/nodes/{}/vncwebsocket?port={}&vncticket={}",
-            pve_host, pve_port, pve_node, term_port, vncticket
+            pve_ws_host, pve_port, pve_node, term_port, vncticket
         )
     } else {
         format!(
             "wss://{}:{}/api2/json/nodes/{}/{}/{}/vncwebsocket?port={}&vncticket={}",
-            pve_host, pve_port, pve_node, guest_type, vmid, term_port, vncticket
+            pve_ws_host, pve_port, pve_node, guest_type, vmid, term_port, vncticket
         )
     };
 

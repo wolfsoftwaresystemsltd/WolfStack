@@ -3507,20 +3507,46 @@ fn collect_workload_subnets_uncached() -> Vec<String> {
             || name.starts_with("virbr");  // libvirt
         if !is_workload { continue; }
         for addr in &iface.addresses {
-            if addr.family != "inet" { continue; }
-            // Derive the network address from address + prefix so two
-            // containers on the same /24 don't each contribute their
-            // own /32.
-            let ip = match addr.address.parse::<std::net::Ipv4Addr>() {
-                Ok(ip) => ip,
-                Err(_) => continue,
-            };
-            let prefix = addr.prefix.min(32);
-            let mask: u32 = if prefix == 0 { 0 }
-                else { 0xFFFF_FFFFu32.checked_shl(32 - prefix).unwrap_or(0) };
-            let net = u32::from(ip) & mask;
-            let net_ip = std::net::Ipv4Addr::from(net);
-            out.insert(format!("{}/{}", net_ip, prefix));
+            match addr.family.as_str() {
+                "inet" => {
+                    // Derive the network address from address + prefix so two
+                    // containers on the same /24 don't each contribute their
+                    // own /32.
+                    let ip = match addr.address.parse::<std::net::Ipv4Addr>() {
+                        Ok(ip) => ip,
+                        Err(_) => continue,
+                    };
+                    let prefix = addr.prefix.min(32);
+                    let mask: u32 = if prefix == 0 { 0 }
+                        else { 0xFFFF_FFFFu32.checked_shl(32 - prefix).unwrap_or(0) };
+                    let net = u32::from(ip) & mask;
+                    let net_ip = std::net::Ipv4Addr::from(net);
+                    out.insert(format!("{}/{}", net_ip, prefix));
+                }
+                "inet6" => {
+                    // v6 container bridges (Docker fixed-cidr-v6 ULA, LXC RA
+                    // prefixes) need the same never-block exemption as v4.
+                    let ip = match addr.address.parse::<std::net::Ipv6Addr>() {
+                        Ok(ip) => ip,
+                        Err(_) => continue, // zone-scoped forms don't parse — skip
+                    };
+                    // SKIP link-local (fe80::/10): every interface carries the
+                    // same fe80::/64, so protecting it would make ANY
+                    // link-local source — including a LAN attacker on the same
+                    // L2 — permanently unblockable. Loopback never appears on
+                    // a bridge; skip it defensively anyway.
+                    if ip.is_loopback() || (ip.segments()[0] & 0xffc0) == 0xfe80 {
+                        continue;
+                    }
+                    let prefix = addr.prefix.min(128);
+                    if prefix == 0 { continue; } // never emit ::/0
+                    let mask: u128 = if prefix == 128 { u128::MAX }
+                        else { u128::MAX.checked_shl(128 - prefix).unwrap_or(0) };
+                    let net_ip = std::net::Ipv6Addr::from(u128::from(ip) & mask);
+                    out.insert(format!("{}/{}", net_ip, prefix));
+                }
+                _ => {}
+            }
         }
     }
     out.into_iter().collect()

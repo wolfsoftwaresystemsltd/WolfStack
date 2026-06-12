@@ -65,7 +65,7 @@ impl PveClient {
     pub fn new(address: &str, port: u16, token: &str, fingerprint: Option<&str>, node_name: &str) -> Self {
         // Cheap Arc clone of the shared pool — see PVE_CLIENT.
         Self {
-            base_url: format!("https://{}:{}", address, port),
+            base_url: format!("https://{}:{}", crate::netaddr::bracket_host(address), port),
             token: token.to_string(),
             fingerprint: fingerprint.map(|s| s.to_string()),
             node_name: node_name.to_string(),

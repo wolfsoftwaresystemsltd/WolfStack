@@ -109,8 +109,9 @@ pub fn leave_is_service_active() -> Option<bool> {
 /// Check if an address is on a private/local network (RFC1918 + loopback + link-local)
 /// This is used to restrict gossip auto-discovery to local networks only.
 fn is_private_address(addr: &str) -> bool {
-    // Parse as IP address
-    if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+    // Parse as IP address. to_canonical: judge a mapped ::ffff:a.b.c.d
+    // by its real v4 identity (dual-stack [::] listeners report those).
+    if let Ok(ip) = addr.parse::<std::net::IpAddr>().map(|a| a.to_canonical()) {
         match ip {
             std::net::IpAddr::V4(v4) => {
                 v4.is_private()       // 10.x, 172.16-31.x, 192.168.x
@@ -118,7 +119,12 @@ fn is_private_address(addr: &str) -> bool {
                 || v4.is_link_local() // 169.254.x
             }
             std::net::IpAddr::V6(v6) => {
-                v6.is_loopback()      // ::1
+                v6.is_loopback()                          // ::1
+                // RFC 4193 ULA fc00::/7 — the v6 analogue of RFC1918
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // RFC 4291 link-local fe80::/10 — private but unusable
+                // as an advertised address; is_usable_addr rejects it
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
             }
         }
     } else {
@@ -135,15 +141,49 @@ fn is_private_address(addr: &str) -> bool {
 /// real address from the source IP of its inbound pushes instead (GitHub: the
 /// hub "main" was missing from every other node because its self-entry's
 /// 0.0.0.0 failed is_private_address).
+///
+/// IPv6 link-local (fe80::/10) is also unusable as a STORED address: it is
+/// only reachable with a zone/scope id ("fe80::1%eth0") which is meaningless
+/// on any other host, and a v6 peer connecting from link-local would
+/// otherwise be "learned" under an address nobody can dial back.
 pub fn is_usable_addr(addr: &str) -> bool {
     let a = addr.trim();
-    !a.is_empty()
-        && a != "0.0.0.0"
-        && a != "::"
-        && a != "[::]"
-        && a != "0.0.0.0/0"
-        && !a.starts_with("0.0.0.0:")
-        && !a.starts_with("[::]:")
+    if a.is_empty()
+        || a == "0.0.0.0"
+        || a == "::"
+        || a == "[::]"
+        || a == "0.0.0.0/0"
+        || a.starts_with("0.0.0.0:")
+        || a.starts_with("[::]:")
+    {
+        return false;
+    }
+    // Reject v6 link-local in every spelling we can see: bare, bracketed,
+    // and zone-scoped (the %zone suffix fails Ipv6Addr parsing, so match
+    // on the prefix for that form). Also reject IPv4-mapped forms
+    // (::ffff:a.b.c.d): they are dual-stack socket artifacts, dialable
+    // only from the host that saw them — learn sites canonicalize to
+    // plain v4 BEFORE storing, so a mapped string reaching here is junk
+    // that would otherwise become an undialable [::ffff:…] URL.
+    let bare = a.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(a);
+    if let Ok(v6) = bare.parse::<std::net::Ipv6Addr>()
+        && ((v6.segments()[0] & 0xffc0) == 0xfe80 || v6.to_ipv4_mapped().is_some())
+    {
+        return false;
+    }
+    let lower = bare.to_ascii_lowercase();
+    if lower.starts_with("fe8") || lower.starts_with("fe9")
+        || lower.starts_with("fea") || lower.starts_with("feb")
+    {
+        // Zone-scoped fallback ONLY: fe80::/10 spans fe80..febf, and a
+        // "%zone" suffix makes the Ipv6Addr parse above fail, so those
+        // forms are caught here by prefix. Require a colon so a hostname
+        // like "fe8-server.lan" is never rejected.
+        if lower.contains(':') {
+            return false;
+        }
+    }
+    true
 }
 
 /// Track consecutive poll failures per node — only mark offline after 2+ failures
@@ -1732,8 +1772,11 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // peer. The WolfNet HTTP overlay step is also
                             // a TLS peer (the peer binds the second
                             // listener only because it's self-signed).
+                            // Must build the comparison prefix the same way
+                            // build_node_urls does (bracketed v6) or the
+                            // legacy-plaintext match never fires for v6 peers.
                             let node_tls = url.starts_with("https://")
-                                || !url.starts_with(&format!("http://{}:{}/", node.address, node.port));
+                                || !url.starts_with(&format!("http://{}:{}/", crate::netaddr::bracket_host(&node.address), node.port));
                             // Capture fresh hostname + public_ip BEFORE the move into
                             // update_remote so we can pass them to the wolfnet endpoint
                             // reconciler below without re-locking cluster state.
@@ -2362,8 +2405,21 @@ mod convergence_tests {
         assert!(!is_usable_addr("0.0.0.0:8553"));
         assert!(!is_usable_addr("::"));
         assert!(!is_usable_addr("[::]"));
+        assert!(!is_usable_addr("[::]:8553"));
         assert!(!is_usable_addr(""));
         assert!(!is_usable_addr("   "));
+        // IPv6 link-local needs a zone id to be reachable — it must never
+        // be stored as a peer's address, in any spelling.
+        assert!(!is_usable_addr("fe80::1"));
+        assert!(!is_usable_addr("[fe80::1]"));
+        assert!(!is_usable_addr("fe80::1%eth0"));
+        assert!(!is_usable_addr("FE80::dead:beef"));
+        assert!(!is_usable_addr("febf::1")); // top of fe80::/10
+        // IPv4-mapped forms are dual-stack socket artifacts, never a
+        // dialable peer address — learn sites canonicalize to plain v4
+        // before storage; raw mapped strings must be refused.
+        assert!(!is_usable_addr("::ffff:192.168.1.5"));
+        assert!(!is_usable_addr("[::ffff:10.0.0.7]"));
     }
 
     #[test]
@@ -2371,6 +2427,12 @@ mod convergence_tests {
         assert!(is_usable_addr("192.168.5.10"));
         assert!(is_usable_addr("10.2.0.153"));
         assert!(is_usable_addr("nas.lan"));
+        // Routable IPv6 — ULA and global — is a real address.
+        assert!(is_usable_addr("fd00:10:100::7"));
+        assert!(is_usable_addr("2001:db8::1"));
+        assert!(is_usable_addr("fec0::1")); // deprecated site-local is NOT fe80::/10
+        // Hostname that merely starts with "fe8" must not be rejected.
+        assert!(is_usable_addr("fe8-server.lan"));
     }
 
     #[test]
@@ -2381,6 +2443,18 @@ mod convergence_tests {
         assert!(is_private_address("nas.lan"));       // hostname → treated local
         assert!(!is_private_address("8.8.8.8"));      // public → not auto-added
         assert!(!is_private_address("0.0.0.0"));       // wildcard → not private
+        // IPv6: loopback + ULA (fc00::/7) + link-local are private/local;
+        // global unicast is public and must not be gossip-auto-added.
+        assert!(is_private_address("::1"));
+        assert!(is_private_address("fd00:10:100::7")); // ULA fd00::/8
+        assert!(is_private_address("fc00::1"));        // ULA fc00::/8
+        assert!(is_private_address("fe80::1"));        // link-local
+        assert!(!is_private_address("2001:db8::1"));   // global → not private
+        assert!(!is_private_address("2606:4700::1111")); // global → not private
+        // Mapped v4 is judged by its REAL v4 identity (dual-stack [::]
+        // listeners report v4 peers this way).
+        assert!(is_private_address("::ffff:192.168.1.5"));
+        assert!(!is_private_address("::ffff:8.8.8.8"));
     }
 
     #[test]

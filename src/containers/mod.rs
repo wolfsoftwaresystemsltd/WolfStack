@@ -1367,8 +1367,9 @@ pub async fn sync_wolfnet_peer_routes() {
             None => continue,
         };
 
-        // Extract hostname from endpoint (e.g., "cynthia.wolfterritories.org:9600" → "cynthia.wolfterritories.org")
-        let hostname = endpoint.split(':').next().unwrap_or(&endpoint);
+        // Extract hostname from endpoint (e.g., "cynthia.wolfterritories.org:9600" → "cynthia.wolfterritories.org");
+        // port-aware so a bare/bracketed IPv6 endpoint isn't truncated at its first group.
+        let hostname = crate::netaddr::strip_port(&endpoint);
 
         // Pull the peer's ACTIVE WolfNet IPs (running workloads only) for
         // routing — a stopped container must not attract traffic to a node
@@ -1378,7 +1379,7 @@ pub async fn sync_wolfnet_peer_routes() {
         'byname: for path in &["/api/wolfnet/active-ips", "/api/wolfnet/used-ips"] {
             for port in &[8553, 8552] {
                 for scheme in &["https", "http"] {
-                    let url = format!("{}://{}:{}{}", scheme, hostname, port, path);
+                    let url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(hostname), port, path);
                     if let Ok(resp) = client.get(&url)
                         .header("X-WolfStack-Secret", &cluster_secret)
                         .send().await {

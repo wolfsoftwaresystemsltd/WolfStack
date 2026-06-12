@@ -619,7 +619,10 @@ impl LoginLockoutConfig {
     /// typos in the file shouldn't lock them out).
     pub fn is_trusted(&self, ip: &str) -> bool {
         let target: std::net::IpAddr = match ip.parse() {
-            Ok(a) => a,
+            // to_canonical: an IPv4-mapped v6 form (::ffff:a.b.c.d, from a
+            // dual-stack [::] listener) must match the operator's v4
+            // trusted entries — ip_in_cidr is family-exact by design.
+            Ok(a) => std::net::IpAddr::to_canonical(&a),
             Err(_) => return false,
         };
         for entry in &self.trusted_ips {
@@ -1237,20 +1240,25 @@ pub fn recent_protected_block_events() -> Vec<ProtectedBlockEvent> {
 // cluster-node IPs are exempt. A genuinely-compromised container is stopped /
 // quarantined, never blanket FORWARD-DROP'd (which is over-broad). CIDR-based
 // because container IPs are dynamic; refreshed every ~10s in main.rs.
-static PROTECTED_WORKLOAD_SUBNETS: std::sync::OnceLock<RwLock<Vec<(std::net::Ipv4Addr, u8)>>> =
+static PROTECTED_WORKLOAD_SUBNETS: std::sync::OnceLock<RwLock<Vec<(std::net::IpAddr, u8)>>> =
     std::sync::OnceLock::new();
 
-fn protected_workload_subnets() -> &'static RwLock<Vec<(std::net::Ipv4Addr, u8)>> {
+fn protected_workload_subnets() -> &'static RwLock<Vec<(std::net::IpAddr, u8)>> {
     PROTECTED_WORKLOAD_SUBNETS.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-/// Parse an IPv4 CIDR "a.b.c.d/prefix" into (network, prefix). None on garbage,
-/// a missing prefix, or a /0 — we must never whitelist the entire internet.
-fn parse_workload_cidr(cidr: &str) -> Option<(std::net::Ipv4Addr, u8)> {
+/// Parse a CIDR (v4 "a.b.c.d/prefix" or v6 "fd00::/64") into (network,
+/// prefix). None on garbage, a missing prefix, or a /0 in either family —
+/// we must never whitelist the entire internet.
+fn parse_workload_cidr(cidr: &str) -> Option<(std::net::IpAddr, u8)> {
     let (ip_s, pfx_s) = cidr.split_once('/')?;
-    let ip: std::net::Ipv4Addr = ip_s.trim().parse().ok()?;
+    let ip: std::net::IpAddr = ip_s.trim().parse().ok()?;
     let prefix: u8 = pfx_s.trim().parse().ok()?;
-    if prefix == 0 || prefix > 32 { return None; }
+    let max = match ip {
+        std::net::IpAddr::V4(_) => 32,
+        std::net::IpAddr::V6(_) => 128,
+    };
+    if prefix == 0 || prefix > max { return None; }
     Some((ip, prefix))
 }
 
@@ -1261,7 +1269,7 @@ fn parse_workload_cidr(cidr: &str) -> Option<(std::net::Ipv4Addr, u8)> {
 /// a bridge that appears after startup (Docker starting late, a new compose
 /// network) heals any stale kernel rule for its subnet.
 pub fn set_protected_workload_subnets(cidrs: Vec<String>) -> bool {
-    let mut parsed: Vec<(std::net::Ipv4Addr, u8)> =
+    let mut parsed: Vec<(std::net::IpAddr, u8)> =
         cidrs.iter().filter_map(|c| parse_workload_cidr(c)).collect();
     parsed.sort_unstable();
     if let Ok(mut g) = protected_workload_subnets().write() {
@@ -1275,40 +1283,43 @@ pub fn set_protected_workload_subnets(cidrs: Vec<String>) -> bool {
     }
 }
 
-/// True if `ip` falls inside a protected workload subnet.
-pub fn is_protected_workload_ip(ip: std::net::Ipv4Addr) -> bool {
+/// True if `ip` falls inside a protected workload subnet. Family-matched:
+/// a v4 address only matches v4 subnets and a v6 address only v6 subnets
+/// (ip_in_cidr returns false on a family mismatch).
+pub fn is_protected_workload_ip(ip: std::net::IpAddr) -> bool {
     let g = match protected_workload_subnets().read() {
         Ok(g) => g,
         Err(_) => return false,
     };
-    let ip_u = u32::from(ip);
-    g.iter().any(|&(net, prefix)| {
-        // prefix is 1..=32 (parse_workload_cidr rejects 0 and >32), shift is safe.
-        let mask = u32::MAX << (32 - prefix as u32);
-        (ip_u & mask) == (u32::from(net) & mask)
-    })
+    g.iter().any(|(net, prefix)| ip_in_cidr(&ip, net, *prefix))
 }
 
 /// True if `ip` (string form) is a WolfStack-managed address that must never
-/// be kernel-blocked: a cluster-node IP or an IPv4 inside a local container/
-/// workload bridge subnet. Single predicate shared by every block path
-/// (`kernel_block_ip`, the persisted-lockout restore, the C2 remediation)
-/// so the guards can't drift apart.
+/// be kernel-blocked: a cluster-node IP or an address (v4 or v6) inside a
+/// local container/workload bridge subnet. Single predicate shared by every
+/// block path (`kernel_block_ip`, the persisted-lockout restore, the C2
+/// remediation) so the guards can't drift apart.
 pub fn is_protected_address(ip: &str) -> bool {
-    if is_protected_node_ip(ip) {
+    // canonical_ip_str: a mapped ::ffff:a.b.c.d spelling of a protected v4
+    // address (cluster node or container) must hit the same guard — the
+    // node-IP set stores plain v4 strings and the workload match is
+    // family-exact.
+    let ip = crate::netaddr::canonical_ip_str(ip);
+    if is_protected_node_ip(&ip) {
         return true;
     }
     matches!(
         ip.parse::<std::net::IpAddr>(),
-        Ok(std::net::IpAddr::V4(v4)) if is_protected_workload_ip(v4)
+        Ok(addr) if is_protected_workload_ip(addr)
     )
 }
 
-/// Parse one `iptables -S <chain>` line of the EXACT shape WolfStack's
-/// `insert_drop_rule` writes — `-A <chain> -s <ip>/32 -j DROP` — and return
-/// the bare IP. Anything else (extra matches, a CIDR wider than /32, a
-/// different target) returns None so the sweep can never touch a rule the
-/// operator wrote by hand with comments/ports/REJECT targets.
+/// Parse one `iptables -S <chain>` / `ip6tables -S <chain>` line of the
+/// EXACT shape WolfStack's `insert_drop_rule` writes — `-A <chain> -s
+/// <ip>/32 -j DROP` (v6: `<ip>/128`) — and return the bare IP. Anything
+/// else (extra matches, a CIDR wider than a single host, a different
+/// target) returns None so the sweep can never touch a rule the operator
+/// wrote by hand with comments/ports/REJECT targets.
 fn parse_wolfstack_drop_rule(line: &str, chain: &str) -> Option<String> {
     // Chained strip_prefix instead of a format!() so a sweep over a
     // thousands-entry chain doesn't allocate per line.
@@ -1320,44 +1331,56 @@ fn parse_wolfstack_drop_rule(line: &str, chain: &str) -> Option<String> {
     if tail.trim() != "-j DROP" {
         return None;
     }
-    // iptables -S prints a plain `-s 1.2.3.4` back as `1.2.3.4/32`; accept
-    // both. A wider prefix (`/8` etc.) fails the Ipv4Addr parse below.
-    let ip = cidr.strip_suffix("/32").unwrap_or(cidr);
-    ip.parse::<std::net::Ipv4Addr>().ok()?;
+    // iptables -S echoes a plain `-s 1.2.3.4` as `1.2.3.4/32` (ip6tables:
+    // `<addr>/128`); accept the bare form defensively. Only a FULL-HOST
+    // prefix for the address's own family passes — anything wider is an
+    // operator rule the sweep must never touch.
+    let (ip_part, pfx) = match cidr.split_once('/') {
+        Some((i, p)) => (i, Some(p)),
+        None => (cidr, None),
+    };
+    let ip: std::net::IpAddr = ip_part.parse().ok()?;
+    match (ip, pfx) {
+        (std::net::IpAddr::V4(_), None | Some("32")) => {}
+        (std::net::IpAddr::V6(_), None | Some("128")) => {}
+        _ => return None,
+    }
     Some(ip.to_string())
 }
 
-/// Remove stale WolfStack-shaped kernel DROP rules (`-s <ip>/32 -j DROP` in
-/// INPUT/FORWARD) whose IP is now a protected address. Heals rules written
-/// by versions before the protected-address guard existed (klasSponsor's
-/// compose containers, 2026-06-08): kernel rules survive a WolfStack restart,
-/// so the guard alone never cleaned them up. IPv4 only — workload subnets
-/// are IPv4, and stale v6 node-IP rules are healed by the per-IP
-/// `kernel_unblock_ip` pass when a node IP first becomes protected.
-/// Sync subprocess calls — run from spawn_blocking or startup.
+/// Remove stale WolfStack-shaped kernel DROP rules (`-s <ip>/32 -j DROP`,
+/// v6 `/128`, in INPUT/FORWARD) whose IP is now a protected address. Heals
+/// rules written by versions before the protected-address guard existed
+/// (klasSponsor's compose containers, 2026-06-08): kernel rules survive a
+/// WolfStack restart, so the guard alone never cleaned them up. Sweeps
+/// both iptables and ip6tables — a v6-enabled container that tripped the
+/// auto-block needs the same healing as a v4 one. Sync subprocess calls —
+/// run from spawn_blocking or startup.
 pub fn sweep_protected_drop_rules() {
-    for chain in ["INPUT", "FORWARD"] {
-        let out = match std::process::Command::new("iptables").args(["-S", chain]).output() {
-            Ok(o) if o.status.success() => o,
-            _ => continue, // iptables missing — nothing to heal
-        };
-        let mut healed: Vec<String> = Vec::new();
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let Some(ip) = parse_wolfstack_drop_rule(line, chain) else { continue };
-            if !is_protected_address(&ip) || healed.contains(&ip) {
-                continue;
+    for cmd in ["iptables", "ip6tables"] {
+        for chain in ["INPUT", "FORWARD"] {
+            let out = match std::process::Command::new(cmd).args(["-S", chain]).output() {
+                Ok(o) if o.status.success() => o,
+                _ => continue, // binary missing — nothing to heal in this table
+            };
+            let mut healed: Vec<String> = Vec::new();
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let Some(ip) = parse_wolfstack_drop_rule(line, chain) else { continue };
+                if !is_protected_address(&ip) || healed.contains(&ip) {
+                    continue;
+                }
+                // Loop-until-gone (duplicate inserts can accumulate across old
+                // versions/restarts) — same approach kernel_unblock_ip uses.
+                remove_drop_rule(cmd, chain, &ip);
+                healed.push(ip);
             }
-            // Loop-until-gone (duplicate inserts can accumulate across old
-            // versions/restarts) — same approach kernel_unblock_ip uses.
-            remove_drop_rule("iptables", chain, &ip);
-            healed.push(ip);
-        }
-        for ip in &healed {
-            tracing::warn!(
-                "auth: healed stale kernel-block of {} in {} — it is a \
-                 WolfStack-managed address (cluster node or local container bridge)",
-                ip, chain
-            );
+            for ip in &healed {
+                tracing::warn!(
+                    "auth: healed stale kernel-block of {} in {} ({}) — it is a \
+                     WolfStack-managed address (cluster node or local container bridge)",
+                    ip, chain, cmd
+                );
+            }
         }
     }
 }
@@ -1366,13 +1389,19 @@ pub fn sweep_protected_drop_rules() {
 /// iptables -C to check before adding. Silent when iptables is missing
 /// (the HTTP-level Forbidden fallback still applies).
 pub fn kernel_block_ip(ip: &str) {
-    let target: std::net::IpAddr = match ip.parse() {
-        Ok(a) => a,
+    // to_canonical: an IPv4-mapped form (::ffff:a.b.c.d, reported by a
+    // dual-stack [::] listener) is IPv4 ON THE WIRE — it must produce an
+    // iptables rule for a.b.c.d. Routing it to ip6tables would write a
+    // rule no packet ever matches and the attacker stays unblocked.
+    let target: std::net::IpAddr = match ip.parse::<std::net::IpAddr>() {
+        Ok(a) => a.to_canonical(),
         Err(_) => {
             tracing::warn!("auth: cannot kernel-block invalid IP '{}'", ip);
             return;
         }
     };
+    let canon = target.to_string();
+    let ip = canon.as_str();
     // Universal guard: never DROP a WolfStack-managed address. Every block path
     // (brute-force, scan, propagated) funnels through here, so this one check
     // covers them all — cluster-node IPs AND the host's own container/workload
@@ -1454,10 +1483,14 @@ fn insert_drop_rule(cmd: &str, chain: &str, ip: &str) {
 /// chains. Loops per chain while the rule exists (handles duplicate
 /// INSERTs that can accumulate across restarts).
 pub fn kernel_unblock_ip(ip: &str) {
-    let target: std::net::IpAddr = match ip.parse() {
-        Ok(a) => a,
+    // to_canonical: must mirror kernel_block_ip so a mapped spelling
+    // removes the same iptables rule the block wrote.
+    let target: std::net::IpAddr = match ip.parse::<std::net::IpAddr>() {
+        Ok(a) => a.to_canonical(),
         Err(_) => return,
     };
+    let canon = target.to_string();
+    let ip = canon.as_str();
     let cmd = match target {
         std::net::IpAddr::V4(_) => "iptables",
         std::net::IpAddr::V6(_) => "ip6tables",
@@ -1943,20 +1976,33 @@ mod protected_node_tests {
     fn workload_subnet_protection_matches_only_container_ranges() {
         // CIDRs exactly as collect_workload_subnets() returns them.
         set_protected_workload_subnets(vec![
-            "172.17.0.0/16".into(), // docker0
-            "10.0.3.0/24".into(),   // lxcbr0
-            "garbage".into(),       // dropped (unparseable)
-            "0.0.0.0/0".into(),     // dropped — must NEVER whitelist the whole internet
+            "172.17.0.0/16".into(),       // docker0
+            "10.0.3.0/24".into(),         // lxcbr0
+            "fd00:dead:beef::/48".into(), // docker0 fixed-cidr-v6 ULA
+            "garbage".into(),             // dropped (unparseable)
+            "0.0.0.0/0".into(),           // dropped — must NEVER whitelist the whole internet
+            "::/0".into(),                // dropped — v6 spelling of the same trap
         ]);
         // Container IPs inside the bridges are protected.
         assert!(is_protected_workload_ip("172.17.0.5".parse().unwrap()));
         assert!(is_protected_workload_ip("172.17.255.254".parse().unwrap()));
         assert!(is_protected_workload_ip("10.0.3.42".parse().unwrap()));
+        assert!(is_protected_workload_ip("fd00:dead:beef::42".parse().unwrap()));
         // Everything outside is NOT — including the adjacent /24, an unrelated
-        // LAN, and any public IP (the /0 was dropped, so this must be false).
+        // LAN, and any public IP (the /0s were dropped, so these must be false).
         assert!(!is_protected_workload_ip("10.0.4.1".parse().unwrap()));
         assert!(!is_protected_workload_ip("192.168.1.1".parse().unwrap()));
         assert!(!is_protected_workload_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_protected_workload_ip("fd00:dead:beee::1".parse().unwrap())); // adjacent /48
+        assert!(!is_protected_workload_ip("2001:db8::1".parse().unwrap()));       // public v6
+        // Family-matched: a v4 address must never match a v6 subnet's range
+        // representation or vice versa.
+        assert!(is_protected_address("fd00:dead:beef::7"));
+        assert!(!is_protected_address("2606:4700::1111"));
+        // The mapped spelling of a protected v4 container IP hits the same
+        // guard — dual-stack [::] listeners report v4 peers as ::ffff:….
+        assert!(is_protected_address("::ffff:172.17.0.5"));
+        assert!(!is_protected_address("::ffff:8.8.8.8"));
         // ── Change reporting (same test fn — the global is shared, and a
         // second parallel #[test] mutating it would race this one) ──
         // Reset, then: first real population is a change.
@@ -2014,7 +2060,18 @@ mod protected_node_tests {
         // Non -s rules and chain policy lines.
         assert_eq!(parse_wolfstack_drop_rule("-P INPUT ACCEPT", "INPUT"), None);
         assert_eq!(parse_wolfstack_drop_rule("-A INPUT -d 172.18.0.5/32 -j DROP", "INPUT"), None);
-        // IPv6 source never parses as Ipv4Addr.
-        assert_eq!(parse_wolfstack_drop_rule("-A INPUT -s fd00::1/128 -j DROP", "INPUT"), None);
+        // IPv6 — the shape ip6tables -S echoes for insert_drop_rule's output.
+        assert_eq!(
+            parse_wolfstack_drop_rule("-A INPUT -s fd00::1/128 -j DROP", "INPUT"),
+            Some("fd00::1".to_string())
+        );
+        assert_eq!(
+            parse_wolfstack_drop_rule("-A FORWARD -s 2001:db8::5 -j DROP", "FORWARD"),
+            Some("2001:db8::5".to_string())
+        );
+        // Cross-family prefixes and wider v6 CIDRs are operator rules.
+        assert_eq!(parse_wolfstack_drop_rule("-A INPUT -s fd00::1/32 -j DROP", "INPUT"), None);
+        assert_eq!(parse_wolfstack_drop_rule("-A INPUT -s fd00::/64 -j DROP", "INPUT"), None);
+        assert_eq!(parse_wolfstack_drop_rule("-A INPUT -s 172.18.0.5/128 -j DROP", "INPUT"), None);
     }
 }

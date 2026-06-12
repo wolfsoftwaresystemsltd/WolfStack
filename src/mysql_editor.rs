@@ -866,7 +866,7 @@ fn scan_wolfnet_mysql() -> Vec<(String, String)> {
         let handles: Vec<_> = ips_to_scan.iter().map(|ip| {
             let ip = ip.clone();
             s.spawn(move || {
-                let addr: SocketAddr = match format!("{}:3306", ip).parse() {
+                let addr: SocketAddr = match crate::netaddr::host_port(&ip, 3306).parse() {
                     Ok(a) => a,
                     Err(_) => return None,
                 };

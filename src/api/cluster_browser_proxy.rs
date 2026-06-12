@@ -106,10 +106,11 @@ async fn node_proxy_request(
     // Build target URL on remote node (same endpoint this handler provides)
     let query_string = req.query_string();
     let scheme = if node.tls { "https" } else { "http" };
+    let node_host = crate::netaddr::bracket_host(&node.address);
     let target = if query_string.is_empty() {
-        format!("{}://{}:{}/api/cluster-browser/session/{}/{}", scheme, node.address, node.port, session_id, tail)
+        format!("{}://{}:{}/api/cluster-browser/session/{}/{}", scheme, node_host, node.port, session_id, tail)
     } else {
-        format!("{}://{}:{}/api/cluster-browser/session/{}{}?{}", scheme, node.address, node.port, session_id, tail, query_string)
+        format!("{}://{}:{}/api/cluster-browser/session/{}{}?{}", scheme, node_host, node.port, session_id, tail, query_string)
     };
 
     // Build the request using the shared browser proxy client
@@ -230,6 +231,7 @@ async fn proxy_http(
     tail: String,
 ) -> Result<HttpResponse, Error> {
     let query = req.query_string();
+    let host = crate::netaddr::bracket_host(host);
     let target = if query.is_empty() {
         format!("http://{}:{}/{}", host, port, tail)
     } else {
@@ -292,6 +294,7 @@ async fn proxy_websocket(
     tail: String,
 ) -> Result<HttpResponse, Error> {
     let query = req.query_string();
+    let host = crate::netaddr::bracket_host(host);
     let upstream_url = if query.is_empty() {
         format!("ws://{}:{}/{}", host, port, tail)
     } else {

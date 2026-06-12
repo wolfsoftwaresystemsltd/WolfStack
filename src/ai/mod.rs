@@ -1587,7 +1587,7 @@ impl AiAgent {
                                     rp.public_base_url
                                 } else {
                                     let port = crate::ports::PortConfig::load().api;
-                                    format!("https://{}:{}", hostname, port)
+                                    format!("https://{}:{}", crate::netaddr::bracket_host(&hostname), port)
                                 }
                             };
                             let mut b = String::from("\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");

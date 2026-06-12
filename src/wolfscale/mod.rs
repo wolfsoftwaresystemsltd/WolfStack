@@ -430,7 +430,7 @@ async fn node_status(n: &WolfScaleNode, api_port: u16) -> NodeStatus {
         has_quorum: false,
         lag: 0,
     };
-    let url = format!("http://{}:{}/status", n.address, api_port);
+    let url = format!("http://{}:{}/status", crate::netaddr::bracket_host(&n.address), api_port);
     match crate::api::API_HTTP_CLIENT.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
@@ -879,7 +879,7 @@ pub async fn node_admin(cluster: &WolfScaleCluster, container: &str, action: &st
     }
     let n = cluster.nodes.iter().find(|n| n.container == container)
         .ok_or_else(|| format!("'{}' is not a node of this cluster", container))?;
-    let url = format!("http://{}:{}/admin/{}", n.address, cluster.api_port, action);
+    let url = format!("http://{}:{}/admin/{}", crate::netaddr::bracket_host(&n.address), cluster.api_port, action);
     match crate::api::API_HTTP_CLIENT.post(&url).timeout(std::time::Duration::from_secs(10)).send().await {
         Ok(resp) if resp.status().is_success() => Ok(format!("{} ok", action)),
         Ok(resp) => Err(format!("HTTP {}", resp.status())),

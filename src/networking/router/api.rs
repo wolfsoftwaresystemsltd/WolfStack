@@ -2426,7 +2426,10 @@ pub async fn apply_rules_now(req: HttpRequest, state: S) -> HttpResponse {
     // would flag spurious concerns (the attacker's claimed IP) instead
     // of the real one. False positive, not an exploit path.
     let peer_ip = {
-        let raw = req.peer_addr().map(|a| a.ip().to_string());
+        // to_canonical: dual-stack [::] reports v4 peers (and proxied
+        // loopback) as ::ffff:a.b.c.d — the loopback match and the v4
+        // CIDR comparison in the analyser both need the plain v4 form.
+        let raw = req.peer_addr().map(|a| a.ip().to_canonical().to_string());
         let is_loopback = matches!(raw.as_deref(), Some("127.0.0.1") | Some("::1"));
         if is_loopback {
             req.headers().get("x-forwarded-for")
@@ -2453,7 +2456,7 @@ pub async fn apply_rules_now(req: HttpRequest, state: S) -> HttpResponse {
     // right identity. Harmless to add even when there are no other
     // concerns: if the list is empty we don't emit this.
     if !concerns.is_empty() {
-        if let Some("127.0.0.1") | Some("::1") = req.peer_addr().map(|a| a.ip().to_string()).as_deref() {
+        if let Some("127.0.0.1") | Some("::1") = req.peer_addr().map(|a| a.ip().to_canonical().to_string()).as_deref() {
             concerns.push(format!(
                 "(note: your TCP peer is loopback — evaluated against X-Forwarded-For = {}. \
                  If you run a reverse proxy, verify the right admin IP was checked.)",

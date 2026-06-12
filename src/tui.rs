@@ -192,8 +192,10 @@ pub async fn tui_login_submit(
     let username = form.get("username").cloned().unwrap_or_default();
     let password = form.get("password").cloned().unwrap_or_default();
 
-    // Rate limiting
-    let client_ip = req.connection_info().peer_addr().unwrap_or("unknown").to_string();
+    // Rate limiting. canonical_ip_str: a dual-stack [::] listener reports
+    // v4 clients as ::ffff:a.b.c.d — same lockout bucket as the main login.
+    let client_ip = crate::netaddr::canonical_ip_str(
+        req.connection_info().peer_addr().unwrap_or("unknown")).into_owned();
     if state.login_limiter.is_locked_out(&client_ip) {
         return HttpResponse::Ok().content_type("text/html").body(
             "<html><body style=\"font-family:monospace;background:#181a20;color:#e74c3c;padding:40px;\"><h1>Too many attempts</h1><p>Please try again later.</p><p><a href=\"/tui/login\" style=\"color:#ef4444;\">Back to login</a></p></body></html>"

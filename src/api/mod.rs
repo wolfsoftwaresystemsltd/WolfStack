@@ -76,11 +76,16 @@ async fn drain_response(resp: reqwest::Response) {
 /// Check if an address is blocked for SSRF prevention (loopback, link-local, localhost)
 fn is_ssrf_blocked_address(addr: &str) -> bool {
     use std::net::IpAddr;
+    // URL hosts carry IPv6 literals in brackets — strip them so the
+    // parse below sees the bare address ("[::1]" must not slip past).
+    let bare = addr.strip_prefix('[').and_then(|a| a.strip_suffix(']')).unwrap_or(addr);
     // Only block if it parses as a bare IP — hostnames are legitimate
-    if let Ok(ip) = addr.parse::<IpAddr>() {
+    if let Ok(ip) = bare.parse::<IpAddr>() {
         return ip.is_loopback()
             || matches!(ip, IpAddr::V4(a) if a.octets()[0] == 169 && a.octets()[1] == 254)
-            || matches!(ip, IpAddr::V6(a) if a.is_loopback());
+            // RFC 4291: fe80::/10 is IPv6 link-local — same class of
+            // target as v4 169.254.0.0/16 above.
+            || matches!(ip, IpAddr::V6(a) if (a.segments()[0] & 0xffc0) == 0xfe80);
     }
     // Reject "localhost" by name too
     addr.eq_ignore_ascii_case("localhost")
@@ -131,12 +136,16 @@ pub fn lookup_node_wolfnet_ip(address: &str) -> Option<String> {
 /// HTTPS-with-cert-bypass on the main port reaches every TLS peer including
 /// those still on a self-signed cert.
 pub fn build_node_urls(address: &str, port: u16, path: &str) -> Vec<String> {
+    // Bracket bare IPv6 literals — node addresses are stored bare; a raw
+    // v6 literal in `host:port` makes the port colon ambiguous. v4 and
+    // hostnames pass through unchanged. WolfNet IPs are v4 by design.
+    let host = crate::netaddr::bracket_host(address);
     let mut urls = Vec::with_capacity(3);
-    urls.push(format!("https://{}:{}{}", address, port, path));
+    urls.push(format!("https://{}:{}{}", host, port, path));
     if let Some(wn) = lookup_node_wolfnet_ip(address) {
         urls.push(format!("http://{}:{}{}", wn, port + 1, path));
     }
-    urls.push(format!("http://{}:{}{}", address, port, path));
+    urls.push(format!("http://{}:{}{}", host, port, path));
     urls
 }
 
@@ -153,18 +162,28 @@ pub fn build_external_urls(target_url: &str, path: &str) -> Vec<String> {
         format!("https://{}", trimmed)
     };
 
-    // Extract host from URL (scheme://host:port/path → host)
+    // Extract host from URL (scheme://host:port/path → host). A
+    // bracketed IPv6 host ("[2001:db8::1]:8553") splits on the colon
+    // AFTER the closing bracket. A bare IPv6 literal must NOT split at
+    // all — its last group usually parses as a u16 ("::1" → port 1,
+    // host ":"), which both mangles the host and slips it past the
+    // SSRF guard below. Unbracketed-colon-in-head = bare v6 literal.
     let after_scheme = &with_scheme[with_scheme.find("://").unwrap() + 3..];
     let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
     let (host, user_port) = match host_port.rfind(':') {
-        Some(pos) => {
-            let port_str = &host_port[pos + 1..];
-            match port_str.parse::<u16>() {
-                Ok(port) => (&host_port[..pos], Some(port)),
-                Err(_) => (host_port, None),
+        Some(pos) if !host_port[pos..].contains(']') => {
+            let head = &host_port[..pos];
+            if head.contains(':') && !head.ends_with(']') {
+                (host_port, None)
+            } else {
+                let port_str = &host_port[pos + 1..];
+                match port_str.parse::<u16>() {
+                    Ok(port) => (head, Some(port)),
+                    Err(_) => (host_port, None),
+                }
             }
         }
-        None => (host_port, None),
+        _ => (host_port, None),
     };
 
     // SSRF prevention: block loopback and link-local addresses
@@ -188,7 +207,7 @@ pub fn build_external_urls(target_url: &str, path: &str) -> Vec<String> {
     // pass an explicit `http://host:port` URL — that's why we try the
     // user-supplied URL first above.
     if user_port != Some(8553) {
-        urls.push(format!("https://{}:8553{}", host, path));
+        urls.push(format!("https://{}:8553{}", crate::netaddr::bracket_host(host), path));
     }
 
     urls
@@ -411,7 +430,9 @@ pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
             });
 
         if let Some(raw_key) = api_key_value {
-            let ip = req.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+            // to_canonical: a dual-stack [::] listener reports v4 clients
+            // as ::ffff:a.b.c.d — the key's IP allowlist stores plain v4.
+            let ip = req.peer_addr().map(|a| a.ip().to_canonical().to_string()).unwrap_or_default();
             match crate::compat::validate_key(&raw_key, Some(&ip)) {
                 Some(key) => {
                     let method = req.method().as_str();
@@ -497,7 +518,11 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     // (otherwise every connection from the same client gets its own
     // bucket because the source port changes).
     let raw_ip = req.connection_info().peer_addr().unwrap_or("unknown").to_string();
-    let client_ip = strip_port(&raw_ip);
+    // canonical_ip_str: a dual-stack [::] listener reports v4 clients as
+    // ::ffff:a.b.c.d — without this the lockout bucket keys the mapped
+    // form and kernel_block_ip would write a (no-op) ip6tables rule for
+    // what is really IPv4-wire traffic.
+    let client_ip = crate::netaddr::canonical_ip_str(&strip_port(&raw_ip)).into_owned();
     if state.login_limiter.is_locked_out(&client_ip) {
         state.login_limiter.audit_blocked(&client_ip, &body.username);
         return HttpResponse::Forbidden().json(serde_json::json!({
@@ -1124,21 +1149,11 @@ pub async fn security_auth_unblock_peer(
 /// Strip the trailing `:port` from a `peer_addr()` string. Actix
 /// returns `1.2.3.4:56789` (or `[::1]:56789` for v6) — we want the
 /// bare IP for the rate limiter so all connections from one client
-/// share a bucket.
+/// share a bucket. Delegates to netaddr::strip_port, which also keeps
+/// a bare (portless) IPv6 literal intact instead of eating its last
+/// group as a "port".
 fn strip_port(addr: &str) -> String {
-    if let Some(stripped) = addr.strip_prefix('[') {
-        if let Some(end) = stripped.find(']') {
-            return stripped[..end].to_string();
-        }
-    }
-    if let Some(idx) = addr.rfind(':') {
-        // Only strip if everything after `:` is digits (a port).
-        let port_part = &addr[idx + 1..];
-        if !port_part.is_empty() && port_part.chars().all(|c| c.is_ascii_digit()) {
-            return addr[..idx].to_string();
-        }
-    }
-    addr.to_string()
+    crate::netaddr::strip_port(addr).to_string()
 }
 
 /// GET /api/settings/login-disabled — check if direct login is disabled (no auth needed)
@@ -1369,7 +1384,9 @@ pub async fn passkey_login_start(req: HttpRequest, state: web::Data<AppState>) -
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "No passkeys registered on this server" }));
     }
     // Check rate limit on this IP — same budget as the password login.
-    let client_ip = req.connection_info().peer_addr().unwrap_or("unknown").to_string();
+    // canonical_ip_str: see login() — dual-stack [::] reports mapped v4.
+    let client_ip = crate::netaddr::canonical_ip_str(
+        req.connection_info().peer_addr().unwrap_or("unknown")).into_owned();
     if state.login_limiter.is_locked_out(&client_ip) {
         return HttpResponse::TooManyRequests().json(serde_json::json!({
             "error": "Too many failed login attempts. Please try again later."
@@ -1396,7 +1413,9 @@ pub struct PasskeyLoginFinishRequest {
 /// POST /api/auth/passkey/login/finish — verify the assertion, create a session, set cookie.
 /// Anonymous endpoint.
 pub async fn passkey_login_finish(req: HttpRequest, state: web::Data<AppState>, body: web::Json<PasskeyLoginFinishRequest>) -> HttpResponse {
-    let client_ip = req.connection_info().peer_addr().unwrap_or("unknown").to_string();
+    // canonical_ip_str: see login() — dual-stack [::] reports mapped v4.
+    let client_ip = crate::netaddr::canonical_ip_str(
+        req.connection_info().peer_addr().unwrap_or("unknown")).into_owned();
     if state.login_limiter.is_locked_out(&client_ip) {
         return HttpResponse::TooManyRequests().json(serde_json::json!({
             "error": "Too many failed login attempts. Please try again later."
@@ -1488,12 +1507,16 @@ pub async fn passkey_delete(req: HttpRequest, state: web::Data<AppState>, path: 
 /// transient exemption so an admin can't accidentally lock themselves out
 /// of their own dashboard if their public IP appears on a feed.
 fn ti_request_client_ip(req: &HttpRequest) -> Vec<String> {
-    let raw = req.connection_info().peer_addr().unwrap_or("").to_string();
-    // peer_addr is "ip:port" — strip the port for the safe-filter compare.
-    let ip = match raw.rsplit_once(':') {
-        Some((host, _)) => host.to_string(),
-        None => raw,
-    };
+    // ConnectionInfo::peer_addr() is already the bare IP — actix builds
+    // it as `req.peer_addr.map(|addr| addr.ip().to_string())`
+    // (actix-web-4.13.0/src/info.rs:146). The old rsplit_once(':') here
+    // assumed "ip:port" and silently truncated IPv6 peers to
+    // "2001:db8:"-style garbage, so the safe-filter compare never
+    // matched a v6 client. canonical_ip_str: a dual-stack [::] listener
+    // reports v4 admins as ::ffff:a.b.c.d, which would miss the v4
+    // safe-filter entry.
+    let ip = crate::netaddr::canonical_ip_str(
+        req.connection_info().peer_addr().unwrap_or("")).into_owned();
     if ip.is_empty() { Vec::new() } else { vec![ip] }
 }
 
@@ -4040,7 +4063,10 @@ pub async fn cluster_control_plane_receive(
     // a direct, cluster-secret-authed node→node call; trusting a client header
     // for the source IP would let a peer spoof another node's address. Inter-
     // node traffic is not reverse-proxied.
-    let sender_addr = req.peer_addr().map(|a| a.ip().to_string());
+    // to_canonical: a dual-stack [::] listener reports a v4 peer as
+    // ::ffff:a.b.c.d — storing that as the node's learned address would
+    // produce undialable https://[::ffff:a.b.c.d] URLs fleet-wide.
+    let sender_addr = req.peer_addr().map(|a| a.ip().to_canonical().to_string());
     let detail = crate::agent::apply_control_plane_bundle(&state.cluster, &body, sender_addr);
     HttpResponse::Ok().json(serde_json::json!({ "applied": true, "detail": detail }))
 }
@@ -8631,7 +8657,7 @@ pub async fn cluster_browser_start(
     // user's pinned URLs alongside the cluster-wide discovered list.
     let default_homepage = format!(
         "http://{}:{}/cluster-home?user={}",
-        homepage_host,
+        crate::netaddr::bracket_host(&homepage_host),
         homepage_port,
         urlencoding_simple(&user)
     );
@@ -8702,7 +8728,7 @@ pub async fn cluster_browser_start_stream(
     // user's pinned URLs alongside the cluster-wide discovered list.
     let default_homepage = format!(
         "http://{}:{}/cluster-home?user={}",
-        homepage_host,
+        crate::netaddr::bracket_host(&homepage_host),
         homepage_port,
         urlencoding_simple(&user)
     );
@@ -9022,7 +9048,9 @@ pub async fn announce_wolfnet_routes_to_peers(
                         None => continue,
                     };
                     // endpoint is "hostname:port" — extract hostname
-                    let hostname = endpoint.split(':').next().unwrap_or(endpoint);
+                    // (port-aware: a bare/bracketed IPv6 endpoint must not
+                    // be truncated at its first group)
+                    let hostname = crate::netaddr::strip_port(endpoint);
                     if hostname.is_empty() { continue; }
                     // Skip if we already pushed to this host via Path 1
                     if pushed_hosts.contains(hostname) { continue; }
@@ -9033,9 +9061,10 @@ pub async fn announce_wolfnet_routes_to_peers(
                     pushed_hosts.insert(hostname.to_string());
 
                     // Try HTTPS on default port, then HTTP, then via wolfnet IP
+                    let hostname_url = crate::netaddr::bracket_host(hostname);
                     let urls = vec![
-                        format!("https://{}:8553/api/wolfnet/routes/announce", hostname),
-                        format!("http://{}:8554/api/wolfnet/routes/announce", hostname),
+                        format!("https://{}:8553/api/wolfnet/routes/announce", hostname_url),
+                        format!("http://{}:8554/api/wolfnet/routes/announce", hostname_url),
                         format!("http://{}:8554/api/wolfnet/routes/announce", allowed_ip),
                     ];
                     for url in &urls {
@@ -11189,7 +11218,7 @@ pub async fn ai_save_config(
     let nodes = state.cluster.get_all_nodes();
     let client = API_HTTP_CLIENT.clone();
     for node in nodes.iter().filter(|n| !n.is_self && n.online) {
-        let url = format!("http://{}:{}/api/ai/config/sync", node.address, node.port);
+        let url = format!("http://{}:{}/api/ai/config/sync", crate::netaddr::bracket_host(&node.address), node.port);
         let secret = cluster_secret.clone();
         let cfg = config_json.clone();
         let c = client.clone();
@@ -19370,7 +19399,7 @@ async fn sync_mount_to_cluster(
     
     for node in &nodes {
         if node.is_self { continue; }
-        let url = format!("http://{}:{}/api/agent/storage/apply", node.address, node.port);
+        let url = format!("http://{}:{}/api/agent/storage/apply", crate::netaddr::bracket_host(&node.address), node.port);
         let client = API_HTTP_CLIENT.clone();
         match client.post(&url)
             .header("X-WolfStack-Secret", state.cluster_secret.clone())
@@ -23044,7 +23073,7 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
         "rke2" => 9345,
         _ => 6443,
     };
-    let api_url = format!("https://{}:{}", server_address, api_port);
+    let api_url = format!("https://{}:{}", crate::netaddr::bracket_host(&server_address), api_port);
     let cluster_id = format!("k8s-{}", cluster_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"));
     let kubeconfig_path = default_kubeconfig_path.to_string();
 
@@ -23287,7 +23316,7 @@ pub async fn k8s_prepare_provision(req: HttpRequest, state: web::Data<AppState>,
         "distribution": dist,
         "cluster_type": cluster_type.to_string(),
         "kubeconfig_path": kubeconfig_path,
-        "api_url": format!("https://{}:{}", server_address, api_port),
+        "api_url": format!("https://{}:{}", crate::netaddr::bracket_host(&server_address), api_port),
         "server_address": server_address,
         "server_node_id": body.server_node_id,
         "agent_node_ids": body.agent_node_ids,
@@ -36265,6 +36294,56 @@ mod compose_secrets_tests {
         assert!(is_injectable_secret_key("DB_PASSWORD"));
         assert!(is_injectable_secret_key("DB_PATH"));
         assert!(is_injectable_secret_key("docker_host_token"));
+    }
+}
+
+#[cfg(test)]
+mod external_url_tests {
+    use super::{build_external_urls, build_node_urls, is_ssrf_blocked_address};
+
+    #[test]
+    fn ssrf_guard_blocks_loopback_and_link_local_in_every_spelling() {
+        assert!(is_ssrf_blocked_address("127.0.0.1"));
+        assert!(is_ssrf_blocked_address("169.254.169.254"));
+        assert!(is_ssrf_blocked_address("localhost"));
+        assert!(is_ssrf_blocked_address("::1"));
+        assert!(is_ssrf_blocked_address("[::1]"));      // bracketed must not slip past
+        assert!(is_ssrf_blocked_address("fe80::1"));    // v6 link-local
+        assert!(is_ssrf_blocked_address("[fe80::1]"));
+        assert!(!is_ssrf_blocked_address("192.168.1.10"));
+        assert!(!is_ssrf_blocked_address("2001:db8::1"));
+        assert!(!is_ssrf_blocked_address("nas.lan"));
+    }
+
+    #[test]
+    fn external_urls_bare_v6_is_not_split_at_its_last_group() {
+        // Pre-fix: "https://::1" split host=":" port=1 — mangled AND past
+        // the SSRF guard. A bare v6 loopback must yield no URLs at all.
+        assert!(build_external_urls("::1", "/api/x").is_empty());
+        assert!(build_external_urls("https://::1", "/api/x").is_empty());
+        // A bare global v6 target survives intact, bracketed in the URL.
+        let urls = build_external_urls("2001:db8::1", "/api/x");
+        assert_eq!(urls, vec!["https://[2001:db8::1]:8553/api/x".to_string()]);
+        // Bracketed with explicit port: exact URL first, then 8553 retry.
+        let urls = build_external_urls("https://[2001:db8::1]:9000", "/api/x");
+        assert_eq!(urls[0], "https://[2001:db8::1]:9000/api/x");
+        assert_eq!(urls[1], "https://[2001:db8::1]:8553/api/x");
+        // v4 + hostname behavior unchanged.
+        let urls = build_external_urls("peer.lan", "/api/x");
+        assert_eq!(urls, vec!["https://peer.lan:8553/api/x".to_string()]);
+        let urls = build_external_urls("http://10.0.0.5:8554", "/api/x");
+        assert_eq!(urls[0], "http://10.0.0.5:8554/api/x");
+    }
+
+    #[test]
+    fn node_urls_bracket_bare_v6_only() {
+        let urls = build_node_urls("fd00:10::7", 8553, "/api/agent/status");
+        assert_eq!(urls[0], "https://[fd00:10::7]:8553/api/agent/status");
+        assert!(urls.last().unwrap().starts_with("http://[fd00:10::7]:8553"));
+        // v4 output is byte-identical to the pre-IPv6 builder.
+        let urls = build_node_urls("192.168.1.7", 8553, "/p");
+        assert_eq!(urls[0], "https://192.168.1.7:8553/p");
+        assert!(urls.last().unwrap().starts_with("http://192.168.1.7:8553"));
     }
 }
 

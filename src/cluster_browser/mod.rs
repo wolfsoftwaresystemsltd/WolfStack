@@ -680,7 +680,7 @@ spec:
     // Verify reachability from the host. kube-proxy needs a moment after
     // the pod becomes Ready before its endpoint is published.
     let _ = tx.send(format!("Verifying reachability to {}:3000...", cluster_ip));
-    let target: std::net::SocketAddr = match format!("{}:3000", cluster_ip).parse() {
+    let target: std::net::SocketAddr = match crate::netaddr::host_port(&cluster_ip, 3000).parse() {
         Ok(a) => a,
         Err(e) => return Err(format!("Bad ClusterIP {}: {}", cluster_ip, e)),
     };

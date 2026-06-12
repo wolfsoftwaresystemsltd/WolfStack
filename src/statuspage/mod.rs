@@ -803,7 +803,9 @@ async fn run_http_check(url: &str, expected_status: u16, timeout: std::time::Dur
 }
 
 async fn run_tcp_check(host: &str, port: u16, timeout: std::time::Duration) -> (bool, Option<String>) {
-    let addr = format!("{}:{}", host, port);
+    // host_port brackets bare IPv6 monitor targets — "2001:db8::1:9600"
+    // is unconnectable; "[2001:db8::1]:9600" resolves.
+    let addr = crate::netaddr::host_port(host, port);
     match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
         Ok(Ok(_)) => (true, None),
         Ok(Err(e)) => (false, Some(format!("Connection failed: {}", e))),
