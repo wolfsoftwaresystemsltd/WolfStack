@@ -1701,41 +1701,126 @@ function mountClusterPill() {
     if (document.getElementById('ws-cluster-pill')) return;
     const title = document.getElementById('page-title');
     if (!title || !title.parentElement) return;
-    const pill = document.createElement('span');
-    pill.id = 'ws-cluster-pill';
-    // Stacked: cluster name on the first line, server name on the second —
-    // reads cleaner than "cluster › server" squeezed onto one line, and the
-    // page title no longer repeats the server name.
-    pill.style.cssText = 'display:none;flex-direction:column;align-items:flex-start;gap:0;margin-left:14px;padding:4px 12px;border-radius:12px;'
-        + 'font-weight:600;letter-spacing:0.2px;line-height:1.25;'
-        + 'background:rgba(59, 130, 246,0.12);border:1px solid rgba(59, 130, 246,0.35);color:#93c5fd;cursor:default;';
-    pill.title = 'Current scope — actions on this page apply here';
-    title.parentElement.appendChild(pill);
+    const el = document.createElement('span');
+    el.id = 'ws-cluster-pill';
+    el.style.cssText = 'display:none;align-items:center;gap:8px;margin-left:14px;';
+    el.title = 'Current scope — actions on this page apply here';
+    title.parentElement.appendChild(el);
     updateClusterPill();
 }
 
+// Sorted unique WolfStack clusters present in the fleet. Proxmox-typed
+// nodes are excluded — they aren't WolfStack-managed scopes.
+function wsScopeClusters(wsNodes) {
+    return Array.from(new Set(wsNodes.map(n => n.cluster_name || 'WolfStack')))
+        .sort((a, b) => a.localeCompare(b));
+}
+function wsScopeNodes(wsNodes, cluster) {
+    return wsNodes
+        .filter(n => (n.cluster_name || 'WolfStack') === cluster)
+        .sort((a, b) => (a.hostname || a.address || '').localeCompare(b.hostname || b.address || ''));
+}
+// The per-node views selectServerView knows how to render (mirrors its
+// viewTitles + asyncViews). Used to decide whether the current page can be
+// carried to another node.
+const WS_NODE_VIEWS = new Set([
+    'dashboard', 'components', 'services', 'containers', 'compose', 'secrets',
+    'lxc', 'vms', 'storage', 'shares', 'files', 'networking', 'wolfnet',
+    'certificates', 'cron', 'pve-resources', 'mysql-editor', 'terminal',
+    'wolfusb', 'syslogs', 'security', 'ceph', 'wolfkube', 'wolfram', 'wolfrouter',
+    'backups'
+]);
+// When hopping nodes, keep the node-level page you're on (so you can
+// re-check the same setting across the fleet — community request, piranha
+// 2026-06-12). Only carry it when it's a real per-node view; from a
+// cluster-level page (cluster-storage, galera-cluster, …) land on the node
+// Dashboard instead of asking a node to render a cluster page.
+function wsScopeTargetView() {
+    return (typeof currentPage !== 'undefined' && WS_NODE_VIEWS.has(currentPage)) ? currentPage : 'dashboard';
+}
+function wsSwitchNode(nodeId) {
+    if (!nodeId) return; // the "Switch to node…" placeholder
+    const list = (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) ? allNodes : [];
+    if (!list.find(x => x.id === nodeId)) return;
+    selectServerView(nodeId, wsScopeTargetView());
+}
+function wsSwitchCluster(cluster) {
+    const list = (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) ? allNodes : [];
+    const nodes = wsScopeNodes(list.filter(n => n.node_type !== 'proxmox'), cluster);
+    if (!nodes.length) { try { updateClusterPill(); } catch (_) {} return; }
+    // Spec: changing cluster jumps to that cluster's first node.
+    selectServerView(nodes[0].id, wsScopeTargetView());
+}
+
+// Top-bar scope control. On a fleet (>=2 WolfStack nodes) this is two
+// dropdowns — cluster + node — always visible so you can hop from any
+// page; node API calls already route through apiUrl()'s proxy, so
+// switching the node here re-targets the whole page automatically. On a
+// single-node install it falls back to the original read-only scope pill
+// so nothing changes for solo operators (Golden Rule).
 function updateClusterPill() {
-    const pill = document.getElementById('ws-cluster-pill');
-    if (!pill) return;
-    let cluster = '', node = '';
-    try {
-        if (typeof currentNodeId !== 'undefined' && currentNodeId
-            && typeof allNodes !== 'undefined' && Array.isArray(allNodes)) {
-            const n = allNodes.find(x => x.id === currentNodeId);
-            if (n) {
-                cluster = n.cluster_name || n.pve_cluster_name || '';
-                node = n.hostname || n.address || '';
-            }
-        }
-    } catch (_) {}
-    if (!cluster && !node) {
-        pill.style.display = 'none';
+    const el = document.getElementById('ws-cluster-pill');
+    if (!el) return;
+    let wsNodes = [];
+    try { if (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) wsNodes = allNodes.filter(n => n.node_type !== 'proxmox'); } catch (_) {}
+    const cur = (typeof currentNodeId !== 'undefined' && currentNodeId) ? currentNodeId : null;
+
+    if (wsNodes.length < 2) {
+        el.dataset.sig = '';
+        let cluster = '', node = '';
+        const n = cur ? wsNodes.find(x => x.id === cur) : null;
+        if (n) { cluster = n.cluster_name || n.pve_cluster_name || ''; node = n.hostname || n.address || ''; }
+        if (!cluster && !node) { el.style.display = 'none'; el.innerHTML = ''; return; }
+        el.style.cssText = 'display:inline-flex;flex-direction:column;align-items:flex-start;gap:0;margin-left:14px;padding:4px 12px;border-radius:12px;font-weight:600;letter-spacing:0.2px;line-height:1.25;background:rgba(59, 130, 246,0.12);border:1px solid rgba(59, 130, 246,0.35);color:#93c5fd;cursor:default;';
+        el.innerHTML =
+            (cluster ? '<span style="font-size:9.5px;opacity:0.75;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap;">' + escapeHtmlSafe(cluster) + '</span>' : '')
+            + (node ? '<span style="font-size:12px;white-space:nowrap;">' + escapeHtmlSafe(node) + '</span>' : '');
         return;
     }
-    pill.style.display = 'inline-flex';
-    pill.innerHTML =
-        (cluster ? '<span style="font-size:9.5px;opacity:0.75;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap;">' + escapeHtmlSafe(cluster) + '</span>' : '')
-        + (node ? '<span style="font-size:12px;white-space:nowrap;">' + escapeHtmlSafe(node) + '</span>' : '');
+
+    const curNode = cur ? wsNodes.find(x => x.id === cur) : null;
+    const clusters = wsScopeClusters(wsNodes);
+    let curCluster = curNode ? (curNode.cluster_name || 'WolfStack') : null;
+    if (!curCluster) {
+        const selfN = wsNodes.find(x => x.is_self);
+        curCluster = selfN ? (selfN.cluster_name || 'WolfStack') : clusters[0];
+    }
+    const nodesInCluster = wsScopeNodes(wsNodes, curCluster);
+
+    // Skip the rebuild when nothing changed so a background node-refresh
+    // poll can't collapse an open dropdown mid-selection.
+    const sig = JSON.stringify([
+        clusters, curCluster,
+        nodesInCluster.map(n => [n.id, n.online === false]),
+        curNode ? curNode.id : ''
+    ]);
+    if (el.dataset.sig === sig) { el.style.display = 'inline-flex'; return; }
+    el.dataset.sig = sig;
+
+    el.style.cssText = 'display:inline-flex;align-items:center;gap:8px;margin-left:14px;';
+    // Theme-driven bg/text (guaranteed-contrast pairing on all themes — a
+    // hardcoded light-blue failed 4.5:1 on light themes); blue border keeps
+    // the "current scope" accent. Options inherit the select's bg/color, so
+    // the open list is readable too.
+    const selStyle = 'padding:4px 10px;border-radius:10px;font-size:12px;font-weight:600;'
+        + 'background:var(--bg-secondary);border:1px solid rgba(59, 130, 246,0.45);color:var(--text-primary);cursor:pointer;max-width:190px;';
+    const clusterOpts = clusters.map(c =>
+        '<option value="' + escapeHtmlSafe(c) + '"' + (c === curCluster ? ' selected' : '') + '>' + escapeHtmlSafe(c) + '</option>'
+    ).join('');
+    const placeholder = curNode ? '' : '<option value="" selected>Switch to node…</option>';
+    const nodeOpts = nodesInCluster.map(n => {
+        const label = (n.hostname || n.address || n.id) + (n.online === false ? ' (offline)' : '');
+        return '<option value="' + escapeHtmlSafe(n.id) + '"' + (curNode && n.id === curNode.id ? ' selected' : '') + '>' + escapeHtmlSafe(label) + '</option>';
+    }).join('');
+
+    el.style.display = 'inline-flex';
+    el.innerHTML =
+        '<select id="ws-cluster-select" aria-label="Cluster scope" title="Cluster — pick another cluster to jump to its first node" style="' + selStyle + '">' + clusterOpts + '</select>'
+        + '<select id="ws-node-select" aria-label="Node scope" title="Node — switch the node this page acts on" style="' + selStyle + '">' + placeholder + nodeOpts + '</select>';
+    const cs = document.getElementById('ws-cluster-select');
+    const ns = document.getElementById('ws-node-select');
+    if (cs) cs.onchange = function () { wsSwitchCluster(cs.value); };
+    if (ns) ns.onchange = function () { wsSwitchNode(ns.value); };
 }
 
 // ─── Trust-signal footer — version, identity, last-checked ───
@@ -3338,6 +3423,10 @@ function nodeName(node) {
 // ─── Server Tree ───
 function buildServerTree(nodes) {
     allNodes = nodes;
+    // Keep the top-bar cluster/node switcher in sync with the fleet on every
+    // node-list refresh (appears once a 2nd node joins; the signature guard
+    // makes this a no-op when nothing changed). Safe before the tree exists.
+    try { updateClusterPill(); } catch (_) {}
     const tree = document.getElementById('server-tree');
     if (!tree) return;
 
