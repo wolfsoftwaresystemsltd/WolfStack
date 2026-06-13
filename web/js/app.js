@@ -100,6 +100,7 @@ let diskHistory = {}; // mount_point -> array of {timestamp, usage_percent}
 const MAX_HISTORY = 300; // 10 minutes at 2s intervals
 let displayRange = 150; // default 5 minutes (150 samples at 2s)
 let currentConfiguratorTarget = null; // null = host, {runtime:'docker'|'lxc', target:'name'} for containers
+let currentConfiguratorNode = null;   // null = the node serving this page; else a wolfstack node object managed via the node proxy
 
 // ─── Sidebar Toggle ───
 function isMobileView() {
@@ -1988,8 +1989,32 @@ function normalizeWolfStackUrl(url) {
     return u;
 }
 
+// Resolve the base URL for a configurator/cert call to the cluster node the
+// operator picked in the configurator's node selector. When none is picked
+// (currentConfiguratorNode === null) this is exactly apiUrl()'s behaviour, so
+// single-node installs and the per-node view are unchanged. A remote node is
+// reached through the standard node proxy (node_proxy re-prepends /api/ and
+// forwards the query string, so runtime/target survive the hop).
+function configuratorNodeUrl(path) {
+    if (currentConfiguratorNode && !currentConfiguratorNode.is_self) {
+        const cleanPath = path.replace(/^\/api\//, '');
+        return `/api/nodes/${encodeURIComponent(currentConfiguratorNode.id)}/proxy/${cleanPath}`;
+    }
+    return apiUrl(path);
+}
+
+// Which node a cert action should run on. An explicit nodeId (cluster-scope
+// rows in the SSL manager pass one) always wins; otherwise the configurator's
+// selected node; '' means the page-serving node (the existing single-node
+// path, zero proxy overhead).
+function certNodeId(explicitNodeId) {
+    if (explicitNodeId) return explicitNodeId;
+    if (currentConfiguratorNode && !currentConfiguratorNode.is_self) return currentConfiguratorNode.id;
+    return '';
+}
+
 function configuratorApiUrl(path) {
-    const base = apiUrl(path);
+    const base = configuratorNodeUrl(path);
     if (!currentConfiguratorTarget) return base;
     const sep = base.includes('?') ? '&' : '?';
     return `${base}${sep}runtime=${encodeURIComponent(currentConfiguratorTarget.runtime)}&target=${encodeURIComponent(currentConfiguratorTarget.target)}`;
@@ -12030,6 +12055,9 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
 // ─── Component Detail ───
 async function openComponentDetail(name) {
     currentComponent = name;
+    // Fresh entry always starts on the page-serving node — clear any node
+    // override left over from a previous component-detail visit.
+    currentConfiguratorNode = null;
     // If launched from container configurator, use the preset target; otherwise reset
     if (_configuratorTargetPreset) {
         currentConfiguratorTarget = _configuratorTargetPreset;
@@ -12664,49 +12692,121 @@ async function loadConfigurator(name) {
 }
 
 async function buildConfiguratorTargetSelector(componentName) {
+    // Containers come from the selected node, not necessarily the page node —
+    // so the host/container Target list reflects whichever cluster node you're
+    // managing.
     let containers = [];
     try {
-        const resp = await fetch(apiUrl('/api/containers/running'));
+        const resp = await fetch(configuratorNodeUrl('/api/containers/running'));
         if (resp.ok) containers = await resp.json();
     } catch (e) { /* host-only mode */ }
 
     const titleEl = document.getElementById('configurator-title');
 
-    // Add target badge next to title if targeting a container
-    let targetBadge = '';
-    if (currentConfiguratorTarget) {
-        const icon = currentConfiguratorTarget.runtime === 'docker' ? '' : '';
-        targetBadge = ` <span style="font-size:12px; background:var(--accent); color:#fff; padding:2px 8px; border-radius:10px; font-weight:500; vertical-align:middle;">${icon} ${escapeHtml(currentConfiguratorTarget.target)}</span>`;
+    // ── Cluster node selector ────────────────────────────────────────────
+    // The component being configured (nginx/certbot/apache) may live on a
+    // different node than the one serving this page — wabil 2026-06-13. Offer
+    // a cluster-scoped node picker so the operator drives the right node
+    // instead of getting "certbot not installed" from whichever node answered.
+    let nodeSelectorHtml = '';
+    const wsNodes = Array.isArray(allNodes) ? allNodes.filter(n => n.node_type === 'wolfstack') : [];
+    if (wsNodes.length > 1) {
+        const selectedId = currentConfiguratorNode ? String(currentConfiguratorNode.id) : '';
+        // "This node" = the node serving the page. Group the rest by cluster
+        // so the picker is explicitly cluster-based.
+        let nodeOpts = `<option value="" ${selectedId === '' ? 'selected' : ''}>This node</option>`;
+        for (const cluster of wsScopeClusters(wsNodes)) {
+            const inCluster = wsScopeNodes(wsNodes, cluster).filter(n => !n.is_self);
+            if (inCluster.length === 0) continue;
+            nodeOpts += `<optgroup label="${escapeHtml(cluster)}">`;
+            for (const n of inCluster) {
+                const off = n.online === false ? ' (offline)' : '';
+                const sel = String(n.id) === selectedId ? 'selected' : '';
+                nodeOpts += `<option value="${escapeAttr(n.id)}" ${sel}>${escapeHtml(n.hostname || n.address || n.id)}${off}</option>`;
+            }
+            nodeOpts += `</optgroup>`;
+        }
+        nodeSelectorHtml = `
+            <label style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Node:</label>
+            <select class="form-control" style="font-size:12px; padding:2px 8px; width:auto; min-width:120px; max-width:250px;"
+                onchange="onConfiguratorNodeChange(this.value, '${escapeHtml(componentName)}')">
+                ${nodeOpts}
+            </select>`;
     }
 
-    // Build dropdown options
-    let options = `<option value="host" ${!currentConfiguratorTarget ? 'selected' : ''}>This Host</option>`;
-    for (const c of containers) {
-        const icon = c.runtime === 'docker' ? '' : '';
-        const val = `${c.runtime}:${c.name}`;
-        const selected = currentConfiguratorTarget &&
-            currentConfiguratorTarget.runtime === c.runtime &&
-            currentConfiguratorTarget.target === c.name ? 'selected' : '';
-        options += `<option value="${escapeHtml(val)}" ${selected}>${icon} ${escapeHtml(c.name)}</option>`;
-    }
-
-    // Only show selector if there are containers available
+    // ── Host / container target selector ─────────────────────────────────
+    let targetSelectorHtml = '';
     if (containers.length > 0) {
-        const selector = document.createElement('div');
-        selector.id = 'configurator-target-selector';
-        selector.style.cssText = 'display:flex; align-items:center; gap:6px; margin-left:12px;';
-        selector.innerHTML = `
+        let options = `<option value="host" ${!currentConfiguratorTarget ? 'selected' : ''}>This Host</option>`;
+        for (const c of containers) {
+            const icon = c.runtime === 'docker' ? '' : '';
+            const val = `${c.runtime}:${c.name}`;
+            const selected = currentConfiguratorTarget &&
+                currentConfiguratorTarget.runtime === c.runtime &&
+                currentConfiguratorTarget.target === c.name ? 'selected' : '';
+            options += `<option value="${escapeHtml(val)}" ${selected}>${icon} ${escapeHtml(c.name)}</option>`;
+        }
+        targetSelectorHtml = `
             <label style="font-size:12px; color:var(--text-muted); white-space:nowrap;">Target:</label>
             <select class="form-control" style="font-size:12px; padding:2px 8px; width:auto; min-width:120px; max-width:250px;"
                 onchange="onConfiguratorTargetChange(this.value, '${escapeHtml(componentName)}')">
                 ${options}
             </select>`;
+    }
 
-        // Insert selector after title, before header-actions
-        const header = titleEl.parentElement;
-        const existing = document.getElementById('configurator-target-selector');
-        if (existing) existing.remove();
+    // Render the selector row (node picker, target picker, or both)
+    const existing = document.getElementById('configurator-target-selector');
+    if (existing) existing.remove();
+    if (nodeSelectorHtml || targetSelectorHtml) {
+        const selector = document.createElement('div');
+        selector.id = 'configurator-target-selector';
+        selector.style.cssText = 'display:flex; align-items:center; gap:6px; margin-left:12px; flex-wrap:wrap;';
+        selector.innerHTML = nodeSelectorHtml + targetSelectorHtml;
         titleEl.after(selector);
+    }
+}
+
+// Switch the configurator to manage a different cluster node. Container names
+// are node-specific, so reset the host/container target to host on switch.
+// Empty value = the page-serving node (clears the override → apiUrl behaviour).
+function onConfiguratorNodeChange(nodeId, componentName) {
+    if (!nodeId) {
+        currentConfiguratorNode = null;
+    } else {
+        const node = (Array.isArray(allNodes) ? allNodes : []).find(n => String(n.id) === String(nodeId));
+        currentConfiguratorNode = (node && !node.is_self) ? node : null;
+    }
+    // Container names are node-specific — reset the target to host on switch.
+    currentConfiguratorTarget = null;
+    if (currentConfiguratorNode) {
+        // Remote node: its local status/actions/raw-config/logs aren't this
+        // node's, so hide the host-only chrome and show only the (now
+        // node-scoped) configurator. Don't call refreshComponentDetail — that
+        // would fetch the PAGE node's host data.
+        setConfiguratorHostSectionsVisible(false);
+        loadConfigurator(componentName);
+    } else {
+        // Back to the page-serving node: refreshComponentDetail re-fetches host
+        // data and itself un-hides the stats/actions/config/logs panels and
+        // repopulates the service buttons from live state — so we let it own
+        // the restore rather than pre-showing stale panels here.
+        refreshComponentDetail(componentName);
+    }
+}
+
+// Toggle the host-only component-detail panels (status cards, service action
+// bar, raw config editor, logs, and the top service buttons). Hidden when
+// managing a container or a remote node — those panels and controls describe
+// the page-serving host's local service only and must not act on it while a
+// different node is selected. When made visible, refreshComponentDetail
+// repopulates the buttons from live state, so we only force-hide here.
+function setConfiguratorHostSectionsVisible(visible) {
+    const hide = visible ? '' : 'none';
+    ['detail-stats-grid', 'detail-actions-bar', 'detail-config-section', 'detail-logs-section']
+        .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = hide; });
+    if (!visible) {
+        ['detail-top-btn-start', 'detail-top-btn-restart', 'detail-top-btn-stop']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     }
 }
 
@@ -12717,20 +12817,14 @@ function onConfiguratorTargetChange(value, componentName) {
         const [runtime, ...nameParts] = value.split(':');
         currentConfiguratorTarget = { runtime, target: nameParts.join(':') };
     }
-    // Toggle host-only sections visibility
     const isContainer = !!currentConfiguratorTarget;
-    const hide = isContainer ? 'none' : '';
-    const statsGrid = document.getElementById('detail-stats-grid');
-    const actionsBar = document.getElementById('detail-actions-bar');
-    const configSection = document.getElementById('detail-config-section');
-    const logsSection = document.getElementById('detail-logs-section');
-    if (statsGrid) statsGrid.style.display = hide;
-    if (actionsBar) actionsBar.style.display = hide;
-    if (configSection) configSection.style.display = hide;
-    if (logsSection) logsSection.style.display = hide;
+    const remoteNode = !!(currentConfiguratorNode && !currentConfiguratorNode.is_self);
+    // Host-only panels describe the page node's local service — keep them
+    // hidden for a container OR a remote node.
+    setConfiguratorHostSectionsVisible(!isContainer && !remoteNode);
 
-    if (!isContainer) {
-        // Switching back to host — reload everything including host data
+    if (!isContainer && !remoteNode) {
+        // Back to this host on the page node — reload everything incl. host data
         refreshComponentDetail(componentName);
     } else {
         loadConfigurator(componentName);
@@ -13259,13 +13353,18 @@ async function loadCertManager() {
             const data = await resp.json();
             renderCertClusterList(data);
         } else {
-            const resp = await fetch('/api/certs');
+            const resp = await fetch(configuratorNodeUrl('/api/certs'));
             if (handleAuthError(resp)) return;
             const data = await resp.json();
             if (!data.installed) {
+                // Name the node so a multi-node operator knows WHERE certbot is
+                // missing — the configurator may be pointed at a remote node.
+                const where = (currentConfiguratorNode && !currentConfiguratorNode.is_self)
+                    ? escapeHtml(currentConfiguratorNode.hostname || currentConfiguratorNode.address || currentConfiguratorNode.id)
+                    : 'this node';
                 body.innerHTML = `<div style="padding:18px; border:1px solid var(--border); border-radius:8px; background:var(--bg-panel);">
-                    <h3 style="margin-top:0;">certbot not installed</h3>
-                    <p style="color:var(--text-secondary);">Install certbot on this node to manage Let's Encrypt certificates from here.</p>
+                    <h3 style="margin-top:0;">certbot not installed on ${where}</h3>
+                    <p style="color:var(--text-secondary);">Install certbot on ${where} to manage Let's Encrypt certificates from here, or use the <strong>Node</strong> selector above to pick the node that hosts your proxy. The <strong>Scope: Whole cluster</strong> toggle lists every node's certs at once.</p>
                     <pre style="background:var(--bg-input); padding:10px; border-radius:6px; font-size:12px;">apt install certbot         # Debian / Ubuntu
 dnf install certbot         # RHEL / Fedora / Alma
 pacman -S certbot           # Arch</pre>
@@ -13465,7 +13564,8 @@ async function certIssueSubmit() {
     const challenge = (document.getElementById('cert-challenge')?.value || 'webroot');
     const dnsCreds = (document.getElementById('cert-dns-creds')?.value || '').trim();
     const dryRun = document.getElementById('cert-dry-run')?.checked || false;
-    const targetNode = (document.getElementById('cert-target-node')?.value || '').trim();
+    // Cluster-scope picker wins; otherwise the configurator's selected node.
+    const targetNode = certNodeId((document.getElementById('cert-target-node')?.value || '').trim());
     document.getElementById('cert-issue-modal')?.remove();
     // node_proxy re-prepends /api/ to the captured path — proxy path
     // must NOT include the leading /api/.
@@ -13494,10 +13594,12 @@ async function certIssueSubmit() {
 // `nodeId` (optional) routes the action through /api/nodes/{id}/proxy
 // when the cert lives on a different node — local actions still hit
 // /api/certs directly to keep the existing single-node path zero-overhead.
+// In local scope, certNodeId() falls back to the configurator's selected node.
 async function certRenew(name, nodeId) {
     if (!(await wolfConfirm(`Force-renew ${name}? This bypasses certbot's 30-day freshness window.`, 'Renew'))) return;
-    const url = nodeId
-        ? `/api/nodes/${encodeURIComponent(nodeId)}/proxy/certs/${encodeURIComponent(name)}/renew`
+    const id = certNodeId(nodeId);
+    const url = id
+        ? `/api/nodes/${encodeURIComponent(id)}/proxy/certs/${encodeURIComponent(name)}/renew`
         : `/api/certs/${encodeURIComponent(name)}/renew`;
     try {
         const resp = await fetch(url, { method: 'POST' });
@@ -13513,8 +13615,9 @@ async function certRenew(name, nodeId) {
 
 async function certDelete(name, nodeId) {
     if (!(await wolfConfirm(`Delete ${name}? This revokes the cert and removes it from /etc/letsencrypt.`, 'Delete'))) return;
-    const url = nodeId
-        ? `/api/nodes/${encodeURIComponent(nodeId)}/proxy/certs/${encodeURIComponent(name)}`
+    const id = certNodeId(nodeId);
+    const url = id
+        ? `/api/nodes/${encodeURIComponent(id)}/proxy/certs/${encodeURIComponent(name)}`
         : `/api/certs/${encodeURIComponent(name)}`;
     try {
         const resp = await fetch(url, { method: 'DELETE' });
@@ -13529,7 +13632,7 @@ async function certDelete(name, nodeId) {
 }
 
 async function certConfigDialog() {
-    const resp = await fetch('/api/certs');
+    const resp = await fetch(configuratorNodeUrl('/api/certs'));
     const data = await resp.json();
     const cfg = data.config || {};
     const existing = document.getElementById('cert-cfg-modal');
@@ -13567,7 +13670,7 @@ async function certConfigSubmit() {
         reload_cmd: document.getElementById('cert-cfg-reload').value.trim(),
         auto_renew: document.getElementById('cert-cfg-auto').checked,
     };
-    const r = await fetch('/api/certs/config', {
+    const r = await fetch(configuratorNodeUrl('/api/certs/config'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
     });
