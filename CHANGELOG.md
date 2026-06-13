@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.42.0: WolfProxy/Nginx configurator — cluster node selector** _(2026-06-13 — [`e843cdb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e843cdb97126e7903af771df4e35824580ff739e))_
 - **v24.41.0: Fleet Logs — Enterprise cluster log aggregation, retention & search** _(2026-06-13 — [`8a854df`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8a854df8b93f68527287cc1a08a456c4f0e48495))_
 - **v24.40.1: VNC desktop install recovers from interrupted dpkg state** _(2026-06-13 — [`aff31f4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aff31f4a1086e1d1bf8ee26cff434662babec200))_
 - **v24.40.0: built-in local CA + one-click publish — internal-domain TLS** _(2026-06-12 — [`02e2ad5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/02e2ad540ba476aeebd45b720c1053787b204b34))_
