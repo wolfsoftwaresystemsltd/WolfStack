@@ -1457,9 +1457,17 @@ pub fn attach_and_passthrough(
         return Err(format!("Failed to start {}", unit_name));
     }
 
-    // Wait up to 5 seconds for the virtual USB device to appear
+    // Wait for the virtual USB device to appear. This must be generous: on a
+    // FRESH attach the source binds the device to usbip-host on demand when the
+    // mount first connects (a cold re-bind from its current driver + vhci
+    // enumeration), and if that first connect races the just-started source
+    // server it fails and systemd retries it RestartSec(2s) later. A short
+    // window expired before the retry landed, so the FIRST attach reported
+    // "did not appear" and only a second attempt succeeded (PapaSchlumpf
+    // 2026-06-13). ~20s comfortably covers a cold bind plus a couple of retry
+    // cycles, so the first attach succeeds.
     let mut dev_path = None;
-    for _ in 0..50 {
+    for _ in 0..200 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Some(new_path) = find_new_device(&before) {
             dev_path = Some(new_path);
@@ -1472,7 +1480,7 @@ pub fn attach_and_passthrough(
         None => {
             return Err(format!(
                 "Virtual USB device did not appear after mount. \
-                 Check: journalctl -u {} -n 30",
+                 The mount unit keeps retrying in the background — check: journalctl -u {} -n 30",
                 unit_name
             ));
         }
@@ -1568,12 +1576,24 @@ fn install_mount_unit(
          Description=WolfUSB Mount ({} from {})\n\
          After=network.target wolfusb.service\n\
          Wants=wolfusb.service\n\
+         # Never stop retrying: when the SOURCE node reboots the mount drops,\n\
+         # and a long outage would otherwise trip systemd's default start-rate\n\
+         # limit and leave the unit dead forever (the device silently stops\n\
+         # forwarding until a manual re-attach — PapaSchlumpf 2026-06-13).\n\
+         StartLimitIntervalSec=0\n\
          \n\
          [Service]\n\
          Type=simple\n\
          ExecStart=/usr/local/bin/wolfusb mount --server {}:3240 --bus {} --addr {} {}\n\
+         # on-failure (not always): `wolfusb mount` exits NON-ZERO when the kernel\n\
+         # releases the vhci port (source closed the connection / rebooted), so\n\
+         # on-failure reconnects it; it exits 0 on a deliberate Ctrl-C detach, so\n\
+         # on-failure leaves it stopped. A short RestartSec reconnects within\n\
+         # seconds of the source coming back, with no operator action. (Requires\n\
+         # wolfusb >= 0.5.1, which added the exit-on-port-loss behaviour; older\n\
+         # binaries parked forever on disconnect and never triggered a restart.)\n\
          Restart=on-failure\n\
-         RestartSec=5\n\
+         RestartSec=2\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",

@@ -253,6 +253,26 @@
             display: block;
         }
 
+        /* 2FA prompt — NOT an error. The password was accepted; we just need the
+           code. Green + calm (no red, no shake) and sits right under the 2FA
+           field, so it doesn't read as "wrong password" the way the red error
+           box does (wabil 2026-06-13). */
+        .totp-hint {
+            display: none;
+            margin-top: 8px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: rgba(16, 185, 129, 0.10);
+            border: 1px solid rgba(16, 185, 129, 0.30);
+            color: #6ee7b7;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .totp-hint.visible {
+            display: block;
+        }
+
         .login-info {
             text-align: center;
             margin-top: 24px;
@@ -335,6 +355,7 @@
                     <input type="text" id="totp_code" name="totp_code" placeholder="6-digit code from authenticator"
                         autocomplete="one-time-code" inputmode="numeric" maxlength="6" pattern="[0-9]*"
                         style="text-align:center;letter-spacing:6px;font-size:20px;">
+                    <div id="totp-hint" class="totp-hint" role="status" aria-live="polite"></div>
                 </div>
                 <button type="submit" class="login-btn" id="login-btn">
                     Sign In
@@ -594,7 +615,9 @@
             }
 
             if (_needs2fa && !totp_code) {
-                showError('Please enter the 6-digit code from your authenticator app');
+                // Not a failure — just a nudge. Keep it the calm green hint, not
+                // the red error box, so 2FA never reads as "wrong password".
+                showTotpHint('Enter the 6-digit code from your authenticator app to continue.');
                 document.getElementById('totp_code').focus();
                 return;
             }
@@ -623,13 +646,16 @@
                         window.location.href = '/index.html?_=' + Date.now();
                     }, 500);
                 } else if (data.requires_2fa) {
-                    // Password correct, need 2FA code
+                    // Password correct, need 2FA code. This is NOT a failure, so
+                    // show a calm green hint under the 2FA field rather than the
+                    // red "wrong password"-style error box (wabil 2026-06-13).
                     _needs2fa = true;
                     document.getElementById('totp-group').style.display = 'block';
                     document.getElementById('totp_code').focus();
                     btn.disabled = false;
                     btn.innerHTML = 'Verify & Sign In';
-                    showError('Enter the 6-digit code from your authenticator app');
+                    errorEl.classList.remove('visible');  // clear any prior red error
+                    showTotpHint('Password accepted — enter the 6-digit code from your authenticator app.');
                 } else {
                     showError(data.error || 'Invalid username or password');
                     btn.disabled = false;
@@ -653,6 +679,17 @@
             const el = document.getElementById('error-msg');
             el.textContent = msg;
             el.classList.add('visible');
+            hideTotpHint();  // a real error supersedes the calm 2FA prompt
+        }
+
+        function showTotpHint(msg) {
+            const el = document.getElementById('totp-hint');
+            if (el) { el.textContent = msg; el.classList.add('visible'); }
+        }
+
+        function hideTotpHint() {
+            const el = document.getElementById('totp-hint');
+            if (el) el.classList.remove('visible');
         }
 
         // Enter key support

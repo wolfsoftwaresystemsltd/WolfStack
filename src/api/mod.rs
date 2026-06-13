@@ -21262,10 +21262,20 @@ pub async fn wolfusb_attach(req: HttpRequest, state: web::Data<AppState>, body: 
     // HTTP success with a parseable bus_addr wins.
     let source_bus_addr = query_source_bus_addr(&source_address, &busid, &state.cluster_secret).await;
 
+    // attach_and_passthrough shells out (systemctl, lsusb) and waits up to ~20s
+    // for the virtual device to appear — offload to the blocking pool so it
+    // never ties up an actix worker thread (coding canon: no sync blocking work
+    // in an async handler). spawn_blocking matches the local path in
+    // wolfusb_assign and gives the long (20s) wait ample pool headroom.
+    let bus_addr_resolved = source_bus_addr.is_some();
     let busid_c = busid.clone();
-    match crate::wolfusb::attach_and_passthrough(&source_address, &busid_c, &target_type, &target_name, source_bus_addr) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "message": msg, "bus_addr_resolved": source_bus_addr.is_some() })),
-        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "ok": false, "error": e })),
+    let res = tokio::task::spawn_blocking(move || {
+        crate::wolfusb::attach_and_passthrough(&source_address, &busid_c, &target_type, &target_name, source_bus_addr)
+    }).await;
+    match res {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "message": msg, "bus_addr_resolved": bus_addr_resolved })),
+        Ok(Err(e)) => HttpResponse::Ok().json(serde_json::json!({ "ok": false, "error": e })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "ok": false, "error": format!("attach task failed: {}", e) })),
     }
 }
 
