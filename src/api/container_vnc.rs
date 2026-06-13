@@ -975,6 +975,19 @@ Pin-Priority: 100
 WOLFSTACK_PREF_EOF
 fi
 
+# Recover from an interrupted dpkg state before touching apt. Some LXC
+# templates ship with a half-configured dpkg database (or a prior apt/install
+# inside the container was killed), which makes EVERY apt operation abort at
+# the gate with "dpkg was interrupted, you must manually run 'dpkg --configure
+# -a'" — exactly the failure that left a user with no vncpasswd and an
+# "exit 127" install. Setting the frontend non-interactive first means neither
+# command can stop on a debconf prompt; both are idempotent (a no-op on a clean
+# database), so this can only ever unblock a stuck container, never break a
+# healthy one.
+export DEBIAN_FRONTEND=noninteractive
+dpkg --configure -a 2>/dev/null || true
+apt-get install -f -y 2>/dev/null || true
+
 apt-get update -qq
 # Step 1: VNC core — must succeed. tigervnc-tools provides vncpasswd.
 # Kept in its own apt transaction so a broken desktop package set on the
