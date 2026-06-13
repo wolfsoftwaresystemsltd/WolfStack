@@ -7440,6 +7440,25 @@ pub fn is_libvirt() -> bool {
     })
 }
 
+/// True when this host's kernel has AppArmor — and therefore its LXC is built
+/// WITH AppArmor support, so `lxc.apparmor.profile` is a valid config key. On
+/// SELinux hosts (Fedora, RHEL/Rocky/Alma) AppArmor is absent AND the distro's
+/// LXC is built WITHOUT it, so that key is invalid — `lxc-ls`/`lxc-start` fail
+/// to parse the WHOLE config and the container silently vanishes from the list
+/// (PapaSchlumpf 2026-06-13, Fedora lxc 6.0.6: "Built without AppArmor support").
+///
+/// We test for the kernel module's PRESENCE, not whether it's enforcing: a
+/// Debian/Ubuntu host with AppArmor disabled at boot (`apparmor=0`) still has
+/// the module dir and an AppArmor-built LXC, so the key is valid there and must
+/// NOT be stripped. Only an entirely AppArmor-less build lacks the module —
+/// that's the single case the key breaks. Erring toward "present" means we
+/// never strip a valid line (fix, don't break). Cached — doesn't change without
+/// a reboot.
+pub fn host_has_apparmor() -> bool {
+    static HAS_AA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS_AA.get_or_init(|| std::path::Path::new("/sys/module/apparmor").exists())
+}
+
 /// PVE storage entry from `pvesm status`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PveStorage {
@@ -8179,6 +8198,68 @@ pub struct LxcImportOutcome {
     pub start_id: String,
 }
 
+/// Remove every `lxc.apparmor.profile` line from a container config, preserving
+/// the original line-ending style and trailing-newline shape. Pure for
+/// testability. Scope: only the `lxc.apparmor.profile` key WolfStack writes —
+/// any manually-added `lxc.apparmor.*` keys are left alone.
+fn strip_apparmor_profile(content: &str) -> String {
+    let nl = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing_nl = content.ends_with('\n');
+    let mut out = content
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("lxc.apparmor.profile"))
+        .collect::<Vec<_>>()
+        .join(nl);
+    if trailing_nl { out.push_str(nl); }
+    out
+}
+
+/// Repair existing container configs that carry an `lxc.apparmor.profile` line
+/// this host's LXC can't parse. On AppArmor-less builds (Fedora/SELinux) that
+/// key is invalid, so `lxc-ls`/`lxc-start` reject the WHOLE config and the
+/// container silently disappears from the list (PapaSchlumpf 2026-06-13).
+/// Strips the line from every container config under the registered storage
+/// paths. No-op on AppArmor hosts (the line is valid there) and on Proxmox
+/// (PVE owns its container configs). Runs at startup, before lxc_autostart_all,
+/// so already-broken containers list AND start again with no manual re-create.
+///
+/// The rewrite is atomic (temp file + rename) so an interrupted run can never
+/// truncate a config — this must FIX broken configs, never break intact ones.
+pub fn lxc_migrate_apparmor_configs() {
+    if host_has_apparmor() || is_proxmox() { return; }
+    let mut fixed = 0usize;
+    for base in lxc_storage_paths() {
+        let entries = match std::fs::read_dir(&base) { Ok(e) => e, Err(_) => continue };
+        for entry in entries.flatten() {
+            let cfg = entry.path().join("config");
+            if !cfg.is_file() { continue; }
+            let Ok(content) = std::fs::read_to_string(&cfg) else { continue };
+            if !content.contains("lxc.apparmor.profile") { continue; }
+            let cleaned = strip_apparmor_profile(&content);
+            // Atomic replace: write a sibling temp on the same filesystem, then
+            // rename over the original. A crash mid-write leaves the original
+            // config fully intact (never a truncated/0-byte config).
+            let tmp = cfg.with_extension("wolfstack-tmp");
+            let wrote = std::fs::write(&tmp, &cleaned)
+                .and_then(|_| std::fs::rename(&tmp, &cfg));
+            match wrote {
+                Ok(()) => {
+                    fixed += 1;
+                    info!("LXC: stripped unsupported lxc.apparmor.profile from {}", cfg.display());
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp); // don't leave a stray temp
+                    warn!("LXC: could not repair {}: {} (config left unchanged)", cfg.display(), e);
+                }
+            }
+        }
+    }
+    if fixed > 0 {
+        info!("LXC: repaired {} container config(s) carrying an AppArmor key this host's LXC can't parse (built without AppArmor)", fixed);
+        invalidate_count_caches();
+    }
+}
+
 /// True if the rootfs boots with systemd as PID 1 (Debian Bookworm+,
 /// Ubuntu, Fedora, Rocky, Alma, openSUSE, Arch — everything bar Alpine
 /// and Void). Such inits die on a missing cgroup mount, so they need
@@ -8309,7 +8390,11 @@ pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, car
         // Identical to lxc_create's systemd-compat toggles. Placed after
         // common.conf so the unconfined apparmor profile wins the include.
         lines.push("lxc.include = /usr/share/lxc/config/nesting.conf".to_string());
-        lines.push("lxc.apparmor.profile = unconfined".to_string());
+        // Only on AppArmor hosts — on SELinux/no-AppArmor LXC builds (Fedora)
+        // this key is invalid and makes lxc-ls/lxc-start reject the config.
+        if host_has_apparmor() {
+            lines.push("lxc.apparmor.profile = unconfined".to_string());
+        }
         lines.push("lxc.mount.auto = proc:rw sys:rw cgroup:rw".to_string());
     }
 
@@ -8708,12 +8793,13 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
                 if !cfg.contains("nesting.conf") {
                     additions.push("lxc.include = /usr/share/lxc/config/nesting.conf");
                 }
-                if !cfg.contains("lxc.apparmor.profile") {
+                if host_has_apparmor() && !cfg.contains("lxc.apparmor.profile") {
                     // Unconfined is what users converge on after fighting
                     // the default AppArmor profile with systemd. Container
                     // isolation still rests on user namespacing + cgroups
                     // when running unprivileged; AppArmor inside the LXC
-                    // is defence-in-depth.
+                    // is defence-in-depth. Skipped on no-AppArmor LXC builds
+                    // (Fedora/SELinux) where the key breaks config parsing.
                     additions.push("lxc.apparmor.profile = unconfined");
                 }
                 if !cfg.contains("lxc.mount.auto") {
@@ -11095,6 +11181,37 @@ mod port_mapping_tests {
 
         // "8000-8010:8000-8010" — range form: skip (Docker handles)
         assert!(parse_docker_port_arg("8000-8010:8000-8010").is_none());
+    }
+}
+
+#[cfg(test)]
+mod apparmor_config_tests {
+    use super::*;
+
+    #[test]
+    fn strip_apparmor_profile_removes_only_that_key_and_keeps_shape() {
+        let cfg = "lxc.uts.name = web\n\
+                   lxc.include = /usr/share/lxc/config/nesting.conf\n\
+                   lxc.apparmor.profile = unconfined\n\
+                   lxc.mount.auto = proc:rw sys:rw cgroup:rw\n";
+        let out = strip_apparmor_profile(cfg);
+        assert!(!out.contains("lxc.apparmor.profile"), "apparmor line must be gone");
+        assert!(out.contains("lxc.uts.name = web"), "other keys preserved");
+        assert!(out.contains("nesting.conf") && out.contains("lxc.mount.auto"), "neighbours preserved");
+        assert!(out.ends_with('\n'), "trailing newline preserved");
+        // Indented variants are stripped too; a config without the key is unchanged.
+        assert!(!strip_apparmor_profile("  lxc.apparmor.profile = generated\n").contains("apparmor"));
+        let untouched = "lxc.uts.name = x\n";
+        assert_eq!(strip_apparmor_profile(untouched), untouched);
+        // A config that is ONLY the key, with no trailing newline, becomes empty.
+        assert_eq!(strip_apparmor_profile("lxc.apparmor.profile = unconfined"), "");
+        // CRLF line endings are preserved (not normalised to LF).
+        assert_eq!(
+            strip_apparmor_profile("lxc.uts.name = w\r\nlxc.apparmor.profile = unconfined\r\n"),
+            "lxc.uts.name = w\r\n"
+        );
+        // A sibling apparmor key WolfStack doesn't write is left alone (scope).
+        assert!(strip_apparmor_profile("lxc.apparmor.allow_nesting = 1\n").contains("allow_nesting"));
     }
 }
 

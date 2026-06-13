@@ -568,6 +568,10 @@ async fn main() -> std::io::Result<()> {
     std::thread::spawn(move || {
         storage::auto_mount_all();
         networking::apply_ip_mappings();
+        // Heal LXC configs that carry an apparmor key this host's LXC can't
+        // parse (Fedora/SELinux builds) BEFORE autostart, so broken containers
+        // list and start again. No-op on AppArmor hosts / Proxmox.
+        containers::lxc_migrate_apparmor_configs();
         containers::lxc_autostart_all();
         networking::apply_all_wireguard_bridges();
         kubernetes::apply_all_wolfnet_routes();
