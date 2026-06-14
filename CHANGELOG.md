@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.44.0: Ceph — add the missing "Join existing cluster" flow** _(2026-06-14 — [`af59eb0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af59eb0e35b433bf09a0cdb93916e6da827a40cc))_
+- **v24.43.3: stop the multi-homed control-plane CPU storm at the source** _(2026-06-14 — [`a05e25d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a05e25d0713b895aafe5fdfa13f666d721afecbf))_
 - **v24.43.2: LXC containers on Fedora/SELinux — stop writing an AppArmor key their LXC can't parse** _(2026-06-13 — [`fec3d48`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fec3d4845bca7c3deaf14f31012dfba1c3d0129e))_
 - **v24.43.1: WolfUSB survives source reboot + first-attach reliability; calmer 2FA login** _(2026-06-13 — [`afc8d99`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/afc8d9906d8ba40bc95513514bb8df1a86de0017))_
 - **v24.43.0: auto-refresh package index for the vulnerability scanner** _(2026-06-13 — [`73f9c01`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/73f9c01c42602f2ba581ed3bf4a624ef6c361724))_
