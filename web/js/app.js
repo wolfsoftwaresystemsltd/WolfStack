@@ -6086,6 +6086,7 @@ async function loadCephStatus() {
                 </div>
                 <div style="font-size:13px; color:var(--text-muted); margin-bottom:8px;">No Ceph cluster found on this node. Bootstrap a new cluster or join an existing one.</div>`;
             document.getElementById('ceph-bootstrap-form').style.display = 'block';
+            _populateCephJoinSources();
             return;
         }
 
@@ -6295,6 +6296,47 @@ async function _doCephBootstrap(clusterName, monIp, publicNetwork) {
     } catch (e) {
         document.querySelector('.modal-overlay')?.remove();
         showModal(`<p style="color:var(--danger);">Request failed: ${e.message}</p>`, 'Error');
+    }
+}
+
+// ── Join an existing cluster ──
+// Fill the "cluster node to join" picker with the OTHER WolfStack nodes — the
+// join source is whichever one already has the cluster bootstrapped.
+function _populateCephJoinSources() {
+    const sel = document.getElementById('ceph-join-source');
+    if (!sel) return;
+    const nodes = (allNodes || []).filter(n => n.node_type === 'wolfstack' && !n.is_self);
+    if (nodes.length === 0) {
+        sel.innerHTML = '<option value="">No other WolfStack nodes in the fleet</option>';
+        return;
+    }
+    sel.innerHTML = nodes.map(n =>
+        `<option value="${escapeAttr(n.id)}">${escapeHtml(n.display_name || n.hostname || n.address)}</option>`
+    ).join('');
+}
+
+async function cephJoinCluster() {
+    const sourceId = document.getElementById('ceph-join-source')?.value;
+    if (!sourceId) { showToast('Pick a cluster node to join', 'warning'); return; }
+    if (!(await wolfConfirm('Join the Ceph cluster on the selected node? This pulls its cluster config + keyrings onto this node so it can contribute OSDs.', 'Join Cluster'))) return;
+    showModal('<p>Joining the cluster… fetching config + keyrings.</p>', 'Joining…', { noOk: true });
+    try {
+        const resp = await fetch(apiUrl('/api/ceph/join'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_node_id: sourceId }),
+        });
+        const data = await resp.json();
+        document.querySelector('.modal-overlay')?.remove();
+        if (resp.ok && data.ok) {
+            showModal(`<p style="color:var(--success);">${escapeHtml(data.message || 'Joined the cluster')}</p>`, 'Joined Cluster');
+            loadCephStatus();
+        } else {
+            showModal(`<p style="color:var(--danger);">${escapeHtml(data.error || 'Join failed')}</p>`, 'Join Failed');
+        }
+    } catch (e) {
+        document.querySelector('.modal-overlay')?.remove();
+        showModal(`<p style="color:var(--danger);">Request failed: ${escapeHtml(e.message)}</p>`, 'Error');
     }
 }
 

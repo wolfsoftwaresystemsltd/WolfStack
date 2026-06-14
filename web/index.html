@@ -7465,6 +7465,18 @@ dns_cloudflare_api_token = your_token_here"
                                 </div>
                             </div>
                             <button class="btn btn-primary" onclick="cephBootstrapCluster()">Bootstrap Cluster</button>
+
+                            <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+                                <div style="font-weight:600; margin-bottom:6px;">Join an existing cluster</div>
+                                <div style="font-size:12px; color:var(--text-muted); margin-bottom:10px;">Pull the cluster config + keyrings from a node that's already in the cluster (the one you bootstrapped), then add OSDs here to contribute storage.</div>
+                                <div style="display:flex; gap:8px; align-items:flex-end;">
+                                    <div style="flex:1;">
+                                        <label style="font-size:12px; color:var(--text-muted); display:block; margin-bottom:4px;">Cluster node to join</label>
+                                        <select id="ceph-join-source" class="form-control" style="width:100%;"></select>
+                                    </div>
+                                    <button class="btn btn-primary" onclick="cephJoinCluster()">Join Cluster</button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

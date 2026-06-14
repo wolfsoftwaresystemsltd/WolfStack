@@ -909,3 +909,112 @@ pub fn bootstrap_cluster(cluster_name: &str, public_network: &str, mon_ip: &str)
 
     Ok(format!("Ceph cluster '{}' bootstrapped with mon+mgr on {}", cluster, hostname))
 }
+
+// ─── Join an existing cluster ───
+
+const CEPH_CONF_PATH: &str = "/etc/ceph/ceph.conf";
+const CEPH_ADMIN_KEYRING_PATH: &str = "/etc/ceph/ceph.client.admin.keyring";
+const CEPH_BOOTSTRAP_OSD_KEYRING_PATH: &str = "/var/lib/ceph/bootstrap-osd/ceph.keyring";
+
+/// The files a node needs to JOIN an existing cluster and contribute OSDs: the
+/// cluster config and the admin + bootstrap-osd keyrings. A bootstrapped node
+/// exports this; the joining node writes it verbatim, after which the existing
+/// "Add OSD" flow works against the same cluster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CephJoinBundle {
+    pub ceph_conf: String,
+    pub admin_keyring: String,
+    pub bootstrap_osd_keyring: String,
+    pub cluster_name: String,
+}
+
+/// Read the join bundle from THIS node. Errors unless the node is actually
+/// bootstrapped (has the config + both keyrings), so a non-cluster node can't
+/// hand out an empty/garbage bundle.
+pub fn export_join_bundle() -> Result<CephJoinBundle, String> {
+    if !std::path::Path::new(CEPH_CONF_PATH).exists() {
+        return Err("This node is not part of a Ceph cluster (no /etc/ceph/ceph.conf) — bootstrap or join one first".into());
+    }
+    let ceph_conf = std::fs::read_to_string(CEPH_CONF_PATH)
+        .map_err(|e| format!("read ceph.conf: {}", e))?;
+    let admin_keyring = std::fs::read_to_string(CEPH_ADMIN_KEYRING_PATH)
+        .map_err(|e| format!("read admin keyring: {}", e))?;
+    let bootstrap_osd_keyring = std::fs::read_to_string(CEPH_BOOTSTRAP_OSD_KEYRING_PATH)
+        .map_err(|e| format!("read bootstrap-osd keyring (is this the bootstrap node?): {}", e))?;
+    Ok(CephJoinBundle {
+        ceph_conf,
+        admin_keyring,
+        bootstrap_osd_keyring,
+        cluster_name: load_config().cluster_name,
+    })
+}
+
+/// Pull a single `key = value` line out of a ceph.conf body.
+fn parse_conf_value(conf: &str, key: &str) -> Option<String> {
+    conf.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        if k.trim() == key { Some(v.trim().to_string()) } else { None }
+    })
+}
+
+/// Join an existing cluster by installing the bundle's config + keyrings, after
+/// which this node can add OSDs (the existing flow) and `ceph -s` resolves
+/// against the cluster's mon(s) via the config. Does NOT add a monitor — the
+/// node joins as an OSD-contributing member (mon HA is a separate step). Refuses
+/// to clobber an existing local config so a mistaken join can't break a node
+/// that's already in a cluster.
+pub fn join_cluster(bundle: &CephJoinBundle) -> Result<String, String> {
+    if std::path::Path::new(CEPH_CONF_PATH).exists() {
+        return Err("This node already has /etc/ceph/ceph.conf — it's already in a cluster. Remove it first if you really mean to re-join a different one".into());
+    }
+    // Sanity-check the bundle before we write anything: a real bundle has the
+    // cluster fsid and a client.admin secret.
+    if !bundle.ceph_conf.contains("fsid") {
+        return Err("Join bundle has no cluster fsid — the source node may not be bootstrapped".into());
+    }
+    if !bundle.admin_keyring.contains("client.admin") {
+        return Err("Join bundle is missing the client.admin keyring".into());
+    }
+
+    std::fs::create_dir_all("/etc/ceph").map_err(|e| format!("mkdir /etc/ceph: {}", e))?;
+    std::fs::create_dir_all("/var/lib/ceph/bootstrap-osd")
+        .map_err(|e| format!("mkdir bootstrap-osd: {}", e))?;
+    std::fs::write(CEPH_CONF_PATH, &bundle.ceph_conf)
+        .map_err(|e| format!("write ceph.conf: {}", e))?;
+    std::fs::write(CEPH_ADMIN_KEYRING_PATH, &bundle.admin_keyring)
+        .map_err(|e| format!("write admin keyring: {}", e))?;
+    std::fs::write(CEPH_BOOTSTRAP_OSD_KEYRING_PATH, &bundle.bootstrap_osd_keyring)
+        .map_err(|e| format!("write bootstrap-osd keyring: {}", e))?;
+    // Keyrings are cluster secrets — lock them to root-only before ceph adopts
+    // them, then hand the tree to the ceph user (mirrors bootstrap_cluster).
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(CEPH_ADMIN_KEYRING_PATH, std::fs::Permissions::from_mode(0o600));
+    let _ = std::fs::set_permissions(CEPH_BOOTSTRAP_OSD_KEYRING_PATH, std::fs::Permissions::from_mode(0o600));
+    let _ = Command::new("chown").args(["-R", "ceph:ceph", "/var/lib/ceph/", "/etc/ceph/"]).output();
+
+    // Persist membership so the UI shows the cluster view (status reads the
+    // cluster's mon via the config + admin keyring we just installed).
+    let cfg = CephConfig {
+        configured: true,
+        cluster_name: if bundle.cluster_name.is_empty() { "ceph".into() } else { bundle.cluster_name.clone() },
+        mon_initial_members: Vec::new(),
+        public_network: parse_conf_value(&bundle.ceph_conf, "public network").unwrap_or_default(),
+        cluster_network: parse_conf_value(&bundle.ceph_conf, "cluster network").unwrap_or_default(),
+    };
+    let _ = save_config(&cfg);
+
+    Ok("Joined the Ceph cluster — config + keyrings installed. Add OSDs on this node to contribute storage to the cluster.".to_string())
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::*;
+
+    #[test]
+    fn parse_conf_value_extracts_keys() {
+        let conf = "[global]\nfsid = abc-123\npublic network = 10.0.0.0/24\nmon host = 10.0.0.1\n";
+        assert_eq!(parse_conf_value(conf, "fsid").as_deref(), Some("abc-123"));
+        assert_eq!(parse_conf_value(conf, "public network").as_deref(), Some("10.0.0.0/24"));
+        assert_eq!(parse_conf_value(conf, "cluster network"), None);
+    }
+}
