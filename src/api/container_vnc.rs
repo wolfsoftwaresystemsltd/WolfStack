@@ -450,12 +450,11 @@ fn detect_os(runtime: &str, name: &str) -> Result<OsInfo, String> {
 /// polish package (xfce4-goodies / gnome-tweaks) is appended when
 /// applicable.
 fn extras_packages(family: &str, desktop_id: &str) -> Vec<String> {
-    // NOTE: browser package intentionally omitted on the debian family —
-    // Debian ships `firefox-esr` while Ubuntu / Linux Mint ship `firefox`
-    // (no `firefox-esr` candidate). Picking either statically broke
-    // installs on the other. The install script picks one at runtime
-    // (see install_browser snippet in build_install_script) so we get
-    // Firefox on every distro without failing the apt transaction.
+    // NOTE: the web browser is NOT in this list — a full desktop always gets a
+    // browser via the dedicated BROWSER_BLOCK_* step (run independently of this
+    // optional extras bundle), so unchecking extras still leaves a usable
+    // browser. The per-distro browser-package quirks (Debian firefox-esr vs
+    // Ubuntu's snap-only firefox) are handled there.
     let mut pkgs: Vec<String> = match family {
         "debian" => vec![
             "flatpak".into(),
@@ -466,13 +465,14 @@ fn extras_packages(family: &str, desktop_id: &str) -> Vec<String> {
             "file-roller".into(),
         ],
         "alpine" => vec![
-            "firefox".into(),
+            // NOTE: the web browser is installed by browser_install_block (a
+            // full desktop always gets one, independent of this extras bundle).
             "flatpak".into(),
             "xdg-utils".into(),
             "gvfs".into(),
         ],
         "rhel" => vec![
-            "firefox".into(),
+            // Browser installed by browser_install_block — see note above.
             "flatpak".into(),
             "xdg-utils".into(),
             "gvfs".into(),
@@ -495,6 +495,53 @@ fn extras_packages(family: &str, desktop_id: &str) -> Vec<String> {
 
     pkgs
 }
+
+/// Browser install for a Debian/Ubuntu/Mint full desktop. Run for EVERY desktop
+/// install (not gated on the optional extras bundle) — a desktop with no browser
+/// is what users hit as "no web browser installed". Debian/Mint ship a real
+/// `firefox-esr` .deb; Ubuntu ships `firefox` only as a snap, which does NOT run
+/// inside an LXC container, so we fall back to Mozilla's official APT repo (a
+/// real .deb) and finally to Flatpak. Best-effort: never fatal to the install.
+const BROWSER_BLOCK_DEBIAN: &str = r#"
+echo "[wolfstack] Installing a web browser..."
+apt-get install -y --no-install-recommends firefox-esr 2>/dev/null || true
+if ! command -v firefox-esr >/dev/null 2>&1 && ! command -v firefox >/dev/null 2>&1; then
+    echo "[wolfstack] firefox-esr unavailable — adding Mozilla's APT repo (Ubuntu's firefox is a snap that can't run in LXC)..."
+    apt-get install -y --no-install-recommends ca-certificates curl 2>/dev/null || true
+    install -d -m 0755 /etc/apt/keyrings
+    if curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc 2>/dev/null; then
+        echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" > /etc/apt/sources.list.d/mozilla.list
+        printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y --no-install-recommends firefox 2>/dev/null || true
+    fi
+fi
+if ! command -v firefox-esr >/dev/null 2>&1 && ! command -v firefox >/dev/null 2>&1 && command -v flatpak >/dev/null 2>&1; then
+    echo "[wolfstack] Falling back to Flatpak Firefox..."
+    flatpak install -y --noninteractive flathub org.mozilla.firefox 2>/dev/null || true
+fi
+if command -v firefox-esr >/dev/null 2>&1 || command -v firefox >/dev/null 2>&1 || flatpak info org.mozilla.firefox >/dev/null 2>&1; then
+    echo "[wolfstack] Web browser installed."
+else
+    echo "[wolfstack] WARNING: could not install a web browser automatically — install one manually, e.g. apt-get install firefox-esr"
+fi
+"#;
+
+/// Browser install for a RHEL/Fedora/Rocky full desktop. `$PKG` is set by the
+/// RHEL head to `dnf -y install` / `yum -y install`. Firefox is a native rpm.
+const BROWSER_BLOCK_RHEL: &str = r#"
+echo "[wolfstack] Installing a web browser..."
+$PKG firefox 2>/dev/null \
+    || echo "[wolfstack] WARNING: could not install firefox automatically — install one manually (dnf install firefox)."
+"#;
+
+/// Browser install for an Alpine full desktop. firefox / firefox-esr live in the
+/// community repo.
+const BROWSER_BLOCK_ALPINE: &str = r#"
+echo "[wolfstack] Installing a web browser..."
+apk add --no-cache firefox 2>/dev/null || apk add --no-cache firefox-esr 2>/dev/null \
+    || echo "[wolfstack] WARNING: could not install firefox automatically — install one manually (apk add firefox)."
+"#;
 
 /// Shell commands to register Flathub as a Flatpak remote — same line
 /// recommended by the Flatpak docs. Idempotent (`--if-not-exists`).
@@ -842,6 +889,20 @@ echo
     };
     let extras_pkgs = extras_pkgs_list.join(" ");
     let has_extras = !extras_pkgs_list.is_empty();
+
+    // A full desktop ALWAYS gets a web browser, independent of the optional
+    // extras bundle — a desktop with no browser is what users reported as
+    // broken. Empty for vnc-only (no desktop) installs.
+    let browser_block = if chosen.is_some() {
+        match family {
+            "debian" => BROWSER_BLOCK_DEBIAN,
+            "rhel" => BROWSER_BLOCK_RHEL,
+            "alpine" => BROWSER_BLOCK_ALPINE,
+            _ => "",
+        }
+    } else {
+        ""
+    };
     let label_suffix = chosen.as_ref()
         .map(|d| format!(" + {}{}", d.label, if extras { " + utilities" } else { "" }))
         .unwrap_or_else(|| " (no desktop)".to_string());
@@ -866,10 +927,6 @@ if ! apt-get install -y --no-install-recommends {extras_pkgs}; then
             || echo "[wolfstack] skipped extra: $pkg (no candidate)"
     done
 fi
-echo "[wolfstack] Installing browser (firefox-esr on Debian / firefox on Ubuntu/Mint)..."
-apt-get install -y --no-install-recommends firefox-esr 2>/dev/null \
-    || apt-get install -y --no-install-recommends firefox 2>/dev/null \
-    || echo "[wolfstack] no firefox package available — skipping browser"
 "#, extras_pkgs = extras_pkgs)
             } else {
                 String::new()
@@ -997,8 +1054,8 @@ apt-get install -y --no-install-recommends \
     tigervnc-standalone-server tigervnc-common tigervnc-tools \
     dbus-x11 socat xterm fonts-dejavu \
     procps
-{desktop_block}{extras_block}
-"#, label_suffix = label_suffix, desktop_block = desktop_block, extras_block = extras_block)
+{desktop_block}{extras_block}{browser_block}
+"#, label_suffix = label_suffix, desktop_block = desktop_block, extras_block = extras_block, browser_block = browser_block)
         }
 
         "alpine" => {
@@ -1023,8 +1080,8 @@ apk add --no-cache \
     tigervnc \
     {required_pkgs} \
     dbus-x11 socat xterm ttf-dejavu
-{extras_block}
-"#, label_suffix = label_suffix, required_pkgs = required_pkgs, extras_block = extras_block)
+{extras_block}{browser_block}
+"#, label_suffix = label_suffix, required_pkgs = required_pkgs, extras_block = extras_block, browser_block = browser_block)
         }
 
         "rhel" => {
@@ -1056,8 +1113,8 @@ fi
 $PKG tigervnc-server tigervnc \
      {required_pkgs} \
      dbus-x11 socat xterm dejavu-sans-fonts procps-ng
-{extras_block}
-"#, label_suffix = label_suffix, required_pkgs = required_pkgs, extras_block = extras_block)
+{extras_block}{browser_block}
+"#, label_suffix = label_suffix, required_pkgs = required_pkgs, extras_block = extras_block, browser_block = browser_block)
         }
 
         _ => return String::new(),
@@ -1482,4 +1539,61 @@ pub async fn vnc_list(
     let map = load_config();
     let keys: Vec<&String> = map.keys().collect();
     Ok(HttpResponse::Ok().json(serde_json::json!({ "keys": keys })))
+}
+
+#[cfg(test)]
+mod browser_install_tests {
+    use super::*;
+
+    #[test]
+    fn full_desktop_always_installs_a_browser_even_with_extras_off() {
+        for family in ["debian", "rhel", "alpine"] {
+            let script = build_install_script(family, "pw", true, None, Some("xfce"), false);
+            assert!(
+                script.contains("Installing a web browser"),
+                "{family}: a full desktop must install a browser even when extras are off"
+            );
+            assert!(
+                script.contains("firefox"),
+                "{family}: the browser step should install firefox"
+            );
+        }
+    }
+
+    #[test]
+    fn vnc_only_install_has_no_browser_block() {
+        // No desktop selected -> no browser step (nothing to put it on).
+        for family in ["debian", "rhel", "alpine"] {
+            let script = build_install_script(family, "pw", false, None, None, true);
+            assert!(
+                !script.contains("Installing a web browser"),
+                "{family}: vnc-only install must not run the browser block"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_install_scripts_are_shell_valid() {
+        // Catches an unbalanced quote/paren/heredoc in the generated script —
+        // exactly the failure that would leave a user mid-install. Best-effort:
+        // skip if bash isn't on the test host.
+        if std::process::Command::new("bash").arg("-c").arg("true").output().is_err() {
+            return;
+        }
+        for family in ["debian", "rhel", "alpine"] {
+            for extras in [true, false] {
+                let script = build_install_script(family, "pw", true, None, Some("xfce"), extras);
+                let path = std::env::temp_dir()
+                    .join(format!("wolfstack-vnc-{}-{}-{}.sh", family, extras, std::process::id()));
+                std::fs::write(&path, &script).unwrap();
+                let out = std::process::Command::new("bash").arg("-n").arg(&path).output().unwrap();
+                let _ = std::fs::remove_file(&path);
+                assert!(
+                    out.status.success(),
+                    "{family} (extras={extras}): generated install script has a shell syntax error:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+    }
 }
