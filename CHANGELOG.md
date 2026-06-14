@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.46.2: fix Docker install on Oracle Linux / RHEL 10 family (don't break dnf)** _(2026-06-14 — [`ac5fd14`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ac5fd14899e5163c7501ca9bbeec0b4470e8c5d3))_
+- **v24.46.1: AI claude-cli reachable as root + cluster node selector** _(2026-06-14 — [`d3fa5e7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d3fa5e75cd09d272989244ff0b44af51482fe6c2))_
 - **v24.46.0: Fedora LXC listing, desktop browser, Fleet Security tabs, confirm-dialog fix** _(2026-06-14 — [`90da39b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/90da39bd1f16d05422bc351125c71a0c1280dc5c))_
 - **v24.45.2: Security — manually unblock any IP from the security screen** _(2026-06-14 — [`faad270`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/faad270cad889aba60154f60ff633f0c22c1aee3))_
 - **v24.45.1: AI "claude-cli" provider — Test Connection no longer hits the API with no key** _(2026-06-14 — [`6f228b5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6f228b58f7328b84827d8f58e89df27606f10bdf))_
