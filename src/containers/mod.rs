@@ -5392,6 +5392,10 @@ pub fn lxc_set_root_password(container: &str, password: &str) -> Result<String, 
 /// user can act on it.
 pub fn lxc_start(container: &str) -> Result<String, String> {
     ensure_lxc_bridge();
+    // On AppArmor-less LXC (Fedora/SELinux) an old `lxc.apparmor.profile` line
+    // makes lxc-start reject the whole config — strip it first so the container
+    // can actually start.
+    heal_lxc_apparmor_config(container);
     if is_proxmox() {
         // pct start waits internally — its own exit code is authoritative.
         let msg = run_lxc_cmd(&["pct", "start", container])?;
@@ -5663,6 +5667,9 @@ pub fn lxc_unfreeze(container: &str) -> Result<String, String> {
 /// Destroy an LXC container
 pub fn lxc_destroy(container: &str) -> Result<String, String> {
     lxc_stop(container).ok(); // Stop first, ignore errors
+    // Strip an unparseable apparmor line first, or lxc-destroy can't even LOAD
+    // the config to destroy it (Fedora/SELinux — wabil 2026-06-14).
+    heal_lxc_apparmor_config(container);
     let result = if is_proxmox() {
         run_lxc_cmd(&["pct", "destroy", container])
     } else {
@@ -5673,7 +5680,32 @@ pub fn lxc_destroy(container: &str) -> Result<String, String> {
             run_lxc_cmd(&["lxc-destroy", "-n", container])
         }
     };
-    if result.is_ok() { invalidate_count_caches(); }
+    if result.is_ok() {
+        invalidate_count_caches();
+        return result;
+    }
+    // Fallback for native LXC: if lxc-destroy still couldn't load/destroy the
+    // container (another host-incompatible config key, a corrupt config, etc.),
+    // remove the container directory directly so a broken container is never
+    // permanently undeletable. Guard the name against path traversal — it must
+    // be a bare directory name with an actual container config inside.
+    if !is_proxmox()
+        && !container.is_empty()
+        && !container.contains('/')
+        && container != "."
+        && container != ".."
+    {
+        let dir = format!("{}/{}", lxc_base_dir(container), container);
+        if std::path::Path::new(&dir).join("config").is_file()
+            && std::fs::remove_dir_all(&dir).is_ok()
+        {
+            invalidate_count_caches();
+            return Ok(format!(
+                "Removed '{}' by deleting its directory — lxc-destroy couldn't load its config.",
+                container
+            ));
+        }
+    }
     result
 }
 
@@ -7509,7 +7541,21 @@ pub fn is_libvirt() -> bool {
 /// a reboot.
 pub fn host_has_apparmor() -> bool {
     static HAS_AA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *HAS_AA.get_or_init(|| std::path::Path::new("/sys/module/apparmor").exists())
+    *HAS_AA.get_or_init(|| {
+        // SELinux distros (Fedora, RHEL/Rocky/Alma/Oracle) ship an LXC built
+        // WITHOUT AppArmor. The apparmor kernel MODULE can still be loaded there
+        // (so the old `/sys/module/apparmor` check returned true), but
+        // `lxc.apparmor.profile` is an invalid key for that LXC build and makes
+        // it reject the whole config ("Built without AppArmor support") — the
+        // container then can't be listed, started, OR destroyed. If SELinux is
+        // the active LSM, treat AppArmor as unavailable to LXC regardless of the
+        // module. (wabil 2026-06-14: Fedora, apparmor module present but LXC
+        // without it — couldn't start or delete containers.)
+        if std::path::Path::new("/sys/fs/selinux/enforce").exists() {
+            return false;
+        }
+        std::path::Path::new("/sys/module/apparmor").exists()
+    })
 }
 
 /// PVE storage entry from `pvesm status`
@@ -8265,6 +8311,25 @@ fn strip_apparmor_profile(content: &str) -> String {
         .join(nl);
     if trailing_nl { out.push_str(nl); }
     out
+}
+
+/// Reactively strip an unparseable `lxc.apparmor.profile` line from ONE
+/// container's on-disk config, just before an operation that loads it
+/// (start/destroy), on hosts whose LXC lacks AppArmor. Belt-and-suspenders
+/// alongside the startup migration: heals a container that appeared after
+/// startup, or one the migration skipped. No-op on AppArmor hosts, Proxmox, or
+/// an already-clean config. Atomic (temp + rename) so it can never truncate.
+fn heal_lxc_apparmor_config(container: &str) {
+    if host_has_apparmor() || is_proxmox() { return; }
+    let path = format!("{}/{}/config", lxc_base_dir(container), container);
+    let Ok(content) = std::fs::read_to_string(&path) else { return };
+    if !content.contains("lxc.apparmor.profile") { return; }
+    let cleaned = strip_apparmor_profile(&content);
+    if cleaned == content { return; }
+    let tmp = format!("{}.wolfstack-heal.tmp", path);
+    if std::fs::write(&tmp, &cleaned).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// Repair existing container configs that carry an `lxc.apparmor.profile` line
@@ -11288,6 +11353,29 @@ mod cross_platform_restore_tests {
         assert!(!lxc_archive_is_vzdump("/var/lib/wolfstack/backups/lxc-web01-2026_06_06.tar.gz"));
         assert!(!lxc_archive_is_vzdump("/tmp/myct.tar.gz"));
         assert!(!lxc_archive_is_vzdump("/tmp/rootfs.tar"));
+    }
+
+    #[test]
+    fn strip_apparmor_removes_the_unparseable_line_only() {
+        // wabil 2026-06-14: Fedora LXC ("Built without AppArmor support") rejects
+        // the whole config on this exact line, so the container can't start or be
+        // destroyed. It must be removed; everything else must survive intact.
+        let cfg = "lxc.uts.name = emergency desktop\n\
+                   lxc.apparmor.profile = unconfined\n\
+                   lxc.net.0.type = veth\n";
+        let out = strip_apparmor_profile(cfg);
+        assert!(!out.contains("lxc.apparmor.profile"), "the bad line must be gone");
+        assert!(out.contains("lxc.uts.name = emergency desktop"), "other lines kept");
+        assert!(out.contains("lxc.net.0.type = veth"), "other lines kept");
+        assert!(out.ends_with('\n'), "trailing newline preserved");
+        // A clean config is returned unchanged (so the heal is a no-op on it).
+        let clean = "lxc.uts.name = web\nlxc.net.0.type = veth\n";
+        assert_eq!(strip_apparmor_profile(clean), clean);
+        // Other lxc.apparmor.* keys (e.g. allow_nesting) are intentionally left.
+        let nested = "lxc.apparmor.allow_nesting = 1\nlxc.apparmor.profile = unconfined\n";
+        let nested_out = strip_apparmor_profile(nested);
+        assert!(nested_out.contains("lxc.apparmor.allow_nesting = 1"));
+        assert!(!nested_out.contains("lxc.apparmor.profile"));
     }
 }
 
