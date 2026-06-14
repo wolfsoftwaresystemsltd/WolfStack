@@ -3290,6 +3290,44 @@ async fn call_local_no_tools(
 ///
 /// Auth lives in the invoking user's `~/.claude`. WolfStack runs as root, so
 /// the operator must have run `sudo claude login` first (surfaced in the UI).
+/// Locate the `claude` (Claude Code) binary. WolfStack runs as root under
+/// systemd, whose default PATH (/usr/local/bin:/usr/bin:…) does NOT include
+/// `~/.local/bin` — exactly where Claude Code's native installer drops the
+/// binary. So a perfectly valid `sudo claude` install lands at
+/// /root/.local/bin/claude and a bare `Command::new("claude")` reports "not
+/// installed". Check PATH first, then the common install locations (root's home
+/// and a node-version-manager layout). Returns the resolved path, or None.
+fn find_claude_binary() -> Option<String> {
+    // On PATH already? (`command -v` honours the inherited PATH.)
+    if let Ok(o) = std::process::Command::new("sh").arg("-c").arg("command -v claude").output() {
+        if o.status.success() {
+            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !p.is_empty() && std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let mut candidates = vec![
+        "/usr/local/bin/claude".to_string(),
+        "/usr/bin/claude".to_string(),
+        format!("{home}/.local/bin/claude"),
+        format!("{home}/.npm-global/bin/claude"),
+        format!("{home}/.claude/local/claude"),
+        // Fall back to /root explicitly in case HOME isn't set in the unit env.
+        "/root/.local/bin/claude".to_string(),
+        "/root/.npm-global/bin/claude".to_string(),
+        "/root/.claude/local/claude".to_string(),
+    ];
+    // nvm-style: ~/.nvm/versions/node/<ver>/bin/claude
+    if let Ok(entries) = std::fs::read_dir(format!("{home}/.nvm/versions/node")) {
+        for e in entries.flatten() {
+            candidates.push(format!("{}/bin/claude", e.path().display()));
+        }
+    }
+    candidates.into_iter().find(|p| std::path::Path::new(p).is_file())
+}
+
 async fn call_claude_cli(
     model: &str,
     system: &str,
@@ -3322,7 +3360,17 @@ async fn call_claude_cli(
 
     let mdl = if model.trim().is_empty() { "sonnet" } else { model.trim() };
 
-    let mut child = tokio::process::Command::new("claude")
+    // WolfStack runs as root; resolve the binary across PATH + common install
+    // dirs so a `~/.local/bin` install (the native installer's default) is found.
+    let claude_bin = find_claude_binary().ok_or_else(|| {
+        "The `claude` CLI isn't installed or reachable as root on this node. \
+         WolfStack runs as root, which has its own home and PATH — installing or \
+         logging in as your normal user is NOT enough. As root: install Claude \
+         Code, then run `sudo claude login`. In a cluster you only need this on \
+         the node you point the AI at (you don't need it on every node).".to_string()
+    })?;
+
+    let mut child = tokio::process::Command::new(&claude_bin)
         .arg("-p")
         .arg("--model").arg(mdl)
         .arg("--allowedTools").arg("")        // no tools — text only (security)
@@ -3332,11 +3380,7 @@ async fn call_claude_cli(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)                   // a timed-out `claude` is reaped, not orphaned
         .spawn()
-        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound {
-            "The `claude` CLI isn't installed on this node. Install Claude Code and run `sudo claude login` (WolfStack runs as root, so root needs the session).".to_string()
-        } else {
-            format!("Failed to launch `claude`: {}", e)
-        })?;
+        .map_err(|e| format!("Failed to launch `{}`: {}", claude_bin, e))?;
 
     // Write stdin from a separate task so it streams CONCURRENTLY with draining
     // stdout/stderr — writing the whole prompt before reading output can

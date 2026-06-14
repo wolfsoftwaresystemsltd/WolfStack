@@ -6246,10 +6246,17 @@
                                     <div style="padding:10px 12px; border:1px solid var(--border); border-radius:6px; background:rgba(99,102,241,0.08); font-size:13px; line-height:1.5;">
                                         <strong>Uses your Claude Pro/Max subscription</strong> via the local <code>claude</code> CLI — no API key, no per-use cost.
                                         <ul style="margin:8px 0 0 18px; padding:0;">
-                                            <li>Install <strong>Claude Code</strong> on this node, then run <code>sudo claude login</code> (WolfStack runs as root, so root needs the session).</li>
+                                            <li>Install <strong>Claude Code</strong> as <strong>root</strong> on the chosen node, then run <code>sudo claude login</code> (WolfStack runs as root — installing/logging in as your normal user is not enough).</li>
                                             <li>Set the <strong>Model</strong> below to <code>opus</code>, <code>sonnet</code>, or <code>haiku</code> (or a full <code>claude-*</code> id).</li>
                                             <li>The assistant runs with <strong>all Claude Code tools disabled</strong> — it only returns text; WolfStack's own confirmed command flow is unchanged.</li>
                                         </ul>
+                                    </div>
+                                    <div class="form-group" style="margin-top:12px; margin-bottom:0;">
+                                        <label for="ai-cli-node">Run the CLI on</label>
+                                        <select id="ai-cli-node" class="form-control" onchange="onAiCliNodeChange()">
+                                            <option value="">This node</option>
+                                        </select>
+                                        <small style="color:var(--text-muted); display:block; margin-top:4px;">The <code>claude</code> CLI only needs installing + <code>sudo claude login</code> on the <strong>one</strong> node you pick here — not every node. Settings, Test Connection, and the assistant chat all run on that node.</small>
                                     </div>
                                 </div>
                                 <div class="form-group" style="margin-bottom:16px;">
