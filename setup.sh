@@ -943,11 +943,39 @@ if ! command -v docker >/dev/null 2>&1; then
         DISTRO_LIKE=$(. /etc/os-release 2>/dev/null && echo "$ID_LIKE")
         DISTRO_VERSION=$(. /etc/os-release 2>/dev/null && echo "$VERSION_ID")
 
-        if echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "fedora"; then
-            # Fedora family (Nobara, Ultramarine, etc.) — use Fedora Docker repo
-            # Use the major Fedora version the derivative is based on
+        if echo "$DISTRO_ID" | grep -qiE '^(ol|rhel|centos|rocky|almalinux|alma|scientific|oracle|virtuozzo)$' \
+            || echo "$DISTRO_LIKE" | grep -qiE 'rhel|centos'; then
+            # RHEL/CentOS family — INCLUDING Oracle Linux. Checked BEFORE Fedora
+            # on purpose: Oracle Linux 10 / RHEL 10 set ID_LIKE="fedora", so a
+            # plain `grep fedora` (the old first branch) wrongly sent them to the
+            # Fedora repo, which seds $releasever to e.g. "10.1" and 404s on
+            # download.docker.com/linux/fedora/10.1/. The leftover broken repo
+            # then makes EVERY later dnf/yum run fail — which is how a failed
+            # WolfStack install "killed Docker" on Oracle Linux and persisted
+            # after uninstall (wabil 2026-06-14).
+            echo "  Detected RHEL/CentOS family (${DISTRO_ID}) — using the CentOS Docker repo"
+            # Heal a box left broken by a PRIOR failed install: an earlier
+            # WolfStack version mis-added a Fedora docker-ce.repo with a bogus
+            # $releasever, and that 404'ing repo makes every dnf/yum run fail.
+            # Clear it before any dnf op so re-running setup.sh recovers the box.
+            rm -f /etc/yum.repos.d/docker-ce.repo 2>/dev/null || true
+            dnf -y install dnf-plugins-core 2>/dev/null || yum install -y yum-utils 2>/dev/null || true
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+                dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+                dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+            if yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || \
+               dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null; then
+                DOCKER_INSTALLED=true
+            else
+                # Docker may not publish a repo for a brand-new EL major yet.
+                # Remove the repo we just added so a 404'ing repo can't break
+                # every subsequent dnf/yum run (the root of the OL breakage).
+                rm -f /etc/yum.repos.d/docker-ce.repo 2>/dev/null || true
+            fi
+        elif echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "fedora"; then
+            # Genuine Fedora family (Nobara, Ultramarine, etc.) — Fedora repo.
+            # Use the major Fedora version the derivative is based on.
             FEDORA_VER="$DISTRO_VERSION"
-            # For derivatives, try to detect the Fedora base version
             if [ "$DISTRO_ID" != "fedora" ]; then
                 PLATFORM_ID=$(. /etc/os-release 2>/dev/null && echo "$PLATFORM_ID")
                 if echo "$PLATFORM_ID" | grep -q "fedora"; then
@@ -964,16 +992,9 @@ if ! command -v docker >/dev/null 2>&1; then
             fi
             if dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
                 DOCKER_INSTALLED=true
-            fi
-        elif echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "rhel|centos"; then
-            # RHEL family (Rocky, Alma, Oracle, etc.) — use CentOS Docker repo
-            echo "  Detected RHEL/CentOS family (${DISTRO_ID})"
-            yum install -y yum-utils 2>/dev/null || true
-            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
-                dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
-            if yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || \
-               dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null; then
-                DOCKER_INSTALLED=true
+            else
+                # Don't leave a broken repo behind — it would break later dnf runs.
+                rm -f /etc/yum.repos.d/docker-ce.repo 2>/dev/null || true
             fi
         elif echo "$DISTRO_ID $DISTRO_LIKE" | grep -qiE "suse|sles"; then
             # openSUSE/SLES — use distro docker packages
