@@ -2003,6 +2003,47 @@ function configuratorNodeUrl(path) {
     return apiUrl(path);
 }
 
+// Which node the AI (Settings → AI Agent, Test Connection, assistant chat)
+// runs on. Empty = the page-serving node. Set via the "Run the CLI on" selector
+// in the AI Agent tab so the `claude` CLI only needs installing on ONE node in a
+// cluster (klasSponsor). Persisted so the choice survives reloads.
+let _aiNodeId = '';
+try { _aiNodeId = localStorage.getItem('ai_node_id') || ''; } catch (e) { _aiNodeId = ''; }
+function aiNodeUrl(path) {
+    if (_aiNodeId) {
+        const cleanPath = path.replace(/^\/api\//, '');
+        return `/api/nodes/${encodeURIComponent(_aiNodeId)}/proxy/${cleanPath}`;
+    }
+    return path;
+}
+// Fill the AI node selector with the cluster's WolfStack nodes and restore the
+// saved choice. Called when the AI Agent tab loads.
+function populateAiCliNodes() {
+    const sel = document.getElementById('ai-cli-node');
+    if (!sel) return;
+    const nodes = (allNodes || []).filter(n => n.node_type === 'wolfstack');
+    const opts = ['<option value="">This node</option>'].concat(
+        nodes.filter(n => !n.is_self).map(n =>
+            `<option value="${escapeAttr(n.id)}">${escapeHtml(n.display_name || n.hostname || n.address)}</option>`)
+    );
+    sel.innerHTML = opts.join('');
+    // Restore the saved selection if that node still exists.
+    if (_aiNodeId && nodes.some(n => n.id === _aiNodeId)) {
+        sel.value = _aiNodeId;
+    } else {
+        _aiNodeId = '';
+        sel.value = '';
+    }
+}
+function onAiCliNodeChange() {
+    const sel = document.getElementById('ai-cli-node');
+    _aiNodeId = sel ? sel.value : '';
+    try { localStorage.setItem('ai_node_id', _aiNodeId); } catch (e) { /* ignore */ }
+    // Re-load config + status from the newly-selected node.
+    if (typeof loadAiConfig === 'function') loadAiConfig();
+    if (typeof loadAiStatus === 'function') loadAiStatus();
+}
+
 // Which node a cert action should run on. An explicit nodeId (cluster-scope
 // rows in the SSL manager pass one) always wins; otherwise the configurator's
 // selected node; '' means the page-serving node (the existing single-node
@@ -32042,7 +32083,7 @@ async function sendAiMessage() {
         }
         if (currentPage) chatPayload.view = currentPage;
 
-        var resp = await fetch('/api/ai/chat', {
+        var resp = await fetch(aiNodeUrl('/api/ai/chat'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(chatPayload)
@@ -32177,7 +32218,7 @@ async function approveAiAction(actionId) {
 
     // Mark the action as approved on the server first (required before terminal can fetch the command)
     try {
-        var approveResp = await fetch('/api/ai/action', {
+        var approveResp = await fetch(aiNodeUrl('/api/ai/action'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action_id: actionId, approved: true })
@@ -32213,7 +32254,7 @@ async function dismissAiAction(actionId) {
     if (btns) btns.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">Dismissed</span>';
 
     try {
-        await fetch('/api/ai/action', {
+        await fetch(aiNodeUrl('/api/ai/action'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action_id: actionId, approved: false })
@@ -32228,8 +32269,9 @@ function openAiSettings() {
 }
 
 async function loadAiConfig() {
+    populateAiCliNodes();
     try {
-        var resp = await fetch('/api/ai/config');
+        var resp = await fetch(aiNodeUrl('/api/ai/config'));
         var cfg = await resp.json();
         var el;
         // agent_enabled defaults to true server-side; tolerate missing
@@ -32288,7 +32330,7 @@ async function fetchAiModels(provider, selectedModel) {
     }
     select.innerHTML = '<option value="">Loading models...</option>';
     try {
-        var resp = await fetch('/api/ai/models?provider=' + encodeURIComponent(provider));
+        var resp = await fetch(aiNodeUrl('/api/ai/models?provider=' + encodeURIComponent(provider)));
         var data = await resp.json();
         var models = data.models || [];
         select.innerHTML = '';
@@ -32424,7 +32466,7 @@ async function saveAiConfig() {
     if (model === null) return;
     var config = _buildAiConfigPayload(model);
     try {
-        var resp = await fetch('/api/ai/config', {
+        var resp = await fetch(aiNodeUrl('/api/ai/config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
@@ -32451,7 +32493,7 @@ async function saveAiConfig() {
 
 async function loadAiStatus() {
     try {
-        var resp = await fetch('/api/ai/status');
+        var resp = await fetch(aiNodeUrl('/api/ai/status'));
         var status = await resp.json();
         var textEl = document.getElementById('ai-status-text');
         var detailEl = document.getElementById('ai-status-detail');
@@ -32479,7 +32521,7 @@ async function loadAiStatus() {
 
 async function loadAiAlerts() {
     try {
-        var resp = await fetch('/api/ai/alerts');
+        var resp = await fetch(aiNodeUrl('/api/ai/alerts'));
         var alerts = await resp.json();
         var container = document.getElementById('ai-alerts-list');
         if (!container) return;
@@ -32546,7 +32588,7 @@ async function testAiConnection() {
     };
 
     try {
-        await fetch('/api/ai/config', {
+        await fetch(aiNodeUrl('/api/ai/config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
@@ -32554,7 +32596,7 @@ async function testAiConnection() {
 
         stepEl.textContent = 'Sending a 150-byte ping to ' + (config.provider === 'local' ? config.local_url : config.provider) + '…';
 
-        var resp = await fetch('/api/ai/test-connection', {
+        var resp = await fetch(aiNodeUrl('/api/ai/test-connection'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
         });
@@ -32589,7 +32631,7 @@ async function testAiConnection() {
 
 async function sendTestEmail() {
     try {
-        var resp = await fetch('/api/ai/test-email', { method: 'POST' });
+        var resp = await fetch(aiNodeUrl('/api/ai/test-email'), { method: 'POST' });
         var data = await resp.json();
         if (data.error) {
             showModal('' + data.error, 'Email Error');
