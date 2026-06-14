@@ -11528,6 +11528,8 @@ pub async fn ai_test_connection(
         "openrouter" => "https://openrouter.ai/api/v1".to_string(),
         "cloudflare" => crate::ai::cloudflare_base_url(&config.cloudflare_account_id),
         "gemini" => format!("https://generativelanguage.googleapis.com/.../{}:generateContent", config.model),
+        // claude-cli shells out to the local `claude` binary — no HTTP, no key.
+        "claude-cli" => "local `claude` CLI (Pro/Max login — no API key)".to_string(),
         _ => "https://api.anthropic.com/v1/messages".to_string(),
     };
 

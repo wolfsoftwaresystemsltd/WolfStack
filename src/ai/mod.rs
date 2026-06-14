@@ -2424,6 +2424,15 @@ pub async fn simple_chat(
             call_local(client, &url, &config.cloudflare_api_key, &config.model, system_prompt, history, user_message).await
         }
         "local" => call_local(client, &config.local_url, &config.local_api_key, &config.model, system_prompt, history, user_message).await,
+        // Claude Code CLI (Pro/Max subscription login) — shells out to `claude`,
+        // no API key. MUST be handled here, not left to the `_` arm below: the
+        // operator who picks claude-cli sets no claude_api_key, so falling
+        // through to call_claude posts to api.anthropic.com with an empty
+        // x-api-key and gets a 401 ("x-api-key header is required"). The other
+        // provider-dispatch sites (chat, health_check, issue-fixer) already
+        // special-case claude-cli; simple_chat — which backs Test Connection —
+        // was the one that didn't (klasSponsor 2026-06-14).
+        "claude-cli" => call_claude_cli(&config.model, system_prompt, history, user_message).await,
         // Default to Claude (also covers empty/default provider string).
         _ => call_claude(client, &config.claude_api_key, &config.model, system_prompt, history, user_message).await,
     }
