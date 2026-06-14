@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.45.0: Ceph — fix/repair, mon+mgr HA, daemon control, deeper monitoring, RBD UI** _(2026-06-14 — [`fbc8c76`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fbc8c76a963e46c37f59c5283bb37eb64b2bf8fa))_
 - **v24.44.0: Ceph — add the missing "Join existing cluster" flow** _(2026-06-14 — [`af59eb0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af59eb0e35b433bf09a0cdb93916e6da827a40cc))_
 - **v24.43.3: stop the multi-homed control-plane CPU storm at the source** _(2026-06-14 — [`a05e25d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a05e25d0713b895aafe5fdfa13f666d721afecbf))_
 - **v24.43.2: LXC containers on Fedora/SELinux — stop writing an AppArmor key their LXC can't parse** _(2026-06-13 — [`fec3d48`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fec3d4845bca7c3deaf14f31012dfba1c3d0129e))_
