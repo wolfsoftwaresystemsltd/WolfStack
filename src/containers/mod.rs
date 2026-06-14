@@ -4575,139 +4575,192 @@ pub fn lxc_list_all() -> Vec<ContainerInfo> {
     let mut seen_names = std::collections::HashSet::new();
 
     for base_path in lxc_storage_paths() {
-        let output = match Command::new("lxc-ls")
+        // Names + state + pid + IP from `lxc-ls -f` where it works
+        // (Debian/Ubuntu). Each tuple: (name, state, pid, ls_ip).
+        let mut entries: Vec<(String, String, String, String)> = Vec::new();
+        if let Ok(output) = Command::new("lxc-ls")
             .args(["-P", &base_path, "-f", "-F", "NAME,STATE,PID,RAM,IPV4"])
             .output()
         {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
-
-        for line in String::from_utf8_lossy(&output.stdout).lines().skip(1).filter(|l| !l.is_empty()) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            let name = parts.first().unwrap_or(&"").to_string();
-            if name.is_empty() || !seen_names.insert(name.clone()) {
-                continue; // Skip duplicates
+            for line in String::from_utf8_lossy(&output.stdout).lines().skip(1).filter(|l| !l.is_empty()) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let name = parts.first().unwrap_or(&"").to_string();
+                if name.is_empty() { continue; }
+                let state = parts.get(1).unwrap_or(&"STOPPED").to_lowercase();
+                let pid = parts.get(2).unwrap_or(&"-").to_string();
+                // Skip NAME(0), STATE(1), PID(2), RAM(3); the rest is IPV4.
+                let ls_ip = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default().replace('-', "");
+                entries.push((name, state, pid, ls_ip));
             }
-            let state = parts.get(1).unwrap_or(&"STOPPED").to_lowercase();
-            let status = if state == "running" {
-                format!("Running (PID {})", parts.get(2).unwrap_or(&"-"))
-            } else {
-                "Stopped".to_string()
-            };
+        }
 
-            // IP address: try multiple methods
-            let mut ip = String::new();
-
-            if state == "running" {
-                // Method 1: Use lxc-info which reliably reports IP
-                if let Ok(info_out) = Command::new("lxc-info")
-                    .args(["-P", &base_path, "-n", &name, "-iH"])
-                    .output()
-                {
-                    let info_ip = String::from_utf8_lossy(&info_out.stdout)
-                        .lines()
-                        .filter(|l| !l.contains(':')) // Filter out IPv6 addresses
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    if !info_ip.is_empty() && info_ip != "-" {
-                        ip = info_ip;
-                    }
-                }
+        // Directory-scan fallback. `lxc-ls -f` (fancy mode) needs the python3
+        // lxc bindings, which aren't installed by default on some distros
+        // (notably Fedora) — there it prints nothing even though containers
+        // exist on disk, so they never show in the UI. Any sub-directory that
+        // holds a `config` file IS a container; pick up the ones lxc-ls missed
+        // and read their state from lxc-info (a C binary — no python needed).
+        if let Ok(dir) = std::fs::read_dir(&base_path) {
+            let have: std::collections::HashSet<String> =
+                entries.iter().map(|(n, _, _, _)| n.clone()).collect();
+            for de in dir.flatten() {
+                let nm = de.file_name().to_string_lossy().to_string();
+                if nm.is_empty() || have.contains(&nm) { continue; }
+                if !de.path().join("config").is_file() { continue; }
+                let state = lxc_info_state(&base_path, &nm);
+                entries.push((nm, state, String::new(), String::new()));
             }
+        }
 
-            // Method 2: If still no IP, try from lxc-ls output (after RAM column)
-            if ip.is_empty() {
-                // Skip NAME(0), STATE(1), PID(2), RAM(3), rest is IPV4
-                let lxc_ip = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default()
-                    .replace("-", "");
-                if !lxc_ip.trim().is_empty() {
-                    ip = lxc_ip.trim().to_string();
-                }
+        for (name, state, pid, ls_ip) in entries {
+            if !seen_names.insert(name.clone()) {
+                continue; // already added from an earlier storage path
             }
-
-            // Method 3: Check for WolfNet IP marker
-            let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", base_path, name);
-            let wolfnet_ip = std::fs::read_to_string(&wolfnet_ip_file)
-                .ok()
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            if !wolfnet_ip.is_empty() {
-                if ip.is_empty() {
-                    ip = format!("{} (wolfnet)", wolfnet_ip);
-                } else if !ip.contains(&wolfnet_ip) {
-                    ip = format!("{}, {} (wolfnet)", ip, wolfnet_ip);
-                }
-            }
-
-            // Read config for autostart, hostname, gateway, MAC
-            let config_path = format!("{}/{}/config", base_path, name);
-            let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
-            let autostart = config_content.lines().any(|l| l.trim() == "lxc.start.auto = 1");
-            let hostname = config_content.lines()
-                .find(|l| l.trim().starts_with("lxc.uts.name"))
-                .and_then(|l| l.split('=').nth(1))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let lxc_gateway = config_content.lines()
-                .find(|l| l.trim().starts_with("lxc.net.0.ipv4.gateway"))
-                .and_then(|l| l.split('=').nth(1))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let lxc_mac = config_content.lines()
-                .find(|l| l.trim().starts_with("lxc.net.0.hwaddr"))
-                .and_then(|l| l.split('=').nth(1))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            let lxc_link = config_content.lines()
-                .find(|l| l.trim().starts_with("lxc.net.0.link"))
-                .and_then(|l| l.split('=').nth(1))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-
-            // Get LXC rootfs path and disk usage
-            let rootfs_path = format!("{}/{}/rootfs", base_path, name);
-            let storage_path = if std::path::Path::new(&rootfs_path).exists() {
-                Some(rootfs_path.clone())
-            } else { None };
-            let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
-
-            let version = lxc_read_os_version(&rootfs_path);
-
-            // Detect Wolf services inside running containers
-            let services = if state == "running" {
-                detect_container_services("lxc", &name)
-            } else {
-                vec![]
-            };
-
-            containers.push(ContainerInfo {
-                id: name.clone(),
-                name,
-                image: "lxc".to_string(),
-                status,
-                state,
-                created: String::new(),
-                ports: vec![],
-                runtime: "lxc".to_string(),
-                ip_address: ip,
-                autostart,
-                hostname,
-                storage_path,
-                disk_usage: du,
-                disk_total: dt,
-                fs_type: ft,
-                version,
-                services,
-                gateway: lxc_gateway,
-                mac_address: lxc_mac,
-                network_name: lxc_link,
-                restart_count: None,  // LXC: see ContainerInfo::restart_count doc
-                port_mappings: Vec::new(),
-            });
+            let pid_opt = if pid.is_empty() || pid == "-" { None } else { Some(pid.as_str()) };
+            containers.push(build_lxc_container_info(&base_path, &name, &state, pid_opt, &ls_ip));
         }
     }
     containers
+}
+
+/// Query an LXC container's state with `lxc-info -sH` (a C binary — works where
+/// `lxc-ls -f` can't, e.g. without python3-lxc). Returns a lowercase state such
+/// as "running"/"stopped"; defaults to "stopped" if lxc-info can't answer.
+fn lxc_info_state(base_path: &str, name: &str) -> String {
+    Command::new("lxc-info")
+        .args(["-P", base_path, "-n", name, "-sH"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "stopped".to_string())
+}
+
+/// Build the ContainerInfo for one native-LXC container. Shared by the `lxc-ls`
+/// path and the directory-scan fallback so both produce identical records.
+/// `pid`/`ls_ip` carry what lxc-ls reported (None/"" when the container was
+/// found by directory scan instead).
+fn build_lxc_container_info(
+    base_path: &str,
+    name: &str,
+    state: &str,
+    pid: Option<&str>,
+    ls_ip: &str,
+) -> ContainerInfo {
+    let status = if state == "running" {
+        match pid {
+            Some(p) => format!("Running (PID {})", p),
+            None => "Running".to_string(),
+        }
+    } else {
+        "Stopped".to_string()
+    };
+
+    // IP address: try multiple methods
+    let mut ip = String::new();
+
+    if state == "running" {
+        // Method 1: Use lxc-info which reliably reports IP
+        if let Ok(info_out) = Command::new("lxc-info")
+            .args(["-P", base_path, "-n", name, "-iH"])
+            .output()
+        {
+            let info_ip = String::from_utf8_lossy(&info_out.stdout)
+                .lines()
+                .filter(|l| !l.contains(':')) // Filter out IPv6 addresses
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !info_ip.is_empty() && info_ip != "-" {
+                ip = info_ip;
+            }
+        }
+    }
+
+    // Method 2: If still no IP, use what lxc-ls reported (after the RAM column).
+    if ip.is_empty() && !ls_ip.trim().is_empty() {
+        ip = ls_ip.trim().to_string();
+    }
+
+    // Method 3: Check for WolfNet IP marker
+    let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", base_path, name);
+    let wolfnet_ip = std::fs::read_to_string(&wolfnet_ip_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if !wolfnet_ip.is_empty() {
+        if ip.is_empty() {
+            ip = format!("{} (wolfnet)", wolfnet_ip);
+        } else if !ip.contains(&wolfnet_ip) {
+            ip = format!("{}, {} (wolfnet)", ip, wolfnet_ip);
+        }
+    }
+
+    // Read config for autostart, hostname, gateway, MAC
+    let config_path = format!("{}/{}/config", base_path, name);
+    let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let autostart = config_content.lines().any(|l| l.trim() == "lxc.start.auto = 1");
+    let hostname = config_content.lines()
+        .find(|l| l.trim().starts_with("lxc.uts.name"))
+        .and_then(|l| l.split('=').nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let lxc_gateway = config_content.lines()
+        .find(|l| l.trim().starts_with("lxc.net.0.ipv4.gateway"))
+        .and_then(|l| l.split('=').nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let lxc_mac = config_content.lines()
+        .find(|l| l.trim().starts_with("lxc.net.0.hwaddr"))
+        .and_then(|l| l.split('=').nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let lxc_link = config_content.lines()
+        .find(|l| l.trim().starts_with("lxc.net.0.link"))
+        .and_then(|l| l.split('=').nth(1))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Get LXC rootfs path and disk usage
+    let rootfs_path = format!("{}/{}/rootfs", base_path, name);
+    let storage_path = if std::path::Path::new(&rootfs_path).exists() {
+        Some(rootfs_path.clone())
+    } else { None };
+    let (du, dt, ft) = get_path_disk_usage(&rootfs_path);
+
+    let version = lxc_read_os_version(&rootfs_path);
+
+    // Detect Wolf services inside running containers
+    let services = if state == "running" {
+        detect_container_services("lxc", name)
+    } else {
+        vec![]
+    };
+
+    ContainerInfo {
+        id: name.to_string(),
+        name: name.to_string(),
+        image: "lxc".to_string(),
+        status,
+        state: state.to_string(),
+        created: String::new(),
+        ports: vec![],
+        runtime: "lxc".to_string(),
+        ip_address: ip,
+        autostart,
+        hostname,
+        storage_path,
+        disk_usage: du,
+        disk_total: dt,
+        fs_type: ft,
+        version,
+        services,
+        gateway: lxc_gateway,
+        mac_address: lxc_mac,
+        network_name: lxc_link,
+        restart_count: None,  // LXC: see ContainerInfo::restart_count doc
+        port_mappings: Vec::new(),
+    }
 }
 
 /// List LXC containers using Proxmox's pct command (filters out stale containers)

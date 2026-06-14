@@ -935,8 +935,22 @@
                 </div>
             </div>
 
+            <!-- ── Tab bar: groups the panels below so the page isn't one long scroll ── -->
+            <style>
+                .fsec-tab-btn { background:transparent; border:none; border-bottom:2px solid transparent; color:var(--text-secondary); font-size:13px; font-weight:600; padding:9px 16px; cursor:pointer; border-radius:6px 6px 0 0; white-space:nowrap; }
+                .fsec-tab-btn:hover { color:var(--text-primary); background:var(--bg-secondary); }
+                .fsec-tab-btn.active { color:var(--accent-light, var(--accent)); border-bottom-color:var(--accent); background:var(--bg-secondary); }
+            </style>
+            <div id="fsec-tabs" style="display:flex; flex-wrap:wrap; gap:4px; margin-bottom:18px; border-bottom:1px solid var(--border);">
+                <button class="fsec-tab-btn" data-fsec-tab="lockouts" onclick="fsecTab('lockouts')">Lockouts &amp; Blocks</button>
+                <button class="fsec-tab-btn" data-fsec-tab="detection" onclick="fsecTab('detection')">Threat Detection</button>
+                <button class="fsec-tab-btn" data-fsec-tab="audit" onclick="fsecTab('audit')">Audit &amp; Malware</button>
+                <button class="fsec-tab-btn" data-fsec-tab="hardening" onclick="fsecTab('hardening')">Hardening</button>
+                <button class="fsec-tab-btn" data-fsec-tab="emergency" onclick="fsecTab('emergency')" style="margin-left:auto; color:#fca5a5;">⚠ Emergency</button>
+            </div>
+
             <!-- ── Emergency: rotate root passwords ── -->
-            <div class="card" style="margin-bottom:20px; border:1px solid rgba(220,38,38,0.35); background:linear-gradient(135deg, rgba(220,38,38,0.06), rgba(220,38,38,0.01));">
+            <div class="card fsec-card" data-fsec="emergency" style="margin-bottom:20px; border:1px solid rgba(220,38,38,0.35); background:linear-gradient(135deg, rgba(220,38,38,0.06), rgba(220,38,38,0.01));">
                 <div class="card-header">
                     <h3 style="margin:0; color:#fca5a5;">Emergency: rotate root passwords</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Generates a fresh 32-char random password on every WolfStack-managed node in this cluster, applies it via chpasswd, kills all active root SSH sessions, returns the per-node passwords once.</div>
@@ -948,7 +962,7 @@
             </div>
 
             <!-- ── Force logout all sessions ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="emergency" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Force-logout every WolfStack session, fleet-wide</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Invalidates every active WolfStack web-UI session on every node in the cluster. Use when you suspect a session cookie has been stolen. Everyone (including you) has to re-login.</div>
@@ -959,7 +973,7 @@
             </div>
 
             <!-- ── Lockout policy (push to all) ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="lockouts" style="margin-bottom:20px;">
                 <div class="card-header" style="display:flex; align-items:center; justify-content:space-between;">
                     <div>
                         <h3 style="margin:0;">Brute-force lockout policy</h3>
@@ -999,12 +1013,20 @@
             </div>
 
             <!-- ── Fleet blocked IPs aggregated ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="lockouts" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Blocked IPs across the fleet</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Every IP currently kernel-blocked on any WolfStack node. Click "Unblock everywhere" to clear from all nodes at once.</div>
                 </div>
                 <div class="card-body">
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+                        <label for="fleet-unblock-ip" style="font-size:13px; font-weight:600; color:var(--text-secondary);">Unblock an IP</label>
+                        <input type="text" id="fleet-unblock-ip" placeholder="e.g. 203.0.113.7" autocomplete="off"
+                            onkeydown="if(event.key==='Enter'){event.preventDefault();fleetManualUnblockIp();}"
+                            style="font-family:var(--font-mono); font-size:12px; padding:6px 9px; min-width:200px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary);">
+                        <button class="btn btn-sm btn-primary" onclick="fleetManualUnblockIp()" style="font-size:12px;">Unblock everywhere</button>
+                        <span style="font-size:11px; color:var(--text-muted);">Lifts the kernel block on every node — works even for an IP that isn't in the list below (a manual, scan, or propagated block).</span>
+                    </div>
                     <div id="fleet-blocked-ips">
                         <div style="color:var(--text-muted); font-size:13px;">Loading…</div>
                     </div>
@@ -1012,7 +1034,7 @@
             </div>
 
             <!-- ── Threat Intel — fleet status (v23.12.18) ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="detection" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Threat Intel — fleet status</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Per-node threat-intel enforcement state, feed freshness, and rule presence. If a node isn't blocking what its cluster-mates are, the misbehaviour shows up here — feed entries = 0, missing rules, stale feed. Open the node's Security page for the per-node diagnosis + "Test feed connectivity".</div>
@@ -1025,7 +1047,7 @@
             </div>
 
             <!-- ── Outbound scan detector ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="detection" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Outbound scan detector</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Detects processes (host or container) making rapid outbound connections — the zmap fingerprint that triggered the recent Hetzner abuse mail. Alerts and (optionally) auto-kills + UID-blocks the offending process. Runs on every WolfStack-managed node.</div>
@@ -1082,7 +1104,7 @@
             </div>
 
             <!-- ── Container / VM / host audit ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="audit" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Workload + host audit</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Every container, VM, and host security-relevant signal across the fleet. Surfaces compromised configurations (privileged containers, mounted docker.sock, host-network containers), known-bad processes, executables in temp dirs, sshd policy gaps, recent authorized_keys changes, suspicious cron entries.</div>
@@ -1165,7 +1187,7 @@
             </div>
 
             <!-- ── Antivirus / rootkit scanning (fleet-wide) ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="audit" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">🦠 Antivirus &amp; rootkit scanning</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
@@ -1275,7 +1297,7 @@
             </div>
 
             <!-- ── SSH hardening push ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="hardening" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Push SSH hardening</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Apply <code>PasswordAuthentication</code> + <code>PermitRootLogin</code> + <code>PubkeyAuthentication</code> policy to every WolfStack node. Each node validates with <code>sshd -t</code> before reloading; if invalid, rolls back. <strong style="color:#fca5a5;">Will refuse to disable password auth if no SSH keys exist (lock-out guard).</strong></div>
@@ -1316,7 +1338,7 @@
             </div>
 
             <!-- ── Cluster secret rotation ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="hardening" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Rotate cluster secret</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Generate a fresh inter-node auth token and distribute to every WolfStack node. Use when you suspect the cluster secret has leaked alongside other credentials. Takes effect after WolfStack restarts on each node — old secret remains active until then.</div>
@@ -1331,7 +1353,7 @@
                    with preflight / ACK / rollback safety. Surfaces every finding
                    from /api/security/secret-audit and offers the new safer
                    rotation flow alongside the existing legacy button above. ── -->
-            <div class="card" style="margin-bottom:20px;" id="secret-audit-card">
+            <div class="card fsec-card" data-fsec="hardening" style="margin-bottom:20px;" id="secret-audit-card">
                 <div class="card-header">
                     <h3 style="margin:0;">Credential audit</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Stage 1-5 cluster-secret migration. Lists every committed-default secret this install is still exposed to, plus the safer coordinated-rotation flow with preflight + per-peer ACK + automatic rollback on partial failure.</div>
@@ -1349,7 +1371,7 @@
             </div>
 
             <!-- ── Public listening ports per node ── -->
-            <div class="card" style="margin-bottom:20px;">
+            <div class="card fsec-card" data-fsec="hardening" style="margin-bottom:20px;">
                 <div class="card-header">
                     <h3 style="margin:0;">Internet-exposed services</h3>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Every TCP listener bound to <code>0.0.0.0</code> or <code>::</code> across the fleet. Anything in this list is reachable from the internet (unless firewalled at the network edge). Red = high-risk (database, admin UI, file-share); yellow = exposes credentials; green = expected public services.</div>

@@ -6690,7 +6690,7 @@ function renderCephFlags(active) {
 
 async function cephSetFlag(flag, enable) {
     if (flag === 'pause' && enable) {
-        if (!(await wolfConfirm('Set the <b>pause</b> flag? This halts <b>all client I/O</b> to the cluster until you unset it.', 'Pause Cluster I/O'))) return;
+        if (!(await wolfConfirm('Set the pause flag? This halts ALL client I/O to the cluster until you unset it.', 'Pause Cluster I/O'))) return;
     }
     try {
         const resp = await fetch(apiUrl('/api/ceph/flags'), {
@@ -6728,7 +6728,7 @@ async function cephPgAction(action) {
     const pgid = document.getElementById('ceph-pg-id')?.value.trim();
     if (!pgid) { showToast('Enter a PG id (e.g. 3.1a)', 'warning'); return; }
     if (action === 'repair') {
-        if (!(await wolfConfirm(`Repair PG <b>${escapeHtml(pgid)}</b>? Ceph re-reads the replicas and rewrites the bad copy from a good one. Use this for an <b>inconsistent</b> PG.`, 'Repair PG'))) return;
+        if (!(await wolfConfirm(`Repair PG ${pgid}? Ceph re-reads the replicas and rewrites the bad copy from a good one. Use this for an inconsistent PG.`, 'Repair PG'))) return;
     }
     try {
         const resp = await fetch(apiUrl('/api/ceph/pg-action'), {
@@ -6744,7 +6744,7 @@ async function cephPgAction(action) {
 // ── Daemon control (this node) ──
 async function cephDaemonControl(kind, id, action) {
     const verb = action.charAt(0).toUpperCase() + action.slice(1);
-    if (!(await wolfConfirm(`${verb} <b>${escapeHtml(kind)}.${escapeHtml(id)}</b> on this node?`, 'Daemon Control'))) return;
+    if (!(await wolfConfirm(`${verb} ${kind}.${id} on this node?`, 'Daemon Control'))) return;
     try {
         const resp = await fetch(apiUrl('/api/ceph/daemon'), {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -6793,7 +6793,7 @@ async function _doCephAddMonitor() {
 }
 
 async function cephAddManager() {
-    if (!(await wolfConfirm('Add a standby Ceph manager on <b>this node</b> (for mgr failover)?', 'Add Manager'))) return;
+    if (!(await wolfConfirm('Add a standby Ceph manager on this node (for mgr failover)?', 'Add Manager'))) return;
     showModal('<p>Adding manager…</p>', 'Adding Manager', { noOk: true });
     try {
         const resp = await fetch(apiUrl('/api/ceph/managers'), { method: 'POST' });
@@ -6917,7 +6917,7 @@ async function cephCreateRbd() {
 }
 
 async function cephDeleteRbd(pool, name) {
-    if (!(await wolfConfirm(`Delete RBD image <b>${escapeHtml(name)}</b> from pool <b>${escapeHtml(pool)}</b>? This destroys the image and all its data.`, 'Delete RBD Image'))) return;
+    if (!(await wolfConfirm(`Delete RBD image ${name} from pool ${pool}? This destroys the image and all its data.`, 'Delete RBD Image'))) return;
     try {
         const resp = await fetch(apiUrl(`/api/ceph/rbd/${encodeURIComponent(pool)}/${encodeURIComponent(name)}`), { method: 'DELETE' });
         const data = await resp.json();
@@ -18297,7 +18297,40 @@ window.gandalfToggle = gandalfToggle;
 // done, not just the first one to return.
 let _fleetSecRefreshInFlight = 0;
 
+// ── Fleet Security tabs ──
+// The page groups its cards (each tagged `data-fsec="<group>"`) into tabs so it
+// isn't one long scroll. fsecTab() shows the chosen group and hides the rest.
+let _fsecActiveTab = 'lockouts';
+function fsecTab(group) {
+    _fsecActiveTab = group;
+    document.querySelectorAll('#page-fleet-security .fsec-card').forEach(c => {
+        c.style.display = (c.getAttribute('data-fsec') === group) ? '' : 'none';
+    });
+    document.querySelectorAll('#fsec-tabs .fsec-tab-btn').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-fsec-tab') === group);
+    });
+}
+window.fsecTab = fsecTab;
+
+// Manual fleet-wide unblock: type any IP and lift its kernel block on every
+// node — even one that isn't in the aggregated list (manual / scan / propagated
+// block). Delegates to fleetUnblockIp, which confirms + refreshes the list.
+async function fleetManualUnblockIp() {
+    const input = document.getElementById('fleet-unblock-ip');
+    const ip = (input?.value || '').trim();
+    if (!ip) { showToast('Enter an IP address to unblock', 'warning'); return; }
+    if (!/^[0-9a-fA-F:.]+$/.test(ip) || !(ip.includes('.') || ip.includes(':'))) {
+        showToast(`"${ip}" doesn't look like an IP address`, 'error');
+        return;
+    }
+    await fleetUnblockIp(ip);
+    if (input) input.value = '';
+}
+window.fleetManualUnblockIp = fleetManualUnblockIp;
+
 async function renderFleetSecurity() {
+    // Apply the active tab first so the page never flashes all panels at once.
+    fsecTab(_fsecActiveTab);
     fleetSecMarkRefreshStart();
     // Wrap each loader so we count completions even when one errors.
     const wrap = (p) => {
@@ -27144,9 +27177,9 @@ function _showVncInstallModal(runtime, name, displayName, status) {
                 <label style="display:flex;align-items:flex-start;gap:8px;margin-top:10px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
                     <input type="checkbox" id="vnc-extras" checked style="margin-top:3px;flex-shrink:0;">
                     <span>
-                        <strong style="color:var(--text);">Include browser, Flatpak, and common utilities</strong>
-                        <span style="color:var(--text-muted);">(~280 MB extra)</span><br>
-                        <span style="color:var(--text-muted);">Firefox, Flathub-enabled Flatpak, file/archive helpers, network applet, and DE polish (xfce4-goodies for XFCE, gnome-tweaks for GNOME). Recommended unless you want a minimal install.</span>
+                        <strong style="color:var(--text);">Include Flatpak and common utilities</strong>
+                        <span style="color:var(--text-muted);">(~250 MB extra)</span><br>
+                        <span style="color:var(--text-muted);">Flathub-enabled Flatpak, file/archive helpers, network applet, and DE polish (xfce4-goodies for XFCE, gnome-tweaks for GNOME). A web browser (Firefox) is always installed with the desktop, regardless of this option.</span>
                     </span>
                 </label>
             </div>
