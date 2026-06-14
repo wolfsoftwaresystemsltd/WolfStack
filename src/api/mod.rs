@@ -16929,6 +16929,72 @@ pub async fn ceph_bootstrap(
     }
 }
 
+/// GET /api/ceph/cluster-bundle — export this (bootstrapped) node's config +
+/// keyrings so another node can JOIN the cluster. Authed by a logged-in operator
+/// OR the cluster secret (the joining node's backend fetches it inter-node). The
+/// bundle carries the client.admin keyring, so it only ever goes to an
+/// authenticated caller.
+pub async fn ceph_cluster_bundle(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if require_auth(&req, &state).is_err() && require_cluster_auth(&req, &state).is_err() {
+        return HttpResponse::Forbidden().json(serde_json::json!({"error": "authentication required"}));
+    }
+    match web::block(crate::ceph::export_join_bundle).await {
+        Ok(Ok(bundle)) => HttpResponse::Ok().json(bundle),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("export failed: {}", e)})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CephJoinRequest {
+    pub source_node_id: String,
+}
+
+/// POST /api/ceph/join — join the cluster that `source_node_id` belongs to by
+/// fetching its config + keyrings and installing them locally. Operator-authed;
+/// the node then contributes via the existing "Add OSD" flow.
+pub async fn ceph_join(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CephJoinRequest>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let node = match state.cluster.get_node(&body.source_node_id) {
+        Some(n) => n,
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"ok": false, "error": "source node not found in cluster"})),
+    };
+    if node.is_self {
+        return HttpResponse::BadRequest().json(serde_json::json!({"ok": false, "error": "select a different node — that one is this node"}));
+    }
+    // Fetch the join bundle from the source node (inter-node secret auth).
+    let urls = build_node_urls(&node.address, node.port, "/api/ceph/cluster-bundle");
+    let client = &*API_HTTP_CLIENT;
+    let mut bundle: Option<crate::ceph::CephJoinBundle> = None;
+    let mut last_err = String::from("no URL reachable");
+    for url in &urls {
+        match client.get(url)
+            .timeout(std::time::Duration::from_secs(20))
+            .header("X-WolfStack-Secret", state.cluster_secret.clone())
+            .send().await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.json::<crate::ceph::CephJoinBundle>().await {
+                Ok(b) => { bundle = Some(b); break; }
+                Err(e) => last_err = format!("parse bundle from source: {}", e),
+            },
+            Ok(resp) => {
+                let code = resp.status();
+                last_err = format!("source returned {}: {}", code, resp.text().await.unwrap_or_default());
+            }
+            Err(e) => last_err = format!("reach source: {}", e),
+        }
+    }
+    let bundle = match bundle {
+        Some(b) => b,
+        None => return HttpResponse::BadGateway().json(serde_json::json!({"ok": false, "error": format!("couldn't fetch the cluster config from the source node — {}", last_err)})),
+    };
+    match web::block(move || crate::ceph::join_cluster(&bundle)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": format!("join task failed: {}", e)})),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CephCreatePoolRequest {
     pub name: String,
@@ -35315,6 +35381,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ceph/install", web::post().to(ceph_install))
         .route("/api/ceph/devices", web::get().to(ceph_devices))
         .route("/api/ceph/bootstrap", web::post().to(ceph_bootstrap))
+        .route("/api/ceph/cluster-bundle", web::get().to(ceph_cluster_bundle))
+        .route("/api/ceph/join", web::post().to(ceph_join))
         .route("/api/ceph/pools", web::post().to(ceph_create_pool))
         .route("/api/ceph/pools/{name}", web::delete().to(ceph_delete_pool))
         .route("/api/ceph/pools/{name}", web::put().to(ceph_set_pool_option))
