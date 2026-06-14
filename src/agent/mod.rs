@@ -799,6 +799,9 @@ impl ClusterState {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_default();
         let current = self.get_all_nodes();
+        // Our own addresses across every NIC — so we never seed ourselves as a
+        // peer under a secondary IP (the multi-homed self-poll that storms).
+        let local = local_ipv4_addrs();
         // Dedup WITHIN this single bundle too: a sender that hasn't been pruned
         // yet can advertise the same physical node under two record ids sharing
         // one self_id. `current` is a pre-loop snapshot, so without this set both
@@ -828,6 +831,9 @@ impl ClusterState {
             if m_self_id == self.self_id.as_str() { continue; }
             if m.hostname == self_hostname && m.port == self.port { continue; }
             if m.address == self.self_address && m.port == self.port { continue; }
+            // Any of OUR addresses (LAN/WolfNet/VLAN/storage) — it's us under
+            // another NIC, never a peer.
+            if local.contains(&m.address) { continue; }
             // Already seeded earlier in THIS same bundle (under another record
             // id sharing this self_id)? Skip — the snapshot below can't see it.
             if added_self_ids.contains(m_self_id) { continue; }
@@ -1638,6 +1644,62 @@ pub fn apply_control_plane_bundle(cluster: &ClusterState, bundle: &ControlPlaneB
     )
 }
 
+/// Parse `ip -j addr show` JSON into the set of non-loopback IPv4 addresses.
+/// Pure (no I/O) for testability.
+fn parse_local_ipv4(json: &[u8]) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(entries) = serde_json::from_slice::<Vec<serde_json::Value>>(json) else { return set; };
+    for entry in &entries {
+        if entry["ifname"].as_str() == Some("lo") { continue; }
+        let Some(ai) = entry["addr_info"].as_array() else { continue; };
+        for a in ai {
+            if a["family"].as_str() != Some("inet") { continue; }
+            if let Some(ip) = a["local"].as_str().filter(|ip| !ip.starts_with("127.")) {
+                set.insert(ip.to_string());
+            }
+        }
+    }
+    set
+}
+
+/// Every IPv4 address currently configured on this host (each NIC: LAN,
+/// WolfNet, VLAN, storage, swarm overlay…), loopback excluded. Used so the
+/// poll/replicate loops never contact OUR OWN addresses — a self entry under a
+/// secondary NIC, which on a multi-homed host is the feedback that turns a
+/// bloated node list into a CPU storm. Cached 60s (IPs rarely change; a new
+/// WolfNet/VLAN attach is picked up within a minute). On an `ip` hiccup it
+/// reuses the last good set rather than returning empty, so a transient failure
+/// can never make us suddenly treat our own IPs as pollable peers.
+pub fn local_ipv4_addrs() -> std::collections::HashSet<String> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, HashSet<String>)>> =
+        std::sync::Mutex::new(None);
+    if let Some(set) = CACHE.lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(60))
+            .map(|(_, set)| set.clone())
+    }) {
+        return set;
+    }
+    let set: HashSet<String> = std::process::Command::new("ip")
+        .args(["-j", "addr", "show"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_local_ipv4(&o.stdout))
+        .unwrap_or_default();
+    if set.is_empty() {
+        // Enumeration failed — reuse the last good set so we don't momentarily
+        // forget our own IPs (which would let the loops poll us).
+        return CACHE.lock().ok()
+            .and_then(|g| g.as_ref().map(|(_, last)| last.clone()))
+            .unwrap_or_default();
+    }
+    if let Ok(mut g) = CACHE.lock() {
+        *g = Some((std::time::Instant::now(), set.clone()));
+    }
+    set
+}
+
 /// Push our control-plane bundle to every online WolfStack peer. Runs both as
 /// a periodic sweep (heals nodes that were offline) and one-shot right after a
 /// user/auth change (so edits land in seconds). Cluster-secret authed.
@@ -1652,11 +1714,19 @@ pub async fn sweep_replicate_control_plane(cluster: Arc<ClusterState>, cluster_s
     // storm was unbounded GROWTH of nodes.json (the same multi-homed node
     // re-added under each address forever), now fixed by self_id dedup — NOT the
     // count of distinct peers we push to, which is bounded by the real fleet.
+    let local = local_ipv4_addrs();
     let peers: Vec<(String, u16)> = {
         let nodes = cluster.nodes.read().unwrap();
+        let mut seen: std::collections::HashSet<(String, u16)> = std::collections::HashSet::new();
         nodes.values()
             .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
             .map(|n| (n.address.clone(), n.port))
+            // Skip our OWN addresses (a self entry under another NIC) and push to
+            // each distinct endpoint once — duplicate/self records can't multiply
+            // the sweep into a storm. Removes only redundant pushes; every real
+            // peer (a distinct, non-local endpoint) is still reached.
+            .filter(|(addr, _)| !local.contains(addr))
+            .filter(|key| seen.insert(key.clone()))
             .collect()
     };
     if peers.is_empty() { return; }
@@ -1700,6 +1770,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
     };
 
     let nodes = cluster.get_all_nodes();
+    // Our own addresses (every NIC) + the endpoints already polled this cycle,
+    // so the loop never contacts itself or the same endpoint twice (storm guard).
+    let local_ips = local_ipv4_addrs();
+    let mut polled_endpoints: HashSet<(String, u16)> = HashSet::new();
     // Collect subnet routes from all remote nodes' wolfnet_ips
     let mut subnet_routes: HashMap<String, String> = HashMap::new();
     for node in nodes {
@@ -1711,6 +1785,14 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             // remove them and re-add the hosts as full WolfStack nodes. Do not poll.
             continue;
         }
+
+        // Never poll our OWN addresses (a self entry under another NIC), and poll
+        // each distinct endpoint at most once per cycle. These two guards bound
+        // the 10s loop to distinct, non-local peers — so a bloated or multi-homed
+        // node list can't turn it into a CPU storm. No real peer is dropped: a
+        // distinct, non-local endpoint is always polled.
+        if local_ips.contains(&node.address) { continue; }
+        if !polled_endpoints.insert((node.address.clone(), node.port)) { continue; }
 
         // ── Poll WolfStack node via agent ──
         // v23.12: HTTPS-first via build_node_urls. CA-signed-cert peers no
@@ -2573,6 +2655,36 @@ mod fleet_rename_tests {
         assert!(cluster_rename_member_matches(Some("minio"), "Minio"));
         assert!(cluster_rename_member_matches(Some("Minio"), "Minio"));
         assert!(!cluster_rename_member_matches(Some("Prod"), "Minio"));
+    }
+
+    #[test]
+    fn parse_local_ipv4_collects_every_nic_skips_lo_and_ipv6() {
+        // Multi-homed: LAN + WolfNet (10.x) + a storage NIC + IPv6 + loopback.
+        let json = br#"[
+            {"ifname":"lo","addr_info":[
+                {"family":"inet","local":"127.0.0.1","prefixlen":8},
+                {"family":"inet6","local":"::1","prefixlen":128}]},
+            {"ifname":"eth0","addr_info":[
+                {"family":"inet","local":"192.168.1.50","prefixlen":24},
+                {"family":"inet6","local":"fe80::1","prefixlen":64}]},
+            {"ifname":"wolfnet0","addr_info":[
+                {"family":"inet","local":"10.100.10.5","prefixlen":16}]},
+            {"ifname":"eth1.20","addr_info":[
+                {"family":"inet","local":"10.20.0.5","prefixlen":24}]}
+        ]"#;
+        let set = parse_local_ipv4(json);
+        // Every NIC's IPv4 is captured — these are the addresses a multi-homed
+        // self entry could appear under, and must be recognised as "us".
+        assert!(set.contains("192.168.1.50"));
+        assert!(set.contains("10.100.10.5"));
+        assert!(set.contains("10.20.0.5"));
+        assert_eq!(set.len(), 3, "exactly the 3 non-loopback IPv4 addresses");
+        // Loopback and IPv6 are excluded.
+        assert!(!set.contains("127.0.0.1"));
+        assert!(!set.contains("::1"));
+        assert!(!set.contains("fe80::1"));
+        // Garbage input doesn't panic; yields an empty set.
+        assert!(parse_local_ipv4(b"not json").is_empty());
     }
 
     #[test]
