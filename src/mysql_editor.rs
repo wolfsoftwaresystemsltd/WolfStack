@@ -934,10 +934,10 @@ fn resolve_wolfnet_hostname(ip: &str) -> String {
 
 /// Test a PostgreSQL connection
 pub async fn pg_test_connection(params: &ConnParams) -> Result<String, String> {
-    let conn_str = pg_conn_string(params);
+    let cfg = pg_config(params);
     let (client, connection) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+        cfg.connect(tokio_postgres::NoTls)
     ).await
         .map_err(|_| "Connection timed out (5s)".to_string())?
         .map_err(|e| format!("PostgreSQL connection failed: {}", e))?;
@@ -1168,17 +1168,29 @@ pub fn detect_postgres() -> serde_json::Value {
 
 // ─── PostgreSQL helpers ─────────────────────────────────────────────────────
 
-fn pg_conn_string(params: &ConnParams) -> String {
+// Build a libpq config via the typed builder rather than string
+// interpolation. The previous format!() concatenation let a `host` (or
+// password) value like `localhost sslmode=disable passfile=/root/.pgpass`
+// inject extra libpq key/value tokens — a connection-string injection
+// that could redirect the connection or change its security parameters.
+// Config setters treat each value as opaque, so no injection is possible.
+fn pg_config(params: &ConnParams) -> tokio_postgres::Config {
     let db = params.database.as_deref().unwrap_or("postgres");
-    format!("host={} port={} user={} password={} dbname={} connect_timeout=5",
-        params.host, params.port, params.user, params.password, db)
+    let mut cfg = tokio_postgres::Config::new();
+    cfg.host(&params.host)
+        .port(params.port)
+        .user(&params.user)
+        .password(params.password.as_str())
+        .dbname(db)
+        .connect_timeout(std::time::Duration::from_secs(5));
+    cfg
 }
 
 async fn pg_connect(params: &ConnParams) -> Result<tokio_postgres::Client, String> {
-    let conn_str = pg_conn_string(params);
+    let cfg = pg_config(params);
     let (client, connection) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+        cfg.connect(tokio_postgres::NoTls)
     ).await
         .map_err(|_| "Connection timed out (5s)".to_string())?
         .map_err(|e| format!("PostgreSQL connection failed: {}", e))?;

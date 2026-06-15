@@ -267,6 +267,14 @@ impl ProposalStore {
         self.proposals.iter().any(|p| p.dedup_key() == *key)
     }
 
+    /// Grace window after an operator marks a finding "applied", during
+    /// which the finding is neither re-surfaced (`upsert`) nor rebuilt by
+    /// analyzers (`is_suppressed`). Must comfortably exceed the package
+    /// index refresh throttle (default ~6h) so the condition can actually
+    /// be re-verified before we nag again. See `upsert` for the storm this
+    /// prevents.
+    const APPLIED_GRACE_HOURS: i64 = 12;
+
     pub fn upsert(&mut self, incoming: Proposal) -> String {
         let key = incoming.dedup_key();
         if let Some(existing) = self.proposals.iter_mut()
@@ -278,6 +286,20 @@ impl ProposalStore {
                     return existing.id.clone();
                 }
                 ProposalStatus::Dismissed { .. } => {
+                    return existing.id.clone();
+                }
+                // A finding the operator just marked "applied" must NOT be
+                // resurrected to Pending on every tick. The vuln sampler
+                // reads the package manager's *cached* index (refreshed at
+                // most ~6h) and kernel updates stay "pending" until a
+                // reboot, so the condition reads true long after the apply.
+                // Without this grace the proposal ping-pongs Approved↔Pending
+                // every 5-min tick which, via the cluster inbox fan-out,
+                // pegs CPU fleet-wide. It re-surfaces after the window if
+                // the condition is genuinely still true (apply didn't take).
+                ProposalStatus::Approved { applied_at, outcome: ApprovalOutcome::Applied }
+                    if *applied_at + chrono::Duration::hours(Self::APPLIED_GRACE_HOURS) > Utc::now() =>
+                {
                     return existing.id.clone();
                 }
                 _ => {}
@@ -357,6 +379,11 @@ impl ProposalStore {
                 && match &p.status {
                     ProposalStatus::Snoozed { until } => *until > now,
                     ProposalStatus::Dismissed { .. } => true,
+                    // Stay suppressed during the post-apply grace window so
+                    // analyzers don't rebuild the finding every tick (which
+                    // is what feeds the resurrection storm — see `upsert`).
+                    ProposalStatus::Approved { applied_at, outcome: ApprovalOutcome::Applied } =>
+                        *applied_at + chrono::Duration::hours(Self::APPLIED_GRACE_HOURS) > now,
                     _ => false,
                 }
         })
@@ -569,6 +596,47 @@ mod tests {
 
         assert!(matches!(store.proposals[0].status, ProposalStatus::Pending));
         assert_eq!(store.proposals[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn upsert_does_not_resurrect_recently_applied() {
+        // The CPU-storm regression: marking a vuln "applied" then having
+        // the analyzer re-fire (cached pkg index still shows it pending)
+        // must NOT flip it back to Pending — it stays Approved during grace.
+        let mut store = ProposalStore::default();
+        let s = scope("node-a", None);
+        store.upsert(fake_proposal("host_security_updates_pending", Severity::High, s.clone()));
+        let id = store.proposals[0].id.clone();
+        store.record_approval(&id, ApprovalOutcome::Applied).unwrap();
+
+        // Analyzer re-fires next tick — condition still reads true.
+        store.upsert(fake_proposal("host_security_updates_pending", Severity::High, s.clone()));
+
+        assert_eq!(store.proposals.len(), 1);
+        assert!(matches!(store.proposals[0].status,
+            ProposalStatus::Approved { outcome: ApprovalOutcome::Applied, .. }),
+            "a just-applied finding must not be resurrected to Pending every tick");
+        // And the analyzer should skip rebuilding it entirely during grace.
+        assert!(store.is_suppressed("host_security_updates_pending", &s));
+    }
+
+    #[test]
+    fn applied_finding_resurfaces_after_grace_expires() {
+        // If the apply genuinely didn't take, the finding must come back
+        // after the grace window so the operator isn't left blind.
+        let mut store = ProposalStore::default();
+        let s = scope("node-a", None);
+        store.upsert(fake_proposal("host_security_updates_pending", Severity::High, s.clone()));
+        // Simulate an apply that happened longer ago than the grace window.
+        store.proposals[0].status = ProposalStatus::Approved {
+            applied_at: Utc::now() - Duration::hours(ProposalStore::APPLIED_GRACE_HOURS + 1),
+            outcome: ApprovalOutcome::Applied,
+        };
+
+        assert!(!store.is_suppressed("host_security_updates_pending", &s));
+        store.upsert(fake_proposal("host_security_updates_pending", Severity::Critical, s.clone()));
+        assert!(matches!(store.proposals[0].status, ProposalStatus::Pending),
+            "an applied finding still true after the grace window must re-surface");
     }
 
     #[test]

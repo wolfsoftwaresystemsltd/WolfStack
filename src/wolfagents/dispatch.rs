@@ -1205,9 +1205,12 @@ async fn tool_exec_in_container(
         _ => unreachable!(),
     };
     if local_has {
+        // Escape BOTH the container name and the command — `name` reaches
+        // here past allowed_container_patterns, but that pattern may permit
+        // shell metacharacters, so it must be quoted like `command` is.
         let local_exec = match runtime {
-            "docker" => format!("docker exec {} sh -c {}", name, shell_escape(command)),
-            "lxc" => format!("lxc-attach -n {} -- sh -c {}", name, shell_escape(command)),
+            "docker" => format!("docker exec {} sh -c {}", shell_escape(name), shell_escape(command)),
+            "lxc" => format!("lxc-attach -n {} -- sh -c {}", shell_escape(name), shell_escape(command)),
             _ => unreachable!(),
         };
         return run_shell_with_timeout(&local_exec, timeout_secs).await;

@@ -1269,6 +1269,14 @@ fn stop_vm_and_wait_for_stop(
 /// `/var/lib/wolfstack/vms/`. Stop the VM, archive its files, restart
 /// via the RAII guard so it never stays stopped silently.
 fn backup_vm_native(name: &str) -> Result<(PathBuf, u64), String> {
+    // The VM name flows into a shell string (the socat socket path) and
+    // into tar/JSON filenames. Refuse anything that isn't filename-safe so
+    // a crafted name can't inject shell here. Real VM names are already
+    // filename-safe (used as vm-<name>.tar.gz / <name>.json), so this
+    // never rejects a legitimate VM.
+    if !crate::auth::is_safe_name(name) {
+        return Err(format!("refusing to back up VM with unsafe name: {:?}", name));
+    }
 
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");

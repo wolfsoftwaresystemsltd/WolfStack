@@ -813,6 +813,19 @@ impl AiAgent {
                 .pool_max_idle_per_host(0)
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .timeout(std::time::Duration::from_secs(120))
+                // SSRF guard must cover redirects too: web_fetch validates
+                // the initial URL, but a public page can 30x-redirect to
+                // 127.0.0.1 / 169.254.169.254 / a private LAN host. Re-check
+                // every hop and refuse internal targets; cap the chain.
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() > 8 {
+                        attempt.error("too many redirects")
+                    } else if fetch_url_is_internal(attempt.url().as_str()) {
+                        attempt.stop()
+                    } else {
+                        attempt.follow()
+                    }
+                }))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -1821,7 +1834,9 @@ const ALLOWED_COMMANDS: &[&str] = &[
     // Network info
     "ip addr", "ip route", "ip link", "ip neigh", "ss", "netstat",
     "ping -c", "dig", "nslookup", "host ", "traceroute", "tracepath",
-    "curl -s", "curl --silent", "wget -qO-",
+    // NOTE: curl/wget are deliberately NOT allowed here. [EXEC] must not
+    // be an outbound SSRF/exfil channel — URL fetching goes through the
+    // [FETCH] tag, which enforces the SSRF guard (fetch_url_is_internal).
     // Bounded packet capture — validated below (requires -c N, forbids -w/-W/-z/-G)
     "tcpdump",
     // Containers
@@ -1834,7 +1849,9 @@ const ALLOWED_COMMANDS: &[&str] = &[
     // Wolf suite status
     "wolfnet", "wolfdisk", "wolfproxy", "wolfserve", "wolfscale",
     // Misc read-only
-    "date", "cal", "env", "printenv", "timedatectl", "hostnamectl",
+    // env/printenv removed: they leak the root process environment, which
+    // can contain secrets/API keys injected by the service manager.
+    "date", "cal", "timedatectl", "hostnamectl",
     "dmidecode", "lshw", "sensors", "smartctl",
 ];
 
@@ -1866,6 +1883,25 @@ const BLOCKED_PATTERNS: &[&str] = &[
     "wget ", "curl -o", "curl -O", "curl --output",
 ];
 
+/// True if a command references a path holding credentials, secrets, or
+/// private keys. The [EXEC] allowlist intentionally permits generic read
+/// tools (cat/head/tail/find/ls/grep) for diagnostics; this deny-list
+/// keeps them away from sensitive targets so a chat prompt can't
+/// exfiltrate /etc/shadow, the cluster secret, app .env files, or SSH
+/// private keys via [EXEC].
+fn references_sensitive_path(cmd: &str) -> bool {
+    const SENSITIVE: &[&str] = &[
+        "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
+        "/etc/wolfstack",
+        "/.ssh", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+        "authorized_keys", "environ",
+        ".env", ".pgpass", ".my.cnf", ".netrc", ".aws/credentials",
+        ".pem", ".key", "cluster-secret",
+    ];
+    let lower = cmd.to_lowercase();
+    SENSITIVE.iter().any(|p| lower.contains(p))
+}
+
 /// Execute a command only if it passes safety checks
 pub fn execute_safe_command(cmd: &str) -> Result<String, String> {
     let cmd = cmd.trim();
@@ -1881,6 +1917,14 @@ pub fn execute_safe_command(cmd: &str) -> Result<String, String> {
     // Block backtick/subshell command injection
     if cmd.contains('`') || cmd.contains("$(") {
         return Err("Command substitution is not allowed (read-only mode)".to_string());
+    }
+
+    // Block reads of credential/secret files regardless of which read
+    // command is used — the allowlist permits generic file readers for
+    // diagnostics, so this deny-list is what stops `cat /etc/shadow`,
+    // SSH keys, the cluster secret and app .env leaking through [EXEC].
+    if references_sensitive_path(cmd) {
+        return Err("Access to credential/secret files is not allowed".to_string());
     }
 
     // Check each piped segment for safety. EVERY segment — not just
@@ -4395,6 +4439,43 @@ fn run_security_audit() -> String {
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod exec_safety_tests {
+    use super::*;
+
+    // All of these are rejected BEFORE any shell runs, so the test never
+    // executes the underlying command.
+    #[test]
+    fn blocks_reading_secret_files() {
+        assert!(execute_safe_command("cat /etc/shadow").is_err());
+        assert!(execute_safe_command("cat /etc/wolfstack/users.json").is_err());
+        assert!(execute_safe_command("head /root/.ssh/id_rsa").is_err());
+        assert!(execute_safe_command("find / -name id_ed25519").is_err());
+        assert!(execute_safe_command("cat /root/app/.env").is_err());
+        assert!(execute_safe_command("ls /etc/wolfstack").is_err());
+        assert!(execute_safe_command("cat /proc/self/environ").is_err());
+    }
+
+    #[test]
+    fn blocks_env_and_url_fetch_commands() {
+        // env/printenv leak the root process environment.
+        assert!(execute_safe_command("env").is_err());
+        assert!(execute_safe_command("printenv").is_err());
+        // curl/wget are not an [EXEC] capability (SSRF/exfil) — use [FETCH].
+        assert!(execute_safe_command("curl -s http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(execute_safe_command("wget -qO- http://example.com").is_err());
+    }
+
+    #[test]
+    fn still_allows_benign_diagnostics() {
+        // A normal read with no sensitive target must pass the safety gate
+        // (it may still fail at runtime if the file is absent — that's fine).
+        assert!(references_sensitive_path("cat /etc/shadow"));
+        assert!(!references_sensitive_path("cat /etc/os-release"));
+        assert!(!references_sensitive_path("uname -a"));
+    }
 }
 
 #[cfg(test)]

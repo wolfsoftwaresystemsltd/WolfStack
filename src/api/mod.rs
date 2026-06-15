@@ -5434,9 +5434,15 @@ pub async fn container_updates_apply(req: HttpRequest, state: web::Data<AppState
         _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "No supported package manager found in container" })),
     };
 
-    let output = container_exec_cmd(&runtime, &container, &["sh", "-c", cmd]).output();
+    // Same as the host apply: the in-container upgrade can take minutes,
+    // so run it on the blocking pool, not on an actix-rt worker thread.
+    let runtime_b = runtime.clone();
+    let container_b = container.clone();
+    let output = web::block(move || {
+        container_exec_cmd(&runtime_b, &container_b, &["sh", "-c", cmd]).output()
+    }).await;
     match output {
-        Ok(o) => {
+        Ok(Ok(o)) => {
             let out = String::from_utf8_lossy(&o.stdout).to_string();
             let err = String::from_utf8_lossy(&o.stderr).to_string();
             let combined = if err.is_empty() { out } else { format!("{}\n{}", out, err) };
@@ -5446,7 +5452,8 @@ pub async fn container_updates_apply(req: HttpRequest, state: web::Data<AppState
                 HttpResponse::InternalServerError().json(serde_json::json!({ "error": combined.trim() }))
             }
         }
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to execute: {}", e) })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to execute: {}", e) })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("apply task failed: {}", e) })),
     }
 }
 
@@ -11249,6 +11256,13 @@ async fn container_component_version(
     let component = query.get("component").cloned().unwrap_or_default();
     if runtime.is_empty() || target.is_empty() || component.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "runtime, target, and component are required"}));
+    }
+    // `component` is interpolated into a shell command (`<component> --version`)
+    // run inside the container, and `target` is the container name — both must
+    // be safe tokens so a query param can't inject a command. `component` is a
+    // binary name (e.g. "wolfdisk"); container names are DNS-safe.
+    if !crate::auth::is_safe_name(&component) || !crate::auth::is_safe_name(&target) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "invalid component or target name"}));
     }
     let exec_target = match runtime.as_str() {
         "docker" => crate::configurator::ExecTarget::Docker(target),
@@ -24719,9 +24733,14 @@ pub async fn security_apply_updates(
     } else {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "No supported package manager found" }));
     };
-    match run_shell(cmd) {
-        Ok(out) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    // apt-get/dnf upgrade can run for minutes — run it on the blocking
+    // pool, never inline on an actix-rt worker. Running it inline pins a
+    // worker thread for the whole upgrade and degrades this node's HTTP /
+    // peer-poll responsiveness (a contributor to the apply-node CPU peg).
+    match web::block(move || run_shell(cmd)).await {
+        Ok(Ok(out)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "output": out })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("apply task failed: {}", e) })),
     }
 }
 
