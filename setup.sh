@@ -6,7 +6,8 @@
 #
 # WolfStack Quick Install Script
 # Installs WolfStack server management dashboard
-# Supported: Ubuntu/Debian, Fedora/RHEL/CentOS, SLES/openSUSE, Arch Linux, IBM Power (ppc64le)
+# Supported: Ubuntu/Debian, Fedora/RHEL/CentOS, SLES/openSUSE, Arch Linux, IBM Power (ppc64le),
+#            Unraid (auto-detected — installs the static-binary agent, no package manager needed)
 #
 # Usage (as root — Proxmox root login):
 #        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash
@@ -159,6 +160,145 @@ fi
 # Detect the real user (for Rust install) when running under sudo
 REAL_USER="${SUDO_USER:-root}"
 REAL_HOME=$(eval echo "~$REAL_USER")
+
+# ─── Unraid (Slackware, no package manager, no systemd, RAM-based OS) ────────
+# Unraid boots from USB into RAM: /etc, /usr and /usr/local/bin are recreated
+# on every boot, and there is no apt/dnf/etc. and no systemd — so the normal
+# install path below cannot run (it dies at "Could not detect package manager").
+# Instead we install the prebuilt static-musl binary onto the array
+# (/mnt/user/appdata, which persists), symlink the config dir, and wire startup
+# into /boot/config/go (Unraid's boot script). The node runs in --agent mode and
+# is managed from a master node; agent mode serves an inline page and needs no
+# on-disk web/ assets, so the single binary is self-sufficient. This must run
+# BEFORE the package-manager check. See docs: "Installing WolfStack Agent on
+# Unraid".
+if [ -f /etc/unraid-version ]; then
+    UNRAID_VER=$(tr -d '"' < /etc/unraid-version 2>/dev/null | sed -n 's/^version=//p')
+    echo "✓ Detected Unraid ${UNRAID_VER:-(unknown version)} — using the static-binary agent install"
+    echo ""
+
+    # Unraid is always a managed AGENT node: there's no package manager to build
+    # a full UI host, and full mode needs on-disk web/ assets we don't ship.
+    AGENT_MODE=true
+
+    if [ -z "$BINARY_ARCH" ]; then
+        echo "✗ Unsupported CPU architecture '$HOST_ARCH' for Unraid."
+        echo "  WolfStack ships prebuilt static binaries for x86_64 and aarch64 only,"
+        echo "  and Unraid has no toolchain to build from source. Cannot continue."
+        exit 1
+    fi
+
+    # Persistent storage MUST be the array — /usr/local/bin and /tmp are RAM and
+    # vanish on reboot. Require /mnt/user (the array) to be started.
+    WS_APPDATA="/mnt/user/appdata/wolfstack"
+    if [ ! -d /mnt/user ]; then
+        echo "✗ /mnt/user not found — the Unraid array doesn't appear to be started."
+        echo "  Start the array (so /mnt/user/appdata is available), then re-run this script."
+        exit 1
+    fi
+    mkdir -p "$WS_APPDATA/etc"
+
+    # Stop any agent we previously started (upgrade / re-run) so the new binary
+    # takes over the port cleanly.
+    if pgrep -f "$WS_APPDATA/wolfstack --agent" >/dev/null 2>&1; then
+        echo "  Stopping running WolfStack agent for upgrade..."
+        pkill -f "$WS_APPDATA/wolfstack --agent" 2>/dev/null || true
+        sleep 2
+    fi
+
+    # Download the static musl binary (the same release artifact the normal path
+    # uses). Unraid can't build from source, so a failure here is fatal.
+    if ! download_prebuilt "wolfsoftwaresystemsltd/WolfStack" "wolfstack" "$WS_APPDATA/wolfstack"; then
+        echo "✗ Could not download the prebuilt WolfStack binary for $BINARY_ARCH."
+        echo "  Check this server's internet access to github.com and re-run."
+        exit 1
+    fi
+
+    # /etc is RAM-fresh each boot, so /etc/wolfstack must be a symlink onto the
+    # array. -n replaces an existing symlink instead of descending into it.
+    ln -sfn "$WS_APPDATA/etc" /etc/wolfstack
+    ln -sf "$WS_APPDATA/wolfstack" /usr/local/bin/wolfstack
+
+    # Wire startup into /boot/config/go (persists on the USB). Append an
+    # idempotent, marker-delimited block — never clobber the rest of go, which
+    # carries emhttp (Unraid's own UI) and any user customisations.
+    GO_FILE="/boot/config/go"
+    GO_START="# >>> WolfStack agent (managed by setup.sh) >>>"
+    GO_END="# <<< WolfStack agent (managed by setup.sh) <<<"
+    if [ ! -d /boot/config ]; then
+        echo "  ⚠ /boot/config not found — cannot persist startup across reboots."
+        echo "    The agent will run now but won't auto-start after a reboot."
+    else
+        if [ ! -f "$GO_FILE" ]; then
+            # Very unusual on a real Unraid, but be safe: a fresh go still needs
+            # the shebang and emhttp so the Unraid UI starts.
+            printf '%s\n%s\n%s\n' '#!/bin/bash' '# Start the Management Utilities' '/usr/local/sbin/emhttp &' > "$GO_FILE"
+            chmod +x "$GO_FILE" 2>/dev/null || true
+        fi
+        # Strip any previous WolfStack block (exact-line match, no regex
+        # escaping), then append a fresh one.
+        WS_GO_APPEND=true
+        if grep -qF "$GO_START" "$GO_FILE"; then
+            if awk -v s="$GO_START" -v e="$GO_END" \
+                '$0==s{skip=1} skip&&$0==e{skip=0;next} !skip{print}' \
+                "$GO_FILE" > "$GO_FILE.tmp"; then
+                mv "$GO_FILE.tmp" "$GO_FILE"
+            else
+                rm -f "$GO_FILE.tmp"
+                echo "  ⚠ Could not rewrite $GO_FILE cleanly — leaving the existing block in place."
+                WS_GO_APPEND=false
+            fi
+        fi
+        if [ "$WS_GO_APPEND" = true ]; then
+            # Drop trailing blank lines first so repeated re-runs don't slowly
+            # accumulate them above the block; then append with one separator.
+            if awk 'NF{last=NR} {line[NR]=$0} END{for(i=1;i<=last;i++) print line[i]}' \
+                "$GO_FILE" > "$GO_FILE.tmp"; then
+                mv "$GO_FILE.tmp" "$GO_FILE"
+            else
+                rm -f "$GO_FILE.tmp"
+            fi
+            {
+                printf '\n%s\n' "$GO_START"
+                printf '%s\n' "ln -sfn \"$WS_APPDATA/etc\" /etc/wolfstack"
+                printf '%s\n' "ln -sf \"$WS_APPDATA/wolfstack\" /usr/local/bin/wolfstack"
+                printf '%s\n' "cd \"$WS_APPDATA\" && ./wolfstack --agent >> \"$WS_APPDATA/wolfstack.log\" 2>&1 &"
+                printf '%s\n' "$GO_END"
+            } >> "$GO_FILE"
+            echo "  ✓ Startup wired into $GO_FILE (survives reboots)"
+        fi
+    fi
+
+    # Start the agent now (no reboot needed). nohup + background so it keeps
+    # running after this script (often curl|bash) exits.
+    echo "  Starting WolfStack agent..."
+    ( cd "$WS_APPDATA" && nohup ./wolfstack --agent >> "$WS_APPDATA/wolfstack.log" 2>&1 & )
+    sleep 3
+
+    # awk (not grep -PoP) so it works on busybox grep too: pull the token after "src".
+    WS_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+    [ -z "$WS_IP" ] && WS_IP="<this-unraid-ip>"
+
+    echo ""
+    echo "  ✅ WolfStack agent installed on Unraid"
+    echo "  ─────────────────────────────────────"
+    echo "  Binary:  $WS_APPDATA/wolfstack ($BINARY_ARCH static musl)"
+    echo "  Config:  $WS_APPDATA/etc  (→ /etc/wolfstack)"
+    echo "  Log:     $WS_APPDATA/wolfstack.log"
+    echo "  Startup: $GO_FILE"
+    echo ""
+    echo "  This node runs in AGENT mode — manage it from your master node's UI:"
+    echo "    master UI → + (bottom of the sidebar) → host $WS_IP, port 8554"
+    if [ -s /etc/wolfstack/join-token ]; then
+        echo "    join token: $(tr -d '\n\r' < /etc/wolfstack/join-token 2>/dev/null)"
+    else
+        echo "    join token: cat /etc/wolfstack/join-token   (once the agent has finished starting)"
+    fi
+    echo ""
+    echo "  Verify:  tail -f $WS_APPDATA/wolfstack.log"
+    echo ""
+    exit 0
+fi
 
 # ─── Detect package manager ─────────────────────────────────────────────────
 echo "Checking system requirements..."
