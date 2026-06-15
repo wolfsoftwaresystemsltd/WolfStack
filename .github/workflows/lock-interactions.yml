@@ -1,0 +1,41 @@
+name: Lock Public Interactions
+
+# Re-applies the "collaborators only" interaction limit so it never lapses.
+#
+# GitHub caps interaction limits at a 6-month expiry, after which the repo
+# SILENTLY reopens to public issues / PRs / comments. This job renews the
+# limit monthly so external users can never post issues or pull requests
+# (only repo collaborators / org members can).
+#
+# Requires a repo secret INTERACTION_LOCK_TOKEN: a fine-grained PAT with
+# "Administration: write" on this repository. The default GITHUB_TOKEN
+# cannot set interaction limits, so a PAT is mandatory.
+#
+# Manual run (after adding the secret): Actions tab -> Lock Public
+# Interactions -> Run workflow.
+
+on:
+  schedule:
+    # 04:17 UTC on the 1st of every month — well inside the 6-month
+    # expiry window, so the limit is always renewed before it lapses.
+    - cron: '17 4 1 * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-apply collaborators-only interaction limit
+        env:
+          GH_TOKEN: ${{ secrets.INTERACTION_LOCK_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::INTERACTION_LOCK_TOKEN secret is not set. Add a fine-grained PAT with 'Administration: write' on this repo."
+            exit 1
+          fi
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/interaction-limits" \
+            -f limit=collaborators_only -f expiry=six_months
+          echo "Interaction limit renewed:"
+          gh api "repos/${GITHUB_REPOSITORY}/interaction-limits"
