@@ -26134,7 +26134,10 @@ pub async fn predictive_proposal_snooze(
     path: web::Path<String>,
     body: web::Json<SnoozeProposalRequest>,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     let id = path.into_inner();
     let hours = body.into_inner().hours.clamp(1, 24 * 30);
     let until = chrono::Utc::now() + chrono::Duration::hours(hours);
@@ -26165,8 +26168,15 @@ pub async fn predictive_proposal_snooze(
             // have no way of knowing they're looking at a peer-owned
             // one until they click an action and see it fail.
             drop(store);
+            // Cycle-breaker: a forwarded peer request must not re-fan-out
+            // (see `is_inter_node_forward`).
+            if is_inter_node_forward(&caller) {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "proposal not found on this node",
+                }));
+            }
             forward_proposal_action_to_peers(&state, &id, "snooze",
-                serde_json::json!({ "hours": hours })).await
+                serde_json::json!({ "hours": hours }), is_operator_request(&caller)).await
         }
     }
 }
@@ -26185,7 +26195,10 @@ pub async fn predictive_proposal_dismiss(
     path: web::Path<String>,
     body: web::Json<DismissProposalRequest>,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     let id = path.into_inner();
     let reason = body.into_inner().reason.trim().to_string();
     if reason.is_empty() {
@@ -26207,8 +26220,15 @@ pub async fn predictive_proposal_dismiss(
         }
         Err(_) => {
             drop(store);
+            // Cycle-breaker: a forwarded peer request must not re-fan-out
+            // (see `is_inter_node_forward`).
+            if is_inter_node_forward(&caller) {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "proposal not found on this node",
+                }));
+            }
             forward_proposal_action_to_peers(&state, &id, "dismiss",
-                serde_json::json!({ "reason": reason })).await
+                serde_json::json!({ "reason": reason }), is_operator_request(&caller)).await
         }
     }
 }
@@ -26223,7 +26243,10 @@ pub async fn predictive_proposal_approve(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     let id = path.into_inner();
     let mut store = match state.predictive_proposals.write() {
         Ok(g) => g,
@@ -26238,27 +26261,80 @@ pub async fn predictive_proposal_approve(
         }
         Err(_) => {
             drop(store);
+            // Cycle-breaker: a forwarded peer request must not re-fan-out
+            // (see `is_inter_node_forward`) — that recursion is the
+            // fleet-wide CPU storm on "Mark applied".
+            if is_inter_node_forward(&caller) {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "proposal not found on this node",
+                }));
+            }
             forward_proposal_action_to_peers(&state, &id, "approve",
-                serde_json::json!({})).await
+                serde_json::json!({}), is_operator_request(&caller)).await
         }
     }
 }
 
+/// True when a proposal action (approve / snooze / dismiss / history)
+/// arrived from a cluster peer rather than from the operator's browser
+/// — i.e. it was authenticated with the inter-node secret, so
+/// `require_auth` returned the `"cluster-node"` sentinel.
+///
+/// Such a request is ITSELF a forward emitted by the origin node's
+/// `forward_proposal_action_to_peers` / `forward_proposal_get_to_peers`.
+/// If this node doesn't own the proposal it must record nothing and
+/// must NOT fan out again. Re-forwarding here is what turned a single
+/// "Mark applied" on a peer-owned proposal into a recursive, fleet-wide
+/// request cascade: every non-owner peer re-forwarded to all ITS peers
+/// (including the sender, with no visited-set or depth limit), which on
+/// a multi-node cluster pegged CPU across the fleet and "cycled"
+/// between nodes. The operator's origin node is the single fan-out
+/// point; peers only ever record locally or 404. Mirrors the
+/// `caller == "cluster-node"` cycle-breaker already used by the
+/// threat-intel and gateway fan-out endpoints.
+fn is_inter_node_forward(caller: &str) -> bool {
+    caller == "cluster-node"
+}
+
+/// True when a request came directly from a logged-in operator (a
+/// browser session), as opposed to a relayed forward — either an
+/// intra-cluster one (`"cluster-node"`, via the cluster secret) or a
+/// federation relay (`"apikey:<name>"`, via `Bearer wsk_…`).
+///
+/// Only operator-originated actions are allowed to fan OUT to FEDERATED
+/// clusters. A relayed action must NOT re-federate: the operator's
+/// origin node already forwards directly to every federation it knows,
+/// so a federation's entry node re-federating reaches nothing new and
+/// risks an A→B→A ping-pong between two mutually-federated clusters
+/// (bounded only by the per-hop HTTP timeout). The entry node still
+/// fans out to its own LOCAL peers — that's how it reaches the owner
+/// within its cluster — it just stops there.
+fn is_operator_request(caller: &str) -> bool {
+    !is_inter_node_forward(caller) && !caller.starts_with("apikey:")
+}
+
 /// POST /api/proposals/{id}/{action} fan-out fallback. Tries every
-/// online wolfstack peer in parallel using the cluster secret;
-/// returns the first 2xx response, or 404 if no peer owns the
-/// proposal. Used by snooze / dismiss / approve when the local
+/// online wolfstack peer in turn using the cluster secret, returning
+/// on the first 2xx response (or 404 if no peer owns the
+/// proposal). Used by snooze / dismiss / approve when the local
 /// store doesn't have the id — i.e. the proposal lives on a peer
 /// and the operator is acting from the cluster-aggregate inbox.
 ///
 /// Each peer's own handler will record the action AND invalidate
 /// its own cluster cache, so a subsequent `/api/proposals/cluster`
 /// from any node sees fresh state.
+///
+/// `include_federations` gates the cross-cluster hop: pass `true` only
+/// for an operator-originated action (see `is_operator_request`). A
+/// relayed forward passes `false` so it reaches its own local peers but
+/// never re-federates — closing the A→B→A loop between two
+/// mutually-federated clusters.
 async fn forward_proposal_action_to_peers(
     state: &web::Data<AppState>,
     proposal_id: &str,
     action: &str,
     body: serde_json::Value,
+    include_federations: bool,
 ) -> HttpResponse {
     let path = format!("/api/proposals/{}/{}",
         urlencoding::encode(proposal_id),
@@ -26297,11 +26373,17 @@ async fn forward_proposal_action_to_peers(
     }
 
     // ─── Federated clusters (Bearer wsk_…) ───
-    // Each federation's own handler runs the same fan-out internally,
-    // so forwarding once per federation reaches every node it owns.
-    let federations: Vec<crate::federation::FederatedCluster> = {
+    // Each federation's entry node, on a local miss, fans out to its
+    // own local peers (via the secret) — so forwarding once per
+    // federation reaches every node it owns. We only take this hop for
+    // operator-originated actions; a relayed forward sets
+    // include_federations=false so it never re-federates (anti-loop —
+    // see `is_operator_request`).
+    let federations: Vec<crate::federation::FederatedCluster> = if include_federations {
         let s = state.federations.read().unwrap_or_else(|e| e.into_inner());
         s.clusters.clone()
+    } else {
+        Vec::new()
     };
     for fc in federations {
         // build_client/insecure_tls handling lives inside federation::*;
@@ -26523,7 +26605,10 @@ pub async fn predictive_proposal_history(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
     let id = path.into_inner();
 
     let local_p: Option<crate::predictive::Proposal> = {
@@ -26538,7 +26623,20 @@ pub async fn predictive_proposal_history(
     let p = match local_p {
         Some(p) => p,
         None => {
-            return forward_proposal_get_to_peers(&state, &id, "history").await;
+            // Cycle-breaker: if this GET itself arrived from a peer it
+            // must not re-fan-out (see `is_inter_node_forward`) — that
+            // recursion is the same fleet-wide storm as the POST actions.
+            // Return 404 (NOT a 200 "empty history") so the origin's
+            // `forward_proposal_get_to_peers` treats us as "not the
+            // owner, try the next peer" and still finds the node that
+            // actually holds the proposal + its history samples.
+            if is_inter_node_forward(&caller) {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "proposal not found on this node",
+                }));
+            }
+            return forward_proposal_get_to_peers(&state, &id, "history",
+                is_operator_request(&caller)).await;
         }
     };
 
@@ -26617,10 +26715,15 @@ pub async fn predictive_proposal_history(
 /// (X-WolfStack-Secret auth), then every federated cluster
 /// (Bearer wsk_… auth via `federation::fetch_json`). Returns the
 /// first 2xx response.
+///
+/// `include_federations` gates the cross-cluster hop — see the POST
+/// twin `forward_proposal_action_to_peers`. A relayed GET passes
+/// `false` so it never re-federates.
 async fn forward_proposal_get_to_peers(
     state: &web::Data<AppState>,
     proposal_id: &str,
     action: &str,
+    include_federations: bool,
 ) -> HttpResponse {
     let path = format!("/api/proposals/{}/{}",
         urlencoding::encode(proposal_id),
@@ -26651,12 +26754,16 @@ async fn forward_proposal_get_to_peers(
 
     // ─── Federated clusters ───
     // Each federation is a separate cluster reached via Bearer auth.
-    // Its own /api/proposals/{id}/{action} handler will fan out
-    // internally if needed (same logic, recursion stops at one hop
-    // because federations don't re-federate).
-    let federations: Vec<crate::federation::FederatedCluster> = {
+    // Its own handler fans out to its OWN local peers on a miss, so one
+    // hop per federation reaches every node it owns. We only take this
+    // hop for operator-originated requests; a relayed GET passes
+    // include_federations=false so a federation entry node never
+    // re-federates (anti-loop — see `is_operator_request`).
+    let federations: Vec<crate::federation::FederatedCluster> = if include_federations {
         let s = state.federations.read().unwrap_or_else(|e| e.into_inner());
         s.clusters.clone()
+    } else {
+        Vec::new()
     };
     for fc in federations {
         if let Ok(v) = crate::federation::fetch_json(&fc, &path).await {
@@ -37130,6 +37237,42 @@ mod compose_secrets_tests {
         assert!(is_injectable_secret_key("DB_PASSWORD"));
         assert!(is_injectable_secret_key("DB_PATH"));
         assert!(is_injectable_secret_key("docker_host_token"));
+    }
+}
+
+#[cfg(test)]
+mod predictive_forward_tests {
+    use super::{is_inter_node_forward, is_operator_request};
+
+    #[test]
+    fn inter_node_forward_is_a_cycle_breaker() {
+        // A peer-authenticated action (require_auth → "cluster-node") is
+        // itself a forward and must NOT re-fan-out to local peers — that
+        // recursion is the fleet-wide CPU storm on "Mark applied". The
+        // operator (session username) and API-key callers reach this
+        // node as the first hop, not as a relay.
+        assert!(is_inter_node_forward("cluster-node"));
+        assert!(!is_inter_node_forward("admin"));
+        assert!(!is_inter_node_forward("apikey:ci-bot"));
+        assert!(!is_inter_node_forward(""));
+    }
+
+    #[test]
+    fn only_operator_requests_fan_out_to_federations() {
+        // Only a direct operator (browser session) action may take the
+        // cross-cluster federation hop. A relayed forward — intra-cluster
+        // ("cluster-node") or a federation relay ("apikey:…") — must not
+        // re-federate, or two mutually-federated clusters ping-pong it
+        // forever (A→B→A).
+        assert!(is_operator_request("admin"));
+        assert!(is_operator_request("paul"));
+        assert!(!is_operator_request("cluster-node"));
+        assert!(!is_operator_request("apikey:peer-cluster"));
+        // Boundary: only the "apikey:" prefix (with colon) is the relay
+        // sentinel — a username that merely starts with "apikey" is a
+        // normal operator and may federate.
+        assert!(is_operator_request("apikey"));
+        assert!(is_operator_request("apikeys-admin"));
     }
 }
 
