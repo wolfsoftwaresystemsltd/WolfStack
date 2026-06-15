@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.47.0: predictive "Mark applied" CPU-storm fix + AI/DB security hardening** _(2026-06-15 — [`03b74bda`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/03b74bda70e5c7b558f3d4a23b5a2b2f04a7d679))_
 - **v24.46.4: Fedora LXC — fix the container count (menu showed 0)** _(2026-06-14 — [`4ace6ff0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4ace6ff0a09578b6c450a11cf58604272f7af453))_
 - **v24.46.3: Fedora LXC — start AND delete containers that carry an apparmor line** _(2026-06-14 — [`fa154ddd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fa154ddd5ae7df323cb52bb1b0a1132327f9fbf6))_
 - **v24.46.2: fix Docker install on Oracle Linux / RHEL 10 family (don't break dnf)** _(2026-06-14 — [`ac5fd148`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ac5fd14899e5163c7501ca9bbeec0b4470e8c5d3))_
