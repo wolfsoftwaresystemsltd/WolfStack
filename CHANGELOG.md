@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.47.1: fix predictive "Mark applied" recursive cluster fan-out CPU storm** _(2026-06-15 — [`48c1232e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/48c1232ed4b131cdf8dcd40bd9a2b49986d758d4))_
 - **v24.47.0: predictive "Mark applied" CPU-storm fix + AI/DB security hardening** _(2026-06-15 — [`03b74bda`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/03b74bda70e5c7b558f3d4a23b5a2b2f04a7d679))_
 - **v24.46.4: Fedora LXC — fix the container count (menu showed 0)** _(2026-06-14 — [`4ace6ff0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4ace6ff0a09578b6c450a11cf58604272f7af453))_
 - **v24.46.3: Fedora LXC — start AND delete containers that carry an apparmor line** _(2026-06-14 — [`fa154ddd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fa154ddd5ae7df323cb52bb1b0a1132327f9fbf6))_
