@@ -641,7 +641,7 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
                 if has_s3fs() {
                     mount_s3_via_s3fs(mount, s3)
                 } else {
-                    Err(format!("S3 mount failed: rust-s3 error: {}", e))
+                    Err(with_s3_credential_hint(format!("S3 mount failed: rust-s3 error: {}", e)))
                 }
             }
         }
@@ -681,6 +681,38 @@ fn effective_s3_region(s3: &S3Config) -> String {
         r.to_string()
     } else {
         String::new()
+    }
+}
+
+/// True when `err` looks like an S3 authentication/signature failure — the
+/// #1 cause of an otherwise-correct mount failing. S3, and especially R2,
+/// surface these as cryptic SigV4/SigV2 messages that read like a
+/// region/endpoint bug; they're almost always bad credentials. Gary KO4BSR
+/// spent days on exactly this — a wrong secret_access_key in storage.json
+/// (2026-06-16) — because the failure never said "check your credentials".
+fn s3_credential_hint(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    [
+        "sigv4", "sigv2", "signature version", "please use sigv4",
+        "signaturedoesnotmatch", "signature does not match", "the request signature",
+        "invalidaccesskeyid", "invalid access key",
+        "accessdenied", "access denied", "forbidden",
+        "missing field name", // R2's auth-error document deserializes to this
+    ]
+    .iter()
+    .any(|m| e.contains(m))
+}
+
+/// Append a plain-language credentials hint to `err` when it matches
+/// `s3_credential_hint`, otherwise return it unchanged.
+fn with_s3_credential_hint(err: String) -> String {
+    if s3_credential_hint(&err) {
+        format!(
+            "{} — this looks like an S3 credentials problem: re-check the Access Key and Secret Key for this mount and re-enter the Secret in the GUI (a wrong or truncated secret is the usual cause; for Cloudflare R2 leave the Region blank).",
+            err
+        )
+    } else {
+        err
     }
 }
 
@@ -750,13 +782,19 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
                 return Ok("S3 storage mounted via s3fs".to_string());
             }
         }
-        // Mount point still not detected but s3fs started OK
-        // Trust the exit code — it may just be slow
-        warn!("s3fs started but mount point detection slow for {}", mount.mount_point);
-        Ok("S3 storage mounted via s3fs (mount may still be initializing)".to_string())
+        // s3fs forks a daemon, so the parent exiting 0 does NOT mean the
+        // mount succeeded: the daemon can fail its startup bucket check (bad
+        // credentials, wrong endpoint) and exit, logging the real error to
+        // syslog — NOT to the stderr we captured. If the mountpoint never
+        // appeared, that's a failure, not "still initializing" — the old
+        // false-Ok is exactly why Gary KO4BSR's wrong-secret R2 mount
+        // reported success but never mounted (2026-06-16). A genuinely-slow
+        // mount that appears later self-corrects on the next status refresh.
+        warn!("s3fs started but the mount never came up for {}", mount.mount_point);
+        Err("s3fs started but the mount never came up — the s3fs daemon likely failed its startup bucket check (see `journalctl`/syslog for the s3fs error). This is most often an S3 credentials problem: re-check the Access Key and Secret Key and re-enter the Secret in the GUI (for Cloudflare R2 leave the Region blank).".to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(format!("s3fs mount failed: {}", stderr))
+        Err(with_s3_credential_hint(format!("s3fs mount failed: {}", stderr.trim())))
     }
 }
 
@@ -2642,6 +2680,24 @@ mod mount_dropin_tests {
         assert_eq!(effective_s3_region(&s3cfg("", "https://minio.local:9000")), "");
         // Non-R2 with explicit region → that region (unchanged).
         assert_eq!(effective_s3_region(&s3cfg("us-east-2", "https://minio.local:9000")), "us-east-2");
+    }
+
+    #[test]
+    fn s3_credential_hint_classifies_auth_failures() {
+        // Gary KO4BSR's actual error strings (R2, wrong secret).
+        assert!(s3_credential_hint("Failed to connect by sigv4, so retry to connect by signature version 2"));
+        assert!(s3_credential_hint("SigV2 authorization is not supported. Please use SigV4 instead."));
+        assert!(s3_credential_hint("Failed to list S3 bucket 'wolfstack': serde xml: missing field Name"));
+        assert!(s3_credential_hint("The request signature we calculated does not match"));
+        assert!(s3_credential_hint("InvalidAccessKeyId"));
+        assert!(s3_credential_hint("AccessDenied: Forbidden"));
+        // Non-auth failures must NOT be misclassified as a credentials problem.
+        assert!(!s3_credential_hint("mount.nfs: Connection timed out"));
+        assert!(!s3_credential_hint("No such file or directory"));
+        assert!(!s3_credential_hint("ensure_diskfree=1024 exceeded"));
+        // The wrapper appends only on a match.
+        assert!(with_s3_credential_hint("sigv4 rejected".to_string()).contains("credentials problem"));
+        assert_eq!(with_s3_credential_hint("disk full".to_string()), "disk full");
     }
 
     #[test]
