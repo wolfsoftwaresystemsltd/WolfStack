@@ -603,10 +603,20 @@ fn is_r2_endpoint(endpoint: &str) -> bool {
 /// default). Only R2 behaviour changes; every other provider is untouched.
 fn effective_s3_region(s3: &S3Config) -> String {
     let r = s3.region.trim();
+    // Cloudflare R2's SigV4 region is ALWAYS "auto" for the standard
+    // endpoint. Any other value (e.g. a stale "us-east-1" left on a mount
+    // created before the v24.47.3 fix) makes R2 reject the signature, after
+    // which s3fs falls back to SigV2 — which R2 forbids outright. Because a
+    // *working* R2 mount can only ever carry "auto", forcing it here can
+    // never break a working mount; it only repairs a broken one. This is
+    // what the v24.47.3 blank→auto fallback missed: an EXISTING mount whose
+    // stored region was non-blank never reached the fallback, so the upgrade
+    // changed nothing (Gary KO4BSR: still failing on v24.48.0).
+    if is_r2_endpoint(&s3.endpoint) {
+        return "auto".to_string();
+    }
     if !r.is_empty() {
         r.to_string()
-    } else if is_r2_endpoint(&s3.endpoint) {
-        "auto".to_string()
     } else {
         String::new()
     }
@@ -2555,16 +2565,20 @@ mod mount_dropin_tests {
     }
 
     #[test]
-    fn r2_defaults_region_to_auto_for_sigv4() {
+    fn r2_always_uses_auto_region_for_sigv4() {
         // R2 + blank region → "auto" (its required SigV4 region); without it
         // s3fs falls back to SigV2, which R2 rejects (Gary KO4BSR).
         assert_eq!(effective_s3_region(&s3cfg("", "https://x.r2.cloudflarestorage.com")), "auto");
-        // An explicit region always wins, even for R2.
-        assert_eq!(effective_s3_region(&s3cfg("wnam", "https://x.r2.cloudflarestorage.com")), "wnam");
+        // R2 FORCES "auto" even over a stored non-auto region — that stale
+        // value is precisely what kept an existing mount broken after the
+        // v24.47.3 blank→auto fallback (it never reached the fallback). A
+        // working R2 mount can only be "auto", so this can't regress one.
+        assert_eq!(effective_s3_region(&s3cfg("us-east-1", "https://x.r2.cloudflarestorage.com")), "auto");
+        assert_eq!(effective_s3_region(&s3cfg("wnam", "https://x.r2.cloudflarestorage.com")), "auto");
         // Non-R2 custom endpoint with blank region → empty (caller defaults
         // to us-east-1; MinIO/Wasabi behaviour is unchanged).
         assert_eq!(effective_s3_region(&s3cfg("", "https://minio.local:9000")), "");
-        // Non-R2 with explicit region → that region.
+        // Non-R2 with explicit region → that region (unchanged).
         assert_eq!(effective_s3_region(&s3cfg("us-east-2", "https://minio.local:9000")), "us-east-2");
     }
 }

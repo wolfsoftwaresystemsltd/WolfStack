@@ -252,10 +252,20 @@ fn render(g: &Gateway, share_path: &Path) -> String {
         rw.to_string(),
         "sync".to_string(),
         "no_subtree_check".to_string(),
-        "all_squash".to_string(),
-        "anonuid=65534".to_string(),
-        "anongid=65534".to_string(),
     ];
+    // Squashing: default forces every client to anonymous nobody
+    // (all_squash + anon 65534) — the safe anonymous-export behaviour. When
+    // the operator opts in, emit no_root_squash instead so client
+    // UIDs/GIDs (incl. root) pass through, matching a hand-written
+    // /etc/exports (wabil, 2026-06-16: WebUI export squashed perms that the
+    // manual export preserved).
+    if g.options.nfs_no_root_squash {
+        opts.push("no_root_squash".to_string());
+    } else {
+        opts.push("all_squash".to_string());
+        opts.push("anonuid=65534".to_string());
+        opts.push("anongid=65534".to_string());
+    }
     // Operator escape hatch — appended verbatim (validated at save time by
     // gateway::validate; charset-restricted so it can't break the
     // `path host(opts)` line shape or inject a second export line).
@@ -317,6 +327,23 @@ mod tests {
             updated_at: String::new(),
             disabled: false,
         }
+    }
+
+    #[test]
+    fn render_no_root_squash_preserves_ownership() {
+        // wabil 2026-06-16: the WebUI export squashed perms (all_squash) that
+        // a hand-written /etc/exports preserved. With the opt-in on, the
+        // export must emit no_root_squash and drop all_squash / anon mapping.
+        let mut g = nfs_gateway(true);
+        g.options.nfs_no_root_squash = true;
+        let out = render(&g, Path::new("/srv/media"));
+        assert!(out.contains("no_root_squash"), "expected no_root_squash: {}", out);
+        assert!(!out.contains("all_squash"), "all_squash must be gone: {}", out);
+        assert!(!out.contains("anonuid="), "anon mapping must be gone: {}", out);
+        // Default (off) still squashes — the safe behaviour is unchanged.
+        let out2 = render(&nfs_gateway(true), Path::new("/srv/media"));
+        assert!(out2.contains("all_squash") && !out2.contains("no_root_squash"),
+            "default must remain all_squash: {}", out2);
     }
 
     #[test]
