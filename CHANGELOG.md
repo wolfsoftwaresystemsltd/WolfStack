@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.48.2: cluster NFS sync never reached peers (wabil) + idempotent re-sync** _(2026-06-16 — [`652c792e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/652c792eaf0495df7da8f67f7b327bcd1877b483))_
 - **v24.48.1: sponsor NFS + R2 mount fixes (best-effort, pending confirmation)** _(2026-06-16 — [`5bdb23ad`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5bdb23ada0f1e897ff2501fcc031f030cdb64b92))_
 - **v24.48.0: IPv6 subnet routing (opt-in, default OFF)** _(2026-06-16 — [`136c227e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/136c227ef0a3b99e9e227d137027abffe8558771))_
 - **v24.47.3: predictive IPv6-subnet false positive + Cloudflare R2 S3 mount (SigV4)** _(2026-06-15 — [`76660e05`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/76660e05fab4fb5cdd01e9997b61d51c8331ed05))_
