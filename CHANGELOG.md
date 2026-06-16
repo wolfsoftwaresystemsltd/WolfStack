@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.48.3: legible S3 credential failures (the Gary R2 lesson)** _(2026-06-16 — [`e9ef593e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e9ef593e5360c307f94fdbd157d841303e538d7d))_
 - **v24.48.2: cluster NFS sync never reached peers (wabil) + idempotent re-sync** _(2026-06-16 — [`652c792e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/652c792eaf0495df7da8f67f7b327bcd1877b483))_
 - **v24.48.1: sponsor NFS + R2 mount fixes (best-effort, pending confirmation)** _(2026-06-16 — [`5bdb23ad`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5bdb23ada0f1e897ff2501fcc031f030cdb64b92))_
 - **v24.48.0: IPv6 subnet routing (opt-in, default OFF)** _(2026-06-16 — [`136c227e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/136c227ef0a3b99e9e227d137027abffe8558771))_
