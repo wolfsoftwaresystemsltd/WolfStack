@@ -19793,7 +19793,21 @@ pub async fn agent_storage_apply(
     body: web::Json<storage::StorageMount>,
 ) -> HttpResponse {
     if let Err(e) = require_cluster_auth(&req, &state) { return e; }
-    let mount = body.into_inner();
+    let mut mount = body.into_inner();
+    // A global NFS mount whose source points at loopback would, replicated
+    // verbatim, make every PEER mount itself — which runs no NFS server, so
+    // it errors on every node but the originator (wabil cluster-NFS,
+    // 2026-06-16). Rewrite a loopback source host to the sending node's
+    // address (the connection source IP — the same req.peer_addr technique
+    // the router replication uses) so peers reach the originator's real
+    // server. Only loopback hosts are touched, and a loopback source can
+    // never work on a peer anyway, so a correctly-addressed mount is never
+    // changed.
+    if matches!(mount.mount_type, storage::MountType::Nfs) {
+        if let Some(sender) = req.peer_addr().map(|a| a.ip()) {
+            mount.source = rewrite_loopback_nfs_source(&mount.source, sender);
+        }
+    }
     match storage::create_mount(mount, true) {
         Ok(m) => HttpResponse::Ok().json(serde_json::json!({
             "message": "Mount applied",
@@ -19801,6 +19815,28 @@ pub async fn agent_storage_apply(
         })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
+}
+
+/// Rewrite an NFS source's host to `sender` when it points at loopback
+/// (`127.0.0.0/8`, `::1`, or `localhost`). NFS sources are `host:/export`;
+/// splitting on the first `:/` parses bracketed IPv6 (`[::1]:/p`) and IPv4
+/// (`1.2.3.4:/p`) alike. Non-loopback sources are returned unchanged.
+fn rewrite_loopback_nfs_source(source: &str, sender: std::net::IpAddr) -> String {
+    let (host, path) = match source.trim().split_once(":/") {
+        Some((h, p)) => (h, p),
+        None => return source.to_string(),
+    };
+    let hclean = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let is_loopback = hclean.eq_ignore_ascii_case("localhost")
+        || hclean.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false);
+    if !is_loopback {
+        return source.to_string();
+    }
+    let new_host = match sender {
+        std::net::IpAddr::V6(_) => format!("[{}]", sender),
+        std::net::IpAddr::V4(_) => sender.to_string(),
+    };
+    format!("{}:/{}", new_host, path)
 }
 
 /// Helper: push a mount config to all remote cluster nodes
@@ -37549,5 +37585,52 @@ mod issue_repair_tests {
                 title: "x".into(), detail: "y".into() };
             assert!(repair_for(&i).is_none(), "{} should not be one-click repairable", cat);
         }
+    }
+}
+
+#[cfg(test)]
+mod loopback_nfs_rewrite_tests {
+    use super::rewrite_loopback_nfs_source;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr { s.parse().unwrap() }
+
+    #[test]
+    fn loopback_v4_and_localhost_rewritten_to_sender() {
+        assert_eq!(
+            rewrite_loopback_nfs_source("127.0.0.1:/srv/share", ip("10.0.0.5")),
+            "10.0.0.5:/srv/share"
+        );
+        assert_eq!(
+            rewrite_loopback_nfs_source("localhost:/exports/data", ip("10.0.0.5")),
+            "10.0.0.5:/exports/data"
+        );
+    }
+
+    #[test]
+    fn loopback_v6_and_bracketed_handled() {
+        assert_eq!(
+            rewrite_loopback_nfs_source("[::1]:/srv/share", ip("10.0.0.5")),
+            "10.0.0.5:/srv/share"
+        );
+        // sender is v6 → bracket the substituted host
+        assert_eq!(
+            rewrite_loopback_nfs_source("127.0.0.1:/srv/share", ip("fd00::5")),
+            "[fd00::5]:/srv/share"
+        );
+    }
+
+    #[test]
+    fn real_server_source_never_rewritten() {
+        assert_eq!(
+            rewrite_loopback_nfs_source("10.0.0.9:/srv/share", ip("10.0.0.5")),
+            "10.0.0.9:/srv/share"
+        );
+        assert_eq!(
+            rewrite_loopback_nfs_source("nas.lan:/srv/share", ip("10.0.0.5")),
+            "nas.lan:/srv/share"
+        );
+        // Malformed (no ":/") returned as-is.
+        assert_eq!(rewrite_loopback_nfs_source("garbage", ip("10.0.0.5")), "garbage");
     }
 }

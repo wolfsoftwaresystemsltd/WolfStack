@@ -65363,7 +65363,7 @@ function gwOpenWizard() {
         auth_mode: 'anonymous',
         anon_writable: false,
         users: [],
-        options: { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '' },
+        options: { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '', nfs_no_root_squash: false },
     };
     gwRenderWizard();
 }
@@ -65384,7 +65384,7 @@ function gwOpenEdit(g) {
         anon_writable: !!auth.writable,
         users: (auth.users || []).map(u => ({ username: u.username, writable: !!u.writable })),
         options: Object.assign(
-            { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '' },
+            { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '', nfs_no_root_squash: false },
             g.options || {}
         ),
     };
@@ -65644,6 +65644,12 @@ function gwWizardStep3() {
             oninput="_gwWizardData.options.allow_hosts=this.value.split(',').map(s=>s.trim()).filter(Boolean);">
 
         <h4 style="margin:14px 0 8px;">NFS export options (advanced)</h4>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;">
+            <input type="checkbox" ${d.options.nfs_no_root_squash ? 'checked' : ''} onchange="_gwWizardData.options.nfs_no_root_squash=this.checked;"> Preserve client ownership (<code>no_root_squash</code>)
+        </label>
+        <small style="color:var(--text-muted);font-size:11px;display:block;margin:-2px 0 8px;">
+            Off (default): every client is squashed to <code>nobody</code> — safest, anonymous. On: client UIDs/GIDs (including root) pass through, matching a hand-written <code>/etc/exports</code>. Only enable on trusted networks or with an allow-host list above.
+        </small>
         <input class="form-control" style="width:100%;" placeholder="Extra exports(5) options, e.g. no_root_squash or fsid=7"
             value="${escapeAttr(d.options.nfs_extra_options || '')}"
             oninput="_gwWizardData.options.nfs_extra_options=this.value.trim();">

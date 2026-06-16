@@ -210,6 +210,16 @@ pub struct GatewayOptions {
     /// per-gateway one.
     #[serde(default)]
     pub nfs_extra_options: String,
+    /// NFS: preserve client file ownership instead of squashing every client
+    /// to `nobody`. When false (default) the export forces
+    /// `all_squash,anonuid=65534,anongid=65534` — anonymous and safest. When
+    /// true it emits `no_root_squash` so client UIDs/GIDs (incl. root) pass
+    /// through, matching a hand-written `/etc/exports`. Fixes "permissions
+    /// work in /etc/exports but not the WebUI export" (wabil, 2026-06-16).
+    /// Security note: only enable on trusted networks and/or with an
+    /// allow-host list — clients can then write as any uid, including root.
+    #[serde(default)]
+    pub nfs_no_root_squash: bool,
     /// CIDR allowlist. Empty = allow any.
     #[serde(default)]
     pub allow_hosts: Vec<String>,
