@@ -586,6 +586,32 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
     }
 }
 
+/// True for a Cloudflare R2 S3 endpoint. R2 requires the SigV4 region
+/// "auto"; without a correct region both rust-s3 and s3fs sign for
+/// us-east-1, the request fails, and s3fs then falls back to SigV2 — which
+/// R2 rejects outright ("SigV2 authorization is not supported. Please use
+/// SigV4 instead.") (Gary KO4BSR, 2026-06-15).
+fn is_r2_endpoint(endpoint: &str) -> bool {
+    // Trim: the endpoint is stored verbatim from the UI field, so a
+    // copy-pasted trailing space/newline must not defeat the match.
+    endpoint.trim().contains("r2.cloudflarestorage.com")
+}
+
+/// Region to use for SigV4 signing: the operator's explicit value if set,
+/// else "auto" for Cloudflare R2 (its required region), else empty — in
+/// which case callers fall back to "us-east-1" (the AWS/MinIO/Wasabi
+/// default). Only R2 behaviour changes; every other provider is untouched.
+fn effective_s3_region(s3: &S3Config) -> String {
+    let r = s3.region.trim();
+    if !r.is_empty() {
+        r.to_string()
+    } else if is_r2_endpoint(&s3.endpoint) {
+        "auto".to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// Mount S3 using s3fs-fuse — fast, native, handles offline endpoints gracefully
 fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, String> {
     // Write credentials file: access_key:secret_key
@@ -628,10 +654,15 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
         args.push("use_path_request_style".to_string());
     }
     
-    // Region
-    if !s3.region.is_empty() {
+    // Region for SigV4 signing (s3fs's `-o endpoint=` is the legacy alias
+    // for `-o region=`). R2 needs "auto" — without a usable region s3fs
+    // signs for us-east-1, the request fails, and it falls back to SigV2
+    // which R2 rejects. Empty → omit (s3fs defaults to us-east-1, correct
+    // for AWS/MinIO/Wasabi). See effective_s3_region.
+    let region = effective_s3_region(s3);
+    if !region.is_empty() {
         args.push("-o".to_string());
-        args.push(format!("endpoint={}", s3.region));
+        args.push(format!("endpoint={}", region));
     }
     
     let output = Command::new("s3fs")
@@ -680,8 +711,11 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
             s3.endpoint.clone()
         };
 
+        // R2 requires region "auto" for SigV4; effective_s3_region supplies
+        // it. Empty (non-R2, no explicit region) falls back to us-east-1.
+        let region = effective_s3_region(s3);
         Region::Custom {
-            region: if s3.region.is_empty() { "us-east-1".to_string() } else { s3.region.clone() },
+            region: if region.is_empty() { "us-east-1".to_string() } else { region },
             endpoint,
         }
     } else {
@@ -1117,8 +1151,11 @@ pub fn sync_to_s3(id: &str) -> Result<String, String> {
     ).map_err(|e| format!("Invalid credentials: {}", e))?;
 
     let region = if !s3.endpoint.is_empty() {
+        // R2 requires region "auto" for SigV4 (same fix as the mount path —
+        // effective_s3_region supplies it; empty/non-R2 → us-east-1).
+        let r = effective_s3_region(s3);
         Region::Custom {
-            region: if s3.region.is_empty() { "us-east-1".to_string() } else { s3.region.clone() },
+            region: if r.is_empty() { "us-east-1".to_string() } else { r },
             endpoint: s3.endpoint.clone(),
         }
     } else {
@@ -2498,5 +2535,36 @@ mod mount_dropin_tests {
         assert!(MOUNT_DROPIN_BODY.contains("Before=wolfstack-mounts.target"));
         assert!(MOUNT_DROPIN_BODY.contains("After=network-online.target network.target"));
         assert!(MOUNT_DROPIN_BODY.starts_with("[Unit]\n"));
+    }
+
+    fn s3cfg(region: &str, endpoint: &str) -> S3Config {
+        S3Config {
+            access_key_id: "k".into(), secret_access_key: "s".into(),
+            region: region.into(), endpoint: endpoint.into(),
+            provider: "Custom".into(), bucket: "b".into(),
+        }
+    }
+
+    #[test]
+    fn r2_endpoint_detection() {
+        assert!(is_r2_endpoint("https://abc123.r2.cloudflarestorage.com"));
+        assert!(is_r2_endpoint("abc123.r2.cloudflarestorage.com"));
+        assert!(!is_r2_endpoint("https://s3.us-west-1.wasabisys.com"));
+        assert!(!is_r2_endpoint("https://minio.local:9000"));
+        assert!(!is_r2_endpoint(""));
+    }
+
+    #[test]
+    fn r2_defaults_region_to_auto_for_sigv4() {
+        // R2 + blank region → "auto" (its required SigV4 region); without it
+        // s3fs falls back to SigV2, which R2 rejects (Gary KO4BSR).
+        assert_eq!(effective_s3_region(&s3cfg("", "https://x.r2.cloudflarestorage.com")), "auto");
+        // An explicit region always wins, even for R2.
+        assert_eq!(effective_s3_region(&s3cfg("wnam", "https://x.r2.cloudflarestorage.com")), "wnam");
+        // Non-R2 custom endpoint with blank region → empty (caller defaults
+        // to us-east-1; MinIO/Wasabi behaviour is unchanged).
+        assert_eq!(effective_s3_region(&s3cfg("", "https://minio.local:9000")), "");
+        // Non-R2 with explicit region → that region.
+        assert_eq!(effective_s3_region(&s3cfg("us-east-2", "https://minio.local:9000")), "us-east-2");
     }
 }

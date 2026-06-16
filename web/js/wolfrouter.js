@@ -8126,6 +8126,9 @@
     }
 
     function wrRenderSubnetRoutes() {
+        // Refresh the IPv6 opt-in banner whenever the tab renders (fire and
+        // forget — it only updates its own element, never re-enters render).
+        wrLoadIpv6SubnetSetting();
         const routes = wrState.subnet_routes || [];
         const el = document.getElementById('wr-subnet-routes-list');
         if (!el) return;
@@ -8188,6 +8191,69 @@
         }).join('');
     }
 
+    // ─── IPv6 subnet routing opt-in (default OFF) ───
+    // Reflects RouterConfig.ipv6_subnet_routing and whether the host has a
+    // working v6 stack. Until enabled, the backend rejects IPv6 routes and
+    // no IPv6 code path runs on any node — IPv4 routing is untouched.
+    async function wrLoadIpv6SubnetSetting() {
+        const el = document.getElementById('wr-ipv6-subnet-banner');
+        if (!el) return;
+        let enabled = false, available = false, ok = false;
+        try {
+            const resp = await fetch(wrUrl('/api/router/subnet-routes/ipv6'));
+            if (resp.ok) {
+                const j = await resp.json();
+                enabled = !!j.ipv6_subnet_routing;
+                available = !!j.ipv6_available;
+                ok = true;
+            }
+        } catch (e) {
+            console.error('Failed to load IPv6 subnet setting:', e);
+        }
+        if (!ok) { el.innerHTML = ''; return; }
+
+        const hostWarn = (enabled && !available)
+            ? `<div style="margin-top:6px; color:#fca5a5; font-size:11px;">⚠ IPv6 is disabled on this host (<code>net.ipv6.conf.all.disable_ipv6=1</code>). Enable IPv6 and forwarding before routes can pass traffic.</div>`
+            : '';
+        const btnLabel = enabled ? 'Disable IPv6 subnet routing' : 'Enable IPv6 subnet routing';
+        const stateText = enabled
+            ? `<strong style="color:var(--text);">On</strong> — IPv6 destination subnets can be routed over the WolfNet overlay.`
+            : `<strong style="color:var(--text);">Off</strong> (default) — turn on to route IPv6 workload subnets across peers. IPv4 routing is unaffected either way.`;
+        el.innerHTML = `
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:12px 14px; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div style="font-size:12px; color:var(--text-muted); max-width:720px;">
+                    <span style="font-weight:600; color:var(--text);">IPv6 subnet routing:</span> ${stateText}
+                    The gateway stays the peer's IPv4 WolfNet IP; only the destination subnet is IPv6.
+                    ${hostWarn}
+                </div>
+                <button class="btn btn-sm ${enabled ? '' : 'btn-primary'}" onclick="wrSetIpv6SubnetRouting(${enabled ? 'false' : 'true'})">${btnLabel}</button>
+            </div>`;
+    }
+
+    async function wrSetIpv6SubnetRouting(enabled) {
+        if (enabled && !confirm('Enable IPv6 subnet routing?\n\nThis lets WolfStack route IPv6 workload subnets across WolfNet peers. It only affects nodes that have IPv6 enabled; IPv4 routing is unchanged. You can turn it off again at any time.')) return;
+        if (!enabled && !confirm('Disable IPv6 subnet routing?\n\nAny IPv6 subnet routes stop being applied and their kernel routes / ip6tables rules are removed on this node. IPv4 routes are unaffected.')) return;
+        try {
+            const resp = await fetch(wrUrl('/api/router/subnet-routes/ipv6'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: !!enabled }),
+            });
+            const j = await resp.json().catch(() => ({}));
+            if (!resp.ok || j.ok === false) {
+                if (typeof showToast === 'function') showToast('Failed to update IPv6 subnet routing: ' + (j.error || `HTTP ${resp.status}`), 'error');
+                return;
+            }
+            if (typeof showToast === 'function') showToast('IPv6 subnet routing ' + (enabled ? 'enabled' : 'disabled'), 'success');
+            if (Array.isArray(j.warnings) && j.warnings.length) {
+                alert('IPv6 subnet routing updated, with warnings:\n\n' + j.warnings.join('\n'));
+            }
+            await wrLoadAll();
+        } catch (e) {
+            if (typeof showToast === 'function') showToast('Failed to update IPv6 subnet routing: ' + (e.message || e), 'error');
+        }
+    }
+
     function wrShowSubnetRouteEditor(routeId) {
         const route = routeId ? (wrState.subnet_routes || []).find(r => r.id === routeId) : null;
 
@@ -8229,13 +8295,13 @@
                 <div style="display:grid; gap:14px; color:var(--text);">
                     <div>
                         <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--text);">Destination Subnet</label>
-                        <input id="wr-sr-cidr" class="form-control" value="${route ? escHtml(route.subnet_cidr) : ''}" placeholder="e.g. 10.20.0.0/16" style="padding:10px 12px;" />
-                        <small style="color:var(--text-muted); display:block; margin-top:4px;">Remote subnet you want to reach (in CIDR notation)</small>
+                        <input id="wr-sr-cidr" class="form-control" value="${route ? escHtml(route.subnet_cidr) : ''}" placeholder="e.g. 10.20.0.0/16 or fc00:abcd::/48" style="padding:10px 12px;" />
+                        <small style="color:var(--text-muted); display:block; margin-top:4px;">Remote subnet you want to reach, IPv4 or IPv6 (CIDR). IPv6 requires the IPv6 subnet routing toggle above to be on.</small>
                     </div>
                     <div>
                         <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--text);">Gateway IP</label>
-                        <input id="wr-sr-gateway" class="form-control" value="${route ? escHtml(route.gateway) : ''}" placeholder="e.g. 192.168.1.2" style="padding:10px 12px;" />
-                        <small style="color:var(--text-muted); display:block; margin-top:4px;">Next-hop IP to reach the subnet (WolfNet peer or tunnel endpoint)</small>
+                        <input id="wr-sr-gateway" class="form-control" value="${route ? escHtml(route.gateway) : ''}" placeholder="e.g. 10.100.10.30" style="padding:10px 12px;" />
+                        <small style="color:var(--text-muted); display:block; margin-top:4px;">Next-hop — the WolfNet peer's IPv4 WolfNet IP. Always IPv4, even when the destination subnet is IPv6.</small>
                     </div>
                     <div>
                         <label style="display:block; font-size:13px; font-weight:600; margin-bottom:6px; color:var(--text);">Description</label>
@@ -8302,13 +8368,22 @@
                 body: JSON.stringify(route),
             });
 
-            if (!resp.ok) {
-                const text = await resp.text();
-                alert('Error: ' + text);
+            const j = await resp.json().catch(() => null);
+            if (!resp.ok || (j && j.ok === false)) {
+                // Parse the structured error (e.g. the IPv6-disabled
+                // rejection) so the operator sees a readable message, not
+                // raw JSON.
+                const msg = (j && j.error) ? j.error : `HTTP ${resp.status}`;
+                alert('Error: ' + msg);
                 return;
             }
 
             dlg.close();
+            // Surface a non-fatal apply warning (e.g. IPv6 enabled but the
+            // host has v6 disabled) — the route saved but won't pass traffic.
+            if (j && j.apply_warning && typeof showToast === 'function') {
+                showToast('Saved, but: ' + j.apply_warning, 'warning');
+            }
             await wrLoadAll();
         } catch (e) {
             alert('Error: ' + (e.message || e));
@@ -8953,6 +9028,7 @@
     window.wrDeleteSubnetRoute = wrDeleteSubnetRoute;
     window.wrToggleSubnetRoute = wrToggleSubnetRoute;
     window.wrRunSubnetRouteDiagnostics = wrRunSubnetRouteDiagnostics;
+    window.wrSetIpv6SubnetRouting = wrSetIpv6SubnetRouting;
     window.wrRemoveOrphanRoute = wrRemoveOrphanRoute;
     window.wrReapplySubnetRoute = wrReapplySubnetRoute;
     window.wrResyncContainerRoutes = wrResyncContainerRoutes;

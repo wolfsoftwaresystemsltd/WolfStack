@@ -479,6 +479,23 @@ pub struct RouterConfig {
     /// ingress / DNS / LB strategy that sits on top.
     #[serde(default)]
     pub http_proxies: Vec<http_proxy::HttpProxy>,
+    /// Master opt-in for IPv6 subnet routing. **Defaults to `false`** —
+    /// via `#[serde(default)]` so every existing config (the field is
+    /// absent) AND every fresh install starts with the feature OFF. While
+    /// off, NO IPv6 subnet-route code path executes anywhere: v6 routes
+    /// are rejected at create time, never auto-created, never applied to
+    /// the kernel, never pushed to wolfnetd, and never flagged by the
+    /// predictive analyzer. The v4 subnet-route path is completely
+    /// independent of this flag and unchanged. Turning it on is a
+    /// deliberate per-node operator action (WolfRouter → Subnet Routes).
+    ///
+    /// This is the conservative master switch agreed with the operator
+    /// (2026-06-16): some fleet nodes have IPv6 disabled, and the feature
+    /// must never activate without explicit opt-in. A second, independent
+    /// gate (`ipv6_available()`) still applies on top of this one so that
+    /// even an opted-in node with IPv6 disabled degrades cleanly.
+    #[serde(default)]
+    pub ipv6_subnet_routing: bool,
 }
 
 fn default_safe_mode_seconds() -> u32 { 30 }
@@ -2543,6 +2560,74 @@ pub fn parse_cidr(cidr: &str) -> Option<(String, u32)> {
     Some((ip.to_string(), prefix))
 }
 
+// ─────────────────────── IPv6 subnet routing ───────────────────────
+//
+// Opt-in via `RouterConfig.ipv6_subnet_routing` (default OFF). The IPv4
+// overlay is unchanged: a v6 subnet route's `gateway` field is STILL the
+// peer's IPv4 WolfNet IP — only the *destination* subnet is IPv6. Because a
+// v4 next-hop is invalid for a v6 destination (`ip -6 route add <v6> via
+// <v4>` is rejected by iproute2: "inet6 address is expected …"), the
+// consumer-side kernel route is a DEVICE route (`ip -6 route add <v6cidr>
+// dev wolfnet0`); wolfnetd's userspace longest-prefix table resolves the
+// v6 CIDR to the v4 gateway peer. The gateway node installs ip6tables
+// forwarding/MASQUERADE plumbing instead of a kernel route entry.
+//
+// EVERY function below is reached only after `is_ipv6_cidr` is true, so the
+// v4 code path never touches any of this.
+
+/// True when the network part of `cidr` parses as an IPv6 address. A bare
+/// IP (no `/prefix`) is not a CIDR → false. A v4 CIDR's network part never
+/// parses as `Ipv6Addr`, so this is always false for v4 — that's the
+/// invariant the unchanged v4 apply/remove paths rely on to never divert
+/// into a v6 branch.
+pub fn is_ipv6_cidr(cidr: &str) -> bool {
+    cidr.split_once('/')
+        .and_then(|(ip, _)| ip.parse::<std::net::Ipv6Addr>().ok())
+        .is_some()
+}
+
+/// Parse an IPv6 CIDR into `(network_u128, prefix)`, network masked to the
+/// prefix. Returns None on malformed input or prefix > 128.
+fn parse_cidr_v6(cidr: &str) -> Option<(u128, u32)> {
+    let (ip, prefix) = cidr.split_once('/')?;
+    let addr: std::net::Ipv6Addr = ip.parse().ok()?;
+    let prefix: u32 = prefix.parse().ok()?;
+    if prefix > 128 { return None; }
+    let bits = u128::from(addr);
+    let mask: u128 = if prefix == 0 { 0 }
+        else { u128::MAX.checked_shl(128 - prefix).unwrap_or(0) };
+    Some((bits & mask, prefix))
+}
+
+/// Whether IPv6 is usable on this host at all — the capability gate that
+/// sits *under* the config opt-in. Even an opted-in node must have a
+/// working v6 stack. False when IPv6 is compiled out (the sysctl is
+/// absent) or globally disabled (`disable_ipv6 == 1`). Pure read; no
+/// mutation, safe on a locked-down box.
+pub fn ipv6_available() -> bool {
+    match std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6") {
+        Ok(v) => v.trim() == "0",
+        Err(_) => false, // sysctl path absent → IPv6 not present
+    }
+}
+
+/// Master opt-in: is IPv6 subnet routing enabled in this node's persisted
+/// RouterConfig? Only ever consulted on the v6 branch (after
+/// `is_ipv6_cidr`), so the common v4 path never reads it.
+fn v6_subnet_routing_enabled() -> bool {
+    RouterConfig::load().ipv6_subnet_routing
+}
+
+/// First usable address in an IPv6 CIDR (network + 1) as a probe target
+/// for `ip -6 route get`. None on malformed CIDR.
+fn ipv6_first_addr(cidr: &str) -> Option<String> {
+    let (net, prefix) = parse_cidr_v6(cidr)?;
+    // network+1 stays inside any prefix < 128; for /128 the single host is
+    // the address itself.
+    let probe = if prefix >= 128 { net } else { net.wrapping_add(1) };
+    Some(std::net::Ipv6Addr::from(probe).to_string())
+}
+
 /// Apply a single subnet route to the kernel.
 ///
 /// `previous_gateway`: when this is an UPDATE/edit, pass the gateway value
@@ -2568,11 +2653,42 @@ pub fn parse_cidr(cidr: &str) -> Option<(String, u32)> {
 pub fn apply_subnet_route(route: &SubnetRoute, previous_gateway: Option<&str>) -> Result<(), String> {
     use std::process::Command;
 
-    if parse_cidr(&route.subnet_cidr).is_none() {
+    let is_v6 = is_ipv6_cidr(&route.subnet_cidr);
+
+    // CIDR validation — either family. The gateway is ALWAYS an IPv4
+    // WolfNet IP, even for a v6 destination (the overlay endpoints are
+    // IPv4 and wolfnetd maps the v6 CIDR to the v4 gateway peer), so the
+    // gateway check below stays IPv4 for both families.
+    if is_v6 {
+        if parse_cidr_v6(&route.subnet_cidr).is_none() {
+            return Err(format!("Invalid subnet CIDR: {}", route.subnet_cidr));
+        }
+    } else if parse_cidr(&route.subnet_cidr).is_none() {
         return Err(format!("Invalid subnet CIDR: {}", route.subnet_cidr));
     }
     if route.gateway.parse::<std::net::Ipv4Addr>().is_err() {
         return Err(format!("Invalid gateway IP: {}", route.gateway));
+    }
+
+    // IPv6 master gate. While the feature is off (default) a v6 route is a
+    // clean no-op at apply time — never installed in the kernel. A v6 route
+    // can still sit in config (created while the feature was on, then turned
+    // off); skipping here keeps the kernel and wolfnetd clear of it without
+    // logging a warning every reconcile tick. We return a descriptive Err
+    // only when the operator explicitly opted in but the host's v6 stack is
+    // unavailable, so the UI surfaces exactly why nothing happened.
+    if is_v6 {
+        if !v6_subnet_routing_enabled() {
+            return Ok(());
+        }
+        if !ipv6_available() {
+            return Err(format!(
+                "IPv6 subnet routing is enabled but IPv6 is disabled on this node — \
+                 cannot apply {}. Set net.ipv6.conf.all.disable_ipv6=0 (and enable \
+                 IPv6 forwarding) to use IPv6 subnet routes.",
+                route.subnet_cidr
+            ));
+        }
     }
 
     // Gateway-side dispatch (sponsor klasSponsor 2026-04-27, v20.11.6):
@@ -2590,7 +2706,19 @@ pub fn apply_subnet_route(route: &SubnetRoute, previous_gateway: Option<&str>) -
     // the LAN host but replies couldn't make it back. That's why
     // klasSponsor saw a green health check but `ping 10.10.10.10` failed.
     if node_is_route_gateway(route) {
-        return enable_subnet_route_forwarding(route);
+        return if is_v6 {
+            enable_subnet_route_forwarding_v6(route)
+        } else {
+            enable_subnet_route_forwarding(route)
+        };
+    }
+
+    // Consumer side. IPv6 installs a device route (`ip -6 route add <cidr>
+    // dev wolfnet0`) — no `via`, because a v4 next-hop is invalid for a v6
+    // destination; wolfnetd resolves the v6 CIDR to the v4 gateway peer in
+    // userspace. IPv4 keeps the existing `via <gateway>` add/replace logic.
+    if is_v6 {
+        return apply_v6_device_route(route);
     }
 
     let existing = read_kernel_route_gateway(&route.subnet_cidr)
@@ -2759,6 +2887,240 @@ pub fn enable_subnet_route_forwarding(route: &SubnetRoute) -> Result<(), String>
     } else {
         Err(errors.join("; "))
     }
+}
+
+/// IPv6 consumer-side device route: `ip -6 route add <cidr> dev wolfnet0`.
+/// No `via` — a v4 next-hop is invalid for a v6 destination; wolfnetd maps
+/// the v6 CIDR to the v4 gateway peer in userspace. Idempotent and
+/// ownership-aware, mirroring the v4 apply:
+///   • No existing route → add ours (dev wolfnet iface).
+///   • Existing route already `dev <wolfnet>` → no-op (it's ours).
+///   • Existing route via a different dev / a `via` next-hop → refuse
+///     (installed outside WolfStack; overwriting could break the operator).
+fn apply_v6_device_route(route: &SubnetRoute) -> Result<(), String> {
+    use std::process::Command;
+    let wn_iface = crate::networking::detect_wolfnet_iface()
+        .unwrap_or_else(|| "wolfnet0".to_string());
+
+    match read_kernel_route6_dev(&route.subnet_cidr)? {
+        Some(dev) if dev == wn_iface => Ok(()),
+        Some(dev) => Err(format!(
+            "IPv6 route to {} already exists via dev {} (installed outside WolfStack). \
+             Refusing to overwrite — remove it first if you want WolfStack to manage it.",
+            route.subnet_cidr, dev
+        )),
+        None => {
+            let output = Command::new("ip")
+                .args(["-6", "route", "add", &route.subnet_cidr, "dev", &wn_iface])
+                .output()
+                .map_err(|e| format!("Failed to execute ip -6 command: {}", e))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // "File exists" means a route is present in a form
+                // read_kernel_route6_dev couldn't parse (via/blackhole/
+                // multipath). Refuse rather than loop (same defence as v4).
+                if stderr.contains("File exists") {
+                    Err(format!(
+                        "IPv6 route to {} already exists in an unsupported form. Inspect with \
+                         `ip -6 route show {}` and resolve before WolfStack can manage it.",
+                        route.subnet_cidr, route.subnet_cidr
+                    ))
+                } else {
+                    Err(format!("ip -6 route add failed: {}", stderr.trim()))
+                }
+            }
+        }
+    }
+}
+
+/// Read the egress device of an existing IPv6 route for `cidr`. Returns
+/// `Some(dev)` only for a simple `<cidr> dev <X> …` entry (our shape);
+/// `None` when no route exists OR when the entry has a `via` next-hop /
+/// other unsupported form — so the caller treats those conservatively (the
+/// add then fails with "File exists" → refuse, never silently overwrite).
+fn read_kernel_route6_dev(cidr: &str) -> Result<Option<String>, String> {
+    use std::process::Command;
+    let out = Command::new("ip")
+        .args(["-6", "route", "show", cidr])
+        .output()
+        .map_err(|e| format!("ip -6 route show: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("ip -6 route show failed: {}", stderr.trim()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = match text.lines().find(|l| !l.trim().is_empty()) {
+        Some(l) => l,
+        None => return Ok(None),
+    };
+    let mut dev: Option<String> = None;
+    let mut has_via = false;
+    let mut tokens = line.split_whitespace();
+    while let Some(t) = tokens.next() {
+        match t {
+            "via" => has_via = true,
+            "dev" => dev = tokens.next().map(|s| s.to_string()),
+            _ => {}
+        }
+    }
+    if has_via { return Ok(None); }
+    Ok(dev)
+}
+
+/// Remove the IPv6 consumer device route for `route`. Idempotent (a missing
+/// route is success). Verifies the route is ours (`dev == wolfnet iface`)
+/// before deleting, mirroring remove_subnet_route's gateway check.
+fn remove_v6_device_route(route: &SubnetRoute) -> Result<(), String> {
+    use std::process::Command;
+    let wn_iface = crate::networking::detect_wolfnet_iface()
+        .unwrap_or_else(|| "wolfnet0".to_string());
+
+    match read_kernel_route6_dev(&route.subnet_cidr) {
+        Ok(None) => return Ok(()), // already gone, or not our shape — leave it
+        Ok(Some(dev)) if dev != wn_iface => {
+            tracing::warn!(
+                "remove_v6_device_route: route for {} now uses dev {} (we expected {}); leaving it",
+                route.subnet_cidr, dev, wn_iface
+            );
+            return Ok(());
+        }
+        Ok(Some(_)) => { /* ours — proceed */ }
+        Err(e) => {
+            tracing::warn!("remove_v6_device_route: pre-check failed: {} — attempting targeted del", e);
+        }
+    }
+
+    let output = Command::new("ip")
+        .args(["-6", "route", "del", &route.subnet_cidr, "dev", &wn_iface])
+        .output()
+        .map_err(|e| format!("Failed to execute ip -6 command: {}", e))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("No such process") || stderr.contains("does not exist") {
+        return Ok(());
+    }
+    Err(format!("ip -6 route del failed: {}", stderr.trim()))
+}
+
+/// IPv6 analogue of `enable_subnet_route_forwarding` — the gateway-side
+/// plumbing for a v6 subnet route. Mirrors the v4 steps with `ip6tables`
+/// and the v6 forwarding sysctls, MINUS rp_filter (IPv6 has no rp_filter
+/// knob). Idempotent: every rule is `-C`-checked before insert.
+///   1. net.ipv6.conf.{all,iface}.forwarding = 1.
+///   2. ip6tables FORWARD ACCEPT both ways between wolfnet iface ⇆ subnet.
+///   3. ip6tables NAT POSTROUTING MASQUERADE for traffic into the subnet —
+///      the NAT66 mirror of the v4 path so the far workload replies to the
+///      gateway's local v6 address and no upstream route to the WolfNet
+///      range is required (parity / "just works", 2026-06-16).
+pub fn enable_subnet_route_forwarding_v6(route: &SubnetRoute) -> Result<(), String> {
+    use std::process::Command;
+
+    let wn_iface = crate::networking::detect_wolfnet_iface()
+        .unwrap_or_else(|| "wolfnet0".to_string());
+
+    let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1");
+    let _ = std::fs::write(
+        format!("/proc/sys/net/ipv6/conf/{}/forwarding", wn_iface),
+        "1",
+    );
+
+    let mut errors: Vec<String> = Vec::new();
+    let forward_rules: [&[&str]; 2] = [
+        &["-i", &wn_iface, "-d", &route.subnet_cidr, "-j", "ACCEPT"],
+        &["-s", &route.subnet_cidr, "-o", &wn_iface, "-j", "ACCEPT"],
+    ];
+    for rule in &forward_rules {
+        let mut check_args: Vec<&str> = vec!["-C", "FORWARD"];
+        check_args.extend_from_slice(rule);
+        let exists = Command::new("ip6tables")
+            .args(&check_args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !exists {
+            let mut add_args: Vec<&str> = vec!["-I", "FORWARD"];
+            add_args.extend_from_slice(rule);
+            let out = Command::new("ip6tables")
+                .args(&add_args)
+                .output()
+                .map_err(|e| format!("ip6tables FORWARD insert exec failed: {}", e))?;
+            if !out.status.success() {
+                errors.push(format!(
+                    "FORWARD {}: {}",
+                    rule.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        }
+    }
+
+    let masq_check = Command::new("ip6tables")
+        .args(["-t", "nat", "-C", "POSTROUTING", "-d", &route.subnet_cidr, "-j", "MASQUERADE"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !masq_check {
+        let out = Command::new("ip6tables")
+            .args(["-t", "nat", "-A", "POSTROUTING", "-d", &route.subnet_cidr, "-j", "MASQUERADE"])
+            .output()
+            .map_err(|e| format!("ip6tables MASQUERADE exec failed: {}", e))?;
+        if !out.status.success() {
+            errors.push(format!(
+                "POSTROUTING -d {} MASQUERADE: {}",
+                route.subnet_cidr,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// IPv6 analogue of `disable_subnet_route_forwarding` — tear down the
+/// ip6tables rules `enable_subnet_route_forwarding_v6` installed. Idempotent
+/// (missing rules are not an error); leaves the v6 forwarding sysctl alone,
+/// same rationale as the v4 teardown (other features may rely on it).
+pub fn disable_subnet_route_forwarding_v6(route: &SubnetRoute) -> Result<(), String> {
+    use std::process::Command;
+
+    let wn_iface = crate::networking::detect_wolfnet_iface()
+        .unwrap_or_else(|| "wolfnet0".to_string());
+
+    let forward_rules: [&[&str]; 2] = [
+        &["-i", &wn_iface, "-d", &route.subnet_cidr, "-j", "ACCEPT"],
+        &["-s", &route.subnet_cidr, "-o", &wn_iface, "-j", "ACCEPT"],
+    ];
+    for rule in &forward_rules {
+        for _ in 0..16 {
+            let mut args: Vec<&str> = vec!["-D", "FORWARD"];
+            args.extend_from_slice(rule);
+            let out = Command::new("ip6tables").args(&args).output();
+            match out {
+                Ok(o) if o.status.success() => continue,
+                _ => break,
+            }
+        }
+    }
+
+    for _ in 0..16 {
+        let out = Command::new("ip6tables")
+            .args(["-t", "nat", "-D", "POSTROUTING", "-d", &route.subnet_cidr, "-j", "MASQUERADE"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => continue,
+            _ => break,
+        }
+    }
+
+    Ok(())
 }
 
 /// Reconcile every enabled subnet route on this node — idempotently
@@ -2954,6 +3316,13 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
     let peers = crate::networking::get_wolfnet_peers_list();
     if peers.is_empty() { return; }
 
+    // IPv6 workload subnets are auto-routed ONLY when the operator opted in
+    // AND the host has a working v6 stack. Off by default → v6 subnets are
+    // skipped exactly as they were before this feature existed (the old
+    // `parse_cidr(sub).is_none()` skip). This is the Golden-Rule-safe
+    // default: nodes that never enabled the feature behave identically.
+    let v6_enabled = state.config.read().unwrap().ipv6_subnet_routing && ipv6_available();
+
     // Build hostname → wolfnet-IP map from /etc/wolfnet/config.toml.
     let mut hostname_to_ip: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -3014,7 +3383,15 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
             None => continue,
         };
         for sub in &node.workload_subnets {
-            if parse_cidr(sub).is_none() { continue; }
+            // Family-aware validity + the IPv6 opt-in gate. A v6 subnet is
+            // only considered when the feature is active on this node;
+            // otherwise it is skipped just like before the feature existed.
+            if is_ipv6_cidr(sub) {
+                if !v6_enabled { continue; }
+                if parse_cidr_v6(sub).is_none() { continue; }
+            } else if parse_cidr(sub).is_none() {
+                continue;
+            }
             // Skip subnets that this node also owns locally — see
             // local_subnets comment above.
             if local_subnets.contains(sub) {
@@ -3041,32 +3418,8 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
             .map(|r| (r.subnet_cidr.clone(), r.gateway.clone()))
             .collect()
     };
-    let already_covered = |target_cidr: &str, target_gw: &str| -> bool {
-        let target = match parse_cidr(target_cidr) {
-            Some(t) => t,
-            None => return true, // unparseable — pretend covered, don't add
-        };
-        let target_net: u32 = ipv4_to_u32(&target.0);
-        for (cidr, gw) in &existing {
-            if gw != target_gw { continue; }
-            let parsed = match parse_cidr(cidr) {
-                Some(p) => p,
-                None => continue,
-            };
-            let route_prefix: u32 = parsed.1;
-            let route_net: u32 = ipv4_to_u32(&parsed.0);
-            if route_prefix > target.1 { continue; }
-            let mask: u32 = if route_prefix == 0 { 0 }
-                else { 0xFFFF_FFFFu32.checked_shl(32 - route_prefix).unwrap_or(0) };
-            if (target_net & mask) == (route_net & mask) {
-                return true;
-            }
-        }
-        false
-    };
-
     let to_add: Vec<(String, String, String)> = wanted.into_iter()
-        .filter(|(cidr, gw, _)| !already_covered(cidr, gw))
+        .filter(|(cidr, gw, _)| !route_set_covers(cidr, gw, &existing))
         .collect();
     if to_add.is_empty() { return; }
 
@@ -3128,6 +3481,47 @@ fn ipv4_to_u32(s: &str) -> u32 {
     s.parse::<std::net::Ipv4Addr>().map(u32::from).unwrap_or(0)
 }
 
+/// True iff some `(cidr, gateway)` in `existing` covers `target_cidr` via
+/// `target_gw` — an exact match or a wider same-gateway prefix. Family
+/// aware: v4 uses u32 math, v6 uses u128; a candidate of the other family
+/// never covers the target. An unparseable target returns `true`
+/// ("pretend covered, don't auto-add"), matching the prior v4 behaviour.
+fn route_set_covers(target_cidr: &str, target_gw: &str, existing: &[(String, String)]) -> bool {
+    if is_ipv6_cidr(target_cidr) {
+        let (tnet, tprefix) = match parse_cidr_v6(target_cidr) {
+            Some(t) => t,
+            None => return true,
+        };
+        for (cidr, gw) in existing {
+            if gw != target_gw { continue; }
+            if !is_ipv6_cidr(cidr) { continue; }
+            let (rnet, rprefix) = match parse_cidr_v6(cidr) { Some(p) => p, None => continue };
+            if rprefix > tprefix { continue; }
+            let mask: u128 = if rprefix == 0 { 0 }
+                else { u128::MAX.checked_shl(128 - rprefix).unwrap_or(0) };
+            if (tnet & mask) == (rnet & mask) { return true; }
+        }
+        false
+    } else {
+        let (tnet_str, tprefix) = match parse_cidr(target_cidr) {
+            Some(t) => t,
+            None => return true,
+        };
+        let target_net = ipv4_to_u32(&tnet_str);
+        for (cidr, gw) in existing {
+            if gw != target_gw { continue; }
+            if is_ipv6_cidr(cidr) { continue; }
+            let (rnet_str, rprefix) = match parse_cidr(cidr) { Some(p) => p, None => continue };
+            let route_net = ipv4_to_u32(&rnet_str);
+            if rprefix > tprefix { continue; }
+            let mask: u32 = if rprefix == 0 { 0 }
+                else { 0xFFFF_FFFFu32.checked_shl(32 - rprefix).unwrap_or(0) };
+            if (target_net & mask) == (route_net & mask) { return true; }
+        }
+        false
+    }
+}
+
 /// Snapshot of the kernel forwarding plumbing for a single subnet route —
 /// inspected by the diagnostics endpoint so the operator can see WHY a
 /// route is in the table but traffic isn't passing. Sponsor klasSponsor
@@ -3177,13 +3571,29 @@ pub fn read_forwarding_state(route: &SubnetRoute) -> ForwardingState {
     let wn_iface = crate::networking::detect_wolfnet_iface()
         .unwrap_or_else(|| "wolfnet0".to_string());
 
+    let is_v6 = is_ipv6_cidr(&route.subnet_cidr);
+
     let read = |path: &str| std::fs::read_to_string(path).ok().map(|s| s.trim().to_string());
-    let ip_forward = read("/proc/sys/net/ipv4/ip_forward");
-    let rp_filter_all = read("/proc/sys/net/ipv4/conf/all/rp_filter");
-    let rp_filter_wolfnet = read(&format!("/proc/sys/net/ipv4/conf/{}/rp_filter", wn_iface));
+    // IPv6 has no rp_filter knob, and uses the v6 forwarding sysctl +
+    // ip6tables. For v4 this is byte-identical to the previous behaviour.
+    let (ip_forward, rp_filter_all, rp_filter_wolfnet, iptables_bin) = if is_v6 {
+        (
+            read("/proc/sys/net/ipv6/conf/all/forwarding"),
+            None,
+            None,
+            "ip6tables",
+        )
+    } else {
+        (
+            read("/proc/sys/net/ipv4/ip_forward"),
+            read("/proc/sys/net/ipv4/conf/all/rp_filter"),
+            read(&format!("/proc/sys/net/ipv4/conf/{}/rp_filter", wn_iface)),
+            "iptables",
+        )
+    };
 
     let check = |args: &[&str]| -> bool {
-        Command::new("iptables")
+        Command::new(iptables_bin)
             .args(args)
             .output()
             .map(|o| o.status.success())
@@ -3220,6 +3630,9 @@ pub fn read_forwarding_state(route: &SubnetRoute) -> ForwardingState {
 /// for narrower prefixes we'd hit edge cases, but those subnets
 /// (a /31 or /32) aren't realistic destinations for subnet routing.
 pub fn first_addr_in_cidr(cidr: &str) -> Option<String> {
+    if is_ipv6_cidr(cidr) {
+        return ipv6_first_addr(cidr);
+    }
     let (net, _prefix) = parse_cidr(cidr)?;
     let parts: Vec<u8> = net.split('.').filter_map(|p| p.parse().ok()).collect();
     if parts.len() != 4 { return None; }
@@ -3260,8 +3673,16 @@ pub fn sync_subnet_routes_to_wolfnet(routes: &[SubnetRoute]) {
     // The reconciler self-heal below relies on the content-comparison
     // short-circuit to avoid SIGHUPing wolfnetd every minute; without a
     // stable key order, the comparison would always claim "differs".
+    // IPv6 routes reach wolfnetd ONLY when the operator has opted in
+    // (default off). With the feature off, the daemon's v6 table stays
+    // empty and its v6 code path is inert on that node. The config flag is
+    // read only when an enabled v6 route is actually present, so the common
+    // v4-only case adds no disk I/O to this per-tick self-heal.
+    let has_v6 = routes.iter().any(|r| r.enabled && is_ipv6_cidr(&r.subnet_cidr));
+    let allow_v6 = !has_v6 || v6_subnet_routing_enabled();
     let map: std::collections::BTreeMap<String, String> = routes.iter()
         .filter(|r| r.enabled)
+        .filter(|r| allow_v6 || !is_ipv6_cidr(&r.subnet_cidr))
         .map(|r| (r.subnet_cidr.clone(), r.gateway.clone()))
         .collect();
 
@@ -3307,8 +3728,9 @@ fn inspect_subnet_egress(cidr: &str) -> (Option<String>, Option<String>) {
         Some(ip) => ip,
         None => return (None, None),
     };
+    let fam = if is_ipv6_cidr(cidr) { "-6" } else { "-4" };
     let out = Command::new("ip")
-        .args(["-4", "route", "get", &probe_ip])
+        .args([fam, "route", "get", &probe_ip])
         .output();
     let stdout = match out {
         Ok(o) if o.status.success() => o.stdout,
@@ -3350,8 +3772,10 @@ pub fn route_covered_by_broader_prefix(cidr: &str, expected_gateway: &str, expec
         Some(ip) => ip,
         None => return false,
     };
+    let is_v6 = is_ipv6_cidr(cidr);
+    let fam = if is_v6 { "-6" } else { "-4" };
     let out = Command::new("ip")
-        .args(["-4", "route", "get", &probe_ip])
+        .args([fam, "route", "get", &probe_ip])
         .output();
     let stdout = match out {
         Ok(o) if o.status.success() => o.stdout,
@@ -3367,6 +3791,14 @@ pub fn route_covered_by_broader_prefix(cidr: &str, expected_gateway: &str, expec
             "dev" => iface = tokens.next().map(|s| s.to_string()),
             _ => {}
         }
+    }
+    // IPv6 subnet routes are DEVICE routes (no `via` next-hop — wolfnetd
+    // resolves the v6 CIDR to the v4 gateway peer in userspace), so a v6
+    // route is "covered" when the kernel sends the probe out the expected
+    // wolfnet interface; the gateway is not part of the v6 kernel route.
+    // IPv4 keeps the original via+dev match.
+    if is_v6 {
+        return iface.as_deref() == Some(expected_iface);
     }
     gw.as_deref() == Some(expected_gateway) && iface.as_deref() == Some(expected_iface)
 }
@@ -3432,7 +3864,18 @@ fn read_kernel_route_gateway(cidr: &str) -> Result<Option<String>, String> {
 /// multipath).
 pub fn read_kernel_route_raw(cidr: &str) -> Result<String, String> {
     use std::process::Command;
-    let out = Command::new("ip")
+    // Query the correct address family. For a v6 CIDR, `ip route show`
+    // without `-6` consults the IPv4 table — returning empty (or a
+    // family-mismatch error on some iproute2 builds) — which would make a
+    // correctly-installed v6 device route look missing/errored in the
+    // diagnostics page. v4 is unchanged (no `-6` flag). The v6 apply/remove
+    // paths use read_kernel_route6_dev directly; this helper backs the
+    // diagnostics reader and the v4 gateway inspect.
+    let mut cmd = Command::new("ip");
+    if is_ipv6_cidr(cidr) {
+        cmd.arg("-6");
+    }
+    let out = cmd
         .arg("route")
         .arg("show")
         .arg(cidr)
@@ -3461,11 +3904,35 @@ pub fn read_kernel_route_table() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Capture the entire IPv6 routing table (`ip -6 route`). Used by v6 orphan
+/// detection — v6 subnet routes are device routes that never appear in the
+/// v4 `ip route` table.
+pub fn read_kernel_route_table_v6() -> Result<String, String> {
+    use std::process::Command;
+    let out = Command::new("ip")
+        .args(["-6", "route"])
+        .output()
+        .map_err(|e| format!("ip -6 route: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("ip -6 route failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 /// Public alias for the parser so the diagnostics API can compose the
 /// raw `ip route show` capture with our gateway-extraction logic without
 /// re-running the command.
 pub fn parse_kernel_route_gateway_for_diagnostics(raw: &str) -> Option<String> {
     parse_route_gateway(raw)
+}
+
+/// Diagnostics helper: the wolfnet egress device of a v6 route for `cidr`,
+/// if it's the simple device-route shape WolfStack manages; None for no
+/// route or an unsupported form (`via` next-hop, blackhole, multipath).
+/// Wraps `read_kernel_route6_dev`, swallowing the command error.
+pub fn kernel_route6_dev_for_diagnostics(cidr: &str) -> Option<String> {
+    read_kernel_route6_dev(cidr).ok().flatten()
 }
 
 /// One kernel routing-table entry that *might* be a WolfStack route.
@@ -3559,6 +4026,56 @@ pub fn list_orphan_subnet_routes(configured: &[SubnetRoute]) -> Vec<KernelRouteE
             raw: line.to_string(),
         });
     }
+
+    // IPv6 orphans. A v6 subnet route is a DEVICE route (`<cidr> dev
+    // wolfnet0`, no `via`), so the v4 scan above never sees it (it requires
+    // a `via`). Scan the v6 table for dev-wolfnet routes whose CIDR isn't in
+    // the configured v6 set — matched by CIDR alone (the v6 kernel route
+    // carries no gateway). Conservatively skip `proto kernel` and
+    // link-local (`fe80::`) entries so we never offer to delete the
+    // kernel's own connected / link-local routes on the wolfnet interface.
+    let configured_v6: std::collections::HashSet<String> = configured.iter()
+        .map(|r| r.subnet_cidr.trim().to_string())
+        .filter(|c| is_ipv6_cidr(c))
+        .collect();
+    if let Ok(raw6) = read_kernel_route_table_v6() {
+        for line in raw6.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            // Never touch kernel-managed (connected/autoconf) or link-local.
+            if line.contains("proto kernel") { continue; }
+            let mut tokens = line.split_whitespace();
+            let cidr = match tokens.next() {
+                Some(t) if is_ipv6_cidr(t) => t.to_string(),
+                _ => continue,
+            };
+            if cidr.starts_with("fe80:") || cidr.starts_with("fe80::") { continue; }
+
+            let mut iface: Option<String> = None;
+            let mut has_via = false;
+            let mut iter = tokens;
+            while let Some(t) = iter.next() {
+                match t {
+                    "via" => { has_via = true; let _ = iter.next(); }
+                    "dev" => iface = iter.next().map(|s| s.to_string()),
+                    _ => {}
+                }
+            }
+            // Our v6 routes are dev-only on the wolfnet iface. A `via` means
+            // it's not the device-route shape we install — leave it alone.
+            if has_via { continue; }
+            if iface.as_deref() != Some(wn_iface.as_str()) { continue; }
+            if configured_v6.contains(&cidr) { continue; }
+
+            orphans.push(KernelRouteEntry {
+                cidr,
+                gateway: format!("dev {}", wn_iface),
+                iface: wn_iface.clone(),
+                raw: line.to_string(),
+            });
+        }
+    }
+
     orphans
 }
 
@@ -3572,10 +4089,33 @@ pub fn remove_orphan_kernel_route(cidr: &str, expected_gateway: &str) -> Result<
 
     // Sanity-check the inputs — they came from operator input via the
     // API, even if filtered through `list_orphan_subnet_routes`.
-    // Reject anything that isn't a plain CIDR / IPv4.
+    // Reject anything that isn't a plain CIDR.
     if !cidr.contains('/') {
         return Err(format!("not a CIDR: {}", cidr));
     }
+
+    // IPv6 orphans are device routes (`dev wolfnet0`) with no `via` gateway
+    // to verify against — delete by interface. The dev-route shape and the
+    // `proto kernel`/link-local exclusion in list_orphan_subnet_routes are
+    // the safety checks here.
+    if is_ipv6_cidr(cidr) {
+        use std::process::Command;
+        let wn_iface = crate::networking::detect_wolfnet_iface()
+            .unwrap_or_else(|| "wolfnet0".into());
+        let out = Command::new("ip")
+            .args(["-6", "route", "del", cidr, "dev", &wn_iface])
+            .output()
+            .map_err(|e| format!("ip -6 route del: {}", e))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if stderr.contains("No such process") || stderr.contains("does not exist") {
+                return Ok(());
+            }
+            return Err(format!("ip -6 route del {} failed: {}", cidr, stderr));
+        }
+        return Ok(());
+    }
+
     if expected_gateway.parse::<std::net::Ipv4Addr>().is_err() {
         return Err(format!("not an IPv4 gateway: {}", expected_gateway));
     }
@@ -3642,11 +4182,27 @@ fn parse_route_gateway(raw: &str) -> Option<String> {
 pub fn remove_subnet_route(route: &SubnetRoute) -> Result<(), String> {
     use std::process::Command;
 
+    let is_v6 = is_ipv6_cidr(&route.subnet_cidr);
+
     // Gateway-side dispatch (mirrors apply_subnet_route, v20.11.6): if
     // this node OWNS the gateway IP we never installed a kernel route
     // entry — only the forwarding plumbing. Strip that and we're done.
+    // Removal is NEVER gated on the feature flag or v6 availability: we
+    // always attempt cleanup so a route applied while the feature was on
+    // is torn down after it's turned off. The v6 ip/ip6tables calls are
+    // harmless no-ops when the rule/route is already absent.
     if node_is_route_gateway(route) {
-        return disable_subnet_route_forwarding(route);
+        return if is_v6 {
+            disable_subnet_route_forwarding_v6(route)
+        } else {
+            disable_subnet_route_forwarding(route)
+        };
+    }
+
+    // Consumer side: v6 removes its device route; v4 keeps the existing
+    // gateway-verified `ip route del … via` logic below.
+    if is_v6 {
+        return remove_v6_device_route(route);
     }
 
     // Consumer role: only a kernel route entry to remove. We never
@@ -3746,4 +4302,99 @@ pub fn node_handles_route(route: &SubnetRoute, self_node_id: &str) -> bool {
 /// agree.
 pub fn route_targets_self(route: &SubnetRoute, self_node_id: &str) -> bool {
     route.node_id.is_none() || route.node_id.as_deref() == Some(self_node_id)
+}
+
+#[cfg(test)]
+mod ipv6_subnet_route_tests {
+    use super::*;
+
+    #[test]
+    fn is_ipv6_cidr_never_misclassifies_v4() {
+        // The load-bearing invariant for the whole feature: a v4 CIDR must
+        // NEVER be classified as v6, or a v4 route would divert into the v6
+        // code path. This is exactly what keeps the IPv4 subnet-route path
+        // byte-for-byte unchanged.
+        assert!(!is_ipv6_cidr("10.10.0.0/16"));
+        assert!(!is_ipv6_cidr("192.168.1.0/24"));
+        assert!(!is_ipv6_cidr("172.17.0.0/16"));
+        assert!(!is_ipv6_cidr("0.0.0.0/0"));
+        assert!(!is_ipv6_cidr("255.255.255.255/32"));
+        // Converse: real v6 CIDRs are detected.
+        assert!(is_ipv6_cidr("fc42:5009:ba4b:5ab0::/64"));
+        assert!(is_ipv6_cidr("fd00::/8"));
+        assert!(is_ipv6_cidr("2001:db8::/32"));
+        assert!(is_ipv6_cidr("::/0"));
+        // Garbage / bare IPs are neither family.
+        assert!(!is_ipv6_cidr("not-a-cidr"));
+        assert!(!is_ipv6_cidr("fc00::1")); // no /prefix
+        assert!(!is_ipv6_cidr("10.0.0.1")); // bare v4
+    }
+
+    #[test]
+    fn parse_cidr_v6_masks_and_bounds() {
+        let (net, prefix) = parse_cidr_v6("2001:db8:abcd:1234::1/64").unwrap();
+        assert_eq!(prefix, 64);
+        assert_eq!(
+            std::net::Ipv6Addr::from(net),
+            "2001:db8:abcd:1234::".parse::<std::net::Ipv6Addr>().unwrap()
+        );
+        // /0 → all-zero network.
+        assert_eq!(parse_cidr_v6("2001:db8::/0").unwrap(), (0u128, 0));
+        // prefix > 128, a v4 input, and garbage are all rejected.
+        assert!(parse_cidr_v6("fc00::/129").is_none());
+        assert!(parse_cidr_v6("10.0.0.0/8").is_none());
+        assert!(parse_cidr_v6("garbage").is_none());
+    }
+
+    #[test]
+    fn ipv6_first_addr_is_network_plus_one() {
+        assert_eq!(ipv6_first_addr("fc00::/64").as_deref(), Some("fc00::1"));
+        assert_eq!(ipv6_first_addr("2001:db8::/32").as_deref(), Some("2001:db8::1"));
+        // /128 single host → the address itself.
+        assert_eq!(ipv6_first_addr("2001:db8::5/128").as_deref(), Some("2001:db8::5"));
+    }
+
+    #[test]
+    fn route_set_covers_v4_unchanged() {
+        // Regression: the family-aware coverage must reproduce the old
+        // v4-only `already_covered` closure exactly.
+        let existing = vec![("10.10.0.0/16".to_string(), "10.100.10.30".to_string())];
+        assert!(route_set_covers("10.10.0.0/16", "10.100.10.30", &existing)); // exact
+        assert!(route_set_covers("10.10.5.0/24", "10.100.10.30", &existing)); // wider covers narrower
+        assert!(!route_set_covers("10.10.5.0/24", "10.100.10.99", &existing)); // wrong gateway
+        let narrow = vec![("10.10.5.0/24".to_string(), "10.100.10.30".to_string())];
+        assert!(!route_set_covers("10.10.0.0/16", "10.100.10.30", &narrow)); // narrower can't cover wider
+    }
+
+    #[test]
+    fn route_set_covers_v6_and_never_across_families() {
+        let existing = vec![("fc00:abcd::/32".to_string(), "10.100.10.30".to_string())];
+        assert!(route_set_covers("fc00:abcd::/32", "10.100.10.30", &existing)); // exact
+        assert!(route_set_covers("fc00:abcd:1::/48", "10.100.10.30", &existing)); // wider covers narrower
+        assert!(!route_set_covers("fc00:abcd:1::/48", "10.100.10.99", &existing)); // wrong gateway
+        // Cross-family never covers — a v4 route can't cover a v6 target or vice versa.
+        let v4 = vec![("10.0.0.0/8".to_string(), "10.100.10.30".to_string())];
+        assert!(!route_set_covers("fc00:abcd::/48", "10.100.10.30", &v4));
+        let v6 = vec![("fc00::/16".to_string(), "10.100.10.30".to_string())];
+        assert!(!route_set_covers("10.10.0.0/16", "10.100.10.30", &v6));
+    }
+
+    #[test]
+    fn ipv6_subnet_routing_defaults_off() {
+        // Golden Rule: a freshly-defaulted RouterConfig (what an existing
+        // config without the field deserializes to) has the feature OFF.
+        let cfg = RouterConfig::default();
+        assert!(!cfg.ipv6_subnet_routing, "IPv6 subnet routing must default OFF");
+    }
+
+    #[test]
+    fn existing_config_json_without_flag_deserializes_off() {
+        // The exact Golden-Rule scenario: an on-disk config written by an
+        // older binary has no `ipv6_subnet_routing` key. It must load with
+        // the feature OFF, never error.
+        let json = r#"{"subnet_routes":[{"id":"r1","subnet_cidr":"10.0.0.0/8","gateway":"10.100.10.2"}]}"#;
+        let cfg: RouterConfig = serde_json::from_str(json).expect("legacy config must still parse");
+        assert!(!cfg.ipv6_subnet_routing);
+        assert_eq!(cfg.subnet_routes.len(), 1);
+    }
 }

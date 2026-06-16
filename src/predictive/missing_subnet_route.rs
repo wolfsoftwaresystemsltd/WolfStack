@@ -24,7 +24,7 @@
 //! to add via WolfRouter so the reconciler can apply it.
 
 use std::collections::HashSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,14 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
         .map(|r| (r.subnet_cidr.clone(), r.gateway.clone()))
         .collect();
 
+    // IPv6 workload subnets are only flagged when the reconciler on THIS
+    // node could actually act on them: the operator opted into IPv6 subnet
+    // routing AND this host has a working v6 stack. Off (default) → v6
+    // subnets are skipped exactly as before the feature existed, so a
+    // v6-disabled node never sees an un-actionable finding.
+    let v6_active = cfg.ipv6_subnet_routing
+        && crate::networking::router::ipv6_available();
+
     let mut missing = Vec::new();
     for peer in &peers {
         let peer_ip_only = peer.ip.split('/').next().unwrap_or(&peer.ip).to_string();
@@ -98,6 +106,20 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
         if workload_subnets.is_empty() { continue; }
 
         for sub in workload_subnets {
+            // v4 always qualifies. v6 qualifies only when IPv6 subnet
+            // routing is active on this node (see `v6_active`); otherwise
+            // the finding could never auto-resolve because the reconciler's
+            // v6 apply path is gated the same way. Anything that's neither a
+            // well-formed v4 nor v6 CIDR (bare IP, garbage) is skipped.
+            // (First-class v6 subnet routing built 2026-06-16; was filtered
+            // out as a broken command in v24.47.3 — CodeBangZoom.)
+            if is_ipv4_cidr(sub) {
+                // proceed
+            } else if is_ipv6_cidr(sub) {
+                if !v6_active { continue; }
+            } else {
+                continue;
+            }
             if subnet_already_covered(sub, &peer_ip_only, &configured) { continue; }
             missing.push(MissingRoute {
                 peer_name: peer.name.clone(),
@@ -124,12 +146,32 @@ fn load_nodes_from_disk() -> Option<Vec<crate::agent::Node>> {
 /// `target_subnet` and uses the same gateway — e.g. a configured
 /// `10.0.0.0/8 via X` covers a peer's `10.0.3.0/24` workload.
 fn subnet_already_covered(target_subnet: &str, peer_ip: &str, configured: &[(String, String)]) -> bool {
+    // Dispatch on the target's family; a configured route of the other
+    // family can never cover it (different address space).
+    if is_ipv6_cidr(target_subnet) {
+        let (tnet, tprefix) = match parse_cidr_v6(target_subnet) {
+            Some(t) => t,
+            None => return false,
+        };
+        for (route_cidr, route_gw) in configured {
+            if route_gw.trim() != peer_ip { continue; }
+            if !is_ipv6_cidr(route_cidr) { continue; }
+            let (rnet, rprefix) = match parse_cidr_v6(route_cidr) { Some(r) => r, None => continue };
+            if rprefix > tprefix { continue; }
+            let mask: u128 = if rprefix == 0 { 0 }
+                else { u128::MAX.checked_shl(128 - rprefix).unwrap_or(0) };
+            if (tnet & mask) == (rnet & mask) { return true; }
+        }
+        return false;
+    }
+
     let target = match parse_cidr(target_subnet) {
         Some(t) => t,
         None => return false, // unparseable — leave it alone, don't flag
     };
     for (route_cidr, route_gw) in configured {
         if route_gw.trim() != peer_ip { continue; }
+        if is_ipv6_cidr(route_cidr) { continue; }
         let route = match parse_cidr(route_cidr) {
             Some(r) => r,
             None => continue,
@@ -147,6 +189,18 @@ fn subnet_already_covered(target_subnet: &str, peer_ip: &str, configured: &[(Str
     false
 }
 
+/// True only for a well-formed IPv4 CIDR. The subnet-route feature is
+/// IPv4-only (see the skip in `sample_blocking`), so this gates what the
+/// analyzer flags — IPv6 CIDRs (which contain `:`) and anything unparseable
+/// are excluded.
+fn is_ipv4_cidr(cidr: &str) -> bool {
+    // Require an explicit `/prefix` (split_once, not split) so a bare IP
+    // isn't mistaken for a CIDR — workload subnets are always CIDRs.
+    cidr.split_once('/')
+        .and_then(|(ip, _)| ip.parse::<Ipv4Addr>().ok())
+        .is_some()
+}
+
 fn parse_cidr(cidr: &str) -> Option<(u32, u32)> {
     let (ip_str, prefix_str) = cidr.split_once('/')?;
     let ip: Ipv4Addr = ip_str.parse().ok()?;
@@ -155,6 +209,27 @@ fn parse_cidr(cidr: &str) -> Option<(u32, u32)> {
     let mask = if prefix == 0 { 0 }
         else { 0xFFFF_FFFFu32.checked_shl(32 - prefix).unwrap_or(0) };
     Some((u32::from(ip) & mask, prefix))
+}
+
+/// True only for a well-formed IPv6 CIDR — network part parses as
+/// `Ipv6Addr` with an explicit `/prefix`. Mirrors `is_ipv4_cidr` for the v6
+/// family (only acted on when IPv6 subnet routing is active on this node).
+fn is_ipv6_cidr(cidr: &str) -> bool {
+    cidr.split_once('/')
+        .and_then(|(ip, _)| ip.parse::<Ipv6Addr>().ok())
+        .is_some()
+}
+
+/// Parse an IPv6 CIDR into `(network_u128, prefix)`, network masked to the
+/// prefix. None on malformed input or prefix > 128.
+fn parse_cidr_v6(cidr: &str) -> Option<(u128, u32)> {
+    let (ip_str, prefix_str) = cidr.split_once('/')?;
+    let ip: Ipv6Addr = ip_str.parse().ok()?;
+    let prefix: u32 = prefix_str.parse().ok()?;
+    if prefix > 128 { return None; }
+    let mask: u128 = if prefix == 0 { 0 }
+        else { u128::MAX.checked_shl(128 - prefix).unwrap_or(0) };
+    Some((u128::from(ip) & mask, prefix))
 }
 
 pub fn analyze(
@@ -269,10 +344,22 @@ fn build_proposal(missing: &[&MissingRoute], scope: &ProposalScope) -> Proposal 
         routes_to_add,
     );
 
-    let commands = missing.iter().map(|m| format!(
-        "ip route add {} via {} dev wolfnet0   # one-off; WolfRouter is the canonical place",
-        m.subnet_cidr, m.peer_wolfnet_ip,
-    )).collect();
+    let commands = missing.iter().map(|m| {
+        if is_ipv6_cidr(&m.subnet_cidr) {
+            // v6 is a device route — no `via` (a v4 next-hop is invalid for
+            // a v6 dest); wolfnetd resolves the CIDR to the v4 gateway peer.
+            // WolfRouter still stores gateway = the peer's WolfNet IP.
+            format!(
+                "ip -6 route add {} dev wolfnet0   # one-off; gateway {} is resolved by wolfnetd. WolfRouter is the canonical place",
+                m.subnet_cidr, m.peer_wolfnet_ip,
+            )
+        } else {
+            format!(
+                "ip route add {} via {} dev wolfnet0   # one-off; WolfRouter is the canonical place",
+                m.subnet_cidr, m.peer_wolfnet_ip,
+            )
+        }
+    }).collect();
 
     Proposal::new(
         FINDING_TYPE,
@@ -294,6 +381,74 @@ mod tests {
     fn subnet_already_covered_exact_match() {
         let configured = vec![("10.10.0.0/16".into(), "10.100.10.30".into())];
         assert!(subnet_already_covered("10.10.0.0/16", "10.100.10.30", &configured));
+    }
+
+    #[test]
+    fn ipv4_cidr_filter_excludes_ipv6_and_garbage() {
+        // The subnet-route feature is IPv4-only; v6 workload subnets must be
+        // skipped so the analyzer never emits a broken `ip route add <v6> via
+        // <v4>` command (CodeBangZoom, 2026-06-15).
+        assert!(is_ipv4_cidr("10.10.10.0/24"));
+        assert!(is_ipv4_cidr("192.168.1.0/24"));
+        assert!(!is_ipv4_cidr("fc42:5009:ba4b:5ab0::/64"));
+        assert!(!is_ipv4_cidr("fd00::/8"));
+        assert!(!is_ipv4_cidr("not-a-cidr"));
+        // A bare IP (no /prefix) is not a CIDR.
+        assert!(!is_ipv4_cidr("10.0.0.1"));
+    }
+
+    #[test]
+    fn ipv6_cidr_detection() {
+        assert!(is_ipv6_cidr("fc42:5009:ba4b:5ab0::/64"));
+        assert!(is_ipv6_cidr("fd00::/8"));
+        assert!(!is_ipv6_cidr("10.10.0.0/24")); // v4 is never v6
+        assert!(!is_ipv6_cidr("fc00::1")); // no /prefix
+        assert!(!is_ipv6_cidr("garbage"));
+    }
+
+    #[test]
+    fn subnet_already_covered_ipv6() {
+        // Same gateway (always the peer's v4 WolfNet IP), exact + wider.
+        let configured = vec![("fc00:abcd::/32".to_string(), "10.100.10.30".to_string())];
+        assert!(subnet_already_covered("fc00:abcd::/32", "10.100.10.30", &configured));
+        assert!(subnet_already_covered("fc00:abcd:1::/48", "10.100.10.30", &configured));
+        // Wrong gateway is not covered.
+        assert!(!subnet_already_covered("fc00:abcd:1::/48", "10.100.10.99", &configured));
+        // A narrower configured v6 route does not cover a wider target.
+        let narrow = vec![("fc00:abcd:1::/48".to_string(), "10.100.10.30".to_string())];
+        assert!(!subnet_already_covered("fc00:abcd::/32", "10.100.10.30", &narrow));
+    }
+
+    #[test]
+    fn subnet_coverage_never_crosses_families() {
+        // A configured v4 route must never "cover" a v6 target, or the
+        // analyzer would wrongly suppress a real v6 finding (and vice versa).
+        let v4 = vec![("10.0.0.0/8".to_string(), "10.100.10.30".to_string())];
+        assert!(!subnet_already_covered("fc00:abcd::/48", "10.100.10.30", &v4));
+        let v6 = vec![("fc00::/16".to_string(), "10.100.10.30".to_string())];
+        assert!(!subnet_already_covered("10.10.0.0/16", "10.100.10.30", &v6));
+    }
+
+    #[test]
+    fn v6_command_is_device_route_not_via() {
+        // The remediation command for a v6 missing route must be the device
+        // route (`ip -6 route add … dev wolfnet0`) — never the broken
+        // `ip route add <v6> via <v4>` form that v24.47.3 filtered out.
+        let missing = MissingRoute {
+            peer_name: "ninni".into(),
+            peer_wolfnet_ip: "10.100.10.30".into(),
+            subnet_cidr: "fc00:abcd::/48".into(),
+        };
+        let scope = ProposalScope { node_id: "n".into(), resource_id: None };
+        let p = build_proposal(&[&missing], &scope);
+        if let RemediationPlan::Manual { commands, .. } = &p.remediation {
+            assert_eq!(commands.len(), 1);
+            assert!(commands[0].starts_with("ip -6 route add fc00:abcd::/48 dev wolfnet0"),
+                "got: {}", commands[0]);
+            assert!(!commands[0].contains(" via "), "v6 device route must have no via: {}", commands[0]);
+        } else {
+            panic!("expected Manual remediation");
+        }
     }
 
     #[test]

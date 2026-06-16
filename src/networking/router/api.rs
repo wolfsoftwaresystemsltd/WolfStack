@@ -4958,6 +4958,104 @@ pub async fn list_subnet_routes(req: HttpRequest, state: S, query: web::Query<To
     HttpResponse::Ok().json(filtered)
 }
 
+/// GET /api/router/subnet-routes/ipv6 — report the IPv6 subnet-routing
+/// opt-in for this node plus whether the host has a working IPv6 stack, so
+/// the UI can render the toggle and an accurate "IPv6 disabled on this
+/// host" hint.
+pub async fn get_ipv6_subnet_setting(req: HttpRequest, state: S) -> HttpResponse {
+    auth_or_return!(req, state);
+    let enabled = state.router.config.read().unwrap().ipv6_subnet_routing;
+    HttpResponse::Ok().json(serde_json::json!({
+        "ipv6_subnet_routing": enabled,
+        "ipv6_available": super::ipv6_available(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct Ipv6SubnetSettingBody {
+    pub enabled: bool,
+}
+
+/// POST /api/router/subnet-routes/ipv6 — flip the IPv6 subnet-routing
+/// opt-in. Turning it ON applies any enabled v6 routes that target this
+/// node and publishes them to wolfnetd; turning it OFF tears down this
+/// node's v6 kernel routes / ip6tables plumbing and re-syncs wolfnetd so
+/// the v6 CIDRs vanish from the daemon's table. The flag lives in
+/// RouterConfig, so it replicates cluster-wide via the normal config push.
+pub async fn set_ipv6_subnet_setting(
+    req: HttpRequest,
+    state: S,
+    body: web::Json<Ipv6SubnetSettingBody>,
+) -> HttpResponse {
+    auth_or_return!(req, state);
+    let enable = body.enabled;
+    let self_id = crate::agent::self_node_id();
+
+    // Persist the flag first so apply_subnet_route (which reads it from
+    // disk via v6_subnet_routing_enabled) sees the new value below.
+    {
+        let mut cfg = state.router.config.write().unwrap();
+        cfg.ipv6_subnet_routing = enable;
+        if let Err(e) = cfg.save() {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "ok": false,
+                "error": format!("Failed to save config: {}", e),
+            }));
+        }
+    }
+
+    // The enabled v6 routes this node actually handles (consumer or
+    // gateway). Snapshot under the read lock, act outside it.
+    let v6_routes: Vec<SubnetRoute> = {
+        let cfg = state.router.config.read().unwrap();
+        cfg.subnet_routes.iter()
+            .filter(|r| r.enabled && super::is_ipv6_cidr(&r.subnet_cidr))
+            .filter(|r| super::node_handles_route(r, &self_id))
+            .cloned()
+            .collect()
+    };
+
+    let mut warnings: Vec<String> = Vec::new();
+    if enable {
+        if !super::ipv6_available() {
+            warnings.push("IPv6 is disabled on this host (net.ipv6.conf.all.disable_ipv6=1); IPv6 routes will not pass traffic until you enable IPv6 and forwarding.".to_string());
+        }
+        for r in &v6_routes {
+            if let Err(e) = super::apply_subnet_route(r, None) {
+                warnings.push(format!("{}: {}", r.subnet_cidr, e));
+            }
+        }
+    } else {
+        // Turning off — tear down this node's v6 kernel state. remove_* is
+        // not gated on the flag, so cleanup always runs.
+        for r in &v6_routes {
+            if let Err(e) = super::remove_subnet_route(r) {
+                warnings.push(format!("{}: {}", r.subnet_cidr, e));
+            }
+        }
+    }
+
+    // Re-sync wolfnetd (now includes/excludes v6 CIDRs per the flag) and
+    // replicate the flag to the cluster.
+    {
+        let snapshot = state.router.config.read().unwrap().subnet_routes.clone();
+        super::sync_subnet_routes_to_wolfnet(&snapshot);
+    }
+    replicate_config_to_cluster(state);
+
+    let mut resp = serde_json::json!({
+        "ok": true,
+        "ipv6_subnet_routing": enable,
+        "ipv6_available": super::ipv6_available(),
+    });
+    if !warnings.is_empty() {
+        resp["warnings"] = serde_json::Value::Array(
+            warnings.into_iter().map(serde_json::Value::String).collect()
+        );
+    }
+    HttpResponse::Ok().json(resp)
+}
+
 pub async fn create_subnet_route(req: HttpRequest, state: S, body: web::Json<SubnetRoute>, query: web::Query<TopologyQuery>) -> HttpResponse {
     auth_or_return!(req, state);
     if let Some(resp) = cluster_guard_node_id(&state, &query, body.node_id.as_deref()) { return resp; }
@@ -4980,6 +5078,27 @@ pub async fn create_subnet_route(req: HttpRequest, state: S, body: web::Json<Sub
             "ok": false,
             "error": "gateway is required"
         }));
+    }
+
+    // IPv6 subnet routing is opt-in (default off). Reject an ENABLED v6
+    // destination up front with a clear, actionable message rather than
+    // saving a dormant entry that never reaches the kernel. A disabled v6
+    // route is allowed (staging) since it never applies. The gateway is
+    // always an IPv4 WolfNet IP, so only the destination CIDR's family
+    // matters here.
+    if route.enabled && super::is_ipv6_cidr(route.subnet_cidr.trim()) {
+        if !state.router.config.read().unwrap().ipv6_subnet_routing {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "ok": false,
+                "error": "IPv6 subnet routing is disabled on this node. Turn on the 'IPv6 subnet routing' toggle in WolfRouter → Subnet Routes before adding an IPv6 route."
+            }));
+        }
+        if !super::ipv6_available() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "ok": false,
+                "error": "IPv6 is disabled on this node (net.ipv6.conf.all.disable_ipv6=1). Enable IPv6 and IPv6 forwarding before adding an IPv6 subnet route."
+            }));
+        }
     }
 
     // Reject overlapping subnet-route destinations. Codex P2 (v20.11.2):
@@ -5090,6 +5209,25 @@ pub async fn update_subnet_route(
             "ok": false,
             "error": "gateway is required"
         }));
+    }
+
+    // IPv6 opt-in gate (mirrors create). Only blocks ENABLING a v6 route
+    // while the feature is off — editing or DISABLING an existing v6 route
+    // is always allowed so the operator can clean up after turning the
+    // feature off.
+    if updated.enabled && super::is_ipv6_cidr(updated.subnet_cidr.trim()) {
+        if !state.router.config.read().unwrap().ipv6_subnet_routing {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "ok": false,
+                "error": "IPv6 subnet routing is disabled on this node. Turn on the 'IPv6 subnet routing' toggle in WolfRouter → Subnet Routes before enabling an IPv6 route."
+            }));
+        }
+        if !super::ipv6_available() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "ok": false,
+                "error": "IPv6 is disabled on this node (net.ipv6.conf.all.disable_ipv6=1). Enable IPv6 and IPv6 forwarding before enabling an IPv6 subnet route."
+            }));
+        }
     }
     if let Some(resp) = cluster_guard_existing_subnet_route(&state, &query, &id) { return resp; }
     if let Some(resp) = cluster_guard_node_id(&state, &query, updated.node_id.as_deref()) { return resp; }
@@ -5329,10 +5467,22 @@ pub async fn diagnostics_subnet_routes(req: HttpRequest, state: S) -> HttpRespon
             Ok(s) => (s, None),
             Err(e) => (String::new(), Some(e)),
         };
-        let kernel_gw = super::parse_kernel_route_gateway_for_diagnostics(&kernel_raw);
+        let is_v6 = super::is_ipv6_cidr(&r.subnet_cidr);
         let kernel_present = !kernel_raw.trim().is_empty();
-        let kernel_matches = kernel_present
-            && kernel_gw.as_deref() == Some(r.gateway.as_str());
+        // IPv6 consumer routes are device routes (`<cidr> dev wolfnet0`, no
+        // `via`), so "matches our config" means the kernel route resolves
+        // out the wolfnet interface — there is no gateway to compare. IPv4
+        // is byte-identical to the previous via-gateway match.
+        let (kernel_gw, kernel_matches) = if is_v6 {
+            let wn = crate::networking::detect_wolfnet_iface()
+                .unwrap_or_else(|| "wolfnet0".to_string());
+            let dev = super::kernel_route6_dev_for_diagnostics(&r.subnet_cidr);
+            (None, dev.as_deref() == Some(wn.as_str()))
+        } else {
+            let gw = super::parse_kernel_route_gateway_for_diagnostics(&kernel_raw);
+            let m = kernel_present && gw.as_deref() == Some(r.gateway.as_str());
+            (gw, m)
+        };
 
         // Map the (config × kernel) cross-product to a single status code
         // the frontend can colour-code without re-deriving the rules.
@@ -5480,11 +5630,19 @@ pub async fn diagnostics_subnet_routes(req: HttpRequest, state: S) -> HttpRespon
             } else {
                 String::new()
             };
+            let installed_desc = if is_v6 {
+                format!(
+                    "IPv6 route `{}` is installed in Linux as a device route on `{}` (wolfnetd forwards it to gateway peer `{}`)",
+                    r.subnet_cidr, fwd.wolfnet_iface, r.gateway
+                )
+            } else {
+                format!("route `{} via {}` is installed in Linux", r.subnet_cidr, r.gateway)
+            };
             (
                 "ok",
                 format!(
-                    "Working — route `{} via {}` is installed in Linux. As the consumer side, this node only needs the route entry (no iptables/sysctl plumbing — that lives on the gateway node `{}`).{}",
-                    r.subnet_cidr, r.gateway, r.gateway, advisory
+                    "Working — {}. As the consumer side, this node only needs the route entry (no iptables/sysctl plumbing — that lives on the gateway node `{}`).{}",
+                    installed_desc, r.gateway, advisory
                 ),
             )
         } else if let Some(gw) = &kernel_gw {
@@ -6797,6 +6955,8 @@ pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
         .route("/api/router/subnet-routes",                 web::get().to(list_subnet_routes))
         .route("/api/router/subnet-routes",                 web::post().to(create_subnet_route))
         .route("/api/router/subnet-routes/diagnostics",     web::get().to(diagnostics_subnet_routes))
+        .route("/api/router/subnet-routes/ipv6",            web::get().to(get_ipv6_subnet_setting))
+        .route("/api/router/subnet-routes/ipv6",            web::post().to(set_ipv6_subnet_setting))
         .route("/api/router/subnet-routes/orphan/remove",   web::post().to(remove_orphan_subnet_route))
         .route("/api/router/subnet-routes/{id}/reapply",    web::post().to(reapply_subnet_route))
         .route("/api/router/subnet-routes/{id}",            web::put().to(update_subnet_route))
