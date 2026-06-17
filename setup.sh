@@ -260,9 +260,21 @@ if [ -f /etc/unraid-version ]; then
             fi
             {
                 printf '\n%s\n' "$GO_START"
-                printf '%s\n' "ln -sfn \"$WS_APPDATA/etc\" /etc/wolfstack"
-                printf '%s\n' "ln -sf \"$WS_APPDATA/wolfstack\" /usr/local/bin/wolfstack"
-                printf '%s\n' "cd \"$WS_APPDATA\" && ./wolfstack --agent >> \"$WS_APPDATA/wolfstack.log\" 2>&1 &"
+                # /boot/config/go runs at boot BEFORE the Unraid array is
+                # started, so /mnt/user/appdata (where the binary + config
+                # live) does NOT exist yet. Starting the agent directly here
+                # fails the `cd` and the node never comes back after a reboot —
+                # this is the "node did not survive an Unraid update" bug.
+                # Instead wait (in a backgrounded subshell, so `go` never
+                # blocks boot / emhttp) for the binary to appear once the array
+                # mounts, then symlink + launch. 180×5s = up to 15 min.
+                printf '%s\n' "("
+                printf '%s\n' "  for _i in \$(seq 1 180); do [ -x \"$WS_APPDATA/wolfstack\" ] && break; sleep 5; done"
+                printf '%s\n' "  [ -x \"$WS_APPDATA/wolfstack\" ] || exit 0"
+                printf '%s\n' "  ln -sfn \"$WS_APPDATA/etc\" /etc/wolfstack"
+                printf '%s\n' "  ln -sf \"$WS_APPDATA/wolfstack\" /usr/local/bin/wolfstack"
+                printf '%s\n' "  cd \"$WS_APPDATA\" && ./wolfstack --agent </dev/null >> \"$WS_APPDATA/wolfstack.log\" 2>&1"
+                printf '%s\n' ") &"
                 printf '%s\n' "$GO_END"
             } >> "$GO_FILE"
             echo "  ✓ Startup wired into $GO_FILE (survives reboots)"
@@ -272,7 +284,8 @@ if [ -f /etc/unraid-version ]; then
     # Start the agent now (no reboot needed). nohup + background so it keeps
     # running after this script (often curl|bash) exits.
     echo "  Starting WolfStack agent..."
-    ( cd "$WS_APPDATA" && nohup ./wolfstack --agent >> "$WS_APPDATA/wolfstack.log" 2>&1 & )
+    # </dev/null so the backgrounded agent never holds the curl|bash pipe open.
+    ( cd "$WS_APPDATA" && nohup ./wolfstack --agent </dev/null >> "$WS_APPDATA/wolfstack.log" 2>&1 & )
     sleep 3
 
     # awk (not grep -PoP) so it works on busybox grep too: pull the token after "src".
@@ -297,6 +310,14 @@ if [ -f /etc/unraid-version ]; then
     echo ""
     echo "  Verify:  tail -f $WS_APPDATA/wolfstack.log"
     echo ""
+    # This Unraid branch is self-contained and exits before the rest of the
+    # script. When run via `curl ... | bash`, exiting while curl still has the
+    # remaining ~1500 lines to send breaks the pipe and curl dies with
+    # "curl: (23) Failure writing output to destination" — alarming the user
+    # even though the install succeeded. Drain the rest of the piped script
+    # first so curl finishes cleanly. Guarded on a non-tty stdin so a direct
+    # `bash setup.sh` (tty) never blocks waiting on the terminal.
+    [ -t 0 ] || cat >/dev/null 2>&1 || true
     exit 0
 fi
 

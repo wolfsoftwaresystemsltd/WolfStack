@@ -2636,6 +2636,24 @@ pub fn kill_pids(pids: &[i32]) -> Vec<i32> {
         // Skip kernel threads (PPID==2). Killing one would do nothing
         // useful and `kill -9` on them returns EPERM anyway.
         if is_kernel_thread(pid) { continue; }
+        // SECURITY/SAFETY: never SIGKILL a cluster-critical daemon on a
+        // ClamAV hit. A false-positive signature match on a pmxcfs /
+        // corosync / qemu / ceph / database binary would otherwise take the
+        // host (or the whole cluster) down. Reuse the scan-detector's
+        // essential-safety list (it handles the 15-byte /proc/comm
+        // truncation). AV scans run unattended on a schedule, so this is
+        // the only thing standing between an FP and a downed node.
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if !comm.is_empty() && crate::scan_detector::is_essential_safety_comm(&comm) {
+            tracing::warn!(
+                "antivirus: refusing to kill PID {} ({}) — on the essential-safety list \
+                 (likely a ClamAV false positive on a system/cluster binary)",
+                pid, comm
+            );
+            continue;
+        }
         let r = Command::new("kill").args(["-9", &pid.to_string()]).status();
         if r.map(|s| s.success()).unwrap_or(false) {
             killed.push(pid);

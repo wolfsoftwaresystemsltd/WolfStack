@@ -257,12 +257,64 @@ fn remove_mount_shutdown_dropin(mount_point: &str) {
     }
 }
 
+/// True if `mount_point` is unsafe to mount a filesystem over — a critical
+/// system directory (or a path at/under one). Mounting over these hides the
+/// running system's own files even though the disk is intact: a mount over
+/// `/dev` hides `/dev/null` and every process loses the ability to exec; over
+/// `/usr`/`/bin`/`/lib` it hides every binary; over `/` it hides everything.
+/// Enforced at the single mount chokepoint so it covers BOTH operator-created
+/// mounts and cluster-replicated ones (a global-scoped mount fans out to every
+/// peer). Rejects relative paths and `..` traversal too.
+fn is_unsafe_mount_target(mount_point: &str) -> bool {
+    let p = mount_point.trim();
+    if p.is_empty() || !p.starts_with('/') { return true; }
+    if p.split('/').any(|seg| seg == "..") { return true; }
+    // Normalise: collapse duplicate/trailing slashes.
+    let mut norm = String::from("/");
+    for seg in p.split('/').filter(|s| !s.is_empty()) {
+        if norm.len() > 1 { norm.push('/'); }
+        norm.push_str(seg);
+    }
+    if norm == "/" { return true; }
+    // Whole OS trees that must never host a storage mount — rejected at the
+    // directory itself AND any path under it (mounting over /usr/bin hides
+    // every binary just as surely as mounting over /usr).
+    const UNSAFE_TREES: &[&str] = &[
+        "/dev", "/proc", "/sys", "/run", "/boot", "/etc", "/usr",
+        "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/root",
+    ];
+    for root in UNSAFE_TREES {
+        if norm == *root || norm.starts_with(&format!("{}/", root)) {
+            return true;
+        }
+    }
+    // /var and /home: the directory itself is unsafe, but normal data mounts
+    // legitimately live *under* them (/var/lib/vz, /home/user/data) — allow
+    // those, reject only the bare top-level dir.
+    if norm == "/var" || norm == "/home" { return true; }
+    false
+}
+
 /// Mount a storage entry by ID
 pub fn mount_storage(id: &str) -> Result<String, String> {
     let mut config = load_config();
     let idx = config.mounts.iter().position(|m| m.id == id)
         .ok_or_else(|| format!("Mount '{}' not found", id))?;
-    
+
+    // SECURITY: refuse to mount over a critical system directory. Both the
+    // operator path (create_mount) and the cluster-replicated path
+    // (apply_replicated_mount) funnel through here, so this one check guards
+    // a single-node mistake AND a global-scoped mount that would otherwise
+    // fan out and break every peer simultaneously.
+    let mp = config.mounts[idx].mount_point.clone();
+    if is_unsafe_mount_target(&mp) {
+        let msg = format!("refusing to mount over critical system path '{}'", mp);
+        config.mounts[idx].status = "error".to_string();
+        config.mounts[idx].error_message = Some(msg.clone());
+        let _ = save_config(&config);
+        return Err(msg);
+    }
+
     // Already mounted?
     if check_mounted(&config.mounts[idx].mount_point) {
         config.mounts[idx].status = "mounted".to_string();
@@ -2594,6 +2646,29 @@ fn get_mountpoint(device: &str) -> Option<String> {
 #[cfg(test)]
 mod mounts_target_tests {
     use super::*;
+
+    /// A WolfStack mount must never be allowed to land on a critical system
+    /// directory — a mount over /dev/, /usr, /bin, / etc. hides the running
+    /// system's own files (disk intact) and breaks exec host-wide; a global
+    /// mount would fan that out to every peer. Legit targets under /mnt,
+    /// /srv, /var/lib, /usr/local must still be accepted.
+    #[test]
+    fn unsafe_mount_targets_are_rejected() {
+        for bad in &[
+            "/", "/dev", "/dev/", "/dev/null", "/usr", "/usr/bin", "/bin",
+            "/sbin", "/lib", "/lib64", "/etc", "/boot", "/boot/efi", "/proc",
+            "/sys", "/run", "/var", "/root", "/home",
+            "/mnt/../dev", "relative/path", "",
+        ] {
+            assert!(is_unsafe_mount_target(bad), "{bad:?} must be rejected");
+        }
+        for ok in &[
+            "/mnt/data", "/srv/share", "/var/lib/vz",
+            "/home/paul/data", "/mnt/pve/cephfs", "/opt/storage",
+        ] {
+            assert!(!is_unsafe_mount_target(ok), "{ok:?} must be allowed");
+        }
+    }
 
     /// The three pieces of the signalling chain reference each other by
     /// literal name/path — this pins them together so an edit to one can't

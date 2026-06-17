@@ -2093,6 +2093,12 @@ function selectView(page) {
         if (typeof maybeShowDockerUpdatesNudge === 'function') {
             maybeShowDockerUpdatesNudge();
         }
+        // Security: if this node is still on the publicly-known built-in
+        // default cluster secret, prompt (once per session) to generate +
+        // apply a unique one. Self-gates on the secret-status check.
+        if (typeof maybePromptDefaultClusterSecret === 'function') {
+            maybePromptDefaultClusterSecret();
+        }
     } else if (page === 'settings') {
         // Load icon packs if icons tab is active
         const iconsTab = document.getElementById('settings-tab-icons');
@@ -15282,6 +15288,66 @@ function dockerUpdatesNudgeDismiss() {
 
 window.maybeShowDockerUpdatesNudge = maybeShowDockerUpdatesNudge;
 window.dockerUpdatesNudgeGo = dockerUpdatesNudgeGo;
+
+// ─── Default-cluster-secret security prompt ───────────────────────────
+// If this node is still using WolfStack's built-in DEFAULT cluster secret
+// (a constant published in the source), any party that can reach the API
+// port could authenticate as a cluster peer. On first datacenter load per
+// session, prompt the operator to generate + apply a unique secret. The
+// backend (/api/cluster/secret/generate) propagates it to every reachable
+// node; nodes accept both old and new during the transition so the cluster
+// stays connected until each restarts.
+let _defaultSecretPrompted = false;
+async function maybePromptDefaultClusterSecret() {
+    if (_defaultSecretPrompted) return;        // once per session
+    _defaultSecretPrompted = true;
+    let onDefault = false;
+    try {
+        const r = await fetch('/api/cluster/secret-status');
+        if (!r.ok) return;                     // can't tell — don't nag
+        const s = await r.json();
+        onDefault = (s && s.has_custom_secret === false);
+    } catch (e) {
+        return;                                // non-fatal; never block the dashboard
+    }
+    if (!onDefault) return;                     // already on a unique secret
+
+    const ok = await showConfirm(
+        'This cluster is still using WolfStack’s built-in DEFAULT cluster secret, ' +
+        'which is publicly known (it ships in the source code). Until you set a unique ' +
+        'secret, anyone who can reach this node’s API port could authenticate as a ' +
+        'cluster peer.\n\n' +
+        'Generate a unique cluster secret now and apply it to every node? ' +
+        'Nodes accept both the old and new secret during the switch, so the cluster ' +
+        'stays connected; the new secret takes full effect after each node restarts.',
+        'Action needed: default cluster secret'
+    );
+    if (!ok) {
+        // Let them dismiss for now, but allow it to re-prompt next login.
+        _defaultSecretPrompted = false;
+        return;
+    }
+    try {
+        const resp = await fetch('/api/cluster/secret/generate', { method: 'POST' });
+        let data = {};
+        try { data = await resp.json(); } catch (e) { /* empty body */ }
+        if (resp.ok) {
+            showModal(
+                'A unique cluster secret has been generated and pushed to all reachable ' +
+                'nodes. It takes full effect on each node after its next restart. You can ' +
+                'review or re-push it any time under Settings → Security.',
+                'Cluster secret updated'
+            );
+        } else {
+            _defaultSecretPrompted = false;
+            showModal('Could not set a new cluster secret: ' + (data.error || ('HTTP ' + resp.status)), 'Error');
+        }
+    } catch (e) {
+        _defaultSecretPrompted = false;
+        showModal('Could not set a new cluster secret: ' + (e && e.message ? e.message : e), 'Error');
+    }
+}
+window.maybePromptDefaultClusterSecret = maybePromptDefaultClusterSecret;
 window.dockerUpdatesNudgeDismiss = dockerUpdatesNudgeDismiss;
 
 // ═══════════════════════════════════════════════════════════════════

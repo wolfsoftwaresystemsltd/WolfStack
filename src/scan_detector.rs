@@ -222,6 +222,19 @@ pub const ESSENTIAL_SAFETY_COMMS: &[&str] = &[
     "chronyd", "ntpd",
 ];
 
+/// True if `comm` (as read from `/proc/<pid>/comm`, which the kernel
+/// truncates to 15 bytes / TASK_COMM_LEN-1) names a process on the
+/// essential-safety list — one that must NEVER be killed by an automated
+/// heuristic. Handles the 15-byte truncation so long names like
+/// `qemu-system-x86_64` / `systemd-networkd` are matched by the truncated
+/// form the kernel actually reports. Shared single source of truth for the
+/// scan detector and the antivirus auto-kill path.
+pub fn is_essential_safety_comm(comm: &str) -> bool {
+    ESSENTIAL_SAFETY_COMMS
+        .iter()
+        .any(|&s| s == comm || s.get(..15) == Some(comm))
+}
+
 impl Default for ScanDetectorConfig {
     fn default() -> Self {
         Self {
@@ -360,7 +373,21 @@ impl ScanDetector {
         // ahead of the iter_mut so we don't hold conflicting borrows
         // on `inner` simultaneously.
         let allowlist: HashSet<&str> = cfg.allowlist_comms.iter().map(|s| s.as_str()).collect();
-        let essential: HashSet<&str> = ESSENTIAL_SAFETY_COMMS.iter().copied().collect();
+        // /proc/<pid>/comm is truncated by the kernel to 15 bytes
+        // (TASK_COMM_LEN-1), so a daemon whose real name is longer —
+        // qemu-system-x86_64, systemd-networkd, proxmox-backup-proxy,
+        // containerd-shim-runc-v2, pacemaker-schedulerd — appears as just
+        // its 15-char prefix. Register BOTH the full name and its 15-byte
+        // truncation so the exact-match guard below still protects it.
+        // Without this the guard silently skipped every critical daemon
+        // with a >15-char name (it could never match the truncated comm).
+        let essential: HashSet<&str> = ESSENTIAL_SAFETY_COMMS
+            .iter()
+            .flat_map(|&s| match s.get(..15) {
+                Some(trunc) if trunc.len() < s.len() => vec![s, trunc],
+                _ => vec![s],
+            })
+            .collect();
         let recently_actioned: HashMap<i32, Instant> = inner.actioned.clone();
         let mut to_action: Vec<(i32, String, u32, HashSet<String>)> = Vec::new();
         for (pid, entries) in inner.samples.iter_mut() {
@@ -659,6 +686,37 @@ mod tests {
         for must in &["systemd", "NetworkManager", "systemd-networkd",
                       "dnsmasq", "named", "chronyd"] {
             assert!(essential.contains(must), "essential-safety list must contain {must}");
+        }
+    }
+
+    /// /proc/<pid>/comm is truncated to 15 bytes, so the runtime guard
+    /// must also protect the truncated form of long critical names —
+    /// otherwise it silently skipped qemu-system-x86_64, systemd-networkd,
+    /// proxmox-backup-proxy, containerd-shim-runc-v2, pacemaker-schedulerd
+    /// (their full names can never equal the 15-char comm the kernel reports).
+    #[test]
+    fn essential_safety_handles_comm_truncation() {
+        // Mirror the truncation-aware construction used in ScanDetector::tick().
+        let essential: HashSet<&str> = ESSENTIAL_SAFETY_COMMS
+            .iter()
+            .flat_map(|&s| match s.get(..15) {
+                Some(trunc) if trunc.len() < s.len() => vec![s, trunc],
+                _ => vec![s],
+            })
+            .collect();
+        // The exact 15-byte comm values the kernel reports for these
+        // long-named critical daemons — each MUST be protected.
+        for must in &[
+            "qemu-system-x86", // qemu-system-x86_64
+            "systemd-network", // systemd-networkd
+            "systemd-resolve", // systemd-resolved
+            "pacemaker-sched", // pacemaker-schedulerd
+            "proxmox-backup-", // proxmox-backup-proxy / -client
+        ] {
+            assert!(
+                essential.contains(must),
+                "truncated comm {must:?} must be protected (kernel truncates comm to 15 bytes)"
+            );
         }
     }
 

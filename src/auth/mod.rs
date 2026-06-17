@@ -54,6 +54,23 @@ pub fn load_cluster_secret() -> String {
     CLUSTER_SECRET.to_string()
 }
 
+/// True if this node has its OWN custom cluster secret configured (the
+/// operator has migrated off the built-in default). Such a node never
+/// needs to accept the public built-in default for inter-node auth, so
+/// `default_secret_accepted` can safely refuse it. Un-migrated installs
+/// (no custom secret file, or a file still holding the default) return
+/// false so we don't sever their auth on upgrade.
+fn has_custom_cluster_secret() -> bool {
+    let path_str = custom_secret_path();
+    match std::fs::read_to_string(std::path::Path::new(&path_str)) {
+        Ok(s) => {
+            let s = s.trim();
+            !s.is_empty() && s != CLUSTER_SECRET
+        }
+        Err(_) => false,
+    }
+}
+
 /// Generate a new random cluster secret (wsk_ prefix + 64 hex chars)
 pub fn generate_cluster_secret() -> String {
     use std::fmt::Write;
@@ -270,9 +287,25 @@ pub fn default_secret_accepted() -> bool {
     {
         return false;
     }
-    // For now: accept by default. The opt-out env flag is here so
-    // operators who've migrated their cluster can lock the door
-    // behind them without waiting for a future release.
+    // Permanent escape hatch: an operator recovering a half-migrated
+    // cluster can force-accept the default without an emergency release.
+    // Takes priority over the auto-lock below.
+    if std::env::var("WOLFSTACK_ACCEPT_DEFAULT_SECRET")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Auto-lock: a node that has rotated to its OWN custom cluster secret
+    // has migrated and never needs the public built-in default (which is a
+    // constant published in the source repo). Reject the default for it —
+    // this closes the "public default secret accepted everywhere" hole for
+    // every cluster that has rotated, with zero operator action. Un-migrated
+    // installs (still on the default) keep accepting it so a binary upgrade
+    // can't sever their inter-node auth. See [[feedback_no_breaking_existing_installs]].
+    if has_custom_cluster_secret() {
+        return false;
+    }
     true
 }
 
