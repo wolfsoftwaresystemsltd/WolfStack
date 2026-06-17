@@ -1740,6 +1740,18 @@ pub fn ensure_lxc_bridge() {
 /// callers can't do anything useful with the error, they just need it
 /// logged. The periodic self-heal tick uses the same wrapper.
 fn ensure_lxc_bridge_checked() -> Result<(), String> {
+    // FAST PATH: if lxcbr0 already has its IP, the bridge is up and lxc-net
+    // (or a prior run) already did its job — do NOTHING. This is the steady
+    // state on every healthy host, and the 60s self-heal tick lands here.
+    // The previous code ran `systemctl enable --now lxc-net` on EVERY tick
+    // regardless of state; because lxc-net is a sysv-init unit, each `enable`
+    // triggers update-rc.d -> `systemctl daemon-reload`, producing a relentless
+    // per-minute reload storm AND re-bouncing lxcbr0/dnsmasq. (regions9 /
+    // PapaSchlumpf investigation, 2026-06-17.)
+    if bridge_has_ip("lxcbr0", "10.0.3.1") {
+        return Ok(());
+    }
+
     // Load the kernel bridge module first. `ip link add … type bridge`
     // fails with "Operation not supported" on kernels where the module
     // isn't built in and hasn't been auto-loaded yet (minimal cloud
@@ -1748,13 +1760,22 @@ fn ensure_lxc_bridge_checked() -> Result<(), String> {
     // built-in (no /lib/modules entry) and modprobe returns non-zero.
     let _ = Command::new("modprobe").arg("bridge").output();
 
-    // Try the standard systemd service. If lxc-net brings up lxcbr0
-    // with 10.0.3.1 we don't need to do anything else for the bridge.
+    // Bridge isn't up — bring it up via lxc-net. Avoid `enable` (which rewrites
+    // the sysv init links and forces a `daemon-reload`) when the unit is already
+    // enabled; only `enable --now` if it isn't, otherwise just `start`. Keeps
+    // the reload churn out of the recovery path too.
     let mut used_lxc_net = false;
-    if let Ok(o) = Command::new("systemctl")
-        .args(["enable", "--now", "lxc-net"])
+    let already_enabled = Command::new("systemctl")
+        .args(["is-enabled", "lxc-net"])
         .output()
-    {
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let svc_args: &[&str] = if already_enabled {
+        &["start", "lxc-net"]
+    } else {
+        &["enable", "--now", "lxc-net"]
+    };
+    if let Ok(o) = Command::new("systemctl").args(svc_args).output() {
         if o.status.success() {
             used_lxc_net = true;
             for _ in 0..10 {
