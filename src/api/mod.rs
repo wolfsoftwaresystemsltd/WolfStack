@@ -31245,6 +31245,56 @@ pub async fn token_events(req: HttpRequest, state: web::Data<AppState>) -> HttpR
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ─── Support Tickets (proxy to wolfstack.org) ───
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// GET /api/support/entitlement — does this node qualify for support? Used by
+/// the UI to show/hide the Support tab. Auth required (dashboard user).
+pub async fn support_entitlement(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    HttpResponse::Ok().json(serde_json::json!({ "entitled": crate::support::entitled() }))
+}
+
+/// Map a `crate::support::call` result to an HttpResponse.
+fn support_result(r: Result<serde_json::Value, String>) -> HttpResponse {
+    match r {
+        Ok(v) => HttpResponse::Ok().json(v),
+        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/support/tickets — list this node's tickets.
+pub async fn support_tickets_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    support_result(crate::support::call("list", serde_json::Map::new()).await)
+}
+
+/// POST /api/support/tickets — create a ticket. Body: { subject, body }.
+pub async fn support_ticket_create(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut m = serde_json::Map::new();
+    m.insert("subject".into(), body.get("subject").cloned().unwrap_or(serde_json::Value::String(String::new())));
+    m.insert("body".into(), body.get("body").cloned().unwrap_or(serde_json::Value::String(String::new())));
+    support_result(crate::support::call("create", m).await)
+}
+
+/// GET /api/support/tickets/{id} — ticket + messages (polled for chat).
+pub async fn support_ticket_get(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut m = serde_json::Map::new();
+    m.insert("ticket_id".into(), serde_json::Value::String(path.into_inner()));
+    support_result(crate::support::call("get", m).await)
+}
+
+/// POST /api/support/tickets/{id}/message — post a chat message. Body: { body }.
+pub async fn support_ticket_message(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut m = serde_json::Map::new();
+    m.insert("ticket_id".into(), serde_json::Value::String(path.into_inner()));
+    m.insert("body".into(), body.get("body").cloned().unwrap_or(serde_json::Value::String(String::new())));
+    support_result(crate::support::call("message", m).await)
+}
+
 // ─── OIDC Authentication Endpoints ───
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -35641,6 +35691,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/smtp-configured", web::get().to(smtp_configured))
         .route("/api/auth/forgot-password", web::post().to(forgot_password))
         .route("/api/auth/reset-password", web::post().to(reset_password))
+        // Support tickets — proxied to wolfstack.org, auth = dashboard session
+        .route("/api/support/entitlement", web::get().to(support_entitlement))
+        .route("/api/support/tickets", web::get().to(support_tickets_list))
+        .route("/api/support/tickets", web::post().to(support_ticket_create))
+        .route("/api/support/tickets/{id}", web::get().to(support_ticket_get))
+        .route("/api/support/tickets/{id}/message", web::post().to(support_ticket_message))
         // OIDC login flow — no auth (the login page & IdP callback are pre-auth)
         .route("/api/auth/oidc/providers", web::get().to(oidc_providers))
         .route("/api/auth/oidc/login/{provider_id}", web::get().to(oidc_login))

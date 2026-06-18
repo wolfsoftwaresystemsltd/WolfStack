@@ -2102,6 +2102,8 @@ function selectView(page) {
     } else if (page === 'settings') {
         // Reveal the SSO tab only for licences that include it (Team/MSP/Enterprise).
         gateSsoTab();
+        // Reveal the Support tab for licence holders + GitHub sponsors.
+        gateSupportTab();
         // Load icon packs if icons tab is active
         const iconsTab = document.getElementById('settings-tab-icons');
         if (iconsTab && iconsTab.classList.contains('active')) {
@@ -38645,6 +38647,8 @@ function switchSettingsTab(tabName) {
         loadFileLocations();
     } else if (tabName === 'sso') {
         loadSsoSettings();
+    } else if (tabName === 'support') {
+        loadSupport();
     } else if (tabName === 'reverseproxy') {
         loadReverseProxyConfig();
     } else if (tabName === 'github') {
@@ -41139,6 +41143,155 @@ window.ssoAddProvider = ssoAddProvider;
 window.ssoRemoveProvider = ssoRemoveProvider;
 window.ssoTestProvider = ssoTestProvider;
 window.ssoSave = ssoSave;
+
+// ─── Support Tickets ───
+// Talks to /api/support/* which proxies to wolfstack.org. Gated to licence
+// holders + GitHub sponsors (the binary holds both credentials); the website is
+// authoritative. Live chat = poll the open ticket every ~4s.
+let _supportTicketId = null;
+let _supportPoll = null;
+
+async function gateSupportTab() {
+    let ok = false;
+    try {
+        const r = await fetch('/api/support/entitlement');
+        if (r.ok) { const d = await r.json(); ok = !!d.entitled; }
+    } catch (_) {}
+    const btn = document.getElementById('settings-tab-btn-support');
+    if (btn) btn.style.display = ok ? '' : 'none';
+    return ok;
+}
+
+function supportStopPoll() { if (_supportPoll) { clearInterval(_supportPoll); _supportPoll = null; } }
+
+async function loadSupport() {
+    supportStopPoll();
+    _supportTicketId = null;
+    const body = document.getElementById('support-body');
+    if (!body) return;
+    if (!(await gateSupportTab())) {
+        body.innerHTML = `<div style="padding:18px;border:1px solid var(--border);border-radius:8px;background:var(--bg-panel);">
+            <h4 style="margin:0 0 8px 0;">Support is for licence holders &amp; GitHub sponsors</h4>
+            <p style="color:var(--text-secondary);font-size:13px;margin:0;">Add a WolfStack licence, or set your GitHub sponsor login, to open support tickets. <a href="https://wolfstack.org/enterprise.php" target="_blank" rel="noopener" style="color:var(--accent);">See plans</a> or <a href="https://github.com/sponsors/wolfsoftwaresystemsltd" target="_blank" rel="noopener" style="color:var(--accent);">sponsor on GitHub</a>.</p>
+        </div>`;
+        return;
+    }
+    body.innerHTML = (typeof renderBlockSkeleton === 'function') ? renderBlockSkeleton({ lines: 3 }) : '<div style="padding:20px;color:var(--text-muted);">Loading…</div>';
+    try {
+        const r = await fetch('/api/support/tickets');
+        if (handleAuthError(r)) return;
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        renderSupportList(d.tickets || []);
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger);padding:16px;">Couldn't load tickets: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderSupportList(tickets) {
+    const body = document.getElementById('support-body');
+    let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <span style="font-size:13px;color:var(--text-muted);">Your tickets</span>
+        <button class="btn btn-primary btn-sm" onclick="supportNewForm()">+ New ticket</button>
+    </div>`;
+    if (!tickets.length) {
+        html += `<div style="text-align:center;color:var(--text-muted);padding:18px;border:1px dashed var(--border);border-radius:8px;">No tickets yet. Open one and we'll get back to you.</div>`;
+    } else {
+        html += `<table class="data-table" style="width:100%;"><thead><tr><th>Subject</th><th>Status</th><th>Updated</th></tr></thead><tbody>`;
+        for (const t of tickets) {
+            const badge = t.status === 'open'
+                ? '<span style="color:var(--success);">● open</span>'
+                : `<span style="color:var(--text-muted);">○ ${escapeHtml(t.status || '')}</span>`;
+            html += `<tr style="cursor:pointer;" onclick="supportOpen('${escapeHtml(t.id)}')">
+                <td>${escapeHtml(t.subject || '')}</td><td>${badge}</td>
+                <td style="color:var(--text-muted);font-size:12px;">${escapeHtml((t.updated || '').substring(0, 16).replace('T', ' '))}</td></tr>`;
+        }
+        html += `</tbody></table>`;
+    }
+    body.innerHTML = html;
+}
+
+function supportNewForm() {
+    supportStopPoll();
+    _supportTicketId = null;
+    const body = document.getElementById('support-body');
+    body.innerHTML = `<button class="btn btn-sm" onclick="loadSupport()" style="background:var(--bg-tertiary);border:1px solid var(--border);">← Back</button>
+        <div style="margin-top:12px;display:grid;gap:10px;max-width:640px;">
+            <input id="support-new-subject" type="text" placeholder="Subject" maxlength="200" style="font-size:14px;padding:9px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);">
+            <textarea id="support-new-body" placeholder="Describe the issue…" style="min-height:160px;font-size:13px;padding:10px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:inherit;"></textarea>
+            <div><button class="btn btn-primary" onclick="supportCreate()">Send ticket</button></div>
+        </div>`;
+}
+
+async function supportCreate() {
+    const subject = ((document.getElementById('support-new-subject') || {}).value || '').trim();
+    const bodyTxt = ((document.getElementById('support-new-body') || {}).value || '').trim();
+    if (!subject || !bodyTxt) { showToast('Subject and message are required', 'error'); return; }
+    try {
+        const r = await fetch('/api/support/tickets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject, body: bodyTxt }) });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ticket_id) { showToast("Ticket created — we'll be in touch.", 'success'); supportOpen(d.ticket_id); }
+        else showToast('Failed: ' + (d.error || 'HTTP ' + r.status), 'error', 0);
+    } catch (e) { showToast('Failed to create ticket: ' + e.message, 'error', 0); }
+}
+
+function supportOpen(id) {
+    supportStopPoll();
+    _supportTicketId = id;
+    const body = document.getElementById('support-body');
+    body.innerHTML = `<button class="btn btn-sm" onclick="loadSupport()" style="background:var(--bg-tertiary);border:1px solid var(--border);">← All tickets</button>
+        <div id="support-thread" style="margin-top:12px;"><div style="color:var(--text-muted);">Loading…</div></div>
+        <div style="margin-top:12px;display:flex;gap:8px;">
+            <input id="support-chat-input" type="text" placeholder="Type a message…" onkeydown="if(event.key==='Enter')supportSend()" style="flex:1;font-size:13px;padding:9px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);">
+            <button class="btn btn-primary" onclick="supportSend()">Send</button>
+        </div>`;
+    supportRefreshThread();
+    _supportPoll = setInterval(supportRefreshThread, 4000);
+}
+
+async function supportRefreshThread() {
+    // Auto-stop if the user navigated away from the Support tab.
+    const panel = document.getElementById('settings-tab-support');
+    if (!_supportTicketId || !panel || !panel.classList.contains('active')) { supportStopPoll(); return; }
+    try {
+        const r = await fetch('/api/support/tickets/' + encodeURIComponent(_supportTicketId));
+        if (!r.ok) return;
+        const d = await r.json();
+        const el = document.getElementById('support-thread');
+        if (!el) { supportStopPoll(); return; }
+        const msgs = d.messages || [];
+        const subj = (d.ticket && d.ticket.subject) || '';
+        let html = `<div style="font-weight:600;margin-bottom:8px;">${escapeHtml(subj)}</div>`;
+        if (!msgs.length) html += '<div style="color:var(--text-muted);">No messages yet.</div>';
+        for (const m of msgs) {
+            const staff = m.author === 'staff';
+            html += `<div style="border:1px solid ${staff ? 'rgba(220,38,38,0.25)' : 'var(--border)'};background:${staff ? 'rgba(220,38,38,0.06)' : 'var(--bg-panel)'};border-radius:8px;padding:9px 11px;margin-bottom:7px;">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:3px;">${escapeHtml(m.name || (staff ? 'WolfStack' : 'You'))} · ${escapeHtml((m.ts || '').substring(0, 16).replace('T', ' '))}</div>
+                <div style="white-space:pre-wrap;font-size:13px;">${escapeHtml(m.body || '')}</div></div>`;
+        }
+        el.innerHTML = html;
+    } catch (e) { /* transient */ }
+}
+
+async function supportSend() {
+    const input = document.getElementById('support-chat-input');
+    if (!input || !_supportTicketId) return;
+    const msg = input.value.trim();
+    if (!msg) return;
+    input.value = '';
+    try {
+        const r = await fetch('/api/support/tickets/' + encodeURIComponent(_supportTicketId) + '/message', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: msg }) });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); showToast('Failed: ' + (d.error || 'HTTP ' + r.status), 'error'); input.value = msg; return; }
+        supportRefreshThread();
+    } catch (e) { showToast('Send failed: ' + e.message, 'error'); input.value = msg; }
+}
+
+window.loadSupport = loadSupport;
+window.gateSupportTab = gateSupportTab;
+window.supportNewForm = supportNewForm;
+window.supportCreate = supportCreate;
+window.supportOpen = supportOpen;
+window.supportSend = supportSend;
 
 // ─── Reverse Proxy config (Settings → 🌐 Reverse Proxy) ───
 
