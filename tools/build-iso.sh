@@ -179,6 +179,33 @@ cp /etc/resolv.conf "$FS/etc/resolv.conf" 2>/dev/null || true
 
 chroot "$FS" bash -c '
 export DEBIAN_FRONTEND=noninteractive
+
+# Ensure working NETWORK apt sources in the squashfs. install-to-disk rsyncs
+# this filesystem onto the target, so whatever sources.list lives here is what
+# the INSTALLED system gets. Debian Live images commonly ship only a `cdrom:`
+# entry (or none), which left a fresh install unable to apt-update/upgrade or
+# install anything until the user hand-added repos (SponiX 2026-06-18). Write
+# canonical deb.debian.org sources for THIS image codename (deb822 form — the
+# Debian 13/trixie default) and neutralise any cdrom entry so post-install
+# `apt update` does not fail on an absent CD.
+CODENAME="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-stable}")"
+sed -i "s|^deb cdrom:|# deb cdrom:|g" /etc/apt/sources.list 2>/dev/null || true
+rm -f /etc/apt/sources.list.d/*cdrom*.sources /etc/apt/sources.list.d/*cdrom*.list 2>/dev/null || true
+mkdir -p /etc/apt/sources.list.d
+cat > /etc/apt/sources.list.d/wolfstack-debian.sources <<SRC
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: ${CODENAME} ${CODENAME}-updates
+Components: main contrib non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.debian.org/debian-security
+Suites: ${CODENAME}-security
+Components: main contrib non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+SRC
+
 apt update -qq 2>/dev/null || true
 
 # Runtime dependencies — NO build tools, NO Rust
