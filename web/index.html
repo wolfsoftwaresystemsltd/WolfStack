@@ -5355,6 +5355,7 @@
                         <button class="settings-tab-btn" onclick="switchSettingsTab('systemcheck')"><span class="ws-icon-clean-wrap" data-icon="health"></span> System Check</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('paths')"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span> File Locations</button>
                         <button class="settings-tab-btn" id="settings-tab-btn-sso" style="display:none;" onclick="switchSettingsTab('sso')"><span class="ws-icon-clean-wrap" data-icon="key"></span> Single Sign-On</button>
+                        <button class="settings-tab-btn" id="settings-tab-btn-support" style="display:none;" onclick="switchSettingsTab('support')"><span class="ws-icon-clean-wrap" data-icon="bell"></span> Support</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('reverseproxy')"><span class="ws-icon-clean-wrap" data-icon="globe"></span> Reverse Proxy</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('github')"><span class="ws-icon-clean-wrap" data-icon="upload"></span> GitHub Backup</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('wolfnote')"><span class="ws-icon-clean-wrap" data-icon="edit"></span> WolfNote</button>
@@ -6864,6 +6865,19 @@ dns_cloudflare_api_token = your_token_here"
                             then appear on the login page.
                         </p>
                         <div id="sso-settings-body" style="max-width:820px;">
+                            <div style="color:var(--text-muted);text-align:center;padding:20px;">Loading...</div>
+                        </div>
+                    </div>
+
+                    <!-- ─── Support Tickets Tab ─── -->
+                    <div id="settings-tab-support" class="settings-tab-panel">
+                        <h4 style="margin:0 0 8px 0;font-size:16px;font-weight:600;">Support</h4>
+                        <p style="font-size:13px;color:var(--text-muted);margin:0 0 20px 0;">
+                            Raise and track support tickets with the WolfStack team. Available to licence
+                            holders and GitHub sponsors. We reply by email and here; you can chat with us live
+                            while we work on it.
+                        </p>
+                        <div id="support-body" style="max-width:820px;">
                             <div style="color:var(--text-muted);text-align:center;padding:20px;">Loading...</div>
                         </div>
                     </div>

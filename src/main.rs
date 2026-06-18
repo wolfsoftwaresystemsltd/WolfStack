@@ -70,6 +70,7 @@ mod at_rest_crypto;
 mod services_discovery;
 mod cluster_browser;
 mod compat;
+mod support;
 mod danger;
 mod plugins;
 mod sql_connections;
