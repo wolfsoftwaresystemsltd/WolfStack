@@ -12454,9 +12454,14 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
 // ─── Component Detail ───
 async function openComponentDetail(name) {
     currentComponent = name;
-    // Fresh entry always starts on the page-serving node — clear any node
-    // override left over from a previous component-detail visit.
-    currentConfiguratorNode = null;
+    // Restore the operator's last cluster-node choice for THIS component's
+    // configurator. A multi-node operator whose proxy/certs live on a node
+    // other than the one serving the page had to re-pick that node on every
+    // single visit (wabil 2026-06-17) — and until they did, the sites/certs
+    // list came back empty because the page node has no nginx/wolfproxy.
+    // restoreConfiguratorNode falls back to the page-serving node (null) when
+    // nothing is remembered or the remembered node is gone/offline.
+    currentConfiguratorNode = restoreConfiguratorNode(name);
     // If launched from container configurator, use the preset target; otherwise reset
     if (_configuratorTargetPreset) {
         currentConfiguratorTarget = _configuratorTargetPreset;
@@ -12476,6 +12481,10 @@ async function openComponentDetail(name) {
 
 async function refreshComponentDetail(name) {
     const isContainer = !!currentConfiguratorTarget;
+    // A remembered/selected remote node manages a DIFFERENT host's service, so
+    // the host-only status/actions/config/logs panels (which describe the
+    // page-serving node) must not show — same treatment as a container target.
+    const remoteNode = !!(currentConfiguratorNode && !currentConfiguratorNode.is_self);
 
     // Host-only sections (status, actions, raw config, logs)
     const statsGrid = document.getElementById('detail-stats-grid');
@@ -12483,8 +12492,8 @@ async function refreshComponentDetail(name) {
     const configSection = document.getElementById('detail-config-section');
     const logsSection = document.getElementById('detail-logs-section');
 
-    if (isContainer) {
-        // Hide host-only sections when targeting a container
+    if (isContainer || remoteNode) {
+        // Hide host-only sections when targeting a container or a remote node
         if (statsGrid) statsGrid.style.display = 'none';
         if (actionsBar) actionsBar.style.display = 'none';
         if (configSection) configSection.style.display = 'none';
@@ -13168,7 +13177,29 @@ async function buildConfiguratorTargetSelector(componentName) {
 // Switch the configurator to manage a different cluster node. Container names
 // are node-specific, so reset the host/container target to host on switch.
 // Empty value = the page-serving node (clears the override → apiUrl behaviour).
+// Per-component localStorage key for the remembered configurator node.
+function configuratorNodeStorageKey(component) {
+    return 'wolfstack_configurator_node_' + (component || '');
+}
+
+// Restore the remembered cluster node for a component's configurator. Returns a
+// node object (a remote wolfstack node) or null (= the page-serving node). Only
+// honours a remembered node that still exists, is remote, online, and is a
+// wolfstack node — anything else falls back to the page node so a removed or
+// down node never leaves the configurator stuck pointing at nowhere.
+function restoreConfiguratorNode(component) {
+    let id = null;
+    try { id = localStorage.getItem(configuratorNodeStorageKey(component)); } catch (_) {}
+    if (!id) return null;
+    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => String(n.id) === String(id));
+    if (node && !node.is_self && node.online !== false && node.node_type === 'wolfstack') return node;
+    return null;
+}
+
 function onConfiguratorNodeChange(nodeId, componentName) {
+    // Remember the choice so the next visit to this component lands on the same
+    // node (empty = the page-serving node).
+    try { localStorage.setItem(configuratorNodeStorageKey(componentName), nodeId || ''); } catch (_) {}
     if (!nodeId) {
         currentConfiguratorNode = null;
     } else {

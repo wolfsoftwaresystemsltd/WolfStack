@@ -678,26 +678,32 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
         return Err("Bucket name is required for S3 mounts".to_string());
     }
     
-    // Strategy:
-    // 1. Try rust-s3 native sync (pure Rust, works on IBM Power/ppc64le)
-    // 2. Fall back to s3fs-fuse if available
-    // 3. Try installing s3fs as last resort
-    match mount_s3_via_rust_s3(mount, s3) {
-        Ok(msg) => Ok(msg),
-        Err(e) => {
-            warn!("rust-s3 mount failed ({}), trying s3fs fallback", e);
-            if has_s3fs() {
-                mount_s3_via_s3fs(mount, s3)
-            } else {
-                install_s3fs().ok();
-                if has_s3fs() {
-                    mount_s3_via_s3fs(mount, s3)
-                } else {
-                    Err(with_s3_credential_hint(format!("S3 mount failed: rust-s3 error: {}", e)))
-                }
-            }
-        }
+    // Strategy (order matters — corrects a silent data-loss bug, Gary KO4BSR
+    // 2026-06-17):
+    //   1. s3fs-fuse — a REAL read-write FUSE mount. This is the only mode
+    //      where writes actually reach the bucket, so it is the default
+    //      everywhere FUSE is usable.
+    //   2. rust-s3 bind — fallback ONLY when s3fs/FUSE is unavailable
+    //      (e.g. ppc64le, FUSE-less containers). It is a one-shot download +
+    //      local bind mount: reads work but writes land on the local disk and
+    //      NEVER reach S3. mount_s3_via_rust_s3 now mounts it READ-ONLY so
+    //      writes fail loudly instead of silently vanishing from the bucket.
+    //
+    // The old order tried rust-s3 FIRST; whenever its sync happened to succeed
+    // (correct creds, <1000 objects, <30s) the operator got a read-only-in-
+    // disguise mount and every file they wrote disappeared from the bucket's
+    // view — exactly Gary's "files written but do not show in R2" report.
+    if has_s3fs() {
+        return mount_s3_via_s3fs(mount, s3);
     }
+    install_s3fs().ok();
+    if has_s3fs() {
+        return mount_s3_via_s3fs(mount, s3);
+    }
+    // No s3fs and it couldn't be installed — fall back to the read-only
+    // rust-s3 bind so the bucket is at least readable.
+    warn!("s3fs/FUSE unavailable for {} — falling back to a READ-ONLY rust-s3 bind mount (writes not supported in this mode)", mount.mount_point);
+    mount_s3_via_rust_s3(mount, s3)
 }
 
 /// True for a Cloudflare R2 S3 endpoint. R2 requires the SigV4 region
@@ -971,13 +977,46 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
         .output()
         .map_err(|e| format!("Failed to bind mount: {}", e))?;
 
-    if output.status.success() {
-
-        Ok(format!("S3 storage mounted via rust-s3 ({} objects synced)", sync_result))
-    } else {
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Bind mount failed after S3 sync: {}", stderr))
+        return Err(format!("Bind mount failed after S3 sync: {}", stderr));
     }
+
+    // CRITICAL: this bind exposes a LOCAL cache directory. Anything written
+    // here lands on the local disk and is NEVER uploaded back to S3 (rust-s3
+    // here is a one-shot downloader, not a live filesystem). Re-mount the bind
+    // read-only so writes fail loudly at the kernel instead of silently
+    // disappearing from the bucket — the silent-loss trap Gary KO4BSR hit
+    // (2026-06-17). `remount,bind,ro` is the canonical mount(8) form for making
+    // a bind read-only.
+    let ro = Command::new("mount")
+        .args(["-o", "remount,bind,ro", &mount.mount_point])
+        .output();
+    let ro_ok = matches!(&ro, Ok(o) if o.status.success());
+    if !ro_ok {
+        // We could not guarantee read-only, so a WRITABLE local bind is now
+        // exposed — exactly the silent-data-loss mount we're trying to avoid.
+        // Fail safe: tear it down and error rather than hand back a mount that
+        // looks like S3 but quietly swallows every write. No-FUSE host without
+        // a working read-only bind simply can't have a safe S3 mount.
+        let stderr = ro.as_ref().ok().map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string()).unwrap_or_default();
+        error!("rust-s3 bind for {} could not be made read-only ({}) — unmounting to avoid silent write loss", mount.mount_point, stderr);
+        let _ = Command::new("umount").arg(&mount.mount_point).output();
+        let _ = Command::new("umount").args(["-l", &mount.mount_point]).output();
+        return Err(format!(
+            "Could not establish a safe S3 mount: s3fs-fuse is unavailable and the \
+             read-only fallback bind could not be enforced ({}). Install s3fs-fuse \
+             for read-write S3 access.",
+            stderr
+        ));
+    }
+
+    Ok(format!(
+        "S3 storage mounted READ-ONLY via rust-s3 ({} objects synced). \
+         s3fs-fuse is not available on this host, so read-write S3 mounting is \
+         disabled — install s3fs-fuse for full read-write access.",
+        sync_result,
+    ))
 }
 
 /// Sentinel prefix for mount-helper-missing errors. The storage/backup API
@@ -1522,6 +1561,58 @@ Requires=wolfstack-mounts-wait.service
 After=wolfstack-mounts-wait.service
 ";
 
+// Docker drop-in: make dockerd wait for WolfStack's WebUI auto-mounts to settle
+// before it starts containers. Without it, Docker comes up first and any
+// container with a bind mount onto a WolfStack-managed NFS/CIFS path starts
+// pointing at an empty directory until it is restarted (wabil 2026-06-17, after
+// the NFS mount fixes made the mounts reliable enough to expose the race).
+//
+// `Wants=` (NOT `Requires=`) is deliberate and Golden-Rule-critical: a failed
+// mount, an unreachable NAS, or a stopped/disabled WolfStack must never PREVENT
+// Docker from starting — it may only order Docker *after* the mounts have been
+// attempted. wolfstack-mounts.target signals once every auto-mount has been
+// tried (success OR failure), and in normal operation WolfStack touches that
+// flag within seconds of boot, so the added delay is negligible.
+const DOCKER_MOUNTS_DROPIN_PATH: &str = "/etc/systemd/system/docker.service.d/wolfstack-mounts.conf";
+const DOCKER_MOUNTS_DROPIN: &str = "\
+[Unit]
+# Written by WolfStack (storage manager). Orders Docker AFTER WolfStack's WebUI
+# storage auto-mounts settle so bind-mount containers don't start before their
+# data is mounted. Wants= (not Requires=) so a mount failure never blocks Docker.
+After=wolfstack-mounts.target
+Wants=wolfstack-mounts.target
+";
+
+/// Order Docker after `wolfstack-mounts.target` via a drop-in, so containers
+/// with bind mounts onto WolfStack-managed network mounts don't start before
+/// those mounts exist. Self-healing (content-compared, daemon-reload only on
+/// change) and a no-op when systemd or Docker isn't present.
+fn ensure_docker_mounts_ordering() {
+    if !std::path::Path::new("/run/systemd/system").exists() {
+        return;
+    }
+    // Only act when systemd actually knows a docker.service to order against —
+    // otherwise the drop-in is dead weight and we'd daemon-reload for nothing.
+    let docker_known = Command::new("systemctl")
+        .args(["cat", "docker.service"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !docker_known {
+        return;
+    }
+    if std::fs::read_to_string(DOCKER_MOUNTS_DROPIN_PATH).ok().as_deref() == Some(DOCKER_MOUNTS_DROPIN) {
+        return;
+    }
+    let Some(dir) = std::path::Path::new(DOCKER_MOUNTS_DROPIN_PATH).parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    if std::fs::write(DOCKER_MOUNTS_DROPIN_PATH, DOCKER_MOUNTS_DROPIN).is_ok() {
+        let _ = Command::new("systemctl").arg("daemon-reload").output();
+    }
+}
+
 /// Write the two units when missing or outdated (content-compared, so a
 /// binary upgrade that changes them self-heals without setup.sh). Only
 /// daemon-reloads when something actually changed.
@@ -1559,6 +1650,9 @@ fn ensure_mounts_target_units() {
 /// etc.) must not stall behind a slow CIFS mount.
 pub fn auto_mount_all() {
     ensure_mounts_target_units();
+    // Make Docker wait for these mounts so bind-mount containers don't start
+    // before their data is mounted (wabil 2026-06-17).
+    ensure_docker_mounts_ordering();
 
     let config = load_config();
     let auto_mounts: Vec<_> = config.mounts.iter()

@@ -195,6 +195,16 @@ if [ -f "/etc/systemd/system/wolfstack-mounts.target" ] || [ -f "/etc/systemd/sy
     echo "✓ WolfStack mounts-target units removed"
 fi
 
+# Docker ordering drop-in (written by the binary so dockerd waits for WolfStack
+# WebUI mounts). Must be removed too — otherwise dockerd keeps Wants= a target
+# that no longer exists and waits out the 300s wait-service timeout at every boot.
+if [ -f "/etc/systemd/system/docker.service.d/wolfstack-mounts.conf" ]; then
+    rm -f /etc/systemd/system/docker.service.d/wolfstack-mounts.conf
+    rmdir /etc/systemd/system/docker.service.d 2>/dev/null || true
+    systemctl daemon-reload
+    echo "✓ WolfStack Docker mount-ordering drop-in removed"
+fi
+
 # ─── Remove binary ──────────────────────────────────────────────────────────
 if [ -f "/usr/local/bin/wolfstack" ]; then
     rm -f /usr/local/bin/wolfstack

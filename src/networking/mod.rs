@@ -1086,6 +1086,21 @@ fn is_on_link(target: std::net::Ipv4Addr, subnets: &[(std::net::Ipv4Addr, u8)]) 
     subnets.iter().any(|&(net, prefix)| is_in_subnet(target, net, prefix))
 }
 
+/// Friendly error for a failed read of `/etc/wolfnet/config.toml`. A missing
+/// file (`NotFound`) means WolfNet simply isn't set up on this node. The
+/// cluster-sync sweep surfaces this verbatim as e.g. `nginx → docker: ...`,
+/// where `nginx` is the NODE NAME, not the web server — so the old bare
+/// "Failed to read config: ... (os error 2)" was misread as a missing *nginx*
+/// config file (wabil 2026-06-17). Say plainly what's actually missing.
+fn missing_wolfnet_config_msg(e: std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        "WolfNet is not configured on this node (/etc/wolfnet/config.toml is missing) — \
+         run setup or 'Update WolfNet Connections' on this node to create it".to_string()
+    } else {
+        format!("Failed to read WolfNet config (/etc/wolfnet/config.toml): {}", e)
+    }
+}
+
 /// Add or update a peer in WolfNet config (upsert).
 /// If a peer with the same name, public key, or allowed IP already exists,
 /// its name is updated and the endpoint is handled per `endpoint` (see
@@ -1112,7 +1127,7 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
     let ip = ip.split('/').next().unwrap_or(ip);
     let config_path = "/etc/wolfnet/config.toml";
     let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+        .map_err(missing_wolfnet_config_msg)?;
 
     // Fix any `ip = ` entries to `allowed_ip = ` before parsing
     let fixed: String = content.lines().map(|line| {
@@ -1313,7 +1328,7 @@ pub fn edit_wolfnet_peer(
     let ip = ip.split('/').next().unwrap_or(ip);
     let config_path = "/etc/wolfnet/config.toml";
     let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+        .map_err(missing_wolfnet_config_msg)?;
 
     // Fix any legacy `ip = ` entries to `allowed_ip = ` before parsing.
     let fixed: String = content.lines().map(|line| {
@@ -1593,7 +1608,7 @@ pub fn reconcile_wolfnet_peers_batch(
         // No WolfNet config = nothing to reconcile. Return Ok(0) so the periodic
         // caller doesn't log an error every tick on nodes that don't run WolfNet.
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(format!("Failed to read config: {}", e)),
+        Err(e) => return Err(missing_wolfnet_config_msg(e)),
     };
     let mut doc: toml::Value = toml::from_str(&content)
         .map_err(|e| format!("Failed to parse config: {}", e))?;
@@ -1860,7 +1875,7 @@ pub fn reconcile_wolfnet_peers_batch(
 pub fn remove_wolfnet_peer(name: &str) -> Result<String, String> {
     let config_path = "/etc/wolfnet/config.toml";
     let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+        .map_err(missing_wolfnet_config_msg)?;
 
     let mut result_lines: Vec<String> = Vec::new();
     let mut in_target_peer = false;
