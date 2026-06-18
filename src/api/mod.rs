@@ -6776,6 +6776,10 @@ pub async fn lxc_create(
             &body.name, &body.distribution, &body.release, &body.architecture,
             storage, template_storage, password, memory_mb, cpu_cores,
             wolfnet_ip.as_deref(),
+            net_mode,
+            body.bridge_name.as_deref(),
+            body.bridge_ip.as_deref(),
+            body.bridge_gateway.as_deref(),
         ) {
             Ok((_vmid, msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
             Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
@@ -6843,7 +6847,9 @@ pub async fn lxc_create(
                         rand_byte(), rand_byte(), rand_byte());
                     lines.push(format!("lxc.net.0.hwaddr = {}", mac));
                     if let Some(ref ip) = body.bridge_ip {
-                        let ip = ip.trim();
+                        // Normalise a bare IP to CIDR — LXC requires a prefix on
+                        // ipv4.address or the container comes up unreachable.
+                        let ip = containers::normalize_bridge_cidr(ip);
                         if !ip.is_empty() {
                             lines.push(format!("lxc.net.0.ipv4.address = {}", ip));
                             if let Some(ref gw) = body.bridge_gateway {

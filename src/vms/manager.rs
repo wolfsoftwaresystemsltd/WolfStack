@@ -1969,6 +1969,13 @@ impl VmManager {
                 if let Some(ref wip) = wolfnet_ip {
                     sidecar.wolfnet_ip = if wip.is_empty() { None } else { Some(wip.clone()) };
                 }
+                // A bridge/NAT VM has no WolfNet IP. Force it off authoritatively
+                // (after the wip assignment above) so switching a VM from WolfNet
+                // to bridge never leaves the dead 10.x address in config, even if
+                // the UI form still carried the old value (Gary KO4BSR 2026-06-18).
+                if matches!(sidecar.network_mode.as_deref(), Some("bridge") | Some("nat")) {
+                    sidecar.wolfnet_ip = None;
+                }
                 let _ = serde_json::to_string_pretty(&sidecar)
                     .map_err(|_| ())
                     .and_then(|json| fs::write(&sidecar_path, json).map_err(|_| ()));

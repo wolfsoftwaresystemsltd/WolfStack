@@ -334,6 +334,12 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     config.bridge_ip = body.bridge_ip.clone().filter(|s| !s.is_empty());
     config.bridge_gateway = body.bridge_gateway.clone().filter(|s| !s.is_empty());
 
+    // Bridge/NAT VMs carry no WolfNet IP — mirror the update path so a
+    // create-with-bridge can't persist a stale/auto wolfnet_ip.
+    if matches!(config.network_mode.as_deref(), Some("bridge") | Some("nat")) {
+        config.wolfnet_ip = None;
+    }
+
     // If importing a disk image, set it on the config
     if let Some(ref img) = body.import_image {
         if !img.is_empty() {

@@ -7887,11 +7887,70 @@ fn pct_ensure_template(storage: &str, distribution: &str, release: &str, archite
     Ok(format!("{}:vztmpl/{}", storage, best_template))
 }
 
-/// Fix networking for NetworkManager-based distros on Proxmox containers.
-/// Proxmox's `ip=dhcp` doesn't always write correct NetworkManager keyfiles
-/// for RHEL-family containers (AlmaLinux, Rocky, Fedora, CentOS), leaving them
-/// without working networking. This mounts the rootfs and writes the config.
-fn pct_fix_nm_networking(vmid: &str, distribution: &str) {
+/// Normalise a user-entered bridge IP into CIDR form. Both LXC
+/// (`lxc.net.0.ipv4.address`) and Proxmox (`pct ... ip=`) require a prefix
+/// length: a bare IPv4 like "192.168.0.99" is rejected by `pct create` and
+/// silently ignored by NetworkManager, leaving the container unreachable at the
+/// address the user typed. If the value is a bare IPv4 (no `/`), append `/24` —
+/// the near-universal small-LAN prefix. Anything already containing `/`, empty,
+/// or not a bare IPv4 is returned trimmed and unchanged so a deliberate entry is
+/// never corrupted.
+pub fn normalize_bridge_cidr(ip: &str) -> String {
+    let t = ip.trim();
+    if t.is_empty() || t.contains('/') {
+        return t.to_string();
+    }
+    if t.parse::<std::net::Ipv4Addr>().is_ok() {
+        format!("{}/24", t)
+    } else {
+        t.to_string()
+    }
+}
+
+/// Build the `--net0` value for a Proxmox LXC. Returns `None` for host mode
+/// (no network device — matches the standalone `lxc.net.0.type=none` semantics
+/// the native path uses). For bridge mode the bridge defaults to `vmbr0` (the
+/// Proxmox LAN bridge), NOT `lxcbr0` (the private WolfNet NAT bridge whose
+/// dnsmasq hands out 10.0.3.x — the very address bridge-mode users did NOT
+/// want). A non-empty `bridge_ip` (CIDR) yields a static config; otherwise DHCP.
+fn pct_net0_arg(
+    net_mode: &str,
+    bridge: Option<&str>,
+    bridge_ip: Option<&str>,
+    bridge_gateway: Option<&str>,
+) -> Option<String> {
+    match net_mode {
+        "host" => None,
+        "bridge" => {
+            let br = bridge
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("vmbr0");
+            let ip_part = match bridge_ip.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(cidr) => match bridge_gateway.map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(gw) => format!("ip={},gw={}", cidr, gw),
+                    None => format!("ip={}", cidr),
+                },
+                None => "ip=dhcp".to_string(),
+            };
+            Some(format!("name=eth0,bridge={},{}", br, ip_part))
+        }
+        // wolfnet / default / unknown: eth0 on the LAN bridge via DHCP. WolfNet
+        // gets its own wn0 NIC on lxcbr0 added separately by the caller.
+        _ => Some("name=eth0,bridge=vmbr0,ip=dhcp".to_string()),
+    }
+}
+
+/// Fix in-container networking for NetworkManager-based distros (AlmaLinux,
+/// Rocky, Fedora, CentOS, RHEL), where Proxmox's generated config is
+/// unreliable. `static_ip` (CIDR, e.g. "192.168.0.99/24") with an optional
+/// `gateway` writes a static keyfile; `None` writes a DHCP keyfile.
+fn pct_fix_nm_networking(
+    vmid: &str,
+    distribution: &str,
+    static_ip: Option<&str>,
+    gateway: Option<&str>,
+) {
     let dist = distribution.to_lowercase();
     let is_nm_distro = dist.contains("alma") || dist.contains("rocky")
         || dist.contains("centos") || dist.contains("fedora")
@@ -7907,16 +7966,31 @@ fn pct_fix_nm_networking(vmid: &str, distribution: &str) {
 
     let rootfs = format!("/var/lib/lxc/{}/rootfs", vmid);
 
-    // Write NetworkManager keyfile for eth0 DHCP
+    // Write NetworkManager keyfile for eth0 (static if a CIDR was supplied,
+    // otherwise DHCP). A static bridge IP must NOT be clobbered by a DHCP
+    // keyfile, which is what the old unconditional-DHCP version did.
     let nm_base = format!("{}/etc/NetworkManager", rootfs);
     if std::path::Path::new(&nm_base).exists() {
         let nm_dir = format!("{}/system-connections", nm_base);
         let _ = std::fs::create_dir_all(&nm_dir);
-        let conf = "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
+        let conf = match static_ip {
+            Some(cidr) => {
+                let gw_line = gateway
+                    .map(|g| format!("gateway={}\n", g))
+                    .unwrap_or_default();
+                format!(
+                    "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
+                     [ipv4]\nmethod=manual\naddress1={}\n{}dns=8.8.8.8;1.1.1.1;\n\n\
+                     [ipv6]\nmethod=auto\n",
+                    cidr, gw_line
+                )
+            }
+            None => "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
                     [ipv4]\nmethod=auto\ndns=8.8.8.8;1.1.1.1;\n\n\
-                    [ipv6]\nmethod=auto\n";
+                    [ipv6]\nmethod=auto\n".to_string(),
+        };
         let nm_file = format!("{}/eth0.nmconnection", nm_dir);
-        let _ = std::fs::write(&nm_file, conf);
+        let _ = std::fs::write(&nm_file, &conf);
         let _ = std::fs::set_permissions(
             &nm_file,
             std::fs::Permissions::from_mode(0o600),
@@ -7937,11 +8011,15 @@ fn pct_fix_nm_networking(vmid: &str, distribution: &str) {
 }
 
 /// Create an LXC container via Proxmox's pct command (public API entry point)
+#[allow(clippy::too_many_arguments)]
 pub fn pct_create_api(name: &str, distribution: &str, release: &str, architecture: &str,
               storage_id: Option<&str>, template_storage_id: Option<&str>,
               root_password: Option<&str>,
               memory_mb: Option<u32>, cpu_cores: Option<u32>,
-              wolfnet_ip: Option<&str>) -> Result<(u32, String), String> {
+              wolfnet_ip: Option<&str>,
+              net_mode: &str,
+              bridge: Option<&str>, bridge_ip: Option<&str>, bridge_gateway: Option<&str>)
+              -> Result<(u32, String), String> {
     let vmid = pct_next_vmid()?;
     let storage = storage_id.unwrap_or("local-lvm");
 
@@ -7969,12 +8047,27 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         "--hostname".to_string(), name.to_string(),
         "--storage".to_string(), storage.to_string(),
         "--rootfs".to_string(), format!("{}:8", storage), // 8GB default rootfs
-        "--net0".to_string(), "name=eth0,bridge=vmbr0,ip=dhcp".to_string(),
         "--start".to_string(), "0".to_string(),
         "--unprivileged".to_string(), "1".to_string(),
         "--swap".to_string(), "0".to_string(),
         "--cores".to_string(), "1".to_string(),
     ];
+
+    // Normalise the static IP to CIDR form once, so the --net0 arg and the NM
+    // keyfile below agree (a bare IP would be rejected by pct and ignored by NM).
+    let norm_bridge_ip: Option<String> = bridge_ip
+        .map(normalize_bridge_cidr)
+        .filter(|s| !s.is_empty());
+
+    // Honour the chosen network mode. Bridge mode puts eth0 on the user's
+    // bridge (static or DHCP); host mode creates no network device; wolfnet
+    // and the legacy default both use eth0 on vmbr0 via DHCP (WolfNet then
+    // gets its own wn0 NIC below). Previously this was hardcoded to
+    // vmbr0/DHCP, so bridge-mode + static IP was silently ignored.
+    if let Some(net0) = pct_net0_arg(net_mode, bridge, norm_bridge_ip.as_deref(), bridge_gateway) {
+        args.push("--net0".to_string());
+        args.push(net0);
+    }
 
     if let Some(pw) = root_password {
         if !pw.is_empty() {
@@ -8010,10 +8103,21 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
     if output.status.success() {
 
         // Fix networking for NetworkManager-based distros (AlmaLinux, Rocky, Fedora, CentOS).
-        // Proxmox's `ip=dhcp` doesn't always generate correct NM keyfiles for RHEL-family
-        // containers, leaving them without working networking. Mount the rootfs, write a
-        // proper eth0.nmconnection for DHCP, and set fallback DNS.
-        pct_fix_nm_networking(&vmid.to_string(), distribution);
+        // Proxmox doesn't always generate correct NM keyfiles for RHEL-family containers,
+        // leaving them without working networking. Mount the rootfs, write a proper
+        // eth0.nmconnection (static for a bridge-mode static IP, otherwise DHCP) and set
+        // fallback DNS. Host mode has no network device, so skip the fixup entirely.
+        if net_mode != "host" {
+            let (nm_static, nm_gw) = if net_mode == "bridge" {
+                (
+                    norm_bridge_ip.as_deref(),
+                    bridge_gateway.map(str::trim).filter(|s| !s.is_empty()),
+                )
+            } else {
+                (None, None)
+            };
+            pct_fix_nm_networking(&vmid.to_string(), distribution, nm_static, nm_gw);
+        }
 
         // Attach WolfNet: add wn0 on lxcbr0 with the WolfNet IP
         if let Some(ip) = wolfnet_ip {
@@ -8846,7 +8950,8 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
     // through so the user's choice of vztmpl storage is honoured.
     if is_proxmox() {
         let result = pct_create_api(name, distribution, release, architecture,
-            storage_path, template_cache_path, None, None, None, None);
+            storage_path, template_cache_path, None, None, None, None,
+            "wolfnet", None, None, None);
         if result.is_ok() { invalidate_count_caches(); }
         return result.map(|(_vmid, msg)| msg);
     }
@@ -11403,6 +11508,84 @@ mod cross_platform_restore_tests {
         let nested_out = strip_apparmor_profile(nested);
         assert!(nested_out.contains("lxc.apparmor.allow_nesting = 1"));
         assert!(!nested_out.contains("lxc.apparmor.profile"));
+    }
+}
+
+#[cfg(test)]
+mod pct_net0_tests {
+    use super::*;
+
+    #[test]
+    fn host_mode_has_no_network_device() {
+        // Matches the standalone lxc.net.0.type=none semantics — no eth0.
+        assert_eq!(pct_net0_arg("host", None, None, None), None);
+    }
+
+    #[test]
+    fn wolfnet_and_default_use_vmbr0_dhcp() {
+        let expect = Some("name=eth0,bridge=vmbr0,ip=dhcp".to_string());
+        assert_eq!(pct_net0_arg("wolfnet", None, None, None), expect);
+        assert_eq!(pct_net0_arg("", None, None, None), expect);
+    }
+
+    #[test]
+    fn bridge_static_includes_ip_and_gateway() {
+        // wabil's case: a chosen LAN bridge + static IP + gateway must reach
+        // pct verbatim — never the old hardcoded vmbr0/dhcp (or lxcbr0 10.0.3.x).
+        assert_eq!(
+            pct_net0_arg("bridge", Some("vmbr0"), Some("192.168.0.99/24"), Some("192.168.0.1")),
+            Some("name=eth0,bridge=vmbr0,ip=192.168.0.99/24,gw=192.168.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn bridge_static_without_gateway_omits_gw() {
+        assert_eq!(
+            pct_net0_arg("bridge", Some("vmbr1"), Some("10.50.0.5/24"), None),
+            Some("name=eth0,bridge=vmbr1,ip=10.50.0.5/24".to_string())
+        );
+        // Whitespace-only gateway is treated as absent.
+        assert_eq!(
+            pct_net0_arg("bridge", Some("vmbr1"), Some("10.50.0.5/24"), Some("  ")),
+            Some("name=eth0,bridge=vmbr1,ip=10.50.0.5/24".to_string())
+        );
+    }
+
+    #[test]
+    fn bridge_without_ip_uses_dhcp_on_chosen_bridge() {
+        assert_eq!(
+            pct_net0_arg("bridge", Some("vmbr2"), None, None),
+            Some("name=eth0,bridge=vmbr2,ip=dhcp".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_bridge_cidr_appends_24_to_bare_ip() {
+        // wabil typed "192.168.0.99" — pct/NM need a prefix or it's unreachable.
+        assert_eq!(normalize_bridge_cidr("192.168.0.99"), "192.168.0.99/24");
+        assert_eq!(normalize_bridge_cidr("  10.0.0.5  "), "10.0.0.5/24");
+        // Already has a prefix → left exactly as given (trimmed).
+        assert_eq!(normalize_bridge_cidr("192.168.0.99/24"), "192.168.0.99/24");
+        assert_eq!(normalize_bridge_cidr("10.0.0.5/16"), "10.0.0.5/16");
+        // Not a bare IPv4 (empty, hostname, IPv6) → unchanged, never corrupted.
+        assert_eq!(normalize_bridge_cidr(""), "");
+        assert_eq!(normalize_bridge_cidr("dhcp"), "dhcp");
+        assert_eq!(normalize_bridge_cidr("fe80::1/64"), "fe80::1/64");
+    }
+
+    #[test]
+    fn bridge_defaults_to_vmbr0_not_lxcbr0() {
+        // An empty/missing bridge name must fall back to the Proxmox LAN bridge
+        // (vmbr0), NOT lxcbr0 — lxcbr0's dnsmasq is exactly the 10.0.3.x source
+        // bridge-mode users were complaining about.
+        assert_eq!(
+            pct_net0_arg("bridge", None, Some("192.168.1.10/24"), None),
+            Some("name=eth0,bridge=vmbr0,ip=192.168.1.10/24".to_string())
+        );
+        assert_eq!(
+            pct_net0_arg("bridge", Some("  "), None, None),
+            Some("name=eth0,bridge=vmbr0,ip=dhcp".to_string())
+        );
     }
 }
 

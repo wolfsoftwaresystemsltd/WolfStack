@@ -2499,6 +2499,7 @@ pub fn prepare_install(
                 let (vmid, create_msg) = crate::containers::pct_create_api(
                     container_name, &lxc.distribution, &lxc.release, &lxc.architecture,
                     pct_storage.as_deref(), None, None, memory_mb, cpu_cores, wolfnet_ip.as_deref(),
+                    "wolfnet", None, None, None,
                 )?;
 
                 // Record the install against the VMID — that's how every later
