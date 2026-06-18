@@ -54,7 +54,19 @@ impl Default for OidcConfig {
 impl OidcConfig {
     pub fn load() -> Self {
         match std::fs::read_to_string(&oidc_config_path()) {
-            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+            Ok(data) => match serde_json::from_str(&data) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    // Never silently drop a corrupt config — that would hide the
+                    // loss of every provider + its encrypted secret. Surface it
+                    // loudly so the operator can fix/restore the file.
+                    tracing::error!(
+                        "OIDC config at {} failed to parse ({}) — using an empty config; configured SSO providers are unavailable until the file is fixed",
+                        oidc_config_path(), e
+                    );
+                    Self::default()
+                }
+            },
             Err(_) => Self::default(),
         }
     }
@@ -277,6 +289,14 @@ async fn discover(issuer_url: &str) -> Result<DiscoveryDocument, String> {
     resp.json::<DiscoveryDocument>()
         .await
         .map_err(|e| format!("Failed to parse OIDC discovery document: {}", e))
+}
+
+/// Probe an issuer's OIDC discovery document — backs the Settings → SSO "Test"
+/// button so an operator can confirm the issuer URL is reachable and speaks
+/// OIDC before saving. Returns the discovered authorization + token endpoints.
+pub async fn probe_discovery(issuer_url: &str) -> Result<(String, String), String> {
+    let d = discover(issuer_url).await?;
+    Ok((d.authorization_endpoint, d.token_endpoint))
 }
 
 /// Generate a PKCE code verifier (32 random bytes, base64url-encoded without padding).
