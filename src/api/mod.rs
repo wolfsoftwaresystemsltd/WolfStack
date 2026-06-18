@@ -3652,11 +3652,26 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
 pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
+    // Capture the node's identity BEFORE removal so we can also evict it from
+    // every node's WolfNet peer list. Without this the deleted node lingers in
+    // /etc/wolfnet/config.toml on each remaining peer and shows up forever as an
+    // unreachable peer (wabil 2026-06-17). Cluster-sync's prune pass would
+    // eventually catch it, but a delete should clean up immediately.
+    let removed_node = state.cluster.get_node(&id);
     if state.cluster.remove_server(&id) {
+        // Evict from THIS node's WolfNet config right away (synchronous).
+        // Best-effort: "not found" is fine, and a WolfNet-less node has nothing
+        // to evict.
+        if let Some(ref n) = removed_node && !n.hostname.is_empty() {
+            let _ = networking::remove_wolfnet_peer(&n.hostname);
+        }
         // Broadcast deletion to all other online nodes so they don't gossip it back
         let nodes = state.cluster.get_all_nodes();
         let secret = state.cluster_secret.clone();
         let delete_id = id.clone();
+        let peer_name = removed_node.as_ref()
+            .map(|n| n.hostname.clone())
+            .filter(|h| !h.is_empty());
         tokio::spawn(async move {
             let client = &*API_HTTP_CLIENT;
             for node in &nodes {
@@ -3671,6 +3686,25 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
                     {
                         let _ = resp.bytes().await;
                         break; // Success, no need to try next URL
+                    }
+                }
+                // Also evict the deleted node from this peer's WolfNet config —
+                // same name-keyed DELETE that cluster-sync's prune pass uses.
+                if let Some(ref pname) = peer_name {
+                    let purls = build_node_urls(&node.address, node.port, "/api/networking/wolfnet/peers");
+                    let payload = serde_json::json!({ "name": pname }).to_string();
+                    for url in &purls {
+                        if let Ok(resp) = client.delete(url)
+                            .timeout(std::time::Duration::from_secs(5))
+                            .header("X-WolfStack-Secret", &secret)
+                            .header("Content-Type", "application/json")
+                            .body(payload.clone())
+                            .send()
+                            .await
+                        {
+                            let _ = resp.bytes().await;
+                            break;
+                        }
                     }
                 }
             }
@@ -4119,6 +4153,23 @@ pub struct WolfNetSyncRequest {
     pub node_ids: Vec<String>,
 }
 
+/// Do two WolfNet peer/host names refer to the same node? True for an exact
+/// match (case-insensitive) or a short-hostname-vs-FQDN pair (`immich` vs
+/// `immich.lan`). Deliberately NOT a substring test: the old `a.contains(b)`
+/// kept a stale `docker-immich` peer alive forever because it contains the live
+/// host `immich`, so cluster-sync's prune never removed it (wabil 2026-06-17).
+fn hostnames_same_node(a: &str, b: &str) -> bool {
+    let a = a.trim().to_ascii_lowercase();
+    let b = b.trim().to_ascii_lowercase();
+    if a.is_empty() || b.is_empty() { return false; }
+    if a == b { return true; }
+    let a_short = a.split('.').next().unwrap_or(&a);
+    let b_short = b.split('.').next().unwrap_or(&b);
+    // Same leading label, but only when a dot is actually involved — two
+    // distinct dotless names (`docker-immich` vs `immich`) never match here.
+    a_short == b_short && (a.contains('.') || b.contains('.'))
+}
+
 pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetSyncRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
@@ -4449,8 +4500,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
             if ip.is_empty() || cluster_ips.contains(ip) {
                 continue;
             }
-            let name_is_member = cluster_hosts.iter().any(|h|
-                peer_name == h || peer_name.contains(h.as_str()) || h.contains(peer_name.as_str()));
+            let name_is_member = cluster_hosts.iter().any(|h| hostnames_same_node(peer_name, h));
             if name_is_member {
                 continue;
             }
@@ -37338,7 +37388,7 @@ mod predictive_forward_tests {
 
 #[cfg(test)]
 mod external_url_tests {
-    use super::{build_external_urls, build_node_urls, is_ssrf_blocked_address};
+    use super::{build_external_urls, build_node_urls, hostnames_same_node, is_ssrf_blocked_address};
 
     #[test]
     fn ssrf_guard_blocks_loopback_and_link_local_in_every_spelling() {
@@ -37383,6 +37433,27 @@ mod external_url_tests {
         let urls = build_node_urls("192.168.1.7", 8553, "/p");
         assert_eq!(urls[0], "https://192.168.1.7:8553/p");
         assert!(urls.last().unwrap().starts_with("http://192.168.1.7:8553"));
+    }
+
+    #[test]
+    fn hostnames_same_node_matches_and_rejects() {
+        // Exact (case-insensitive).
+        assert!(hostnames_same_node("immich", "immich"));
+        assert!(hostnames_same_node("Immich", "immich"));
+        // Short vs FQDN.
+        assert!(hostnames_same_node("immich", "immich.lan"));
+        assert!(hostnames_same_node("immich.example.com", "immich"));
+        assert!(hostnames_same_node("immich.lan", "immich.example.com"));
+        // The regression: a stale `docker-immich` peer must NOT be treated as
+        // the live `immich` node (the old substring test kept it forever).
+        assert!(!hostnames_same_node("docker-immich", "immich"));
+        assert!(!hostnames_same_node("immich", "docker-immich"));
+        // Distinct nodes never collide.
+        assert!(!hostnames_same_node("pm2", "pm3"));
+        assert!(!hostnames_same_node("web1", "web2"));
+        // Empty names are never a match.
+        assert!(!hostnames_same_node("", "immich"));
+        assert!(!hostnames_same_node("immich", ""));
     }
 }
 

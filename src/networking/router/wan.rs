@@ -708,6 +708,17 @@ pub fn apply(conn: &WanConnection) -> Result<(), String> {
         }
         return Ok(());
     }
+    // Bring the underlying WAN NIC administratively UP before applying any mode.
+    // After a reboot the ISP NIC can come back admin-DOWN when no host network
+    // manager owns it: PPPoE discovery (PADI) then never finds the link, and
+    // DHCP/Static traffic black-holes — exactly why PapaSchlumpf had to run
+    // `ip link set <iface> up` by hand (2026-06-17). `ip link set up` is
+    // idempotent, so this is a no-op on hosts that already bring the NIC up.
+    // For PPPoE, `conn.interface` is the ETHERNET device the pppoe plugin rides
+    // on (not the ppp unit), which is precisely the one that must be up.
+    if let Err(e) = crate::networking::set_interface_state(&conn.interface, true) {
+        warn!("WolfRouter: could not bring WAN interface {} up ({}) — continuing", conn.interface, e);
+    }
     match &conn.mode {
         WanMode::Pppoe(p) => pppoe_apply(conn, p),
         WanMode::Dhcp => {

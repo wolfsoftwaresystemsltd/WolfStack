@@ -291,11 +291,43 @@ pub fn reload(target: &ExecTarget) -> Result<String, String> {
         return Err(format!("Config test failed, not reloading:\n{}", test.output));
     }
 
-    // Try nginx first, then wolfproxy
-    let reload_result = target.exec("systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || systemctl reload wolfproxy 2>/dev/null || systemctl restart wolfproxy");
-    match reload_result {
-        Ok(_) => Ok("Configuration reloaded successfully".to_string()),
-        Err(e) => Err(format!("Failed to reload: {}", e)),
+    // Prefer a GRACEFUL reload — these signal the running server to re-read its
+    // config without tearing down listeners, so existing connections survive.
+    // nginx reloads gracefully via SIGHUP; wolfproxy *would* too if its unit
+    // grew an ExecReload, but today it has neither an ExecReload nor a SIGHUP
+    // handler, so `systemctl reload wolfproxy` exits non-zero and we drop to the
+    // restart path below.
+    let graceful = target.exec(
+        "systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || systemctl reload wolfproxy 2>/dev/null",
+    );
+    if graceful.is_ok() {
+        return Ok("Configuration reloaded successfully".to_string());
+    }
+
+    // No graceful path available — wolfproxy can only apply config via a full
+    // restart, which briefly drops every connection through the proxy. wabil
+    // 2026-06-17: when the operator's own WolfStack UI transits that proxy, a
+    // *synchronous* restart inside this handler kills the very connection
+    // carrying the response, so the browser sees a bare "Failed to fetch" even
+    // though the restart succeeded (and the operator wrongly concludes the
+    // reload hit the wrong node). Config already passed `--test` above, so the
+    // restart is safe to schedule: detach it with a short delay so this HTTP
+    // response escapes the proxy *before* it goes down. The blip then
+    // reconnects transparently.
+    //
+    // `nohup … &` + redirected stdio fully detaches the child from the exec
+    // shell so `target.exec` returns immediately instead of waiting on the
+    // restart (and on the connection it is about to sever). nohup is in
+    // coreutils — effectively always present wherever systemctl is — so this
+    // doesn't hard-fail the way `setsid` would on a minimal host.
+    let scheduled = target.exec(
+        "nohup sh -c 'sleep 1; systemctl restart wolfproxy' >/dev/null 2>&1 < /dev/null &",
+    );
+    match scheduled {
+        Ok(_) => Ok("Configuration test passed — WolfProxy is restarting to apply it. \
+                     A brief connection blip is expected if this UI is served through the proxy; \
+                     it will reconnect on its own.".to_string()),
+        Err(e) => Err(format!("Failed to schedule WolfProxy restart: {}", e)),
     }
 }
 
