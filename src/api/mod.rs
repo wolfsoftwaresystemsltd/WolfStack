@@ -31268,6 +31268,145 @@ pub async fn oidc_providers() -> HttpResponse {
     HttpResponse::Ok().json(providers)
 }
 
+/// Gate helper for the SSO admin endpoints — requires a licence that grants the
+/// `sso` feature (Team / MSP / Enterprise). Returns Some(response) to short-
+/// circuit when not entitled, None when allowed.
+fn require_sso_feature() -> Option<HttpResponse> {
+    if crate::compat::has_feature("sso") {
+        None
+    } else {
+        Some(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Single Sign-On requires a Team, MSP or Enterprise licence."
+        })))
+    }
+}
+
+/// GET /api/auth/oidc/config — full OIDC config for the admin UI. Secrets are
+/// NEVER returned (not even the encrypted blob) — only a `has_secret` flag.
+/// Auth + `sso` feature required.
+pub async fn oidc_get_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if let Some(resp) = require_sso_feature() { return resp; }
+    let config = crate::auth::oidc::OidcConfig::load();
+    let providers: Vec<serde_json::Value> = config.providers.iter().map(|p| serde_json::json!({
+        "id": p.id,
+        "name": p.name,
+        "issuer_url": p.issuer_url,
+        "client_id": p.client_id,
+        // Secret is write-only over the API. Tell the UI whether one is set so
+        // it can show "configured" without ever shipping the value.
+        "has_secret": !p.client_secret.is_empty(),
+        "scopes": p.scopes,
+        "role_claim": p.role_claim,
+        "role_mappings": p.role_mappings,
+        "enabled": p.enabled,
+    })).collect();
+    HttpResponse::Ok().json(serde_json::json!({
+        "enabled": config.enabled,
+        "providers": providers,
+    }))
+}
+
+/// POST /api/auth/oidc/config — save OIDC config from the admin UI.
+/// Auth + `sso` feature required. Secret handling: a provider whose
+/// `client_secret` arrives EMPTY keeps its existing (encrypted) secret — the UI
+/// never receives the secret, so empty means "unchanged". A non-empty value is
+/// encrypted at rest (AES-256-GCM via the cluster secret).
+pub async fn oidc_save_config(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::auth::oidc::OidcConfig>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if let Some(resp) = require_sso_feature() { return resp; }
+
+    let existing = crate::auth::oidc::OidcConfig::load();
+    let mut cfg = body.into_inner();
+
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in &mut cfg.providers {
+        p.id = p.id.trim().to_string();
+        p.name = p.name.trim().to_string();
+        p.issuer_url = p.issuer_url.trim().trim_end_matches('/').to_string();
+        p.client_id = p.client_id.trim().to_string();
+        if p.scopes.trim().is_empty() {
+            p.scopes = "openid profile email".to_string();
+        }
+        if p.id.is_empty() || p.name.is_empty() || p.issuer_url.is_empty() || p.client_id.is_empty() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Each provider needs a name, issuer URL and client ID."
+            }));
+        }
+        // Block SSRF issuers (loopback / link-local / cloud-metadata) at SAVE
+        // time. The saved issuer is fetched server-side during the (pre-auth)
+        // login discovery, so validating here also protects that path — not just
+        // the admin Test button.
+        if let Err(e) = validate_outbound_url(&p.issuer_url) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Issuer URL for '{}': {}", p.name, e)
+            }));
+        }
+        if !seen_ids.insert(p.id.clone()) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Duplicate provider id '{}'", p.id)
+            }));
+        }
+        // Secret: empty = keep existing (UI never receives it); else encrypt.
+        if p.client_secret.is_empty() {
+            if let Some(old) = existing.providers.iter().find(|o| o.id == p.id) {
+                p.client_secret = old.client_secret.clone();
+            }
+        } else {
+            match crate::auth::oidc::encrypt_secret(&p.client_secret, &state.cluster_secret) {
+                Ok(enc) => p.client_secret = enc,
+                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Failed to encrypt client secret: {}", e)
+                })),
+            }
+        }
+        // A provider can't actually be used without a secret (confidential
+        // client). Surface that as a clear error rather than a silent broken login.
+        if p.enabled && p.client_secret.is_empty() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Provider '{}' is enabled but has no client secret.", p.name)
+            }));
+        }
+    }
+
+    match cfg.save() {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "status": "ok" })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct OidcTestRequest {
+    pub issuer_url: String,
+}
+
+/// POST /api/auth/oidc/test — probe an issuer's discovery document so the
+/// operator can validate the URL before saving. Auth + `sso` feature required.
+pub async fn oidc_test_discovery(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<OidcTestRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if let Some(resp) = require_sso_feature() { return resp; }
+    let issuer = body.issuer_url.trim().trim_end_matches('/');
+    if let Err(e) = validate_outbound_url(issuer) {
+        return HttpResponse::Ok().json(serde_json::json!({ "ok": false, "error": e }));
+    }
+    match crate::auth::oidc::probe_discovery(issuer).await {
+        Ok((auth_ep, token_ep)) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true,
+            "authorization_endpoint": auth_ep,
+            "token_endpoint": token_ep,
+        })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
 /// GET /api/auth/oidc/login/{provider_id} — initiate OIDC login (no auth, returns 302)
 pub async fn oidc_login(
     req: HttpRequest,
@@ -35502,10 +35641,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/smtp-configured", web::get().to(smtp_configured))
         .route("/api/auth/forgot-password", web::post().to(forgot_password))
         .route("/api/auth/reset-password", web::post().to(reset_password))
-        // OIDC Authentication (no auth required)
+        // OIDC login flow — no auth (the login page & IdP callback are pre-auth)
         .route("/api/auth/oidc/providers", web::get().to(oidc_providers))
         .route("/api/auth/oidc/login/{provider_id}", web::get().to(oidc_login))
         .route("/api/auth/oidc/callback", web::get().to(oidc_callback))
+        // OIDC admin config — auth + `sso` licence feature required (enforced in-handler)
+        .route("/api/auth/oidc/config", web::get().to(oidc_get_config))
+        .route("/api/auth/oidc/config", web::post().to(oidc_save_config))
+        .route("/api/auth/oidc/test", web::post().to(oidc_test_discovery))
         // User management (auth required)
         .route("/api/auth/config", web::get().to(get_auth_config))
         .route("/api/auth/config", web::post().to(save_auth_config))

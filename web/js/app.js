@@ -2100,6 +2100,8 @@ function selectView(page) {
             maybePromptDefaultClusterSecret();
         }
     } else if (page === 'settings') {
+        // Reveal the SSO tab only for licences that include it (Team/MSP/Enterprise).
+        gateSsoTab();
         // Load icon packs if icons tab is active
         const iconsTab = document.getElementById('settings-tab-icons');
         if (iconsTab && iconsTab.classList.contains('active')) {
@@ -38641,6 +38643,8 @@ function switchSettingsTab(tabName) {
         loadPasskeys();
     } else if (tabName === 'paths') {
         loadFileLocations();
+    } else if (tabName === 'sso') {
+        loadSsoSettings();
     } else if (tabName === 'reverseproxy') {
         loadReverseProxyConfig();
     } else if (tabName === 'github') {
@@ -40886,6 +40890,255 @@ function pushPathField(key) {
 }
 window.loadFileLocations = loadFileLocations;
 window.pushPathField = pushPathField;
+
+// ─── Single Sign-On (OIDC) Settings ───
+// Backed by /api/auth/oidc/config (GET masks secrets; POST encrypts them at
+// rest server-side). The whole tab is gated to the `sso` licence feature
+// (Team/MSP/Enterprise) on BOTH ends — the button is hidden here and the
+// endpoints enforce has_feature("sso").
+//
+// Presets prefill the issuer pattern + sensible scopes/role-claim for the
+// common IdPs; the issuer is what OIDC discovery (.well-known) is read from, so
+// any compliant provider works, not just these.
+const SSO_PRESETS = {
+    authentik: { name: 'Authentik',          issuer: 'https://auth.example.com/application/o/<app-slug>/', scopes: 'openid profile email',        role_claim: 'groups' },
+    entra:     { name: 'Microsoft Entra ID', issuer: 'https://login.microsoftonline.com/<tenant-id>/v2.0', scopes: 'openid profile email',        role_claim: 'roles' },
+    okta:      { name: 'Okta',               issuer: 'https://<your-org>.okta.com',                          scopes: 'openid profile email groups', role_claim: 'groups' },
+    keycloak:  { name: 'Keycloak',           issuer: 'https://kc.example.com/realms/<realm>',                scopes: 'openid profile email',        role_claim: 'realm_access.roles' },
+    generic:   { name: 'OIDC Provider',      issuer: 'https://idp.example.com',                              scopes: 'openid profile email',        role_claim: '' },
+};
+
+let _ssoConfig = null; // { enabled, providers:[{id,name,issuer_url,client_id,has_secret,scopes,role_claim,role_mappings,enabled}] }
+
+// Reveal the Settings → Single Sign-On tab only when the licence grants `sso`.
+// Mirrors the backend has_feature("sso") (Team/MSP/Enterprise). Returns whether
+// it's entitled so callers can branch.
+async function gateSsoTab() {
+    let ok = false;
+    try {
+        const lic = await loadPlatformLicense();
+        const tier = (lic && lic.tier) || '';
+        const feats = (lic && Array.isArray(lic.features)) ? lic.features : [];
+        ok = !!(lic && lic.valid) && (['team', 'msp', 'pro', 'enterprise'].includes(tier) || feats.includes('sso'));
+    } catch (_) { ok = false; }
+    const btn = document.getElementById('settings-tab-btn-sso');
+    if (btn) btn.style.display = ok ? '' : 'none';
+    return ok;
+}
+
+function ssoRedirectUri() {
+    return window.location.origin + '/api/auth/oidc/callback';
+}
+
+async function loadSsoSettings() {
+    const body = document.getElementById('sso-settings-body');
+    if (!body) return;
+    if (!(await gateSsoTab())) {
+        body.innerHTML = `<div style="padding:18px;border:1px solid var(--border);border-radius:8px;background:var(--bg-panel);">
+            <h4 style="margin:0 0 8px 0;">Single Sign-On is a Team / MSP / Enterprise feature</h4>
+            <p style="color:var(--text-secondary);font-size:13px;margin:0;">Upgrade to enable OIDC login with Authentik, Entra ID, Okta, Keycloak or any OpenID Connect provider — <a href="https://wolfstack.org/enterprise.php" target="_blank" rel="noopener" style="color:var(--accent);">see plans</a>.</p>
+        </div>`;
+        return;
+    }
+    body.innerHTML = (typeof renderBlockSkeleton === 'function') ? renderBlockSkeleton({ lines: 3 }) : '<div style="padding:20px;color:var(--text-muted);">Loading…</div>';
+    try {
+        const r = await fetch('/api/auth/oidc/config');
+        if (handleAuthError(r)) return;
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || ('HTTP ' + r.status)); }
+        _ssoConfig = await r.json();
+        if (!_ssoConfig.providers) _ssoConfig.providers = [];
+        renderSsoSettings();
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger);padding:16px;">Failed to load SSO config: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderSsoSettings() {
+    const body = document.getElementById('sso-settings-body');
+    const cfg = _ssoConfig || { enabled: false, providers: [] };
+    const redirect = ssoRedirectUri();
+    const inputCss = 'font-size:13px;padding:7px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);width:100%;';
+    const monoCss = inputCss + 'font-family:var(--font-mono,monospace);';
+
+    let html = `<div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;background:var(--bg-panel);">
+        <label style="display:flex;align-items:center;gap:8px;font-size:14px;cursor:pointer;">
+            <input type="checkbox" id="sso-enabled" ${cfg.enabled ? 'checked' : ''}> Enable OIDC sign-in on the login page
+        </label>
+        <div style="margin-top:12px;font-size:12px;color:var(--text-muted);">Redirect / Callback URI — add this to each provider's <strong>allowed redirect URIs</strong>:</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+            <input type="text" id="sso-redirect" readonly value="${escapeAttr(redirect)}" style="${monoCss}">
+            <button class="btn btn-sm" onclick="ssoCopyRedirect()" style="white-space:nowrap;">Copy</button>
+        </div>
+    </div>`;
+
+    if (!cfg.providers.length) {
+        html += `<div style="text-align:center;color:var(--text-muted);padding:18px;border:1px dashed var(--border);border-radius:8px;margin-bottom:12px;">No identity providers configured yet. Add one below.</div>`;
+    } else {
+        cfg.providers.forEach((p, i) => { html += ssoProviderCard(p, i, inputCss, monoCss); });
+    }
+
+    html += `<div style="margin-top:10px;font-size:12px;color:var(--text-muted);">Add a provider:</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
+            ${Object.keys(SSO_PRESETS).map(k => `<button class="btn btn-sm" onclick="ssoAddProvider('${k}')" style="background:var(--bg-tertiary);border:1px solid var(--border);">+ ${escapeHtml(SSO_PRESETS[k].name)}</button>`).join('')}
+        </div>
+        <div style="margin-top:18px;display:flex;gap:8px;">
+            <button class="btn btn-primary" onclick="ssoSave()">Save SSO settings</button>
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">No restart needed — changes apply to the next login. The client secret is encrypted at rest and never shown again after saving.</p>`;
+    body.innerHTML = html;
+}
+
+function ssoProviderCard(p, i, inputCss, monoCss) {
+    const rm = (p.role_mappings && p.role_mappings[0]) || { admin_values: [], viewer_values: [], default_role: 'viewer' };
+    const fld = (label, key, val, css, ph) => `
+        <div style="display:grid;grid-template-columns:160px 1fr;gap:8px;align-items:center;margin-bottom:6px;">
+            <label style="font-size:12px;color:var(--text-secondary);">${label}</label>
+            <input type="text" id="sso-p${i}-${key}" value="${escapeAttr(val || '')}" placeholder="${escapeAttr(ph || '')}" style="${css}">
+        </div>`;
+    const secretPh = p.has_secret ? '•••••••• (saved — leave blank to keep)' : 'Client secret from the provider';
+    return `<div data-sso-idx="${i}" style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                <input type="checkbox" id="sso-p${i}-enabled" ${p.enabled ? 'checked' : ''}> Enabled
+            </label>
+            <button class="btn btn-sm btn-danger" onclick="ssoRemoveProvider(${i})" style="font-size:11px;">Remove</button>
+        </div>
+        ${fld('Display name', 'name', p.name, inputCss, 'Sign in with…')}
+        ${fld('Provider ID', 'id', p.id, monoCss, 'short-slug (e.g. keycloak)')}
+        ${fld('Issuer URL', 'issuer', p.issuer_url, monoCss, 'https://idp.example.com')}
+        ${fld('Client ID', 'clientid', p.client_id, monoCss, 'OAuth2 client id')}
+        <div style="display:grid;grid-template-columns:160px 1fr auto;gap:8px;align-items:center;margin-bottom:6px;">
+            <label style="font-size:12px;color:var(--text-secondary);">Client secret</label>
+            <input type="password" id="sso-p${i}-secret" value="" placeholder="${escapeAttr(secretPh)}" style="${monoCss}" autocomplete="new-password">
+            <button class="btn btn-sm" onclick="ssoTestProvider(${i})" style="white-space:nowrap;" title="Fetch the issuer's discovery document">Test issuer</button>
+        </div>
+        ${fld('Scopes', 'scopes', p.scopes, monoCss, 'openid profile email')}
+        <details style="margin-top:6px;">
+            <summary style="font-size:12px;color:var(--text-muted);cursor:pointer;">Role mapping (optional)</summary>
+            <div style="margin-top:8px;">
+                ${fld('Role claim', 'roleclaim', p.role_claim, monoCss, 'groups  •  realm_access.roles')}
+                ${fld('Admin values', 'admin', (rm.admin_values || []).join(', '), inputCss, 'comma-separated group/role names → admin')}
+                ${fld('Viewer values', 'viewer', (rm.viewer_values || []).join(', '), inputCss, 'comma-separated → viewer (read-only)')}
+                <div style="display:grid;grid-template-columns:160px 1fr;gap:8px;align-items:center;">
+                    <label style="font-size:12px;color:var(--text-secondary);">Default role</label>
+                    <select id="sso-p${i}-defrole" style="${inputCss}">
+                        <option value="viewer" ${(rm.default_role !== 'admin') ? 'selected' : ''}>viewer (read-only)</option>
+                        <option value="admin" ${(rm.default_role === 'admin') ? 'selected' : ''}>admin</option>
+                    </select>
+                </div>
+            </div>
+        </details>
+    </div>`;
+}
+
+function ssoCopyRedirect() {
+    const el = document.getElementById('sso-redirect');
+    if (!el) return;
+    navigator.clipboard.writeText(el.value).then(
+        () => showToast('Redirect URI copied', 'success'),
+        () => showToast('Copy failed — select and copy manually', 'error')
+    );
+}
+
+// Add a provider prefilled from a preset. Edits the in-memory model then
+// re-renders so unsaved edits to OTHER cards are preserved first.
+function ssoAddProvider(presetKey) {
+    ssoSyncFromDom();
+    const pre = SSO_PRESETS[presetKey] || SSO_PRESETS.generic;
+    // Unique id — append a number if the base slug is taken.
+    let base = presetKey, id = base, n = 2;
+    while (_ssoConfig.providers.some(p => p.id === id)) { id = base + n; n++; }
+    _ssoConfig.providers.push({
+        // Prefill the issuer pattern (with <placeholders> for the operator to
+        // replace) plus sensible scopes/role-claim for this IdP.
+        id, name: pre.name, issuer_url: pre.issuer,
+        client_id: '', has_secret: false, scopes: pre.scopes, role_claim: pre.role_claim,
+        role_mappings: [], enabled: false,
+    });
+    renderSsoSettings();
+}
+
+function ssoRemoveProvider(i) {
+    ssoSyncFromDom();
+    _ssoConfig.providers.splice(i, 1);
+    renderSsoSettings();
+}
+
+// Read every card's current DOM values back into _ssoConfig (so add/remove
+// re-renders don't drop unsaved edits, and so Save has the latest values).
+function ssoSyncFromDom() {
+    const cards = document.querySelectorAll('[data-sso-idx]');
+    const out = [];
+    cards.forEach(card => {
+        const i = card.getAttribute('data-sso-idx');
+        const v = (k) => { const el = document.getElementById(`sso-p${i}-${k}`); return el ? el.value.trim() : ''; };
+        const chk = (k) => { const el = document.getElementById(`sso-p${i}-${k}`); return !!(el && el.checked); };
+        const prev = (_ssoConfig.providers && _ssoConfig.providers[i]) || {};
+        const secret = (document.getElementById(`sso-p${i}-secret`) || {}).value || '';
+        const admin = v('admin').split(',').map(s => s.trim()).filter(Boolean);
+        const viewer = v('viewer').split(',').map(s => s.trim()).filter(Boolean);
+        const roleClaim = v('roleclaim');
+        out.push({
+            id: v('id'), name: v('name'), issuer_url: v('issuer'), client_id: v('clientid'),
+            // empty secret = keep existing (backend preserves); track has_secret for re-render
+            client_secret: secret,
+            has_secret: prev.has_secret || !!secret,
+            scopes: v('scopes'), role_claim: roleClaim,
+            role_mappings: (admin.length || viewer.length || roleClaim)
+                ? [{ admin_values: admin, viewer_values: viewer, default_role: v('defrole') || 'viewer' }]
+                : [],
+            enabled: chk('enabled'),
+        });
+    });
+    _ssoConfig.providers = out;
+}
+
+async function ssoTestProvider(i) {
+    const issuer = (document.getElementById(`sso-p${i}-issuer`) || {}).value || '';
+    if (!issuer.trim()) { showToast('Enter an issuer URL first', 'error'); return; }
+    showToast('Testing issuer discovery…', 'info');
+    try {
+        const r = await fetch('/api/auth/oidc/test', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issuer_url: issuer.trim() }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) {
+            showModal(`<div style="font-size:13px;">Discovery OK ✓<pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:12px;margin-top:10px;">authorization_endpoint:\n${escapeHtml(d.authorization_endpoint || '')}\n\ntoken_endpoint:\n${escapeHtml(d.token_endpoint || '')}</pre></div>`, 'Issuer reachable');
+        } else {
+            showModal(`<div style="color:var(--danger);font-size:13px;">${escapeHtml(d.error || ('HTTP ' + r.status))}</div>`, 'Issuer test failed');
+        }
+    } catch (e) { showToast('Test failed: ' + e.message, 'error', 0); }
+}
+
+async function ssoSave() {
+    ssoSyncFromDom();
+    const payload = {
+        enabled: !!(document.getElementById('sso-enabled') || {}).checked,
+        providers: _ssoConfig.providers,
+    };
+    try {
+        const r = await fetch('/api/auth/oidc/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && (d.status === 'ok')) {
+            showToast('SSO settings saved.', 'success');
+            loadSsoSettings(); // reload so secrets re-mask and has_secret refreshes
+        } else {
+            showToast('Failed to save: ' + (d.error || 'HTTP ' + r.status), 'error', 0);
+        }
+    } catch (e) { showToast('Failed to save SSO settings: ' + e.message, 'error', 0); }
+}
+
+window.loadSsoSettings = loadSsoSettings;
+window.gateSsoTab = gateSsoTab;
+window.ssoCopyRedirect = ssoCopyRedirect;
+window.ssoAddProvider = ssoAddProvider;
+window.ssoRemoveProvider = ssoRemoveProvider;
+window.ssoTestProvider = ssoTestProvider;
+window.ssoSave = ssoSave;
 
 // ─── Reverse Proxy config (Settings → 🌐 Reverse Proxy) ───
 
