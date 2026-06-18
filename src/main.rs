@@ -1637,6 +1637,74 @@ async fn main() -> std::io::Result<()> {
             });
         }
 
+        // WolfUSB SOURCE-side restore (PapaSchlumpf/wabil 2026-06-17): when THIS
+        // node is the USB *host* (the exporter with the device physically
+        // plugged in) and it reboots, the device used to come back unexported
+        // and the target couldn't reconnect until a manual remove + re-assign.
+        // `restore_assignments` above only re-establishes the TARGET side — it
+        // has no branch for assignments where this node is the SOURCE. Fill that
+        // gap by re-driving each such assignment through the exact recovery the
+        // manual "Re-attach" button runs (`POST /api/wolfusb/reattach/{busid}`):
+        // for a remote target we poke the target node (it calls back here for
+        // prepare-for-export, then re-installs its mount unit + re-passes the
+        // device through); a same-node assignment recovers locally.
+        {
+            let nid = node_id.clone();
+            let secret = cluster_secret.clone();
+            let cluster_usb = cluster.clone();
+            tokio::spawn(async move {
+                // Run after the target-side restore (5s) so a whole-cluster
+                // reboot doesn't have both ends fighting over the mount unit.
+                tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+                let config = wolfusb::WolfUsbConfig::load();
+                if !config.enabled { return; }
+                let mine: Vec<wolfusb::UsbAssignment> = config.assignments.iter()
+                    .filter(|a| a.source_node_id == nid)
+                    .cloned()
+                    .collect();
+                if mine.is_empty() || !wolfusb::is_wolfusb_available() { return; }
+                info!("WolfUSB: re-driving {} source-side assignment(s) after startup", mine.len());
+                for a in &mine {
+                    if a.target_node_id == nid {
+                        // Source and target are the same node — recover locally.
+                        let busid = a.busid.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            wolfusb::reattach_local(&busid, None)
+                        }).await;
+                        continue;
+                    }
+                    // Remote target — trigger its full Re-attach recovery.
+                    let Some(target) = cluster_usb.get_all_nodes().into_iter()
+                        .find(|n| n.id == a.target_node_id) else {
+                        warn!("WolfUSB: target node {} for {} not in cluster — skipping source-side restore",
+                            a.target_node_id, a.busid);
+                        continue;
+                    };
+                    let urls = api::build_node_urls(&target.address, target.port,
+                        &format!("/api/wolfusb/reattach/{}", a.busid));
+                    let client = &*api::API_HTTP_CLIENT;
+                    let mut ok = false;
+                    for url in &urls {
+                        if let Ok(r) = client.post(url)
+                            .timeout(std::time::Duration::from_secs(60))
+                            .header("X-WolfStack-Secret", &secret)
+                            .send().await
+                            && r.status().is_success()
+                        {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    if ok {
+                        info!("WolfUSB: re-attach triggered on {} for {}", target.hostname, a.busid);
+                    } else {
+                        warn!("WolfUSB: could not trigger re-attach on {} for {} (target offline?) — \
+                               its own mount unit will keep retrying", target.hostname, a.busid);
+                    }
+                }
+            });
+        }
+
         // Background: periodic self-monitoring update
         let state_clone = app_state.clone();
         let cluster_clone = cluster.clone();
