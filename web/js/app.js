@@ -41188,6 +41188,23 @@ async function loadSupport() {
     }
 }
 
+// Human label + colour for a ticket status slug. Mirrors the website's
+// ticket_statuses() so the four lifecycle states (set by staff in adminsys)
+// render consistently here instead of as raw slugs like "working".
+function supportStatusMeta(status) {
+    switch (status) {
+        case 'working': return { label: 'Working On', color: '#60a5fa', dot: '●' };
+        case 'waiting': return { label: 'Waiting on Customer', color: '#fbbf24', dot: '○' };
+        case 'closed':  return { label: 'Closed', color: 'var(--text-muted)', dot: '○' };
+        case 'open':
+        default:        return { label: 'Open', color: 'var(--success)', dot: '●' };
+    }
+}
+function supportStatusBadge(status) {
+    const m = supportStatusMeta(status);
+    return `<span style="color:${m.color};">${m.dot} ${escapeHtml(m.label)}</span>`;
+}
+
 function renderSupportList(tickets) {
     const body = document.getElementById('support-body');
     let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
@@ -41199,9 +41216,7 @@ function renderSupportList(tickets) {
     } else {
         html += `<table class="data-table" style="width:100%;"><thead><tr><th>Subject</th><th>Status</th><th>Updated</th></tr></thead><tbody>`;
         for (const t of tickets) {
-            const badge = t.status === 'open'
-                ? '<span style="color:var(--success);">● open</span>'
-                : `<span style="color:var(--text-muted);">○ ${escapeHtml(t.status || '')}</span>`;
+            const badge = supportStatusBadge(t.status);
             html += `<tr style="cursor:pointer;" onclick="supportOpen('${escapeHtml(t.id)}')">
                 <td>${escapeHtml(t.subject || '')}</td><td>${badge}</td>
                 <td style="color:var(--text-muted);font-size:12px;">${escapeHtml((t.updated || '').substring(0, 16).replace('T', ' '))}</td></tr>`;
@@ -41261,7 +41276,10 @@ async function supportRefreshThread() {
         if (!el) { supportStopPoll(); return; }
         const msgs = d.messages || [];
         const subj = (d.ticket && d.ticket.subject) || '';
-        let html = `<div style="font-weight:600;margin-bottom:8px;">${escapeHtml(subj)}</div>`;
+        const st = (d.ticket && d.ticket.status) || (d.status) || 'open';
+        let html = `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
+            <span style="font-weight:600;">${escapeHtml(subj)}</span>
+            <span style="font-size:12px;">${supportStatusBadge(st)}</span></div>`;
         if (!msgs.length) html += '<div style="color:var(--text-muted);">No messages yet.</div>';
         for (const m of msgs) {
             const staff = m.author === 'staff';
