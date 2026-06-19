@@ -2699,6 +2699,90 @@ fn lxc_apply_wolfnet(container: &str) {
     }
 }
 
+/// Tear down a WolfNet IP binding inside an LXC container — the inverse of
+/// [`lxc_apply_wolfnet`]. Called when the WolfNet IP is cleared (e.g. switching
+/// a container to bridge/nat mode). Removing the stored `.wolfnet/ip` marker and
+/// the `wn0` NIC from the pct config is NOT enough: the address lives on inside
+/// the container (a live `ip addr` plus a persistent NetworkManager keyfile /
+/// rootfs network config), so without this the WolfNet IP is re-bound on the
+/// next start — exactly the symptom Gary (KO4BSR) reported on v24.51.2.
+///
+/// Mirrors the bind path's platform split: Proxmox uses `wn0` (its own NM
+/// keyfile), standalone LXC uses a secondary /32 on `eth0` persisted in the
+/// rootfs network config. Both the live binding and the persistent config are
+/// cleared, and the now-dead host route to the container's WolfNet IP is
+/// removed. Every step is best-effort and idempotent so a stopped or
+/// partly-configured container is safe.
+fn lxc_remove_wolfnet(container: &str, old_ip: &str) {
+    let old_ip = old_ip.trim();
+    if old_ip.is_empty() { return; }
+
+    let base = lxc_base_dir(container);
+    let attach_prefix: Vec<String> = if base != LXC_DEFAULT_PATH {
+        vec!["-P".to_string(), base.clone(), "-n".to_string(), container.to_string(), "--".to_string()]
+    } else {
+        vec!["-n".to_string(), container.to_string(), "--".to_string()]
+    };
+    let running = lxc_is_running(container);
+    let wolfnet_cidr = format!("{}/32", old_ip);
+
+    if is_proxmox() {
+        // Proxmox: the WolfNet IP lives on wn0, persisted in a NetworkManager
+        // keyfile (id=wn0). The caller removes the wn0 NIC from the pct config,
+        // so once stopped there is no wn0 for the IP to re-bind to. While the
+        // container is running we must also bring the NM connection down, delete
+        // its keyfile, and remove the live address so the IP is gone immediately
+        // rather than lingering until the next restart.
+        if running {
+            let cmd = format!(
+                "nmcli con down wn0 2>/dev/null; nmcli con delete wn0 2>/dev/null; \
+                 rm -f /etc/NetworkManager/system-connections/wn0.nmconnection; \
+                 nmcli con reload 2>/dev/null; \
+                 ip addr del {} dev wn0 2>/dev/null; true",
+                wolfnet_cidr
+            );
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["sh", "-c", &cmd].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
+        }
+    } else {
+        // Standalone LXC: the WolfNet IP is a secondary /32 on eth0, persisted in
+        // the rootfs network config. Rewrite that config WITHOUT the WolfNet IP
+        // (keeping the 10.0.3.x bridge IP so host routing / connectivity
+        // survives), then — if running — drop the live address and the
+        // source-pinned WolfNet subnet route and re-apply the rewritten config so
+        // NetworkManager / networkd don't immediately put the address back.
+        // Derive the SAME bridge IP assign_container_bridge_ip wrote (last octet
+        // of the WolfNet IP). Only rewrite when we can derive a valid octet — a
+        // malformed marker must not make us guess a wrong bridge IP and break
+        // connectivity; in that case we skip the rewrite and rely on the live
+        // unbind below.
+        if let Some(bridge_ip) = old_ip.rsplit('.').next()
+            .filter(|o| o.parse::<u8>().is_ok())
+            .map(|o| format!("10.0.3.{}", o)) {
+            write_container_network_config(container, &bridge_ip, None);
+        }
+
+        if running {
+            let mut cmd = format!("ip addr del {} dev eth0 2>/dev/null; ", wolfnet_cidr);
+            if let Some(subnet) = wolfnet_subnet_from_ip(old_ip) {
+                cmd.push_str(&format!("ip route del {} 2>/dev/null; ", subnet));
+            }
+            // Re-apply the rewritten config across renderers: NM (reload+up) and
+            // systemd-networkd (reload re-reads the .network file, reconfigure
+            // re-applies it to eth0 so the secondary address is dropped live).
+            cmd.push_str("nmcli con reload 2>/dev/null && nmcli con up eth0 2>/dev/null; \
+                          networkctl reload 2>/dev/null; networkctl reconfigure eth0 2>/dev/null; true");
+            let mut args: Vec<String> = attach_prefix.clone();
+            args.extend(["sh", "-c", &cmd].iter().map(|s| s.to_string()));
+            let _ = Command::new("lxc-attach").args(&args).output();
+        }
+    }
+
+    // The host route to the container's WolfNet IP is no longer valid.
+    let _ = Command::new("ip").args(["route", "del", &wolfnet_cidr]).output();
+}
+
 /// Find a free IP in 10.0.3.100-254 by checking ALL containers, LXCs, VMs, Docker
 fn find_free_bridge_ip() -> u8 {
     let mut used: Vec<u8> = Vec::new();
@@ -6520,12 +6604,19 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
         let wolfnet_ip_file = format!("{}/ip", wolfnet_dir);
         let ip_trimmed = wip.trim();
         if ip_trimmed.is_empty() {
+            // Read the old WolfNet IP before deleting the marker — it's the only
+            // record of which address to unbind inside the container.
+            let old_ip = std::fs::read_to_string(&wolfnet_ip_file).unwrap_or_default();
             let _ = std::fs::remove_file(&wolfnet_ip_file);
+            // Unbind the WolfNet IP inside the container + drop the host route.
+            // Without this the address is re-applied from the in-container NM
+            // keyfile on next start (Gary KO4BSR, v24.51.2).
+            lxc_remove_wolfnet(container, old_ip.trim());
             // Remove the wn0 NIC from pct config if it exists
             let current = lxc_parse_config(container).unwrap_or_default();
             if let Some(wn_nic) = current.network_interfaces.iter().find(|n| n.name == "wn0" || n.link == "lxcbr0") {
                 let _ = Command::new("pct")
-                    .args(["set", container, &format!("--delete"), &format!("net{}", wn_nic.index)])
+                    .args(["set", container, "--delete", &format!("net{}", wn_nic.index)])
                     .output();
 
             }
@@ -6918,8 +7009,14 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
         let wolfnet_ip_file = format!("{}/ip", wolfnet_dir);
         let ip_trimmed = wip.trim();
         if ip_trimmed.is_empty() {
+            // Read the old WolfNet IP before deleting the marker so the binding
+            // can be torn down inside the container.
+            let old_ip = std::fs::read_to_string(&wolfnet_ip_file).unwrap_or_default();
             // Remove WolfNet IP
             let _ = std::fs::remove_file(&wolfnet_ip_file);
+            // Rewrite the rootfs net config without the WolfNet IP + drop the
+            // live address — otherwise it's re-applied on next start.
+            lxc_remove_wolfnet(container, old_ip.trim());
         } else {
             let _ = std::fs::create_dir_all(&wolfnet_dir);
             std::fs::write(&wolfnet_ip_file, ip_trimmed)

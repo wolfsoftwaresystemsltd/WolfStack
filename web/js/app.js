@@ -13192,12 +13192,36 @@ function configuratorNodeStorageKey(component) {
 // wolfstack node — anything else falls back to the page node so a removed or
 // down node never leaves the configurator stuck pointing at nowhere.
 function restoreConfiguratorNode(component) {
+    const nodes = Array.isArray(allNodes) ? allNodes : [];
     let id = null;
     try { id = localStorage.getItem(configuratorNodeStorageKey(component)); } catch (_) {}
-    if (!id) return null;
-    const node = (Array.isArray(allNodes) ? allNodes : []).find(n => String(n.id) === String(id));
-    if (node && !node.is_self && node.online !== false && node.node_type === 'wolfstack') return node;
-    return null;
+    if (id !== null) {
+        // A choice was remembered. Empty string = the user explicitly picked
+        // "This node" (onConfiguratorNodeChange stores `nodeId || ''`) — honour
+        // it and do NOT auto-detect. A non-empty id resolves to the remembered
+        // remote; anything removed/down/non-wolfstack falls back to local.
+        if (!id) return null;
+        const node = nodes.find(n => String(n.id) === String(id));
+        if (node && !node.is_self && node.online !== false && node.node_type === 'wolfstack') return node;
+        return null;
+    }
+    // Nothing ever remembered: auto-target the node that actually runs this component
+    // so the configurator / Cert Manager loads the right config instead of
+    // silently showing the page-serving node's (which may not host it at all —
+    // wabil's main node isn't the WolfProxy node). If the page node has the
+    // component installed, stay local ("This node"). Otherwise, when exactly one
+    // remote wolfstack node has it, default to that node. Ambiguous (0 or >1
+    // remotes) stays local so the user picks rather than us guessing wrong.
+    // Note: nodes arriving via cross-boundary cluster gossip carry empty
+    // components, so they never match here and auto-detection falls through to
+    // "This node" for federated topologies — they keep the manual selector.
+    const lc = String(component || '').toLowerCase();
+    const hasComponent = (n) => (Array.isArray(n.components) ? n.components : [])
+        .some(c => c && String(c.component).toLowerCase() === lc && c.installed);
+    const selfNode = nodes.find(n => n.is_self);
+    if (selfNode && hasComponent(selfNode)) return null;
+    const remotes = nodes.filter(n => !n.is_self && n.online !== false && n.node_type === 'wolfstack' && hasComponent(n));
+    return remotes.length === 1 ? remotes[0] : null;
 }
 
 function onConfiguratorNodeChange(nodeId, componentName) {
