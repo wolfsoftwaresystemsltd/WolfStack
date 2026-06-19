@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.51.3: clear WolfNet IP inside LXC on mode switch + cert manager defaults to the proxy node** _(2026-06-19 — [`4825de43`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4825de43152a15d8824336bc3c9f46978da2cea7))_
 - **v24.51.2: in-app Support shows the 4 ticket statuses with labels** _(2026-06-18 — [`d6302e66`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d6302e66101901a1cb487eed636c7a83552a2b3c))_
 - **v24.51.1: bridge-mode VMs/LXCs no longer keep/get a WolfNet IP (Gary, wabil)** _(2026-06-18 — [`12fe43be`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/12fe43bed23133cb24dfba3fd20c41ae581618c8))_
 - **v24.51.0: in-app Support tickets for licence holders & GitHub sponsors** _(2026-06-18 — [`bbd271e3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bbd271e30b646622352c68d6b6621a7ef92450f1))_
