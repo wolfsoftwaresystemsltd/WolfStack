@@ -12456,7 +12456,8 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
 }
 
 // ─── Component Detail ───
-async function openComponentDetail(name) {
+async function openComponentDetail(name, opts) {
+    opts = opts || {};
     currentComponent = name;
     // Restore the operator's last cluster-node choice for THIS component's
     // configurator. A multi-node operator whose proxy/certs live on a node
@@ -12480,10 +12481,17 @@ async function openComponentDetail(name) {
     currentPage = 'component-detail';
     const cName = componentDisplayNames[name] || name.charAt(0).toUpperCase() + name.slice(1);
     document.getElementById('page-title').textContent = cName;
-    await refreshComponentDetail(name);
+    await refreshComponentDetail(name, opts);
 }
 
-async function refreshComponentDetail(name) {
+async function refreshComponentDetail(name, opts) {
+    opts = opts || {};
+    // The Cert Manager opens through this and then immediately swaps the
+    // configurator body for the cert list — rendering the nginx/sites view first
+    // makes it visibly flash before the certs appear (wabil 2026-06-19). When
+    // asked, skip the content render but still build the node/target selector so
+    // the Node dropdown stays present.
+    const skipCfgContent = !!opts.skipConfiguratorLoad;
     const isContainer = !!currentConfiguratorTarget;
     // A remembered/selected remote node manages a DIFFERENT host's service, so
     // the host-only status/actions/config/logs panels (which describe the
@@ -12509,7 +12517,8 @@ async function refreshComponentDetail(name) {
         const cfgSection = document.getElementById('detail-configurator-section');
         if (cfgSection && hasConfigurator(name)) {
             cfgSection.style.display = '';
-            loadConfigurator(name);
+            if (skipCfgContent) { await buildConfiguratorTargetSelector(name); }
+            else { loadConfigurator(name); }
         }
         return;
     }
@@ -12620,7 +12629,8 @@ async function refreshComponentDetail(name) {
         const cfgSection = document.getElementById('detail-configurator-section');
         if (cfgSection && hasConfigurator(name)) {
             cfgSection.style.display = '';
-            loadConfigurator(name);
+            if (skipCfgContent) { await buildConfiguratorTargetSelector(name); }
+            else { loadConfigurator(name); }
         } else if (cfgSection) {
             cfgSection.style.display = 'none';
         }
@@ -13786,7 +13796,11 @@ function setCertScope(scope) {
 // cluster cert manager. Single function so the CTA's onclick stays a
 // one-liner and the navigation order is auditable.
 async function openClusterCertManager() {
-    await openComponentDetail('wolfproxy');
+    // skipConfiguratorLoad: don't render the nginx/sites view first —
+    // loadCertManager replaces the configurator body with the cert list right
+    // after, so rendering sites in between makes them flash (wabil 2026-06-19).
+    // The node selector is still built, so the Node dropdown stays.
+    await openComponentDetail('wolfproxy', { skipConfiguratorLoad: true });
     await loadCertManager();
 }
 window.openClusterCertManager = openClusterCertManager;
