@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.53.0: Fleet Terminal Console (byobu-style multi-window) + grouped top menu bar** _(2026-06-20 — [`e0e7e3db`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e0e7e3dbed52533d86256c1d34391ad0b8175d15))_
 - **v24.52.0: LAN bridge auto-create, VM/LXC notes, QEMU extra-args, backup excludes/PBS-pxar/system-folders + WireGuard & WolfNet fixes** _(2026-06-20 — [`ccddb60c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ccddb60cccb38d5cb5ba072156edcfd1920ea44a))_
 - **v24.51.5: Cert Manager no longer flashes the nginx sites view before the cert list** _(2026-06-19 — [`5db66151`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5db6615177826e8bf4aacf74c0beb36f2dadb748))_
 - **v24.51.4: AI model dropdown loads from a typed-but-unsaved API key (Gemini fix)** _(2026-06-19 — [`62d9c1a5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/62d9c1a5f3f8e225a6010dc61b906887265164c9))_
