@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.52.0: LAN bridge auto-create, VM/LXC notes, QEMU extra-args, backup excludes/PBS-pxar/system-folders + WireGuard & WolfNet fixes** _(2026-06-20 — [`ccddb60c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ccddb60cccb38d5cb5ba072156edcfd1920ea44a))_
 - **v24.51.5: Cert Manager no longer flashes the nginx sites view before the cert list** _(2026-06-19 — [`5db66151`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5db6615177826e8bf4aacf74c0beb36f2dadb748))_
 - **v24.51.4: AI model dropdown loads from a typed-but-unsaved API key (Gemini fix)** _(2026-06-19 — [`62d9c1a5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/62d9c1a5f3f8e225a6010dc61b906887265164c9))_
 - **v24.51.3: clear WolfNet IP inside LXC on mode switch + cert manager defaults to the proxy node** _(2026-06-19 — [`4825de43`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4825de43152a15d8824336bc3c9f46978da2cea7))_
