@@ -6732,6 +6732,10 @@ pub struct LxcCreateRequest {
     /// Gateway for mode=bridge+static. Usually the router IP on that subnet.
     #[serde(default)]
     pub bridge_gateway: Option<String>,
+    /// Free-text operator notes / description. Persisted via `pct set
+    /// --description` (Proxmox) or the WolfStack sidecar (native LXC).
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 /// POST /api/containers/lxc/create — create an LXC container from template
@@ -6781,7 +6785,17 @@ pub async fn lxc_create(
             body.bridge_ip.as_deref(),
             body.bridge_gateway.as_deref(),
         ) {
-            Ok((_vmid, msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+            Ok((vmid, mut msg)) => {
+                // Notes / description — set after the CT exists so `pct set
+                // --description` has a target. Non-fatal: a notes failure must
+                // not fail the whole create.
+                let notes = body.notes.as_deref().unwrap_or("");
+                if !notes.is_empty()
+                    && let Err(e) = containers::lxc_set_notes(&vmid.to_string(), notes) {
+                    msg = format!("{} — Notes warning: {}", msg, e);
+                }
+                HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+            }
             Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
         };
     }
@@ -6885,6 +6899,13 @@ pub async fn lxc_create(
                     }
                 }
                 _ => {}
+            }
+
+            // Notes / description — write the native-LXC sidecar.
+            let notes = body.notes.as_deref().unwrap_or("");
+            if !notes.is_empty()
+                && let Err(e) = containers::lxc_set_notes(&body.name, notes) {
+                messages.push(format!("Notes warning: {}", e));
             }
 
             HttpResponse::Ok().json(serde_json::json!({ "message": messages.join(" — ") }))
@@ -12411,6 +12432,83 @@ pub async fn net_get_dns(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
     HttpResponse::Ok().json(networking::get_dns())
 }
 
+/// GET /api/networking/bridges — list bridges (classified LAN/NAT/empty)
+/// plus candidate physical NICs that could be enslaved into a new LAN
+/// bridge. Drives the "Create LAN bridge" UI.
+pub async fn net_list_bridges(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let bridges = web::block(crate::networking::lan_bridge::classify_bridges).await;
+    let nics = web::block(crate::networking::lan_bridge::candidate_nics).await;
+    match (bridges, nics) {
+        (Ok(bridges), Ok(nics)) => HttpResponse::Ok().json(serde_json::json!({
+            "bridges": bridges,
+            "nics": nics,
+        })),
+        _ => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": "failed to enumerate bridges/NICs" })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LanBridgeCreateRequest {
+    pub bridge_name: String,
+    pub nic: String,
+    #[serde(default)]
+    pub accept_risk: bool,
+}
+
+/// POST /api/networking/lan-bridge — create a LAN bridge enslaving a
+/// physical NIC. The blocking `ip`/`nmcli` work runs on the actix
+/// blocking pool. When the chosen NIC is the management NIC, the
+/// response carries a `pending_confirm` token that must be POSTed back
+/// (see `net_lan_bridge_confirm`) within `rollback_seconds` or the
+/// change auto-reverts.
+pub async fn net_lan_bridge_create(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<LanBridgeCreateRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let body = body.into_inner();
+    let params = crate::networking::lan_bridge::CreateLanBridgeParams {
+        bridge_name: body.bridge_name,
+        nic: body.nic,
+        accept_risk: body.accept_risk,
+    };
+    match web::block(move || crate::networking::lan_bridge::create_lan_bridge(&params)).await {
+        Ok(Ok(outcome)) => HttpResponse::Ok().json(serde_json::json!({
+            "message": outcome.message,
+            "pending_confirm": outcome.pending_confirm,
+            "rollback_seconds": outcome.rollback_seconds,
+        })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("lan-bridge task: {}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LanBridgeConfirmRequest {
+    pub token: String,
+}
+
+/// POST /api/networking/lan-bridge/confirm — confirm a pending
+/// management-NIC bridge so its auto-revert watchdog does not fire.
+pub async fn net_lan_bridge_confirm(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<LanBridgeConfirmRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let token = body.into_inner().token;
+    match web::block(move || crate::networking::lan_bridge::confirm_lan_bridge(&token)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("confirm task: {}", e) })),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct DnsSetRequest {
     pub nameservers: Vec<String>,
@@ -15607,6 +15705,15 @@ pub async fn backup_create(
             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
         }
     }
+    // Validate a system-folder target's path up front (absolute, exists, not
+    // a dangerous root) so the operator gets a clear 400 immediately.
+    if let Some(t) = &body.target {
+        if t.target_type == backup::BackupTargetType::SystemPath {
+            if let Err(e) = backup::validate_system_path(&t.system_path) {
+                return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+            }
+        }
+    }
     backup::merge_pbs_secrets(&mut storage);
     // W6 fix: backup::create_backup runs `qemu-img convert` for VM
     // disks — potentially many minutes for a multi-GB image. Wrap in
@@ -15644,6 +15751,13 @@ pub async fn backup_stream(
     if matches!(storage.storage_type, backup::StorageType::Wolfdisk) {
         if let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+        }
+    }
+    if let Some(t) = &body.target {
+        if t.target_type == backup::BackupTargetType::SystemPath {
+            if let Err(e) = backup::validate_system_path(&t.system_path) {
+                return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+            }
         }
     }
     backup::merge_pbs_secrets(&mut storage);
@@ -16455,6 +16569,29 @@ pub async fn backup_targets(
     HttpResponse::Ok().json(backup::list_available_targets())
 }
 
+/// GET /api/backup/mounts/{type}/{name} — list a container's bind/volume
+/// mounts so the UI can offer an "exclude from backup" checklist. `type` is
+/// `docker` or `lxc`. Returns `[{type,source,destination,size_bytes}]`.
+pub async fn backup_container_mounts(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let (kind, name) = path.into_inner();
+    let result = web::block(move || match kind.as_str() {
+        "docker" => backup::discover_docker_mounts(&name),
+        "lxc" => backup::discover_lxc_mounts(&name),
+        other => Err(format!("Unknown container type '{}' (expected docker|lxc)", other)),
+    }).await;
+    match result {
+        Ok(Ok(mounts)) => HttpResponse::Ok().json(mounts),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("mount discovery task: {}", e),
+        })),
+    }
+}
+
 /// GET /api/backups/schedules — list schedules
 pub async fn backup_schedules_list(
     req: HttpRequest, state: web::Data<AppState>,
@@ -16720,6 +16857,7 @@ pub async fn pbs_config_get(
         "pbs_token_name": config.pbs_token_name,
         "pbs_fingerprint": config.pbs_fingerprint,
         "pbs_namespace": config.pbs_namespace,
+        "pbs_file_level": config.pbs_file_level,
         "has_token_secret": !config.pbs_token_secret.is_empty(),
         "has_password": !config.pbs_password.is_empty(),
     }))
@@ -16740,6 +16878,9 @@ pub struct PbsConfigRequest {
     pub pbs_fingerprint: String,
     #[serde(default)]
     pub pbs_namespace: String,
+    /// Store content as native pxar (file-level) so PBS per-file restore works.
+    #[serde(default)]
+    pub pbs_file_level: bool,
 }
 
 /// GET /api/backups/pbs/config/full — return PBS config INCLUDING secrets (for node-to-node copy)
@@ -16757,6 +16898,7 @@ pub async fn pbs_config_get_full(
         "pbs_password": config.pbs_password,
         "pbs_fingerprint": config.pbs_fingerprint,
         "pbs_namespace": config.pbs_namespace,
+        "pbs_file_level": config.pbs_file_level,
     }))
 }
 
@@ -16789,6 +16931,7 @@ pub async fn pbs_config_save(
         // the UI, whether the operator pasted it with or without colons.
         pbs_fingerprint: backup::format_pbs_fingerprint(&body.pbs_fingerprint),
         pbs_namespace: body.pbs_namespace.clone(),
+        pbs_file_level: body.pbs_file_level,
         ..backup::BackupStorage::default()
     };
     match backup::save_pbs_config(&storage) {
@@ -36082,6 +36225,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/lxc/write", web::post().to(files_lxc_write))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
+        .route("/api/networking/bridges", web::get().to(net_list_bridges))
+        .route("/api/networking/lan-bridge", web::post().to(net_lan_bridge_create))
+        .route("/api/networking/lan-bridge/confirm", web::post().to(net_lan_bridge_confirm))
         .route("/api/networking/dns", web::get().to(net_get_dns))
         .route("/api/networking/dns", web::post().to(net_set_dns))
         .route("/api/networking/wolfnet", web::get().to(net_get_wolfnet))
@@ -36192,6 +36338,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups", web::post().to(backup_create))
         .route("/api/backups/stream", web::post().to(backup_stream))
         .route("/api/backups/targets", web::get().to(backup_targets))
+        .route("/api/backup/mounts/{type}/{name}", web::get().to(backup_container_mounts))
         .route("/api/backups/schedules", web::get().to(backup_schedules_list))
         .route("/api/backups/schedules", web::post().to(backup_schedule_create))
         .route("/api/backups/test-storage", web::post().to(backup_test_storage))

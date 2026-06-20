@@ -9123,7 +9123,6 @@ function removeVmDiskRow(id) {
 
 // Cached lookups so we don't refetch on every modal open within the
 // same page lifetime. Mirrors `_lxcPhysicalNics` etc.
-var _vmBridgesCache = null;
 var _vmPhysicalNicsCache = null;
 var _vmWolfnetStatusCache = null;
 
@@ -9170,9 +9169,12 @@ function buildVmNetSection(prefix) {
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
                     <div>
                         <label style="font-size:12px;">Bridge</label>
-                        <select id="${prefix}-bridge-name" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px;margin-top:3px;">
+                        <select id="${prefix}-bridge-name" onchange="updateBridgeWarning('${prefix}-bridge-name','${prefix}-bridge-warn')" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px;margin-top:3px;">
                             <option value="vmbr0">vmbr0 (default)</option>
                         </select>
+                        <div style="margin-top:5px;">
+                            <button type="button" class="btn btn-sm" onclick="openCreateLanBridge('${prefix}-bridge-name','${prefix}-bridge-warn')" style="font-size:11px;padding:3px 8px;">+ Create LAN bridge</button>
+                        </div>
                     </div>
                     <div>
                         <label style="font-size:12px;">IP assignment</label>
@@ -9186,6 +9188,7 @@ function buildVmNetSection(prefix) {
                     <div><label style="font-size:12px;">IP + CIDR</label><input id="${prefix}-bridge-ip" placeholder="192.168.10.50/24" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px;margin-top:3px;"/></div>
                     <div><label style="font-size:12px;">Gateway</label><input id="${prefix}-bridge-gw" placeholder="192.168.10.1" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px;margin-top:3px;"/></div>
                 </div>
+                <div id="${prefix}-bridge-warn" style="display:none;font-size:11px;margin-top:6px;padding:7px 9px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.35);border-radius:6px;color:var(--text-primary);"></div>
                 <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">VM is attached to this bridge and gets a LAN IP. Use this when the VM should be reachable from your physical network.</div>
             </div>
             <div id="${prefix}-net-vswitch" style="display:none;">
@@ -9272,29 +9275,340 @@ function updateVmNetPreview(prefix) {
 async function populateVmBridges(prefix, selected) {
     const sel = document.getElementById(`${prefix}-bridge-name`);
     if (!sel) return;
-    let bridges = _vmBridgesCache;
-    if (!bridges) {
-        try {
-            const r = await fetch(apiUrl('/api/networking/interfaces'));
-            if (r.ok) {
-                const arr = await r.json();
-                bridges = (Array.isArray(arr) ? arr : [])
-                    .filter(i => i && (i.is_bridge || (i.name || '').match(/^(vmbr|br-|lxcbr|virbr|wolfnet0)/)))
-                    .filter(i => !(i.name || '').startsWith('wnbr-'))
-                    .map(i => i.name);
-            }
-        } catch (_) { bridges = null; }
-        _vmBridgesCache = bridges;
-    }
-    const opts = (bridges && bridges.length) ? bridges : ['vmbr0'];
+    const warnId = `${prefix}-bridge-warn`;
+    const data = await fetchLanBridges();
+    let bridges = (data.bridges || []).slice();
     // Keep the saved selection visible even if it's no longer in the
     // detected list (bridge renamed, host changed) so the editor
-    // round-trips the value on Save.
-    if (selected && !opts.includes(selected)) opts.unshift(selected);
-    sel.innerHTML = opts.map(b => {
-        const s = b === selected ? ' selected' : '';
-        return `<option value="${escapeHtml(b)}"${s}>${escapeHtml(b)}${b === 'vmbr0' ? ' (default)' : ''}</option>`;
+    // round-trips the value on Save. Unknown bridges are shown as-is.
+    if (selected && !bridges.some(b => b.name === selected)) {
+        bridges.unshift({ name: selected, kind: 'empty', members: [] });
+    }
+    if (!bridges.length) {
+        bridges = [{ name: 'vmbr0', kind: 'empty', members: [] }];
+    }
+    sel.innerHTML = bridges.map(b => {
+        const s = b.name === selected ? ' selected' : '';
+        return `<option value="${escapeHtml(b.name)}" data-kind="${escapeHtml(b.kind || 'empty')}"${s}>${escapeHtml(_bridgeOptionLabel(b))}</option>`;
     }).join('');
+    // If nothing was pre-selected, prefer a LAN bridge.
+    if (!selected) {
+        const lan = bridges.find(b => b.kind === 'lan');
+        if (lan) sel.value = lan.name;
+    }
+    updateBridgeWarning(`${prefix}-bridge-name`, warnId);
+}
+
+// ─── LAN bridge creation (shared by LXC + VM create modals) ───
+//
+// /api/networking/bridges returns { bridges:[{name,kind,members,
+// carries_management}], nics:[{name,mac,addresses,is_management,
+// already_enslaved}] }. `kind` is lan | nat | empty. A NAT bridge
+// (lxcbr0/virbr0/wnbr-*) is NOT reachable from the LAN, so when the
+// user picks "Bridged LAN" we warn and offer to build a real LAN
+// bridge that enslaves a physical NIC.
+
+let _lanBridgeData = null; // last { bridges, nics } fetch
+
+async function fetchLanBridges(force) {
+    if (_lanBridgeData && !force) return _lanBridgeData;
+    try {
+        const r = await fetch(apiUrl('/api/networking/bridges'));
+        if (r.ok) {
+            const d = await r.json();
+            _lanBridgeData = { bridges: d.bridges || [], nics: d.nics || [] };
+        } else {
+            _lanBridgeData = { bridges: [], nics: [] };
+        }
+    } catch (_) {
+        _lanBridgeData = { bridges: [], nics: [] };
+    }
+    return _lanBridgeData;
+}
+
+function _bridgeOptionLabel(b) {
+    // e.g. "br0 — LAN (eth0)" / "lxcbr0 — NAT only (no LAN access)"
+    if (b.kind === 'lan') {
+        const phys = (b.members || []).join(', ');
+        return `${b.name} — LAN${phys ? ' (' + phys + ')' : ''}`;
+    }
+    if (b.kind === 'nat') {
+        return `${b.name} — NAT only (no LAN access)`;
+    }
+    return `${b.name} — empty bridge`;
+}
+
+// Populate a bridge <select> from the classified bridge list. `selectId`
+// is the element ID; `warnId` is the ID of an inline-warning container
+// next to it (created by the caller). Returns the chosen bridge object.
+async function populateBridgeSelect(selectId, warnId, force) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    const data = await fetchLanBridges(force);
+    const bridges = data.bridges || [];
+    if (!bridges.length) return; // leave the static default option in place
+    const prev = sel.value;
+    sel.innerHTML = bridges.map(b =>
+        `<option value="${escapeHtml(b.name)}" data-kind="${escapeHtml(b.kind)}">${escapeHtml(_bridgeOptionLabel(b))}</option>`
+    ).join('');
+    // Prefer a LAN bridge by default (that's what users almost always
+    // want in "Bridged LAN" mode); fall back to the previous value.
+    const lan = bridges.find(b => b.kind === 'lan');
+    if (prev && bridges.some(b => b.name === prev)) {
+        sel.value = prev;
+    } else if (lan) {
+        sel.value = lan.name;
+    }
+    updateBridgeWarning(selectId, warnId);
+}
+
+// Show/hide an inline warning beneath a bridge dropdown when a NAT
+// bridge is selected in "Bridged LAN" mode. Visible in the DOM (not a
+// console message) and offers the Create-LAN-bridge action.
+function updateBridgeWarning(selectId, warnId) {
+    const sel = document.getElementById(selectId);
+    const warn = document.getElementById(warnId);
+    if (!sel || !warn) return;
+    const opt = sel.options[sel.selectedIndex];
+    const kind = opt ? opt.getAttribute('data-kind') : null;
+    if (kind === 'nat') {
+        warn.style.display = '';
+        warn.setAttribute('role', 'alert');
+        warn.innerHTML =
+            `<span style="font-weight:600;">⚠ NAT bridge</span> — guests on <code>${escapeHtml(sel.value)}</code> ` +
+            `are behind a private subnet and <strong>not reachable from your LAN</strong>. ` +
+            `<a href="#" onclick="openCreateLanBridge('${escapeHtml(selectId)}','${escapeHtml(warnId)}'); return false;" ` +
+            `style="color:var(--primary);font-weight:600;">Create a LAN bridge →</a>`;
+    } else {
+        warn.style.display = 'none';
+        warn.innerHTML = '';
+    }
+}
+
+// Open the Create LAN bridge modal. `returnSelectId`/`returnWarnId`
+// identify the dropdown to refresh on success. All element IDs in this
+// modal are namespaced with the `clb-` prefix to avoid colliding with
+// the static index.html field IDs (documented collision pitfall).
+async function openCreateLanBridge(returnSelectId, returnWarnId) {
+    document.getElementById('clb-modal')?.remove();
+    const data = await fetchLanBridges(true);
+    const nics = (data.nics || []).filter(n => !n.already_enslaved);
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.id = 'clb-modal';
+    overlay.style.cssText = 'display:flex; z-index:10002;';
+    overlay.dataset.returnSelect = returnSelectId || '';
+    overlay.dataset.returnWarn = returnWarnId || '';
+
+    let nicOptions;
+    if (!nics.length) {
+        nicOptions = '<option value="">No free physical NICs available</option>';
+    } else {
+        nicOptions = nics.map(n => {
+            const tag = n.is_management ? ' — MANAGEMENT NIC' : '';
+            const addr = (n.addresses || []).length ? ' [' + n.addresses.join(', ') + ']' : '';
+            return `<option value="${escapeHtml(n.name)}" data-mgmt="${n.is_management ? '1' : '0'}">${escapeHtml(n.name)}${escapeHtml(addr)}${escapeHtml(tag)}</option>`;
+        }).join('');
+    }
+
+    overlay.innerHTML = `
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clb-title"
+             style="background:var(--bg-card,var(--bg-secondary)); border:1px solid var(--border); border-radius:14px; padding:28px; max-width:520px; width:92%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <h3 id="clb-title" style="color:var(--text-primary); font-size:17px; margin:0 0 4px; font-weight:700;">Create LAN bridge</h3>
+            <p style="color:var(--text-secondary); font-size:13px; margin:0 0 16px;">
+                Builds a real layer-2 bridge that enslaves a physical NIC so guests are reachable from your LAN.
+                The NIC's IP and default route migrate onto the bridge.
+            </p>
+            <div style="margin-bottom:12px;">
+                <label for="clb-nic" style="font-size:12px; display:block; margin-bottom:4px;">Physical NIC to enslave</label>
+                <select id="clb-nic" onchange="clbOnNicChange()" style="width:100%; padding:7px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;">
+                    ${nicOptions}
+                </select>
+            </div>
+            <div style="margin-bottom:12px;">
+                <label for="clb-name" style="font-size:12px; display:block; margin-bottom:4px;">Bridge name</label>
+                <input id="clb-name" value="br0" maxlength="15" style="width:100%; padding:7px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px;"/>
+            </div>
+            <div id="clb-risk-wrap" style="display:none; margin-bottom:12px; padding:10px 12px; border:1px solid rgba(239,68,68,0.4); background:rgba(239,68,68,0.08); border-radius:8px;">
+                <label style="display:flex; gap:8px; align-items:flex-start; font-size:12.5px; color:var(--text-primary); cursor:pointer;">
+                    <input type="checkbox" id="clb-accept-risk" style="margin-top:2px;"/>
+                    <span>I understand this may briefly drop my connection. WolfStack will auto-revert in 90s if I don't confirm.</span>
+                </label>
+            </div>
+            <div id="clb-result" role="alert" aria-live="assertive" style="display:none; margin-bottom:12px; font-size:12.5px;"></div>
+            <div style="display:flex; gap:8px; justify-content:flex-end;">
+                <button class="btn btn-sm" onclick="document.getElementById('clb-modal').remove()">Cancel</button>
+                <button class="btn btn-primary btn-sm" id="clb-submit" onclick="submitCreateLanBridge()" ${nics.length ? '' : 'disabled'}>Create bridge</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    clbOnNicChange();
+}
+
+// Show the risk acknowledgement only when the chosen NIC is the
+// management NIC.
+function clbOnNicChange() {
+    const sel = document.getElementById('clb-nic');
+    const riskWrap = document.getElementById('clb-risk-wrap');
+    if (!sel || !riskWrap) return;
+    const opt = sel.options[sel.selectedIndex];
+    const isMgmt = opt && opt.getAttribute('data-mgmt') === '1';
+    riskWrap.style.display = isMgmt ? '' : 'none';
+    if (!isMgmt) {
+        const cb = document.getElementById('clb-accept-risk');
+        if (cb) cb.checked = false;
+    }
+}
+
+async function submitCreateLanBridge() {
+    const modal = document.getElementById('clb-modal');
+    if (!modal) return;
+    const nic = document.getElementById('clb-nic')?.value || '';
+    const bridge_name = (document.getElementById('clb-name')?.value || '').trim();
+    const riskWrap = document.getElementById('clb-risk-wrap');
+    const isMgmt = riskWrap && riskWrap.style.display !== 'none';
+    const accept_risk = !!document.getElementById('clb-accept-risk')?.checked;
+    const result = document.getElementById('clb-result');
+    const submitBtn = document.getElementById('clb-submit');
+
+    const showErr = (msg) => {
+        if (result) {
+            result.style.display = '';
+            result.style.color = 'var(--danger,#f87171)';
+            // Errors interrupt assistive tech.
+            result.setAttribute('role', 'alert');
+            result.setAttribute('aria-live', 'assertive');
+            result.textContent = msg;
+        }
+    };
+    const showProgress = (msg) => {
+        if (result) {
+            result.style.display = '';
+            result.style.color = 'var(--text-muted)';
+            // Neutral status — polite, not interrupting.
+            result.setAttribute('role', 'status');
+            result.setAttribute('aria-live', 'polite');
+            result.textContent = msg;
+        }
+    };
+
+    if (!nic) { showErr('Select a physical NIC.'); return; }
+    if (!bridge_name) { showErr('Enter a bridge name.'); return; }
+    if (isMgmt && !accept_risk) {
+        showErr('This is the management NIC — tick the risk acknowledgement to continue.');
+        return;
+    }
+
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Creating…'; }
+    showProgress('Applying bridge change…');
+
+    try {
+        const r = await fetch(apiUrl('/api/networking/lan-bridge'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bridge_name, nic, accept_risk })
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            showErr(d.error || `Failed (HTTP ${r.status}).`);
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create bridge'; }
+            return;
+        }
+        const returnSelectId = modal.dataset.returnSelect;
+        const returnWarnId = modal.dataset.returnWarn;
+        if (d.pending_confirm) {
+            // Management NIC — arm the countdown banner.
+            showLanBridgeConfirmBanner(d.pending_confirm, d.rollback_seconds || 90,
+                bridge_name, returnSelectId, returnWarnId);
+            modal.remove();
+        } else {
+            showToast(d.message || `LAN bridge ${bridge_name} created.`, 'success', 8000);
+            modal.remove();
+            // Refresh the originating dropdown to show the new LAN bridge.
+            _lanBridgeData = null;
+            if (returnSelectId) await populateBridgeSelect(returnSelectId, returnWarnId, true);
+        }
+    } catch (e) {
+        showErr('Network error: ' + ((e && e.message) || String(e)));
+        if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Create bridge'; }
+    }
+}
+
+// Prominent, non-dismissing countdown banner for the management-NIC
+// commit-confirm flow. role="alert" / aria-live="assertive" so it
+// interrupts assistive tech. If the operator does nothing, the host
+// auto-reverts after the timer — we tell them so.
+function showLanBridgeConfirmBanner(token, seconds, bridgeName, returnSelectId, returnWarnId) {
+    document.getElementById('clb-confirm-banner')?.remove();
+    const banner = document.createElement('div');
+    banner.id = 'clb-confirm-banner';
+    banner.setAttribute('role', 'alert');
+    banner.setAttribute('aria-live', 'assertive');
+    banner.style.cssText =
+        'position:fixed; top:0; left:0; right:0; z-index:100000; padding:14px 20px; ' +
+        'background:linear-gradient(135deg,#3b2e0e,#2d2408); border-bottom:3px solid #fbbf24; ' +
+        'color:#fff; font-size:14px; display:flex; align-items:center; gap:14px; box-shadow:0 4px 24px rgba(0,0,0,0.5);';
+
+    let remaining = seconds;
+    const msg = document.createElement('div');
+    msg.style.cssText = 'flex:1;';
+    const keepBtn = document.createElement('button');
+    keepBtn.className = 'btn btn-primary btn-sm';
+    keepBtn.textContent = 'Keep this change';
+
+    const render = () => {
+        msg.innerHTML =
+            `<strong>LAN bridge ${escapeHtml(bridgeName)} is live on your management NIC.</strong> ` +
+            `Confirm within <strong>${remaining}s</strong> or the host will <strong>auto-revert</strong> the change. ` +
+            `If your connection just dropped and came back, that was the IP moving to the bridge — click Keep.`;
+    };
+    render();
+
+    let interval = null;
+    const stop = () => { if (interval) { clearInterval(interval); interval = null; } };
+
+    keepBtn.onclick = async () => {
+        keepBtn.disabled = true;
+        keepBtn.textContent = 'Confirming…';
+        try {
+            const r = await fetch(apiUrl('/api/networking/lan-bridge/confirm'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token })
+            });
+            const d = await r.json().catch(() => ({}));
+            stop();
+            if (r.ok) {
+                showToast(d.message || 'LAN bridge kept.', 'success', 8000);
+                banner.remove();
+                _lanBridgeData = null;
+                if (returnSelectId) await populateBridgeSelect(returnSelectId, returnWarnId, true);
+            } else {
+                msg.innerHTML = `<strong style="color:#fca5a5;">${escapeHtml(d.error || 'Confirmation failed — it may have already reverted.')}</strong>`;
+                keepBtn.remove();
+            }
+        } catch (e) {
+            keepBtn.disabled = false;
+            keepBtn.textContent = 'Keep this change';
+            msg.innerHTML += `<br><span style="color:#fca5a5;">Network error confirming — retry: ${escapeHtml((e && e.message) || String(e))}</span>`;
+        }
+    };
+
+    interval = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+            stop();
+            msg.innerHTML = `<strong>Time elapsed — the host has auto-reverted the LAN bridge change.</strong> Your original networking is restored.`;
+            keepBtn.remove();
+            return;
+        }
+        render();
+    }, 1000);
+
+    banner.appendChild(msg);
+    banner.appendChild(keepBtn);
+    document.body.appendChild(banner);
 }
 
 /// Populate the vSwitch uplink picker from /api/networking/interfaces,
@@ -9579,6 +9893,8 @@ function _buildNewVmCurl() {
         os_disk_bus: v('new-vm-os-bus') || 'virtio',
         net_model: v('new-vm-net-model') || 'virtio',
         bios_type: v('new-vm-bios-type') || 'seabios',
+        notes: v('new-vm-notes'),
+        extra_qemu_args: v('new-vm-extra-qemu-args'),
         // vSwitch resolves to "bridge" on submit (the bridge is auto-
         // created). The curl preview shows the same wire shape.
         network_mode: mode === 'vswitch' ? 'bridge' : mode,
@@ -9803,6 +10119,8 @@ async function createVm() {
     const driversIso = document.getElementById('new-vm-drivers-iso').value.trim() || null;
     const importImage = document.getElementById('new-vm-import-image')?.value.trim() || null;
     const biosType = document.getElementById('new-vm-bios-type').value || 'seabios';
+    const notes = document.getElementById('new-vm-notes')?.value ?? '';
+    const extraQemuArgs = document.getElementById('new-vm-extra-qemu-args')?.value ?? '';
 
     if (!name) { showToast('Enter VM name', 'error'); return; }
 
@@ -9857,7 +10175,9 @@ async function createVm() {
                 bridge: netFields.bridge,
                 bridge_ip_mode: netFields.bridge_ip_mode,
                 bridge_ip: netFields.bridge_ip,
-                bridge_gateway: netFields.bridge_gateway
+                bridge_gateway: netFields.bridge_gateway,
+                notes,
+                extra_qemu_args: extraQemuArgs
             })
         });
         const data = await resp.json();
@@ -13101,6 +13421,8 @@ function launchContainerConfigurator(runtime, containerName, component) {
 let _configuratorTargetPreset = null;
 
 async function loadConfigurator(name) {
+    // Loading any component's config view leaves Cert Manager mode.
+    _configuratorMode = 'config';
     // Build target selector dropdown in configurator header
     await buildConfiguratorTargetSelector(name);
 
@@ -13246,6 +13568,16 @@ function onConfiguratorNodeChange(nodeId, componentName) {
     }
     // Container names are node-specific — reset the target to host on switch.
     currentConfiguratorTarget = null;
+    // In Cert Manager mode, a node change must keep the user on the certificate
+    // list for the newly-selected node — not snap back to the nginx sites view.
+    // loadCertManager is node-aware (configuratorNodeUrl('/api/certs')), and the
+    // cert list is not host chrome, so keep the host-only panels hidden.
+    // (wabil 2026-06-19 — the v24.51.5 flash fix didn't cover node switches.)
+    if (_configuratorMode === 'certs') {
+        setConfiguratorHostSectionsVisible(false);
+        loadCertManager();
+        return;
+    }
     if (currentConfiguratorNode) {
         // Remote node: its local status/actions/raw-config/logs aren't this
         // node's, so hide the host-only chrome and show only the (now
@@ -13285,6 +13617,13 @@ function onConfiguratorTargetChange(value, componentName) {
         const [runtime, ...nameParts] = value.split(':');
         currentConfiguratorTarget = { runtime, target: nameParts.join(':') };
     }
+    // Stay on the cert list when in Cert Manager mode — same reasoning as
+    // onConfiguratorNodeChange.
+    if (_configuratorMode === 'certs') {
+        setConfiguratorHostSectionsVisible(false);
+        loadCertManager();
+        return;
+    }
     const isContainer = !!currentConfiguratorTarget;
     const remoteNode = !!(currentConfiguratorNode && !currentConfiguratorNode.is_self);
     // Host-only panels describe the page node's local service — keep them
@@ -13302,6 +13641,7 @@ function onConfiguratorTargetChange(value, componentName) {
 // ── Nginx Configurator (WolfProxy) ──
 
 async function loadNginxConfigurator() {
+    _configuratorMode = 'config';
     document.getElementById('configurator-title').textContent = 'Nginx / WolfProxy Sites';
     document.getElementById('configurator-header-actions').innerHTML = `
         <button class="btn btn-primary btn-sm" onclick="nginxNewSiteForm()">+ New Site</button>
@@ -13784,6 +14124,12 @@ async function nginxReloadService() {
 // Back-to-sites → Cert manager round-trip without surprise.
 let _certScope = (localStorage.getItem('wolfstack_cert_scope') === 'cluster') ? 'cluster' : 'local';
 
+// Which view the configurator body is currently showing: 'config' (nginx sites
+// / component config) or 'certs' (the Cert Manager). The view loaders own this
+// flag, so a Node/Target change can keep the user on the cert list instead of
+// snapping back to the sites view (wabil 2026-06-19).
+let _configuratorMode = 'config';
+
 function setCertScope(scope) {
     _certScope = (scope === 'cluster') ? 'cluster' : 'local';
     try { localStorage.setItem('wolfstack_cert_scope', _certScope); } catch (_) {}
@@ -13806,6 +14152,7 @@ async function openClusterCertManager() {
 window.openClusterCertManager = openClusterCertManager;
 
 async function loadCertManager() {
+    _configuratorMode = 'certs';
     document.getElementById('configurator-title').textContent = 'SSL Certificates';
     const scopeChip = _certScope === 'cluster'
         ? '<button class="btn btn-sm" onclick="setCertScope(\'local\')" title="Show only this node">Scope: Whole cluster ▾</button>'
@@ -23569,6 +23916,12 @@ async function openLxcSettings(name) {
                         </div>
                     </div>
                 </div>
+                <div class="form-group" style="margin-top:12px;">
+                    <label for="lxc-notes">Notes / Description <small style="color:var(--text-muted);">(optional)</small></label>
+                    <textarea id="lxc-notes" class="form-control" rows="3" maxlength="4096"
+                        placeholder="Free-text notes about this container (purpose, owner, maintenance window…)"
+                        style="resize:vertical;">${escapeHtml(cfg.notes || '')}</textarea>
+                </div>
             </div>
 
             <!-- ═══ Tab 2: Network ═══ -->
@@ -24028,6 +24381,10 @@ async function _saveLxcSettingsImpl(name) {
         nfs_enabled: (document.getElementById('lxc-feat-nfs') || {}).checked || false,
         keyctl_enabled: (document.getElementById('lxc-feat-keyctl') || {}).checked || false,
         wolfnet_ip: (document.getElementById('lxc-wolfnet-ip') || {}).value || '',
+        // Notes: send the raw value (empty string clears it). The field always
+        // exists in the General tab, so a missing element is unexpected — fall
+        // back to '' rather than undefined so a clear isn't silently dropped.
+        notes: (document.getElementById('lxc-notes') || {}).value ?? '',
     };
 
     try {
@@ -26368,6 +26725,14 @@ function selectLxcTemplate(distro, release, arch, variant) {
                 </div>
             </div>
 
+            <!-- ── Notes / Description ──────────────────── -->
+            <div style="margin-bottom:16px;">
+                <label for="lxc-create-notes" style="display:block; margin-bottom:4px; font-weight:600; font-size:13px;">Notes / Description <span style="font-weight:400; color:var(--text-muted); font-size:11px;">(optional)</span></label>
+                <textarea id="lxc-create-notes" rows="3" maxlength="4096"
+                    placeholder="Free-text notes about this container (purpose, owner, maintenance window…)"
+                    style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:13px; resize:vertical;"></textarea>
+            </div>
+
             <!-- ── Storage ───────────────────────────── -->
             <details style="margin-bottom:16px;">
                 <summary style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; cursor:pointer; margin-bottom:8px;">Storage <span style="font-weight:400; font-size:11px; text-transform:none;">(defaults are fine for most containers)</span></summary>
@@ -26436,9 +26801,12 @@ function selectLxcTemplate(distro, release, arch, variant) {
                     <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
                         <div>
                             <label style="font-size:12px;">Bridge</label>
-                            <select id="lxc-bridge-name" style="width:100%; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px; margin-top:3px;">
-                                <option value="lxcbr0">lxcbr0 (default)</option>
+                            <select id="lxc-bridge-name" onchange="updateBridgeWarning('lxc-bridge-name','lxc-bridge-warn')" style="width:100%; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px; margin-top:3px;">
+                                <option value="lxcbr0" data-kind="nat">lxcbr0 — NAT only (no LAN access)</option>
                             </select>
+                            <div style="margin-top:5px;">
+                                <button type="button" class="btn btn-sm" onclick="openCreateLanBridge('lxc-bridge-name','lxc-bridge-warn')" style="font-size:11px; padding:3px 8px;">+ Create LAN bridge</button>
+                            </div>
                         </div>
                         <div>
                             <label style="font-size:12px;">IP assignment</label>
@@ -26452,6 +26820,7 @@ function selectLxcTemplate(distro, release, arch, variant) {
                         <div><label style="font-size:12px;">IP + CIDR</label><input id="lxc-bridge-ip" placeholder="192.168.10.50/24" style="width:100%; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px; margin-top:3px;"/></div>
                         <div><label style="font-size:12px;">Gateway</label><input id="lxc-bridge-gw" placeholder="192.168.10.1" style="width:100%; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary); font-size:12px; margin-top:3px;"/></div>
                     </div>
+                    <div id="lxc-bridge-warn" style="display:none; font-size:11px; margin-top:6px; padding:7px 9px; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.35); border-radius:6px; color:var(--text-primary);"></div>
                     <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Container will be attached to the bridge and get a LAN IP. Use this when the container needs to be directly reachable from the physical network.</div>
                 </div>
                 <div id="lxc-net-host" style="display:none;">
@@ -26669,23 +27038,10 @@ function lxcSelectNetPreset(mode) {
         };
         preview.innerHTML = hints[mode] || '';
     }
-    // Populate bridge dropdown from topology if switching to bridge mode.
+    // Populate bridge dropdown (classified LAN/NAT) when switching to
+    // bridge mode, and warn if a NAT bridge is selected.
     if (mode === 'bridge') {
-        const sel = document.getElementById('lxc-bridge-name');
-        if (sel && sel.options.length <= 1) {
-            // Fetch available bridges from the local node.
-            fetch(apiUrl('/api/networking/interfaces'))
-                .then(r => r.ok ? r.json() : [])
-                .then(ifaces => {
-                    const bridges = (Array.isArray(ifaces) ? ifaces : [])
-                        .filter(i => i.type === 'bridge' || (i.name || '').startsWith('br') || (i.name || '') === 'lxcbr0' || (i.name || '').startsWith('vmbr'));
-                    if (bridges.length) {
-                        sel.innerHTML = bridges.map(b =>
-                            `<option value="${escapeHtml(b.name || b)}">${escapeHtml(b.name || b)}</option>`
-                        ).join('');
-                    }
-                }).catch(() => {});
-        }
+        populateBridgeSelect('lxc-bridge-name', 'lxc-bridge-warn');
     }
 }
 
@@ -26703,6 +27059,7 @@ async function createLxcContainer() {
     const root_password = document.getElementById('lxc-create-password')?.value?.trim() || '';
     const memory_limit = document.getElementById('lxc-create-memory')?.value || '';
     const cpu_cores = document.getElementById('lxc-create-cpus')?.value || '';
+    const notes = document.getElementById('lxc-create-notes')?.value ?? '';
 
     // Collect bind mounts
     const mountRows = document.querySelectorAll('.lxc-mount-row');
@@ -26795,7 +27152,7 @@ async function createLxcContainer() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name, distribution, release, architecture, storage_path, template_storage, root_password, memory_limit, cpu_cores,
+                name, distribution, release, architecture, storage_path, template_storage, root_password, memory_limit, cpu_cores, notes,
                 // Network mode from the three-preset picker. Backend uses
                 // this to write the correct LXC net config (veth/bridge
                 // for "bridge", none for "host", WolfNet for "wolfnet").
@@ -27658,6 +28015,24 @@ async function showVmSettings(name) {
                     <label>OS Disk Size (GiB) <small style="color:var(--text-muted);">(can only grow)</small></label>
                     <input type="number" class="form-control" id="edit-vm-disk" value="${vm.disk_size_gb}" min="${vm.disk_size_gb}">
                 </div>
+                <div class="form-group">
+                    <label for="edit-vm-notes">Notes / Description <small style="color:var(--text-muted);">(optional)</small></label>
+                    <textarea class="form-control" id="edit-vm-notes" rows="3" maxlength="4096"
+                        placeholder="Free-text notes about this VM (purpose, owner, maintenance window…)"
+                        style="resize:vertical;">${escapeHtml(vm.notes || '')}</textarea>
+                </div>
+                <div class="form-group">
+                    <label for="edit-vm-extra-qemu-args">Extra QEMU arguments <small style="color:var(--text-muted);">(advanced — applies on next start)</small></label>
+                    <input type="text" class="form-control" id="edit-vm-extra-qemu-args" maxlength="4096"
+                        value="${escapeHtml(vm.extra_qemu_args || '')}"
+                        placeholder="-audiodev pa,id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0">
+                    <small style="display:block; color:var(--text-muted); margin-top:4px;">
+                        Passed straight to the VM start command (e.g. Windows 11 audio). Quote values with spaces. Leave blank for none.
+                    </small>
+                    <div style="margin-top:8px;">
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="showVmStartCommand('${escapeHtml(name)}')">Show start command</button>
+                    </div>
+                </div>
             </div>
 
             <!-- ═══ Tab 2: Disks ═══ -->
@@ -28154,6 +28529,11 @@ async function saveVmSettings(name) {
     const netModel = document.getElementById('edit-vm-net-model')?.value || undefined;
     const driversIso = document.getElementById('edit-vm-drivers-iso')?.value.trim() ?? undefined;
     const biosType = document.getElementById('edit-vm-bios-type')?.value || undefined;
+    // Notes: send the raw value (empty string clears it). ?? '' so a missing
+    // element doesn't send undefined and accidentally skip a clear.
+    const notes = document.getElementById('edit-vm-notes')?.value ?? '';
+    // Extra QEMU args: send the raw value (empty string clears it).
+    const extraQemuArgs = document.getElementById('edit-vm-extra-qemu-args')?.value ?? '';
 
     // Primary-NIC network mode. vSwitch resolves to a Bridge payload after
     // the auto-create. Validation errors come back as exceptions so we
@@ -28191,6 +28571,8 @@ async function saveVmSettings(name) {
                 bridge_ip_mode: netFields.bridge_ip_mode,
                 bridge_ip: netFields.bridge_ip,
                 bridge_gateway: netFields.bridge_gateway,
+                notes,
+                extra_qemu_args: extraQemuArgs,
             })
         });
         const data = await resp.json();
@@ -28206,6 +28588,83 @@ async function saveVmSettings(name) {
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
+}
+
+// Fetch and display the raw VM start command (per backend) in a copyable,
+// read-only modal. Visible in the DOM with ARIA so screen readers announce
+// it; never console-only. The command is rendered as textContent (no HTML
+// injection) inside a <pre>.
+async function showVmStartCommand(name) {
+    let command = '';
+    let source = '';
+    try {
+        const resp = await fetch(apiUrl(`/api/vms/${encodeURIComponent(name)}/start-command`));
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Failed to get start command', 'error');
+            return;
+        }
+        command = data.command || '';
+        source = data.source || '';
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+        return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100001;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+    const modal = document.createElement('div');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'vm-startcmd-title');
+    modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:760px;width:92%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7);font-family:inherit';
+
+    const srcLabel = ({ native: 'Native QEMU', proxmox: 'Proxmox (qm)', libvirt: 'libvirt' })[source] || (source || 'unknown');
+    const h = document.createElement('div');
+    h.id = 'vm-startcmd-title';
+    h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:6px;color:var(--accent-light,#60a5fa)';
+    h.textContent = `Start command — ${name}`;
+    const sub = document.createElement('div');
+    sub.style.cssText = 'font-size:12px;color:var(--text-muted,#71717a);margin-bottom:12px';
+    sub.textContent = `Source: ${srcLabel}`;
+
+    const pre = document.createElement('pre');
+    pre.setAttribute('role', 'region');
+    pre.setAttribute('aria-label', 'Raw start command');
+    pre.setAttribute('tabindex', '0');
+    pre.style.cssText = 'background:var(--bg-secondary,#16181f);border:1px solid var(--border,#2d2f3a);border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:50vh;overflow:auto;color:var(--text-primary,#e4e4e7);margin:0';
+    pre.textContent = command;
+
+    const btnWrap = document.createElement('div');
+    btnWrap.style.cssText = 'margin-top:16px;display:flex;gap:8px;justify-content:flex-end';
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'btn btn-sm btn-secondary';
+    copyBtn.textContent = 'Copy';
+    copyBtn.onclick = function () {
+        navigator.clipboard.writeText(command).then(
+            function () { showToast('Copied to clipboard', 'success', 1500); },
+            function () { showToast('Copy failed — select the text manually', 'error'); }
+        );
+    };
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'btn btn-sm';
+    closeBtn.style.cssText = 'background:var(--accent,#3b82f6);color:#fff;';
+    closeBtn.textContent = 'Close';
+    closeBtn.onclick = function () { overlay.remove(); };
+
+    btnWrap.appendChild(copyBtn);
+    btnWrap.appendChild(closeBtn);
+    modal.appendChild(h);
+    modal.appendChild(sub);
+    modal.appendChild(pre);
+    modal.appendChild(btnWrap);
+    overlay.appendChild(modal);
+    overlay.onclick = function (e) { if (e.target === overlay) overlay.remove(); };
+    (document.fullscreenElement || document.body).appendChild(overlay);
+    closeBtn.focus();
 }
 
 const installCmds = {
@@ -28692,21 +29151,97 @@ function renderBackupTargets(targets) {
             ? `<div style="font-size:11px; color:var(--text-muted); margin-top:1px;">${escapeHtml(t.specs)}</div>`
             : '';
         const val = JSON.stringify(t).replace(/"/g, '&quot;');
-        return `<label style="display:flex; align-items:center; gap:10px; padding:10px 14px;
-            background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm);
-            cursor:pointer; transition:var(--transition); font-size:13px;"
-            onmouseover="this.style.borderColor='var(--border-light)'; this.style.background='var(--bg-card-hover)'"
-            onmouseout="this.style.borderColor='var(--border)'; this.style.background='var(--bg-input)'">
-            <input type="checkbox" class="backup-target-cb" value="${val}" onchange="updateBackupSelectedCount()">
-            <span style="font-size:18px;">${emoji}</span>
-            <span style="flex:1;">
-                <span style="font-weight:500;">${escapeHtml(label)}</span>
-                <span style="color:var(--text-muted); font-size:11px; margin-left:6px;">${typeLabel}</span>
-                ${stateBadge}
-                ${specsLine}
+        // Docker / LXC targets can have bind/volume mounts the operator may
+        // want to exclude (e.g. a sonarr media array). Offer a "mounts" link
+        // that lazy-loads the inventory into an inline panel.
+        const canExclude = (t.type === 'docker' || t.type === 'lxc');
+        const key = `${t.type}:${t.name}`;
+        const excludedCount = (_backupExcludeMap[key] || []).length;
+        const mountsLink = canExclude
+            ? `<div style="margin-top:4px;">
+                 <a href="#" onclick="toggleMountExcludePanel('${escapeHtml(t.type)}','${escapeHtml(t.name)}'); return false;"
+                    style="font-size:11px; color:var(--accent);">Choose mounts${excludedCount ? ` (${excludedCount} excluded)` : ''}</a>
+                 <div id="mount-excl-${escapeHtml(key)}" data-mount-panel="${escapeHtml(key)}" style="display:none; margin-top:6px;"></div>
+               </div>`
+            : '';
+        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px 14px; font-size:13px;">
+            <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+                <input type="checkbox" class="backup-target-cb" value="${val}" data-target-key="${escapeHtml(key)}" onchange="updateBackupSelectedCount()">
+                <span style="font-size:18px;">${emoji}</span>
+                <span style="flex:1;">
+                    <span style="font-weight:500;">${escapeHtml(label)}</span>
+                    <span style="color:var(--text-muted); font-size:11px; margin-left:6px;">${typeLabel}</span>
+                    ${stateBadge}
+                    ${specsLine}
+                </span>
+            </label>
+            ${mountsLink}
+        </div>`;
+    }).join('');
+}
+
+// Per-target mount exclusions, keyed by "type:name" → [excluded source paths].
+// Merged into each target object at backup time (getSelectedTargets).
+let _backupExcludeMap = {};
+
+/// Toggle the inline mount-exclusion panel for a container, lazy-loading the
+/// mount inventory from the backend the first time it's opened.
+async function toggleMountExcludePanel(type, name) {
+    const key = `${type}:${name}`;
+    const panel = document.getElementById(`mount-excl-${key}`);
+    if (!panel) return;
+    if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    panel.innerHTML = '<span style="font-size:11px; color:var(--text-muted);">Loading mounts…</span>';
+    try {
+        const res = await fetch(apiUrl(`/api/backup/mounts/${encodeURIComponent(type)}/${encodeURIComponent(name)}`));
+        if (!res.ok) {
+            let msg = `HTTP ${res.status}`;
+            try { const j = await res.json(); if (j.error) msg = j.error; } catch (e) {}
+            panel.innerHTML = `<span style="font-size:11px; color:var(--danger);" role="alert">Could not load mounts: ${escapeHtml(msg)}</span>`;
+            return;
+        }
+        const mounts = await res.json();
+        renderMountExcludePanel(panel, type, name, Array.isArray(mounts) ? mounts : []);
+    } catch (e) {
+        panel.innerHTML = `<span style="font-size:11px; color:var(--danger);" role="alert">Could not load mounts: ${escapeHtml(e.message)}</span>`;
+    }
+}
+
+function renderMountExcludePanel(panel, type, name, mounts) {
+    const key = `${type}:${name}`;
+    if (!mounts.length) {
+        panel.innerHTML = '<span style="font-size:11px; color:var(--text-muted);">No bind/volume mounts on this container.</span>';
+        return;
+    }
+    const excluded = new Set(_backupExcludeMap[key] || []);
+    const rows = mounts.map((m, i) => {
+        const src = m.source || '';
+        const dest = m.destination || '';
+        const size = m.size_bytes ? formatBytes(m.size_bytes) : '';
+        const checked = excluded.has(src) ? '' : 'checked'; // checked = INCLUDE
+        const cbId = `mexcl-${key}-${i}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+        return `<label for="${cbId}" style="display:flex; align-items:center; gap:8px; padding:3px 0; font-size:11px; cursor:pointer;">
+            <input type="checkbox" id="${cbId}" ${checked}
+                onchange="onMountIncludeToggle('${escapeHtml(key)}', this.checked, ${JSON.stringify(src).replace(/"/g, '&quot;')})">
+            <span style="flex:1; font-family:var(--font-mono);">
+                <span style="color:var(--text-secondary);">${escapeHtml(m.mount_type || '')}</span>
+                ${escapeHtml(src)} <span style="color:var(--text-muted);">→ ${escapeHtml(dest)}</span>
+                ${size ? `<span style="color:var(--text-muted); margin-left:6px;">${size}</span>` : ''}
             </span>
         </label>`;
     }).join('');
+    panel.innerHTML = `
+        <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Untick a mount to exclude it from the backup:</div>
+        ${rows}`;
+}
+
+/// Track an include/exclude toggle. checked = include (remove from exclude
+/// list); unchecked = exclude (add the source path).
+function onMountIncludeToggle(key, included, source) {
+    const list = new Set(_backupExcludeMap[key] || []);
+    if (included) list.delete(source); else list.add(source);
+    _backupExcludeMap[key] = Array.from(list);
 }
 
 function toggleAllBackupTargets(checked) {
@@ -28727,7 +29262,14 @@ function getSelectedTargets() {
     const checked = document.querySelectorAll('.backup-target-cb:checked');
     const targets = [];
     checked.forEach(cb => {
-        try { targets.push(JSON.parse(cb.value)); } catch (e) { }
+        try {
+            const t = JSON.parse(cb.value);
+            // Merge any per-target mount exclusions the operator picked.
+            const key = `${t.type}:${t.name}`;
+            const excl = _backupExcludeMap[key];
+            if (Array.isArray(excl) && excl.length) t.exclude_mounts = excl;
+            targets.push(t);
+        } catch (e) { }
     });
     return targets;
 }
@@ -28866,6 +29408,9 @@ async function getSelectedStorage() {
                 pbs_token_name: _cachedPbsConfig.pbs_token_name || '',
                 pbs_fingerprint: _cachedPbsConfig.pbs_fingerprint || '',
                 pbs_namespace: _cachedPbsConfig.pbs_namespace || '',
+                // File-level (pxar) preference travels with the PBS destination
+                // so backup_pbs_file_level routes correctly.
+                pbs_file_level: !!_cachedPbsConfig.pbs_file_level,
                 // Secrets are stored on server, leave empty so backend preserves them
                 pbs_token_secret: '',
                 pbs_password: '',
@@ -29148,6 +29693,76 @@ async function runStreamingBackup(body, taskId) {
     }
 }
 
+/// Browse for a system folder to back up (directories only).
+function browseSystemFolderPath() {
+    const inp = document.getElementById('sysfolder-path');
+    if (!inp) return;
+    const start = (inp.value || '').trim() || '/';
+    openFileBrowser({
+        start,
+        kind: 'dir',
+        title: 'Choose a folder to back up',
+        onSelect: (chosen) => { inp.value = String(chosen || '').replace(/\/+$/, '') || '/'; },
+    });
+}
+
+/// Back up an arbitrary host system folder to the selected destination.
+/// Builds a SystemPath target and runs it through the same streaming backup
+/// path as the container/VM targets.
+async function backupSystemFolder() {
+    const pathEl = document.getElementById('sysfolder-path');
+    const labelEl = document.getElementById('sysfolder-label');
+    const exclEl = document.getElementById('sysfolder-excludes');
+    const path = (pathEl && pathEl.value || '').trim();
+    if (!path) { showToast('Enter a folder path to back up', 'error'); return; }
+    if (!path.startsWith('/')) { showToast('Folder path must be absolute (start with /)', 'error'); return; }
+
+    const label = (labelEl && labelEl.value || '').trim();
+    const excludes = (exclEl && exclEl.value || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+
+    const target = {
+        type: 'systempath',
+        name: label || path.replace(/\/+$/, '').split('/').pop() || 'folder',
+        system_path: path,
+    };
+    if (excludes.length) target.exclude_mounts = excludes;
+
+    const storage = await getSelectedStorage();
+    if (!(await ensureBackupStorageReady(storage))) return;
+    const storageLabel = storage.type === 'pbs' ? `PBS (${storage.pbs_server})` : (storage.path || storage.type);
+
+    const node = currentNodeId ? allNodes.find(n => n.id === currentNodeId) : null;
+    const cluster_name = node ? (node.cluster_name || node.pve_cluster_name || 'WolfStack') : null;
+
+    const btn = document.querySelector('[onclick="backupSystemFolder()"]');
+    if (btn) { btn.disabled = true; }
+
+    const tbody = document.getElementById('backups-table');
+    if (tbody) showBackupLog(tbody, `Backing up folder ${path} to ${storageLabel}...`);
+    const taskId = addTaskLogEntry({
+        cluster: cluster_name || 'WolfStack',
+        node: node ? (node.hostname || node.address) : 'local',
+        description: `Backup folder ${path} → ${storageLabel}`,
+        status: 'running',
+    });
+
+    let failed = false;
+    try {
+        await runStreamingBackup({ target, storage, cluster_name }, taskId);
+    } catch (e) {
+        appendBackupLog(`Error: ${e.message}`);
+        showToast(`Backup error: ${e.message}`, 'error');
+        failed = true;
+    }
+    stopBackupProgressSpinner();
+    const titleEl = document.getElementById('backup-progress-title');
+    if (titleEl) titleEl.textContent = 'Backup complete';
+    updateTaskLogEntry(taskId, { status: failed ? 'failed' : 'completed' });
+    if (btn) { btn.disabled = false; }
+    setTimeout(() => loadBackups(), 3000);
+}
+
 async function deleteBackup(id) {
     if (!(await showConfirm('Delete this backup? The backup file will be permanently removed.'))) return;
     try {
@@ -29213,6 +29828,11 @@ async function openRestoreDialog(id, type, name) {
         showToast('A restore is already running — wait for it to finish.', 'error');
         return;
     }
+    // Pull the original system_path from the cached backup entry rather than
+    // threading it through the onclick attribute (avoids any HTML/JS injection
+    // via a crafted path).
+    const _entry = (window._backupEntries || []).find(e => e && e.id === id);
+    const systemPath = (_entry && _entry.target && _entry.target.system_path) || '';
     // Storage selection only applies to a Proxmox LXC restore — that is
     // the path that shells out to `pct restore --storage`.
     let proxmox = false, storages = [];
@@ -29246,13 +29866,29 @@ async function openRestoreDialog(id, type, name) {
     // / VMID — when restoring a backup it usually IS different from the
     // backed-up one. Pre-filled with the original; editable.
     const wantsName = type === 'lxc';
-    const nameRow = wantsName ? `
+    let nameRow = wantsName ? `
         <div style="margin-bottom:14px;">
             <label for="restore-name" style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">${proxmox ? 'Restore as container ID (VMID)' : 'Restore as container name'}</label>
             <input type="text" id="restore-name" class="form-control" value="${escapeHtml(String(name || ''))}" placeholder="${proxmox ? 'e.g. 105' : 'e.g. web-01'}">
             <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Defaults to the backup's original ${proxmox ? 'ID' : 'name'}. Change it to restore as a separate copy.</div>
             <div id="restore-name-warn" role="status" aria-live="polite" style="display:none;font-size:11px;color:var(--warning,#f59e0b);margin-top:4px;"></div>
         </div>` : '';
+
+    // System-folder restore: let the operator pick the target directory (the
+    // PARENT into which the folder is unpacked). The `restore-name` field
+    // doubles as the backend's `new_name` → target-dir override. Restoring
+    // over the original location is destructive, so show a clear warning.
+    const isSystemPath = type === 'systempath';
+    if (isSystemPath) {
+        const origParent = (systemPath || '').replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/';
+        nameRow = `
+        <div style="margin-bottom:14px;">
+            <label for="restore-name" style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">Restore into folder (parent directory)</label>
+            <input type="text" id="restore-name" class="form-control" value="${escapeHtml(origParent)}" placeholder="/">
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">The folder is unpacked here. Default restores it back to its original location${systemPath ? ` (<code>${escapeHtml(systemPath)}</code>)` : ''}.</div>
+            <div style="font-size:11px;color:var(--warning,#f59e0b);margin-top:6px;" role="alert">⚠ Restoring overwrites any existing files at the destination. This cannot be undone.</div>
+        </div>`;
+    }
 
     const stale = document.getElementById('restore-dialog-backdrop');
     if (stale) {
@@ -29529,6 +30165,8 @@ async function loadPbsConfig() {
         setVal('pbs-token-name', cfg.pbs_token_name);
         setVal('pbs-fingerprint', cfg.pbs_fingerprint);
         setVal('pbs-namespace', cfg.pbs_namespace);
+        const flCb = document.getElementById('pbs-file-level');
+        if (flCb) flCb.checked = !!cfg.pbs_file_level;
         if (cfg.has_token_secret) {
             const el = document.getElementById('pbs-token-secret');
             if (el) el.placeholder = '(saved — enter new value to change)';
@@ -29607,6 +30245,7 @@ async function updatePbsStatusBadge() {
 
 async function savePbsConfig() {
     const getVal = id => (document.getElementById(id) || {}).value || '';
+    const getChecked = id => !!(document.getElementById(id) || {}).checked;
     const body = {
         pbs_server: getVal('pbs-server'),
         pbs_datastore: getVal('pbs-datastore'),
@@ -29616,6 +30255,7 @@ async function savePbsConfig() {
         pbs_token_secret: getVal('pbs-token-secret'),
         pbs_fingerprint: getVal('pbs-fingerprint'),
         pbs_namespace: getVal('pbs-namespace'),
+        pbs_file_level: getChecked('pbs-file-level'),
     };
     if (!body.pbs_server || !body.pbs_datastore || !body.pbs_user) {
         showToast('Server, datastore, and user are required', 'error');
@@ -29636,6 +30276,9 @@ async function savePbsConfig() {
         const data = await res.json();
         if (data.error) showToast('PBS save failed: ' + data.error, 'error');
         else {
+            // Drop the cached config so the next backup picks up the new
+            // file-level preference rather than a stale copy.
+            _cachedPbsConfig = null;
             showToast('PBS configuration saved', 'success');
             // Switch to saved summary view with credentials hidden
             showPbsConfigSaved({

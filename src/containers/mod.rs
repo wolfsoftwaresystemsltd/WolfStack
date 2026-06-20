@@ -5951,6 +5951,11 @@ pub struct LxcParsedConfig {
     // WolfNet
     pub wolfnet_ip: String,
 
+    // Free-text operator notes / description. Read back from the PVE
+    // `description:` line (Proxmox CTs) or the WolfStack sidecar (native LXC).
+    #[serde(default)]
+    pub notes: String,
+
     // Storage
     #[serde(default)]
     pub storage_path: String,
@@ -6026,6 +6031,7 @@ fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str
 
         match key {
             "hostname" => cfg.hostname = val.to_string(),
+            "description" => cfg.notes = pve_decode_description(val),
             "arch" => cfg.arch = val.to_string(),
             "onboot" => cfg.autostart = val == "1",
             "startup" => {
@@ -6407,7 +6413,94 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         cfg.wolfnet_ip = ip.trim().to_string();
     }
 
+    // Native LXC has no description field — read the WolfStack sidecar.
+    // (Proxmox CTs already had `notes` filled from the `description:` line in
+    // parse_proxmox_config, so only do this for the native format.)
+    if !cfg.proxmox
+        && let Ok(n) = std::fs::read_to_string(lxc_notes_path(container)) {
+        cfg.notes = n;
+    }
+
     Some(cfg)
+}
+
+/// Path to the WolfStack notes sidecar for a NATIVE LXC container. Native LXC
+/// has no `description` directive, so operator notes are kept alongside the
+/// container's other WolfStack metadata under its base dir. Mirrors the
+/// existing `.wolfnet/ip` sidecar convention.
+fn lxc_notes_path(container: &str) -> String {
+    format!("{}/{}/.wolfstack/notes", lxc_base_dir(container), container)
+}
+
+/// Set operator notes / description for a container, dispatched by backend.
+/// Proxmox CTs use `pct set --description` (`--delete description` to clear);
+/// native LXC uses the WolfStack sidecar. Used by the create path so notes
+/// supplied at create time persist the same way an edit would.
+pub fn lxc_set_notes(container: &str, notes: &str) -> Result<(), String> {
+    let pve_path = format!("/etc/pve/lxc/{}.conf", container);
+    if std::path::Path::new(&pve_path).exists() {
+        let mut args: Vec<String> = vec!["set".to_string(), container.to_string()];
+        if notes.is_empty() {
+            args.push("--delete".to_string());
+            args.push("description".to_string());
+        } else {
+            args.push("--description".to_string());
+            args.push(notes.to_string());
+        }
+        let output = Command::new("pct").args(&args).output()
+            .map_err(|e| format!("Failed to run pct set: {}", e))?;
+        if !output.status.success() {
+            return Err(format!("pct set --description failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()));
+        }
+        return Ok(());
+    }
+    lxc_write_notes(container, notes)
+}
+
+/// Write (or clear) the native-LXC notes sidecar. An empty string removes the
+/// file so a cleared notes field reads back as empty.
+fn lxc_write_notes(container: &str, notes: &str) -> Result<(), String> {
+    let path = lxc_notes_path(container);
+    if notes.is_empty() {
+        // Best-effort removal; absent file is already the desired state.
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Failed to create notes dir {}: {}", dir.display(), e))?;
+    }
+    std::fs::write(&path, notes)
+        .map_err(|e| format!("Failed to write notes {}: {}", path, e))
+}
+
+/// Decode a PVE `description:` value. Proxmox URL-encodes newlines as `%0A`
+/// (CR as `%0D`, a literal `%` as `%25`) in the single-line config
+/// representation. Decode those so the operator sees their notes with line
+/// breaks intact; other `%xx` sequences are left untouched. Shared with the
+/// VM manager (`qm`/PVE qemu-server configs use the identical encoding).
+pub(crate) fn pve_decode_description(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Match the two bytes after '%' directly to avoid slicing the &str
+        // across a char boundary on a stray non-escape '%'.
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            let (a, b) = (bytes[i + 1].to_ascii_uppercase(), bytes[i + 2].to_ascii_uppercase());
+            match (a, b) {
+                (b'0', b'A') => { out.push('\n'); i += 3; continue; }
+                (b'0', b'D') => { i += 3; continue; } // strip CR; PVE pairs %0D%0A on Windows-edited configs
+                (b'2', b'5') => { out.push('%'); i += 3; continue; }
+                _ => {}
+            }
+        }
+        let ch = raw[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// Update settings for an LXC container with structured data
@@ -6449,6 +6542,12 @@ pub struct LxcSettingsUpdate {
 
     // WolfNet
     pub wolfnet_ip: Option<String>,
+
+    // Free-text operator notes / description. Empty string clears it.
+    // Proxmox CTs store it in the PVE config (`pct set --description`);
+    // native LXC has no description field, so WolfStack keeps it in a
+    // per-container sidecar (see `lxc_notes_path`).
+    pub notes: Option<String>,
 }
 /// Update LXC container settings via Proxmox pct set
 fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<String, String> {
@@ -6515,6 +6614,20 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
     let autostart = settings.autostart.unwrap_or(current.autostart);
     args.push("--onboot".to_string());
     args.push(if autostart { "1" } else { "0" }.to_string());
+
+    // Notes / description. `pct set --description <text>` stores it in the PVE
+    // config (read back from the `description:` line). An empty string clears
+    // it via `--delete description`, so a cleared notes field actually drops
+    // the stored value rather than leaving the old one in place.
+    if let Some(ref n) = settings.notes {
+        if n.is_empty() {
+            args.push("--delete".to_string());
+            args.push("description".to_string());
+        } else {
+            args.push("--description".to_string());
+            args.push(n.clone());
+        }
+    }
 
     // Features
     let mut features: Vec<String> = Vec::new();
@@ -6747,6 +6860,18 @@ mod mem_parse_tests {
     fn whitespace_tolerated() {
         assert_eq!(parse_mem_to_mb(" 2048 "), 2048);
         assert_eq!(parse_mem_to_mb("2 G"), 2048);
+    }
+
+    #[test]
+    fn pve_description_decodes_notes() {
+        // PVE LXC configs URL-encode the description line just like qemu.
+        assert_eq!(pve_decode_description("a%0Ab"), "a\nb");
+        assert_eq!(pve_decode_description("win%0D%0Ab"), "win\nb");
+        assert_eq!(pve_decode_description("50%25"), "50%");
+        assert_eq!(pve_decode_description("plain notes"), "plain notes");
+        // Trailing bare % and a bare % before a multibyte char must not panic.
+        assert_eq!(pve_decode_description("end%"), "end%");
+        assert_eq!(pve_decode_description("%ä"), "%ä");
     }
 
     #[test]
@@ -7047,6 +7172,12 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
                 lxc_apply_wolfnet(container);
             }
         }
+    }
+
+    // Notes / description — native LXC has no description directive, so it
+    // lives in a WolfStack sidecar. Empty string clears it.
+    if let Some(ref n) = settings.notes {
+        lxc_write_notes(container, n)?;
     }
 
     // Drop the cached LXC list so the UI re-render picks up the new

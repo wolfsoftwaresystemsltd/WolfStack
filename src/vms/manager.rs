@@ -253,6 +253,25 @@ pub struct VmConfig {
     /// `bridge_ip_mode == "static"`. Paired with `bridge_ip`.
     #[serde(default)]
     pub bridge_gateway: Option<String>,
+
+    /// Free-text operator notes / description shown on the VM's General tab.
+    /// Persisted in the hypervisor's own description field where one exists
+    /// (Proxmox `qm set --description`, libvirt `virsh desc`) and in the
+    /// native sidecar config otherwise. Empty string = no notes (and clears
+    /// any previously-set description). Defaults to empty for older configs.
+    #[serde(default)]
+    pub notes: String,
+
+    /// Extra raw arguments appended to the QEMU/KVM command line at start
+    /// (e.g. Windows-11 audio: `-audiodev pa,id=snd0 -device ich9-intel-hda
+    /// -device hda-output,audiodev=snd0`). Tokenised with a shell-style
+    /// splitter (quotes respected) and each token is pushed as a SEPARATE
+    /// argv element — never passed through a shell. Persisted per backend:
+    /// native sidecar config, Proxmox `qm set --args`, libvirt
+    /// `<qemu:commandline>`. Empty string = no extra args (and clears any
+    /// previously-set passthrough). Defaults to empty for older configs.
+    #[serde(default)]
+    pub extra_qemu_args: String,
 }
 
 fn default_net_model() -> String { "virtio".to_string() }
@@ -328,6 +347,121 @@ fn pve_boot_order_arg(boot_order: &[String]) -> String {
         if !keys.contains(&k) { keys.push(k); }
     }
     if keys.is_empty() { default() } else { format!("order={}", keys.join(";")) }
+}
+
+// ─── Extra-QEMU-args helpers (operator passthrough; pure, unit-tested) ──────
+//
+// The operator types a single free-text string of extra QEMU args (e.g.
+// `-audiodev pa,id=snd0 -device hda-output,audiodev=snd0`). It is NEVER
+// handed to a shell — we tokenise it ourselves with a small shell-style
+// splitter and push each token as a separate argv element on the
+// `qemu-system-*` Command, so embedded shell metacharacters can't inject.
+
+/// Split a free-text QEMU-args string into argv tokens, shell-style:
+///   • whitespace (space/tab/newline) separates tokens,
+///   • single quotes preserve everything verbatim until the next `'`,
+///   • double quotes preserve everything (incl. spaces) until the next `"`,
+///     with `\"`, `\\`, `\$` and `` \` `` recognised as escapes (POSIX dquote
+///     rules — a backslash before any other char is kept literally),
+///   • a backslash OUTSIDE quotes escapes the next char (so `\ ` is a
+///     literal space inside one token),
+///   • empty / whitespace-only input yields no tokens,
+///   • adjacent quoted/unquoted runs concatenate into one token
+///     (`-x"a b"c` → `-xa bc`), matching POSIX word splitting.
+/// An unterminated quote is tolerated: the run to end-of-string becomes the
+/// final token (best-effort; the operator's text is validated at the UI but
+/// we never want a stray quote to drop a flag silently).
+pub fn split_qemu_args(input: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false; // distinguishes "" (one empty token) from no token
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' | '\n' | '\r' => {
+                if in_token {
+                    tokens.push(std::mem::take(&mut cur));
+                    in_token = false;
+                }
+            }
+            '\'' => {
+                in_token = true;
+                for sc in chars.by_ref() {
+                    if sc == '\'' { break; }
+                    cur.push(sc);
+                }
+            }
+            '"' => {
+                in_token = true;
+                while let Some(dc) = chars.next() {
+                    if dc == '"' { break; }
+                    if dc == '\\' {
+                        match chars.peek() {
+                            Some('"') | Some('\\') | Some('$') | Some('`') => {
+                                cur.push(chars.next().unwrap());
+                            }
+                            // POSIX: a backslash before any other char in a
+                            // double-quoted string is kept literally.
+                            _ => cur.push('\\'),
+                        }
+                    } else {
+                        cur.push(dc);
+                    }
+                }
+            }
+            '\\' => {
+                in_token = true;
+                if let Some(nc) = chars.next() {
+                    cur.push(nc);
+                } else {
+                    cur.push('\\');
+                }
+            }
+            other => {
+                in_token = true;
+                cur.push(other);
+            }
+        }
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// Re-join argv tokens into a single display/persist string, single-quoting
+/// any token that contains whitespace or shell-significant characters so the
+/// result re-splits to the same tokens. The inverse of `split_qemu_args` for
+/// the common case (used to render `<qemu:commandline>` args back into the
+/// editable field, and to build the "raw start command" display).
+pub fn join_qemu_args(tokens: &[String]) -> String {
+    tokens.iter().map(|t| shell_quote(t)).collect::<Vec<_>>().join(" ")
+}
+
+/// Quote a single argv token for safe display in a space-joined command line.
+/// Empty token → `''`. Tokens with no special chars are returned as-is.
+/// Otherwise single-quote, escaping any embedded `'` via the `'\''` idiom.
+pub fn shell_quote(token: &str) -> String {
+    if token.is_empty() {
+        return "''".to_string();
+    }
+    let needs_quote = token
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | '\\' | '$' | '`' | '&' | '|' | ';' | '<' | '>' | '(' | ')' | '*' | '?' | '#' | '~' | '!'));
+    if !needs_quote {
+        return token.to_string();
+    }
+    let mut out = String::with_capacity(token.len() + 2);
+    out.push('\'');
+    for c in token.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 // ─── External-VNC helpers (native QEMU; opt-in via VmConfig::vnc_external) ───
@@ -434,6 +568,8 @@ impl VmConfig {
             bridge_ip_mode: None,
             bridge_ip: None,
             bridge_gateway: None,
+            notes: String::new(),
+            extra_qemu_args: String::new(),
         }
     }
 
@@ -796,6 +932,8 @@ impl VmManager {
                 let mut storage_path: Option<String> = None;
                 let mut net0_bridge: Option<String> = None;
                 let mut wolfnet_active = false;
+                let mut notes = String::new();
+                let mut extra_qemu_args = String::new();
                 let mut extra_nic_pairs: Vec<(usize, NicConfig)> = Vec::new();
 
                 // Capture the raw qm config text so we can parse passthrough lines too
@@ -808,6 +946,11 @@ impl VmManager {
                         let cline = cline.trim();
                         if cline.starts_with("cores:") {
                             cpus = cline.split(':').nth(1).unwrap_or("1").trim().parse().unwrap_or(1);
+                        } else if cline.starts_with("description:") {
+                            notes = cline.splitn(2, ':').nth(1).map(|s| containers::pve_decode_description(s.trim())).unwrap_or_default();
+                        } else if cline.starts_with("args:") {
+                            // `args:` carries the operator's extra raw KVM args (set via `qm set --args`).
+                            extra_qemu_args = cline.splitn(2, ':').nth(1).map(|s| s.trim().to_string()).unwrap_or_default();
                         } else if cline.starts_with("memory:") {
                             memory_mb = cline.split(':').nth(1).unwrap_or("0").trim().parse().unwrap_or(mem_mb);
                         } else if cline.starts_with("onboot:") {
@@ -919,6 +1062,8 @@ impl VmManager {
                     bridge_ip_mode: None,
                     bridge_ip: None,
                     bridge_gateway: None,
+                    notes,
+                    extra_qemu_args,
                 })
             })
             .collect()
@@ -1279,6 +1424,22 @@ impl VmManager {
             args.push(format!("{}:{}", storage, vol.size_gb));
         }
 
+        // Operator notes / description — stored in the PVE config (read back
+        // from the `description:` line). Only set when non-empty so a blank
+        // notes field doesn't write an empty description line.
+        if !config.notes.is_empty() {
+            args.push("--description".to_string());
+            args.push(config.notes.clone());
+        }
+
+        // Operator extra QEMU args → PVE `args:` (raw kvm passthrough). Only
+        // set when non-blank, same as notes. PVE takes the whole string as
+        // one positional value.
+        if !config.extra_qemu_args.trim().is_empty() {
+            args.push("--args".to_string());
+            args.push(config.extra_qemu_args.trim().to_string());
+        }
+
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("qm")
             .args(&args_ref)
@@ -1569,7 +1730,9 @@ impl VmManager {
                      bridge_ip: Option<String>,
                      bridge_gateway: Option<String>,
                      boot_order: Option<Vec<String>>,
-                     vnc_external: Option<bool>) -> Result<Option<String>, String> {
+                     vnc_external: Option<bool>,
+                     notes: Option<String>,
+                     extra_qemu_args: Option<String>) -> Result<Option<String>, String> {
         // Ok(Some(msg)) carries a non-fatal advisory the UI shows alongside
         // the success toast (e.g. libvirt hardware edits that only take
         // effect on the VM's next start); Ok(None) is a plain success.
@@ -1585,6 +1748,65 @@ impl VmManager {
             if let Some(c) = cpus { if c > 0 { cores_str = c.to_string(); args.extend(["--cores", &cores_str]); } }
             if let Some(m) = memory_mb { if m >= 256 { mem_str = m.to_string(); args.extend(["--memory", &mem_str]); } }
             if let Some(a) = auto_start { onboot_str = if a { "1".to_string() } else { "0".to_string() }; args.extend(["--onboot", &onboot_str]); }
+            // Notes / description: a separate `qm set` so an empty value can
+            // use `--delete description` (which actually drops the stored line),
+            // while non-empty text goes via `--description <text>`. PVE accepts
+            // multi-line text as one arg and URL-encodes newlines as %0A in
+            // `qm config` output, which the read-back path decodes.
+            if let Some(ref n) = notes {
+                let desc_args: Vec<&str> = if n.is_empty() {
+                    vec!["set", &vmid_str, "--delete", "description"]
+                } else {
+                    vec!["set", &vmid_str, "--description", n]
+                };
+                let out = Command::new("qm").args(&desc_args).output()
+                    .map_err(|e| format!("qm set --description failed: {}", e))?;
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let trimmed = stderr.trim();
+                    // Deleting an already-absent description is the desired
+                    // state. Only swallow the specific "key not present"
+                    // rejections PVE emits — a real error (perms, lock) must
+                    // still surface even though its text may mention the field.
+                    let already_clear = n.is_empty()
+                        && (trimmed.is_empty()
+                            || trimmed.contains("does not have property")
+                            || trimmed.contains("not in config")
+                            || trimmed.contains("does not exist")
+                            || trimmed.contains("no such"));
+                    if !already_clear {
+                        return Err(format!("qm set --description failed: {}", trimmed));
+                    }
+                }
+            }
+            // Extra QEMU args → PVE's `args:` field (raw kvm passthrough). One
+            // `qm set` so empty can `--delete args` (drops the stored line)
+            // while non-empty text goes via `--args <text>` as a SINGLE arg.
+            // `qm set --args` takes the whole string verbatim; PVE forwards it
+            // to kvm tokenised the same way we tokenise it for the native path.
+            if let Some(ref ea) = extra_qemu_args {
+                let trimmed_ea = ea.trim();
+                let args_args: Vec<&str> = if trimmed_ea.is_empty() {
+                    vec!["set", &vmid_str, "--delete", "args"]
+                } else {
+                    vec!["set", &vmid_str, "--args", trimmed_ea]
+                };
+                let out = Command::new("qm").args(&args_args).output()
+                    .map_err(|e| format!("qm set --args failed: {}", e))?;
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let trimmed = stderr.trim();
+                    let already_clear = trimmed_ea.is_empty()
+                        && (trimmed.is_empty()
+                            || trimmed.contains("does not have property")
+                            || trimmed.contains("not in config")
+                            || trimmed.contains("does not exist")
+                            || trimmed.contains("no such"));
+                    if !already_clear {
+                        return Err(format!("qm set --args failed: {}", trimmed));
+                    }
+                }
+            }
             if args.len() > 2 {
                 let output = Command::new("qm").args(&args).output()
                     .map_err(|e| format!("Failed to run qm set: {}", e))?;
@@ -1736,39 +1958,45 @@ impl VmManager {
             // Flipping into / out of WolfNet mode means add or delete net1.
             // Idempotent: re-emitting the same net1 is a no-op for PVE.
             if let Some(ref mode) = network_mode {
-                if mode == "wolfnet" {
-                    if let Some(ref wip) = wolfnet_ip {
-                        if !wip.is_empty() {
-                            self.ensure_dnsmasq_installed();
-                            let bridge = Self::wn_bridge_name(&vmid_str);
-                            // Bridge setup or `qm set --net1` failures used
-                            // to be swallowed silently — the UI showed
-                            // "settings saved" with no actual NIC change.
-                            // Surface both so the operator sees the real
-                            // reason (klasSponsor 2026-05-28).
-                            self.setup_wolfnet_bridge(&bridge, wip).map_err(|e| {
-                                format!(
-                                    "WolfNet bridge reconcile (qm) for VMID {} failed: {}",
-                                    vmid, e
-                                )
-                            })?;
-                            let out = Command::new("qm").args([
-                                "set", &vmid_str, "--net1",
-                                &format!("virtio,bridge={}", bridge)
-                            ]).output()
-                                .map_err(|e| format!("qm set --net1 failed: {}", e))?;
-                            if !out.status.success() {
-                                let stderr = String::from_utf8_lossy(&out.stderr);
-                                return Err(format!(
-                                    "qm set --net1 for VMID {} failed: {}",
-                                    vmid,
-                                    stderr.trim()
-                                ));
-                            }
-                        }
+                // WolfNet is "on" only when the mode is wolfnet AND a non-empty
+                // IP was supplied. Clearing the IP while staying in WolfNet mode
+                // (the UI sends wolfnet_ip:null) is an explicit REMOVAL — it used
+                // to fall through both arms below and no-op, so the VM kept its
+                // DHCP-leased WolfNet IP and the operator's removal "didn't take"
+                // (Gary KO4BSR 2026-06-19). Route it to the teardown path instead.
+                let want_wolfnet = mode == "wolfnet"
+                    && wolfnet_ip.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+                if want_wolfnet {
+                    let wip = wolfnet_ip.as_deref().unwrap_or_default();
+                    self.ensure_dnsmasq_installed();
+                    let bridge = Self::wn_bridge_name(&vmid_str);
+                    // Bridge setup or `qm set --net1` failures used
+                    // to be swallowed silently — the UI showed
+                    // "settings saved" with no actual NIC change.
+                    // Surface both so the operator sees the real
+                    // reason (klasSponsor 2026-05-28).
+                    self.setup_wolfnet_bridge(&bridge, wip).map_err(|e| {
+                        format!(
+                            "WolfNet bridge reconcile (qm) for VMID {} failed: {}",
+                            vmid, e
+                        )
+                    })?;
+                    let out = Command::new("qm").args([
+                        "set", &vmid_str, "--net1",
+                        &format!("virtio,bridge={}", bridge)
+                    ]).output()
+                        .map_err(|e| format!("qm set --net1 failed: {}", e))?;
+                    if !out.status.success() {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        return Err(format!(
+                            "qm set --net1 for VMID {} failed: {}",
+                            vmid,
+                            stderr.trim()
+                        ));
                     }
                 } else {
-                    // Mode is explicitly non-wolfnet — drop net1 if present.
+                    // Either explicitly non-wolfnet mode, OR wolfnet mode with a
+                    // cleared IP — drop net1 if present and tear the bridge down.
                     // qm errors when net1 doesn't exist; that specific case
                     // is the desired state and stays ignored, but any other
                     // failure (e.g., permissions) needs to surface so the
@@ -1794,7 +2022,15 @@ impl VmManager {
                         }
                     }
                     let bridge = Self::wn_bridge_name(&vmid_str);
-                    self.cleanup_wolfnet_bridge(&bridge, wolfnet_ip.as_deref());
+                    // Proxmox never persists the WolfNet IP (read-back forces it
+                    // to None), so the supplied IP is None on removal. Recover it
+                    // from the host /32 route we installed on the bridge, so
+                    // cleanup can GC the MASQUERADE rule — deleting the bridge
+                    // alone drops the route but leaves that iptables rule behind.
+                    let old_ip = wolfnet_ip.clone()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| Self::recover_wolfnet_ip_from_bridge(&bridge));
+                    self.cleanup_wolfnet_bridge(&bridge, old_ip.as_deref());
                 }
             }
             // Apply the media + BIOS edits that `qm set --cores/...` above
@@ -1849,6 +2085,27 @@ impl VmManager {
                 let val = if a { "--enable" } else { "--disable" };
                 let _ = Command::new("virsh").args(["autostart", name, val]).output();
             }
+            // Notes / description: `virsh desc <name> --config -- <text>`. The
+            // `--` ends option parsing so the text can begin with a dash; an
+            // empty string clears the description. Stored in the domain's
+            // <description> element and read back via `virsh desc --config`.
+            if let Some(ref n) = notes {
+                let out = Command::new("virsh").args(["desc", name, "--config", "--", n]).output()
+                    .map_err(|e| format!("virsh desc failed: {}", e))?;
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    return Err(format!("Failed to set notes: {}", stderr.trim()));
+                }
+            }
+            // Extra QEMU args → the domain's `<qemu:commandline>` passthrough
+            // block. virt-xml has no flag for this, so we edit the domain XML
+            // directly (add the `xmlns:qemu` namespace + the arg block) and
+            // re-`virsh define` it. Applies on next start, like the other
+            // hardware edits below. Empty clears the block (Golden Rule: a
+            // domain we never touched keeps no <qemu:commandline>).
+            if let Some(ref ea) = extra_qemu_args {
+                libvirt_set_qemu_commandline(name, ea)?;
+            }
             // USB/PCI passthrough via virsh attach-device / detach-device
             if usb_devices.is_some() || pci_devices.is_some() {
                 let mut tmp = VmConfig::new(name.to_string(), 1, 512, 1);
@@ -1869,11 +2126,13 @@ impl VmManager {
                 synth.wolfnet_ip = if want_wolfnet {
                     wolfnet_ip.clone().filter(|s| !s.is_empty())
                 } else { None };
-                // We don't have the previous wolfnet_ip handy on the
-                // libvirt edit branch (it's not loaded from a sidecar
-                // here). Passing None means "don't try to GC an old
-                // /32 route" — safe; setup_wolfnet_bridge is idempotent.
-                self.reconcile_wolfnet_for_vm(name, &synth, None);
+                // The previous wolfnet_ip isn't loaded from a sidecar on this
+                // branch, so recover it from the host /32 route on the WolfNet
+                // bridge. That lets reconcile GC the old MASQUERADE rule on
+                // removal / re-IP; if no route exists this is None (the old
+                // behaviour) and setup_wolfnet_bridge stays idempotent.
+                let old_ip = Self::recover_wolfnet_ip_from_bridge(&Self::wn_bridge_name(name));
+                self.reconcile_wolfnet_for_vm(name, &synth, old_ip.as_deref());
             }
             // Push the hardware + primary-NIC edits into the domain's
             // PERSISTENT config. virt-xml --edit defaults to --define even
@@ -2064,6 +2323,20 @@ impl VmManager {
         // are wired in start_vm). Editing it on a running VM doesn't reach in.
         if let Some(ve) = vnc_external {
             config.vnc_external = ve;
+        }
+
+        // Notes / description — free-text; empty string clears it (mirrors the
+        // iso_path/wolfnet_ip clear-on-empty handling above). Persisted into the
+        // sidecar JSON, from which the read-back deserializes it back.
+        if let Some(ref n) = notes {
+            config.notes = n.clone();
+        }
+
+        // Extra QEMU args — free-text passthrough applied on next start (the
+        // splitter tokenises it in start_vm/build_qemu_command). Empty string
+        // clears it. Persisted into the sidecar JSON like notes.
+        if let Some(ref ea) = extra_qemu_args {
+            config.extra_qemu_args = ea.clone();
         }
 
         // Primary-NIC network mode + bridge details. Each field is independently
@@ -2969,6 +3242,19 @@ impl VmManager {
             }
         }
 
+        // Operator-supplied extra QEMU args (e.g. Windows-11 audio). Appended
+        // LAST — after every standard device/-net arg — so they can't reorder
+        // or shadow the args we build. Tokenised with our own shell-style
+        // splitter and each token pushed as a SEPARATE argv element; the string
+        // is NEVER handed to a shell, so embedded metacharacters can't inject.
+        if !config.extra_qemu_args.trim().is_empty() {
+            let extra = split_qemu_args(&config.extra_qemu_args);
+            write_log(&format!("Extra QEMU args ({} tokens): {}", extra.len(), config.extra_qemu_args));
+            for tok in &extra {
+                cmd.arg(tok);
+            }
+        }
+
         write_log(&format!("Launching QEMU: VNC :{} (port {}), KVM: {}", vnc_num, vnc_port, kvm_available));
 
 
@@ -3043,6 +3329,216 @@ impl VmManager {
         let _ = fs::write(&runtime_path, runtime.to_string());
 
         Ok(())
+    }
+
+    /// Reconstruct the exact `qemu-system-*` argv that the native [`start_vm`]
+    /// path would build for `config`, WITHOUT executing anything or mutating
+    /// the host (no TAP/bridge creation, no vfio binding, no passfile writes).
+    /// Returned as a token vector (argv[0] = the qemu binary). Used by the
+    /// `start-command` endpoint to show the operator the raw command.
+    ///
+    /// This MUST stay in lock-step with `start_vm`'s argv emission — the unit
+    /// test `build_qemu_command_matches_start_prefix` pins the device/order
+    /// prefix so a future edit to one without the other is caught at test time.
+    /// Display-only differences are deliberate and documented inline:
+    ///   • the VNC display number is randomised at real start — here it shows
+    ///     `:NN` as a placeholder so the command is stable/copyable;
+    ///   • network args use the deterministic TAP names start_vm would pick,
+    ///     and assume the bridge/TAP setup succeeds (the fallback-to-user-mode
+    ///     only happens at runtime on failure — not knowable without mutating).
+    pub fn build_qemu_command(&self, config: &VmConfig) -> Vec<String> {
+        let mut argv: Vec<String> = Vec::new();
+        let name = config.name.as_str();
+        let is_arm64 = std::env::consts::ARCH == "aarch64";
+        let qemu_bin = if is_arm64 { "qemu-system-aarch64" } else { "qemu-system-x86_64" };
+        argv.push(qemu_bin.to_string());
+
+        let kvm_available = std::path::Path::new("/dev/kvm").exists();
+
+        let os_disk_if = match config.os_disk_bus.as_str() {
+            "ide" => "ide",
+            "sata" | "ahci" => "ide",
+            _ => "virtio",
+        };
+        let disk_path = self.vm_os_disk_path(config);
+        let actual_disk = if disk_path.exists() { disk_path } else { self.vm_disk_path(name) };
+
+        let qmp_path = format!("/run/wolfstack-qmp-{}.sock", name);
+        let serial_sock = format!("/var/lib/wolfstack/vms/{}.serial.sock", name);
+        let vnc_passfile = format!("/var/lib/wolfstack/vms/{}.vncpass", name);
+
+        // External-VNC secret object precedes -vnc (mirrors start_vm ordering).
+        let (vnc_arg, vnc_secret_obj): (String, Option<String>) = if config.vnc_external {
+            (
+                "0.0.0.0:NN,password-secret=vncsec,websocket=WS".to_string(),
+                Some(format!("secret,id=vncsec,file={},format=raw", vnc_passfile)),
+            )
+        } else {
+            ("0.0.0.0:NN,websocket=WS".to_string(), None)
+        };
+        if let Some(ref secret) = vnc_secret_obj {
+            argv.push("-object".into());
+            argv.push(secret.clone());
+        }
+
+        argv.push("-name".into()); argv.push(name.to_string());
+        argv.push("-m".into()); argv.push(format!("{}M", config.memory_mb));
+        argv.push("-smp".into()); argv.push(format!("{}", config.cpus));
+        argv.push("-drive".into());
+        argv.push(format!("file={},format=qcow2,if={},index=0", actual_disk.display(), os_disk_if));
+        argv.push("-vnc".into()); argv.push(vnc_arg);
+        argv.push("-device".into()); argv.push("qemu-xhci,id=xhci".into());
+        argv.push("-device".into()); argv.push("usb-tablet,bus=xhci.0".into());
+        argv.push("-vga".into()); argv.push("std".into());
+        argv.push("-chardev".into());
+        argv.push(format!("socket,id=serial0,path={},server=on,wait=off", serial_sock));
+        argv.push("-serial".into()); argv.push("chardev:serial0".into());
+        argv.push("-qmp".into()); argv.push(format!("unix:{},server,nowait", qmp_path));
+        argv.push("-daemonize".into());
+
+        if is_arm64 {
+            argv.push("-M".into()); argv.push("virt".into());
+            let fw_paths = [
+                "/usr/share/AAVMF/AAVMF_CODE.fd",
+                "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd",
+                "/usr/share/edk2/aarch64/QEMU_EFI.fd",
+            ];
+            if let Some(fw) = fw_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+                argv.push("-bios".into()); argv.push((*fw).to_string());
+            }
+        } else if config.bios_type == "ovmf" {
+            argv.push("-machine".into()); argv.push("q35".into());
+            let code_paths = [
+                "/usr/share/OVMF/OVMF_CODE_4M.fd",
+                "/usr/share/OVMF/OVMF_CODE.fd",
+                "/usr/share/edk2/x64/OVMF_CODE.fd",
+                "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+                "/usr/share/qemu/OVMF_CODE.fd",
+                "/usr/share/OVMF/OVMF_CODE.pure-efi.fd",
+            ];
+            if let Some(code) = code_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+                argv.push("-drive".into());
+                argv.push(format!("if=pflash,format=raw,readonly=on,file={}", code));
+            }
+            let vars_path = self.vm_efivars_path(config);
+            argv.push("-drive".into());
+            argv.push(format!("if=pflash,format=raw,file={}", vars_path.display()));
+        }
+
+        for (i, vol) in config.extra_disks.iter().enumerate() {
+            let vol_path = vol.file_path();
+            if !vol_path.exists() { continue; }
+            let idx = i + 1;
+            let drive_arg = match vol.bus.as_str() {
+                "scsi" => format!("file={},format={},if=none,id=disk{}", vol_path.display(), vol.format, idx),
+                "ide" => format!("file={},format={},if=ide,index={}", vol_path.display(), vol.format, idx),
+                _ => format!("file={},format={},if=virtio,index={}", vol_path.display(), vol.format, idx),
+            };
+            argv.push("-drive".into()); argv.push(drive_arg);
+            if vol.bus == "scsi" {
+                argv.push("-device".into()); argv.push(format!("scsi-hd,drive=disk{}", idx));
+            }
+        }
+
+        if kvm_available {
+            argv.push("-enable-kvm".into()); argv.push("-cpu".into()); argv.push("host".into());
+        } else {
+            let fallback_cpu = if is_arm64 { "max" } else { "qemu64" };
+            argv.push("-cpu".into()); argv.push(fallback_cpu.to_string());
+        }
+
+        let nic_device = match config.net_model.as_str() {
+            "e1000" => "e1000",
+            "e1000e" => "e1000e",
+            "rtl8139" => "rtl8139",
+            _ => "virtio-net-pci",
+        };
+        let nic_arg = if let Some(ref mac) = config.mac_address {
+            format!("{},netdev=net0,mac={}", nic_device, mac)
+        } else {
+            format!("{},netdev=net0", nic_device)
+        };
+
+        // net0 — mirror start_vm's mode dispatch using deterministic TAP names.
+        let mut default_nic_used = false;
+        if !config.skip_default_nic {
+            match config.effective_network_mode() {
+                "wolfnet" if config.wolfnet_ip.is_some() => {
+                    let tap = Self::tap_name(name);
+                    argv.push("-netdev".into());
+                    argv.push(format!("tap,id=net0,ifname={},script=no,downscript=no", tap));
+                    argv.push("-device".into()); argv.push(nic_arg.clone());
+                }
+                "bridge" if config.bridge.as_deref().map(|b| !b.is_empty()).unwrap_or(false) => {
+                    let tap = format!("tap-{}-0", &name[..name.len().min(8)]);
+                    argv.push("-netdev".into());
+                    argv.push(format!("tap,id=net0,ifname={},script=no,downscript=no", tap));
+                    argv.push("-device".into()); argv.push(nic_arg.clone());
+                }
+                _ => {
+                    argv.push("-netdev".into()); argv.push("user,id=net0".into());
+                    argv.push("-device".into()); argv.push(nic_arg.clone());
+                }
+            }
+            default_nic_used = true;
+        }
+
+        let base_net_idx = if default_nic_used { 1 } else { 0 };
+        for (i, nic) in config.extra_nics.iter().enumerate() {
+            let idx = base_net_idx + i;
+            let net_id = format!("net{}", idx);
+            let dev = match nic.model.as_str() {
+                "e1000" => "e1000",
+                "e1000e" => "e1000e",
+                "rtl8139" => "rtl8139",
+                _ => "virtio-net-pci",
+            };
+            let mac = nic.mac.clone().unwrap_or_else(|| "<auto>".to_string());
+            let dev_arg = format!("{},netdev={},mac={}", dev, net_id, mac);
+            // Display assumes a resolvable bridge → TAP; otherwise user-mode.
+            let bridge = nic.bridge.clone().filter(|b| !b.is_empty())
+                .or_else(|| nic.passthrough_interface.clone().filter(|p| !p.is_empty()).map(|p| format!("br-pt-{}", p)));
+            if let Some(_b) = bridge {
+                let tap = format!("tap-{}-{}", &name[..name.len().min(8)], idx);
+                argv.push("-netdev".into());
+                argv.push(format!("tap,id={},ifname={},script=no,downscript=no", net_id, tap));
+                argv.push("-device".into()); argv.push(dev_arg);
+            } else {
+                argv.push("-netdev".into()); argv.push(format!("user,id={}", net_id));
+                argv.push("-device".into()); argv.push(dev_arg);
+            }
+        }
+
+        let mut has_boot_media = false;
+        if let Some(iso) = config.iso_path.as_ref().filter(|i| !i.is_empty()) {
+            let lower = iso.to_lowercase();
+            if lower.ends_with(".img") || lower.ends_with(".raw") {
+                argv.push("-drive".into());
+                argv.push(format!("file={},format=raw,if=none,id=usbdisk,readonly=on", iso));
+                argv.push("-device".into()); argv.push("usb-storage,drive=usbdisk".into());
+            } else {
+                argv.push("-cdrom".into()); argv.push(iso.clone());
+            }
+            has_boot_media = true;
+        }
+        if let Some(drivers) = config.drivers_iso.as_ref()
+            .filter(|d| !d.is_empty() && std::path::Path::new(d.as_str()).exists())
+        {
+            argv.push("-drive".into());
+            argv.push(format!("file={},media=cdrom,index=1", drivers));
+        }
+        if let Some(boot_arg) = qemu_boot_order_arg(&config.boot_order, has_boot_media) {
+            argv.push("-boot".into()); argv.push(boot_arg);
+        }
+
+        argv.extend(super::passthrough::passthrough_argv(config));
+
+        // Operator extra args — appended LAST, exactly as start_vm does.
+        if !config.extra_qemu_args.trim().is_empty() {
+            argv.extend(split_qemu_args(&config.extra_qemu_args));
+        }
+
+        argv
     }
 
     pub fn autostart_vms(&self) {
@@ -3144,6 +3640,35 @@ impl VmManager {
         // fine because the VM is being destroyed.
         let _ = Command::new("ip").args(["link", "set", bridge, "down"]).output();
         let _ = Command::new("ip").args(["link", "del", bridge]).output();
+    }
+
+    /// Best-effort recovery of the WolfNet IP previously assigned to a per-VM
+    /// bridge, by reading the host /32 route we installed in
+    /// `setup_wolfnet_routing` (`<ip>/32 dev <bridge>`). Proxmox doesn't persist
+    /// the WolfNet IP in config, so on removal we need this to GC the
+    /// MASQUERADE rule that deleting the bridge won't clear.
+    fn recover_wolfnet_ip_from_bridge(bridge: &str) -> Option<String> {
+        let out = Command::new("ip")
+            .args(["-o", "route", "show", "dev", bridge])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            // Lines look like "10.0.10.5/32 scope link" — take the /32 prefix.
+            if let Some(first) = line.split_whitespace().next() {
+                if let Some(ip) = first.strip_suffix("/32") {
+                    if ip.split('.').count() == 4
+                        && ip.split('.').all(|o| o.parse::<u8>().is_ok())
+                    {
+                        return Some(ip.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn setup_tap(&self, tap: &str) -> Result<(), String> {
@@ -4047,6 +4572,86 @@ impl VmManager {
         else { "native" }
     }
 
+    /// Produce the raw VM start command for display, per backend. Returns
+    /// `(command, source)` where source is "native" | "proxmox" | "libvirt".
+    /// Honest degradation: if a backend can't produce the command, the
+    /// `command` carries a clear human message (never a fabricated command)
+    /// and the correct source is still returned so the UI can label it.
+    pub fn start_command(&self, name: &str) -> (String, String) {
+        // Proxmox: `qm showcmd <vmid> --pretty` prints the exact kvm command.
+        if containers::is_proxmox() {
+            let Some(vmid) = self.qm_vmid_by_name(name) else {
+                return (format!("VM '{}' not found in Proxmox.", name), "proxmox".to_string());
+            };
+            match Command::new("qm").args(["showcmd", &vmid.to_string(), "--pretty"]).output() {
+                Ok(o) if o.status.success() => {
+                    let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if out.is_empty() {
+                        return ("Proxmox returned an empty start command for this VM.".to_string(), "proxmox".to_string());
+                    }
+                    return (out, "proxmox".to_string());
+                }
+                Ok(o) => {
+                    return (
+                        format!("Could not get the start command from Proxmox (qm showcmd): {}",
+                            String::from_utf8_lossy(&o.stderr).trim()),
+                        "proxmox".to_string(),
+                    );
+                }
+                Err(e) => {
+                    return (format!("Could not run `qm showcmd`: {}", e), "proxmox".to_string());
+                }
+            }
+        }
+
+        // libvirt: `virsh domxml-to-native qemu-argv <name>` reconstructs the
+        // argv libvirt would launch. Some builds restrict this; fall back to
+        // showing the <qemu:commandline> passthrough block when it errors.
+        if containers::is_libvirt() && self.virsh_has_domain(name) {
+            match Command::new("virsh").args(["domxml-to-native", "qemu-argv", "--domain", name]).output() {
+                Ok(o) if o.status.success() => {
+                    let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if !out.is_empty() {
+                        return (out, "libvirt".to_string());
+                    }
+                }
+                _ => {
+                    // Some virsh versions take the domain as a bare positional.
+                    if let Ok(o) = Command::new("virsh").args(["domxml-to-native", "qemu-argv", name]).output() {
+                        let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if o.status.success() && !out.is_empty() {
+                            return (out, "libvirt".to_string());
+                        }
+                    }
+                }
+            }
+            // Fallback: surface the passthrough args we know about + a note.
+            let xml = Command::new("virsh").args(["dumpxml", "--inactive", name]).output().ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            let extra = libvirt_xml_qemu_commandline(&xml);
+            let msg = if extra.is_empty() {
+                "This libvirt build does not allow reconstructing the raw QEMU command \
+                 (domxml-to-native is restricted), and this domain has no extra \
+                 <qemu:commandline> passthrough args set.".to_string()
+            } else {
+                format!(
+                    "This libvirt build does not allow reconstructing the full raw QEMU \
+                     command (domxml-to-native is restricted). Extra passthrough args \
+                     currently set on the domain:\n{}", extra)
+            };
+            return (msg, "libvirt".to_string());
+        }
+
+        // Native: reconstruct the exact argv our start path would build.
+        match self.get_vm(name) {
+            Some(config) => {
+                let argv = self.build_qemu_command(&config);
+                (join_qemu_args(&argv), "native".to_string())
+            }
+            None => (format!("VM '{}' not found.", name), "native".to_string()),
+        }
+    }
+
     pub fn get_vm(&self, name: &str) -> Option<VmConfig> {
         // On Proxmox, find VM in the qm list output
         if containers::is_proxmox() {
@@ -4523,6 +5128,13 @@ impl VmManager {
             bridge_ip_mode: None,
             bridge_ip: None,
             bridge_gateway: None,
+            // Notes from the domain's <description> element. libvirt owns this
+            // field (set via `virsh desc`), so the XML is authoritative.
+            notes: libvirt_xml_description(&dumpxml),
+            // Extra QEMU args from the domain's <qemu:commandline> passthrough
+            // block — libvirt owns this once we've written it, so the XML is
+            // authoritative (empty for any domain we never touched).
+            extra_qemu_args: libvirt_xml_qemu_commandline(&dumpxml),
         };
 
         // Overlay adoption sidecar for WolfStack-specific fields that
@@ -4711,6 +5323,10 @@ impl VmManager {
             bridge_ip_mode: None,
             bridge_ip: None,
             bridge_gateway: None,
+            // Notes from the persistent domain XML's <description> element.
+            notes: libvirt_xml_description(&persistent),
+            // Extra QEMU args from the persistent domain's <qemu:commandline>.
+            extra_qemu_args: libvirt_xml_qemu_commandline(&persistent),
         };
 
         // Same WolfStack sidecar overlay as the subprocess path: the domain
@@ -4878,6 +5494,25 @@ impl VmManager {
         if !config.usb_devices.is_empty() || !config.pci_devices.is_empty() {
             if let Err(e) = super::passthrough::apply_libvirt_passthrough(&config.name, config) {
                 warn!("Failed to attach passthrough devices to libvirt VM {}: {}", config.name, e);
+            }
+        }
+
+        // Operator notes / description → domain's <description> element. The
+        // domain exists now, so `virsh desc --config` persists it (read back
+        // from the XML). Best-effort: a notes failure must not undo the VM.
+        if !config.notes.is_empty() {
+            match Command::new("virsh").args(["desc", &config.name, "--config", "--", &config.notes]).output() {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => warn!("virsh desc for VM '{}' failed: {}", config.name, String::from_utf8_lossy(&o.stderr).trim()),
+                Err(e) => warn!("virsh desc for VM '{}' could not run: {}", config.name, e),
+            }
+        }
+
+        // Operator extra QEMU args → the domain's <qemu:commandline> block.
+        // Best-effort like notes: a passthrough failure must not undo the VM.
+        if !config.extra_qemu_args.trim().is_empty() {
+            if let Err(e) = libvirt_set_qemu_commandline(&config.name, &config.extra_qemu_args) {
+                warn!("Setting <qemu:commandline> for VM '{}' failed: {}", config.name, e);
             }
         }
 
@@ -5164,6 +5799,10 @@ impl VmManager {
             bridge_ip_mode: None,
             bridge_ip: None,
             bridge_gateway: None,
+            // Carry over any existing libvirt <description> as the VM's notes.
+            notes: libvirt_xml_description(&dumpxml),
+            // Carry over any existing <qemu:commandline> passthrough args.
+            extra_qemu_args: libvirt_xml_qemu_commandline(&dumpxml),
         };
 
         // Save config
@@ -6947,6 +7586,8 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
     let mut net0_bridge: Option<String> = None;
     let mut net_model = "virtio".to_string();
     let mut wolfnet_active = false;
+    let mut notes = String::new();
+    let mut extra_qemu_args = String::new();
     let mut extra_nic_pairs: Vec<(usize, NicConfig)> = Vec::new();
 
     for line in main_section.lines() {
@@ -6957,6 +7598,8 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         let val = val.trim();
         match key {
             "name" => { if !val.is_empty() { name = val.to_string(); } }
+            "description" => { notes = containers::pve_decode_description(val); }
+            "args" => { extra_qemu_args = val.to_string(); }
             "cores" => { cpus = val.parse().unwrap_or(1); }
             "memory" => { memory_mb = val.parse().unwrap_or(memory_mb); }
             "onboot" => { auto_start = val == "1"; }
@@ -7077,8 +7720,14 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         bridge_ip_mode: None,
         bridge_ip: None,
         bridge_gateway: None,
+        notes,
+        extra_qemu_args,
     })
 }
+
+// PVE `description:` decoding lives in `containers::pve_decode_description`
+// (the same encoding applies to qemu-server and pct configs). It's used by the
+// read-back paths above via the fully-qualified `containers::` path.
 
 // ─── Proxmox qemu-server conf helpers (used by update_vm / read-back) ────
 //
@@ -7730,6 +8379,179 @@ fn libvirt_xml_inner_text_after_tag(xml: &str, tag_open_prefix: &str) -> Option<
     let close = format!("</{}>", tag_name);
     let close_idx = xml.get(after_open..)?.find(&close)? + after_open;
     Some(xml.get(after_open..close_idx)?.trim().to_string())
+}
+
+/// Extract the libvirt domain `<description>` text (operator notes), XML-
+/// unescaped. libvirt stores the description set by `virsh desc` in this
+/// element with the usual XML entity escaping (`&lt;`, `&amp;`, etc.). Empty
+/// string when absent. `<description/>` (self-closing, no close tag) reads as
+/// empty too since `libvirt_xml_inner_text_after_tag` finds no `</description>`.
+fn libvirt_xml_description(xml: &str) -> String {
+    libvirt_xml_inner_text_after_tag(xml, "<description")
+        .map(|s| xml_unescape(&s))
+        .unwrap_or_default()
+}
+
+/// Extract the operator's extra QEMU args from a libvirt domain XML's
+/// `<qemu:commandline>` passthrough block. Each `<qemu:arg value='...'/>`
+/// child becomes one token; tokens are re-joined with the shell-style
+/// quoting used for the editable text field (so a token containing spaces
+/// round-trips). Empty string when no `<qemu:commandline>` is present —
+/// which is the case for every domain we didn't add passthrough to, so
+/// existing libvirt VMs read back as having no extra args (Golden Rule).
+fn libvirt_xml_qemu_commandline(xml: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    for block in iter_xml_blocks(xml, "qemu:commandline") {
+        for arg_block in iter_xml_blocks(block, "qemu:arg") {
+            if let Some(v) = xml_attr_value(arg_block, "value") {
+                tokens.push(xml_unescape(&v));
+            }
+        }
+    }
+    join_qemu_args(&tokens)
+}
+
+/// Pull `attr='value'` (or `attr="value"`) out of a single XML open tag.
+/// Used for `<qemu:arg value='...'/>`. Tokenises on the attribute name
+/// followed by `=` so a suffix can't false-match.
+fn xml_attr_value(tag: &str, attr: &str) -> Option<String> {
+    let needle = format!("{}=", attr);
+    let idx = tag.find(&needle)?;
+    let after = &tag[idx + needle.len()..];
+    let quote = after.chars().next()?;
+    if quote != '\'' && quote != '"' { return None; }
+    let rest = &after[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+/// Escape a string for use inside a single-quoted XML attribute value. We
+/// emit `<qemu:arg value='...'/>` with single quotes, so `'` must become
+/// `&apos;`; `&` and `<` are escaped to keep the document well-formed.
+fn xml_escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&apos;")
+        .replace('"', "&quot;")
+}
+
+/// Persist operator extra QEMU args into a libvirt domain's
+/// `<qemu:commandline>` passthrough block. There is no virt-xml flag for
+/// this, so we edit the inactive domain XML by hand: ensure the
+/// `xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'` namespace on
+/// the root `<domain>` element, strip any existing `<qemu:commandline>`,
+/// insert a fresh one built from the tokenised args (each token a
+/// `<qemu:arg>`), then `virsh define` the result. An empty/blank `args`
+/// just removes the block (and leaves the namespace, which is harmless).
+/// Applies on next start. Returns Err only on a real virsh failure.
+fn libvirt_set_qemu_commandline(name: &str, args: &str) -> Result<(), String> {
+    let dump = Command::new("virsh").args(["dumpxml", "--inactive", name]).output()
+        .map_err(|e| format!("virsh dumpxml failed: {}", e))?;
+    if !dump.status.success() {
+        return Err(format!("virsh dumpxml failed: {}", String::from_utf8_lossy(&dump.stderr).trim()));
+    }
+    let xml = String::from_utf8_lossy(&dump.stdout).to_string();
+    let new_xml = match rewrite_domain_qemu_commandline(&xml, args) {
+        Some(x) => x,
+        None => return Err("Could not locate <domain> element in domain XML".to_string()),
+    };
+    // virsh define reads the XML from a file path argument. Sanitise the
+    // name for the temp filename so a quirky VM name can't escape temp_dir.
+    let safe_name: String = name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let tmp = std::env::temp_dir().join(format!("wolfstack-qemucmdline-{}.xml", safe_name));
+    fs::write(&tmp, &new_xml).map_err(|e| format!("write temp domain XML: {}", e))?;
+    let define = Command::new("virsh").args(["define", &tmp.to_string_lossy()]).output();
+    let _ = fs::remove_file(&tmp);
+    let out = define.map_err(|e| format!("virsh define failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!("virsh define (qemu:commandline) failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
+}
+
+/// Pure XML transform behind [`libvirt_set_qemu_commandline`] (unit-tested):
+/// add the qemu namespace to `<domain ...>`, drop any existing
+/// `<qemu:commandline>...</qemu:commandline>` block, and append a fresh one
+/// (when `args` is non-blank) just before `</domain>`. Returns None if no
+/// `<domain` open tag is found.
+fn rewrite_domain_qemu_commandline(xml: &str, args: &str) -> Option<String> {
+    let qemu_ns = "http://libvirt.org/schemas/domain/qemu/1.0";
+    // 1. Ensure the namespace on the <domain ...> open tag.
+    let dom_start = xml.find("<domain")?;
+    let dom_open_end = xml[dom_start..].find('>')? + dom_start; // index of '>'
+    let mut out = String::with_capacity(xml.len() + 256);
+    out.push_str(&xml[..dom_start]);
+    let open_tag = &xml[dom_start..=dom_open_end];
+    if open_tag.contains("xmlns:qemu=") {
+        out.push_str(open_tag);
+    } else {
+        // Insert the namespace right after `<domain` (before any other attrs).
+        // `<domain ...>` → `<domain xmlns:qemu='...' ...>`
+        let inserted = open_tag.replacen("<domain", &format!("<domain xmlns:qemu='{}'", qemu_ns), 1);
+        out.push_str(&inserted);
+    }
+    let mut rest = xml[dom_open_end + 1..].to_string();
+
+    // 2. Strip any existing <qemu:commandline>...</qemu:commandline> blocks.
+    while let Some(s) = rest.find("<qemu:commandline") {
+        // Self-closing form <qemu:commandline/> or full block.
+        let after = &rest[s..];
+        let block_len = if let Some(close) = after.find("</qemu:commandline>") {
+            close + "</qemu:commandline>".len()
+        } else if let Some(sc) = after.find("/>") {
+            sc + "/>".len()
+        } else {
+            break;
+        };
+        // Also swallow trailing whitespace/newline left behind for tidiness.
+        let mut end = s + block_len;
+        while end < rest.len() && rest.as_bytes()[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        rest.replace_range(s..end, "");
+    }
+
+    // 3. Build + insert a fresh block before </domain> when args are non-blank.
+    let tokens = split_qemu_args(args);
+    if !tokens.is_empty() {
+        let mut block = String::from("  <qemu:commandline>\n");
+        for t in &tokens {
+            block.push_str(&format!("    <qemu:arg value='{}'/>\n", xml_escape_attr(t)));
+        }
+        block.push_str("  </qemu:commandline>\n");
+        if let Some(close) = rest.rfind("</domain>") {
+            rest.insert_str(close, &block);
+        } else {
+            rest.push_str(&block);
+        }
+    }
+    out.push_str(&rest);
+    Some(out)
+}
+
+/// Minimal XML entity unescaping for the five predefined entities plus the
+/// numeric line-feed/carriage-return references libvirt emits for multi-line
+/// descriptions. Sufficient for the `<description>` text — we never round-trip
+/// arbitrary markup here.
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        // Newline/CR numeric refs — decimal (what libvirt emits) and hex
+        // (some tooling in the ecosystem) for robustness.
+        .replace("&#10;", "\n")
+        .replace("&#xA;", "\n")
+        .replace("&#xa;", "\n")
+        .replace("&#13;", "")
+        .replace("&#xD;", "")
+        .replace("&#xd;", "")
+        // `&amp;` MUST be resolved last so we never double-decode (e.g. the
+        // literal text "&lt;" arrives as "&amp;lt;" and must stay "&lt;").
+        .replace("&amp;", "&")
 }
 
 /// Find every `<tag>...</tag>` (or self-closing `<tag .../>`) block in
@@ -8456,6 +9278,29 @@ mod libvirt_xml_tests {
         // the WolfNet NIC).
         assert!(libvirt_primary_nic_edit(WNBR_FIRST, "win", Some("wolfnet"), None, None).is_none());
     }
+
+    // ─── Notes / description decode (operator notes round-trip) ───
+    // PVE `description:` decoding is unit-tested in the containers module
+    // (the single shared `pve_decode_description`); here we cover the
+    // libvirt-specific XML description read-back.
+
+    #[test]
+    fn libvirt_description_unescapes_xml_entities() {
+        let xml = "<domain><name>web</name><description>A &amp; B&#10;&lt;tag&gt;</description></domain>";
+        assert_eq!(libvirt_xml_description(xml), "A & B\n<tag>");
+        // Absent description reads as empty.
+        assert_eq!(libvirt_xml_description("<domain><name>web</name></domain>"), "");
+        // Empty description element reads as empty.
+        assert_eq!(libvirt_xml_description("<domain><description></description></domain>"), "");
+    }
+
+    #[test]
+    fn xml_unescape_decodes_amp_last() {
+        // `&amp;lt;` must decode to the literal "&lt;", NOT "<" — i.e. the
+        // ampersand entity is resolved last so we never double-decode.
+        assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
+        assert_eq!(xml_unescape("&quot;x&quot;"), "\"x\"");
+    }
 }
 
 #[cfg(test)]
@@ -8565,5 +9410,148 @@ ide2: none,media=cdrom
         assert_eq!(vm.os_disk_bus, "sata");
         assert_eq!(vm.net_model, "e1000");
         assert_eq!(vm.bios_type, "ovmf");
+    }
+}
+
+#[cfg(test)]
+mod extra_qemu_args_tests {
+    use super::*;
+
+    #[test]
+    fn split_empty_and_whitespace_yield_no_tokens() {
+        assert_eq!(split_qemu_args(""), Vec::<String>::new());
+        assert_eq!(split_qemu_args("   \t \n "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn split_garys_audio_example() {
+        // Gary's exact request — must become 6 separate argv tokens.
+        let s = "-audiodev pa,id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0";
+        assert_eq!(split_qemu_args(s), vec![
+            "-audiodev", "pa,id=snd0",
+            "-device", "ich9-intel-hda",
+            "-device", "hda-output,audiodev=snd0",
+        ]);
+    }
+
+    #[test]
+    fn split_collapses_runs_of_whitespace() {
+        assert_eq!(split_qemu_args("-a    -b\t-c"), vec!["-a", "-b", "-c"]);
+    }
+
+    #[test]
+    fn split_single_quotes_preserve_spaces() {
+        assert_eq!(split_qemu_args("-name 'My VM'"), vec!["-name", "My VM"]);
+        // Empty single-quoted string is a real (empty) token.
+        assert_eq!(split_qemu_args("''"), vec![""]);
+    }
+
+    #[test]
+    fn split_double_quotes_preserve_spaces_and_escapes() {
+        assert_eq!(split_qemu_args("-x \"a b\""), vec!["-x", "a b"]);
+        // \" is a literal quote; \\ is a literal backslash inside dquotes.
+        assert_eq!(split_qemu_args(r#""he said \"hi\"""#), vec![r#"he said "hi""#]);
+        assert_eq!(split_qemu_args(r#""a\\b""#), vec![r"a\b"]);
+        // A backslash before a non-special char stays literal (POSIX dquote).
+        assert_eq!(split_qemu_args(r#""a\nb""#), vec![r"a\nb"]);
+    }
+
+    #[test]
+    fn split_backslash_escape_outside_quotes() {
+        // `\ ` is a literal space joining one token.
+        assert_eq!(split_qemu_args(r"a\ b"), vec!["a b"]);
+        assert_eq!(split_qemu_args(r"\'"), vec!["'"]);
+    }
+
+    #[test]
+    fn split_adjacent_quoted_unquoted_concatenate() {
+        assert_eq!(split_qemu_args(r#"-x"a b"c"#), vec!["-xa bc"]);
+        assert_eq!(split_qemu_args("a'b c'd"), vec!["ab cd"]);
+    }
+
+    #[test]
+    fn split_unterminated_quote_is_tolerated() {
+        assert_eq!(split_qemu_args("-name 'unterminated"), vec!["-name", "unterminated"]);
+        assert_eq!(split_qemu_args(r#"-x "open"#), vec!["-x", "open"]);
+    }
+
+    #[test]
+    fn join_round_trips_through_split() {
+        let cases = vec![
+            vec!["-audiodev".to_string(), "pa,id=snd0".to_string()],
+            vec!["-name".to_string(), "My VM".to_string()],
+            vec!["weird's".to_string(), "a b".to_string(), "".to_string()],
+            vec!["-device".to_string(), "hda-output,audiodev=snd0".to_string()],
+        ];
+        for tokens in cases {
+            let joined = join_qemu_args(&tokens);
+            assert_eq!(split_qemu_args(&joined), tokens, "round-trip failed for {:?} (joined: {})", tokens, joined);
+        }
+    }
+
+    #[test]
+    fn shell_quote_plain_token_unquoted() {
+        assert_eq!(shell_quote("-audiodev"), "-audiodev");
+        assert_eq!(shell_quote("pa,id=snd0"), "pa,id=snd0");
+    }
+
+    #[test]
+    fn shell_quote_special_tokens() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn libvirt_commandline_round_trips_via_xml() {
+        // Build a block, parse it back — tokens must survive incl. spaces/quotes.
+        let tokens = vec![
+            "-audiodev".to_string(), "pa,id=snd0".to_string(),
+            "-device".to_string(), "hda-output,audiodev=snd0".to_string(),
+            "weird & <val>".to_string(),
+        ];
+        let args = join_qemu_args(&tokens);
+        let xml = rewrite_domain_qemu_commandline(
+            "<domain type='kvm'><name>v</name></domain>", &args).unwrap();
+        assert!(xml.contains("xmlns:qemu="));
+        assert!(xml.contains("<qemu:commandline>"));
+        let parsed = libvirt_xml_qemu_commandline(&xml);
+        assert_eq!(split_qemu_args(&parsed), tokens);
+    }
+
+    #[test]
+    fn rewrite_empty_args_removes_block_keeps_namespace() {
+        let with_block = "<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>\
+            <name>v</name>\n  <qemu:commandline>\n    <qemu:arg value='-x'/>\n  </qemu:commandline>\n</domain>";
+        let out = rewrite_domain_qemu_commandline(with_block, "").unwrap();
+        assert!(!out.contains("<qemu:commandline>"));
+        assert!(out.contains("xmlns:qemu=")); // namespace left in place (harmless)
+        assert!(out.contains("</domain>"));
+    }
+
+    #[test]
+    fn rewrite_does_not_double_add_namespace() {
+        let xml = "<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'><name>v</name></domain>";
+        let out = rewrite_domain_qemu_commandline(xml, "-x").unwrap();
+        assert_eq!(out.matches("xmlns:qemu=").count(), 1);
+    }
+
+    #[test]
+    fn rewrite_returns_none_without_domain_tag() {
+        assert!(rewrite_domain_qemu_commandline("<notadomain/>", "-x").is_none());
+    }
+
+    #[test]
+    fn build_qemu_command_appends_extra_args_last() {
+        let mut cfg = VmConfig::new("testvm".to_string(), 2, 1024, 10);
+        cfg.extra_qemu_args = "-audiodev pa,id=snd0".to_string();
+        let argv = VmManager::new().build_qemu_command(&cfg);
+        // argv[0] is the qemu binary.
+        assert!(argv[0].starts_with("qemu-system-"));
+        // The extra args must be the final tokens.
+        let n = argv.len();
+        assert_eq!(&argv[n-2..], &["-audiodev".to_string(), "pa,id=snd0".to_string()]);
+        // And the standard -name flag must precede them.
+        assert!(argv.iter().any(|a| a == "-name"));
     }
 }

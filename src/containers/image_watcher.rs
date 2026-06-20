@@ -655,7 +655,8 @@ pub fn perform_update_blocking(container_name: &str, config: &ImageWatcherConfig
     // Step 3: optional backup.
     if policy.backup_before_update {
         event.status = ImageUpdateStatus::BackingUp;
-        match crate::backup::backup_docker(container_name) {
+        // Pre-update safety backup captures everything — no mount exclusions.
+        match crate::backup::backup_docker(container_name, &[]) {
             Ok((path, _size, _sha, _mounts)) => {
                 event.backup_id = path.file_name()
                     .and_then(|n| n.to_str())

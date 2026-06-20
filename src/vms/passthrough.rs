@@ -462,6 +462,42 @@ pub fn append_qemu_passthrough_args(cmd: &mut Command, config: &VmConfig) -> Res
     Ok(())
 }
 
+/// Pure mirror of [`append_qemu_passthrough_args`] that produces the same
+/// `-device` argv WITHOUT any host side-effects (no vfio binding, no sysfs
+/// writes). Used by `build_qemu_command` to render the raw start command for
+/// display. Invalid device specs are skipped here rather than erroring — the
+/// display path must never fail; the real start path validates and errors.
+pub fn passthrough_argv(config: &VmConfig) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let usb_boot = super::manager::boot_order_usb_first(&config.boot_order);
+    for (i, u) in config.usb_devices.iter().enumerate() {
+        let spec = if let Some(ref hb) = u.host_bus {
+            if !hb.is_empty() {
+                match hb.split_once('-') {
+                    Some((bus, port)) => format!("usb-host,bus=xhci.0,hostbus={},hostport={}", bus, port),
+                    None => continue,
+                }
+            } else {
+                format!("usb-host,bus=xhci.0,vendorid=0x{},productid=0x{}", u.vendor_id, u.product_id)
+            }
+        } else {
+            if u.vendor_id.len() != 4 || u.product_id.len() != 4 { continue; }
+            format!("usb-host,bus=xhci.0,vendorid=0x{},productid=0x{}", u.vendor_id, u.product_id)
+        };
+        let spec = if usb_boot && i == 0 { format!("{},bootindex=0", spec) } else { spec };
+        out.push("-device".to_string());
+        out.push(spec);
+    }
+    for p in &config.pci_devices {
+        if validate_bdf(&p.bdf).is_err() { continue; }
+        let mut spec = format!("vfio-pci,host={}", p.bdf);
+        if p.primary_gpu { spec.push_str(",x-vga=on"); }
+        out.push("-device".to_string());
+        out.push(spec);
+    }
+    out
+}
+
 /// Validate a BDF string to prevent shell injection and malformed addresses.
 /// Accepts both short (BB:DD.F) and full (DDDD:BB:DD.F) forms, normalising to full.
 pub fn normalize_bdf(bdf: &str) -> Result<String, String> {

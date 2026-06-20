@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tracing::{info, warn};
 
+pub mod lan_bridge;
 pub mod router;
 pub mod vlan;
 pub mod vlan_attach;
@@ -4136,45 +4137,62 @@ pub fn delete_wireguard_bridge(cluster: &str) -> Result<String, String> {
 pub fn apply_wireguard_bridge(bridge: &WireGuardBridge) -> Result<(), String> {
     let iface = bridge.interface_name();
 
-    // Create interface if it doesn't exist
+    // Does the interface already exist? If so this is a re-apply (idempotent
+    // startup/refresh path) and we must NOT delete it on a transient failure —
+    // it may be a perfectly good live bridge. If it does NOT exist we are
+    // creating it fresh, so we own cleanup-on-failure.
     let exists = Command::new("ip").args(["link", "show", &iface]).output()
         .map(|o| o.status.success()).unwrap_or(false);
+
     if !exists {
+        // Guard against the cryptic "ip link set up: Address already in use".
+        // WolfNet is itself WireGuard, and a prior half-applied bridge can
+        // linger holding the UDP port, so surface a clear, actionable error
+        // before we even create the interface.
+        if udp_port_in_use(bridge.listen_port) {
+            return Err(format!(
+                "UDP port {} is already in use on this host (WolfNet or another \
+                 WireGuard bridge may be using it) — choose a different WireGuard listen port",
+                bridge.listen_port
+            ));
+        }
         run_cmd("ip", &["link", "add", &iface, "type", "wireguard"])?;
     }
 
+    // Run the configuration steps; on failure of a freshly-created iface, tear
+    // it down so the lingering device doesn't hold the listen-port and block
+    // the next retry with "Address already in use".
+    let result = apply_wireguard_bridge_inner(bridge, &iface);
+    if result.is_err() && !exists {
+        let _ = Command::new("ip").args(["link", "set", &iface, "down"]).output();
+        let _ = Command::new("ip").args(["link", "delete", &iface]).output();
+    }
+    result
+}
+
+/// Configure an already-created WireGuard interface (key, port, IP, peers, NAT).
+fn apply_wireguard_bridge_inner(bridge: &WireGuardBridge, iface: &str) -> Result<(), String> {
     // Tell NetworkManager to ignore WireGuard and WolfNet interfaces — on
     // Fedora/RHEL desktops NM tries to manage them, messes with routing
     // metrics, and causes slow/broken connectivity on WiFi.
     ensure_nm_unmanaged();
     let _ = Command::new("nmcli")
-        .args(["device", "set", &iface, "managed", "no"])
+        .args(["device", "set", iface, "managed", "no"])
         .output();
 
-    // Write private key to a temp file for `wg set` — wg refuses to read
-    // the key from stdin or an argument, so we MUST stage it on disk
-    // briefly. /tmp is world-readable, so the file is created with
-    // mode 0600 via write_secure and removed immediately after wg
-    // consumes it. Pre-v18.7.27 this used plain fs::write which
-    // inherited umask 022 → the private key was world-readable for the
-    // duration of the wg call.
-    let key_path = format!("/tmp/wg-{}-key", iface);
-    crate::paths::write_secure(&key_path, &bridge.private_key)
-        .map_err(|e| format!("Failed to write key: {}", e))?;
-
-    // Set private key and listen port
-    let set_result = run_cmd("wg", &["set", &iface, "private-key", &key_path, "listen-port", &bridge.listen_port.to_string()]);
-
-    // Clean up key file even on error — don't leave a private key in /tmp.
-    let _ = std::fs::remove_file(&key_path);
-    set_result?;
+    // Set private key + listen port. The key is fed on a pipe via /dev/stdin
+    // so it never touches disk: the old /tmp/wg-<iface>-key staging file failed
+    // with "fopen: Permission denied" on hardened hosts (SELinux/AppArmor or a
+    // restrictively-mounted /tmp denied wg reading even a root-owned 0600 file).
+    // The stdin pattern is already proven by wg_pubkey() above.
+    wg_set_private_key(iface, &bridge.private_key, bridge.listen_port)?;
 
     // Set IP address (flush first to avoid duplicates)
-    let _ = Command::new("ip").args(["addr", "flush", "dev", &iface]).output();
-    run_cmd("ip", &["addr", "add", &bridge.server_ip, "dev", &iface])?;
+    let _ = Command::new("ip").args(["addr", "flush", "dev", iface]).output();
+    run_cmd("ip", &["addr", "add", &bridge.server_ip, "dev", iface])?;
 
     // Bring up
-    run_cmd("ip", &["link", "set", &iface, "up"])?;
+    run_cmd("ip", &["link", "set", iface, "up"])?;
 
     // Add all enabled client peers
     for client in &bridge.clients {
@@ -4238,6 +4256,65 @@ fn wg_pubkey(private_key: &str) -> Result<String, String> {
     let output = child.wait_with_output()
         .map_err(|e| format!("wg pubkey wait: {}", e))?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Set a WireGuard interface's private key + listen port without staging the
+/// key on disk. The key is piped to `wg set <iface> private-key /dev/stdin`,
+/// so it never lands in /tmp (which broke on hardened hosts — SELinux/AppArmor
+/// or a restrictive /tmp mount denied wg's fopen of even a root-owned 0600
+/// file). Mirrors the proven stdin pattern in wg_pubkey().
+fn wg_set_private_key(iface: &str, private_key: &str, listen_port: u16) -> Result<(), String> {
+    use std::io::Write;
+    let port = listen_port.to_string();
+    let mut child = Command::new("wg")
+        .args(["set", iface, "private-key", "/dev/stdin", "listen-port", &port])
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("wg set failed: {}", e))?;
+    child.stdin.take().unwrap().write_all(private_key.as_bytes())
+        .map_err(|e| format!("wg set stdin: {}", e))?;
+    let output = child.wait_with_output()
+        .map_err(|e| format!("wg set wait: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("wg set {} private-key /dev/stdin listen-port {}: {}",
+            iface, listen_port,
+            String::from_utf8_lossy(&output.stderr).trim()))
+    }
+}
+
+/// Best-effort check whether a UDP port is already bound on this host.
+/// Used to convert the cryptic "ip link set up: Address already in use" into a
+/// clear, actionable error when a WireGuard listen-port collides (with WolfNet,
+/// which is itself WireGuard, or a lingering half-applied bridge). If `ss` is
+/// unavailable we return false and let the real bind attempt surface the error.
+fn udp_port_in_use(port: u16) -> bool {
+    let output = match Command::new("ss").args(["-lunH"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let want = port.to_string();
+    for line in text.lines() {
+        // ss columns vary slightly by version; only the address columns
+        // (Local Address:Port / Peer Address:Port) contain a ':'. Match the
+        // trailing ":<port>" there. We must NOT scan the bare-number Recv-Q /
+        // Send-Q columns — a receive-queue depth that happens to equal the
+        // port would false-positive. The Peer column for a listening UDP
+        // socket is "0.0.0.0:*" / "*:*", whose trailing segment is "*", so it
+        // never matches a numeric port.
+        for col in line.split_whitespace() {
+            if !col.contains(':') {
+                continue;
+            }
+            if col.rsplit(':').next() == Some(want.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Add a peer to a live WireGuard interface

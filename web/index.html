@@ -3844,6 +3844,32 @@
                         <p style="text-align:center; padding:20px; color:var(--text-muted); grid-column:1/-1;">Loading
                             targets...</p>
                     </div>
+
+                    <!-- System folder backup source -->
+                    <div style="margin-top:16px; padding:12px 14px; border:1px dashed var(--border); border-radius:var(--radius-sm);">
+                        <div style="font-weight:500; font-size:13px; margin-bottom:6px;">
+                            <span class="ws-icon-clean-wrap" data-icon="folder"></span> System folder
+                        </div>
+                        <div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">
+                            Back up an arbitrary host folder (e.g. <code>/etc</code>, <code>/home</code>, app data) to the
+                            destination selected above. Dangerous roots (<code>/</code>, <code>/proc</code>, <code>/sys</code>,
+                            <code>/dev</code>) are refused.
+                        </div>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+                            <input type="text" id="sysfolder-path" placeholder="/etc"
+                                style="flex:1; min-width:200px; padding:5px 10px; font-size:12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text-primary); font-family:var(--font-mono);">
+                            <button class="btn btn-sm" onclick="browseSystemFolderPath()" title="Browse for a folder" style="font-size:12px; padding:5px 10px;"><span class="ws-icon-clean-wrap" data-icon="folder"></span></button>
+                            <input type="text" id="sysfolder-label" placeholder="Label (optional)"
+                                style="width:auto; min-width:140px; padding:5px 10px; font-size:12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text-primary);">
+                        </div>
+                        <div style="margin-top:8px;">
+                            <input type="text" id="sysfolder-excludes" placeholder="Exclude sub-paths (comma-separated, optional) e.g. /etc/ssl, /home/big"
+                                style="width:100%; padding:5px 10px; font-size:12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text-primary); font-family:var(--font-mono);">
+                        </div>
+                        <div style="margin-top:8px; display:flex; gap:8px;">
+                            <button class="btn btn-sm btn-primary" onclick="backupSystemFolder()"><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Back up folder now</button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -3982,6 +4008,19 @@
                                 <input type="text" id="pbs-fingerprint" class="form-control"
                                     placeholder="SHA-256 fingerprint">
                             </div>
+                        </div>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label style="font-size:13px; color:var(--text-secondary); cursor:pointer; display:flex; align-items:flex-start; gap:8px;">
+                                <input type="checkbox" id="pbs-file-level" style="margin-top:3px;">
+                                <span>
+                                    <span style="font-weight:500;">File-level backup (pxar) — enables per-file restore</span>
+                                    <span style="display:block; font-size:11px; color:var(--text-muted); margin-top:2px;">
+                                        Stores container/folder contents as native PBS pxar archives instead of one opaque .tar.gz,
+                                        so you can restore individual files from PBS. Docker, native LXC and System Folder targets only
+                                        (VMs and Proxmox LXC fall back to image backup automatically).
+                                    </span>
+                                </span>
+                            </label>
                         </div>
                     </div>
                 </div>
@@ -9831,6 +9870,20 @@ region = us-east-1"></textarea>
                             <div class="form-group">
                                 <label>Memory (MB)</label>
                                 <input type="number" class="form-control" id="new-vm-memory" value="1024" min="256">
+                            </div>
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label for="new-vm-notes">Notes / Description <small style="color:var(--text-muted);">(optional)</small></label>
+                                <textarea class="form-control" id="new-vm-notes" rows="3" maxlength="4096"
+                                    placeholder="Free-text notes about this VM (purpose, owner, maintenance window…)"
+                                    style="resize:vertical;"></textarea>
+                            </div>
+                            <div class="form-group" style="grid-column: 1 / -1;">
+                                <label for="new-vm-extra-qemu-args">Extra QEMU arguments <small style="color:var(--text-muted);">(advanced)</small></label>
+                                <input type="text" class="form-control" id="new-vm-extra-qemu-args" maxlength="4096"
+                                    placeholder="-audiodev pa,id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0">
+                                <small style="display:block; color:var(--text-muted); margin-top:4px;">
+                                    Passed straight to the VM start command (e.g. Windows 11 audio). Quote values with spaces. Leave blank for none.
+                                </small>
                             </div>
                         </div>
                     </div>

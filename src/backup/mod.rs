@@ -30,6 +30,10 @@ pub enum BackupTargetType {
     Lxc,
     Vm,
     Config,
+    /// Arbitrary host system folder (e.g. /etc, /home, app data). The
+    /// folder path travels in `BackupTarget::system_path`; `name` carries
+    /// an operator-supplied label used in the backup filename.
+    SystemPath,
 }
 
 impl std::fmt::Display for BackupTargetType {
@@ -39,6 +43,7 @@ impl std::fmt::Display for BackupTargetType {
             Self::Lxc => write!(f, "lxc"),
             Self::Vm => write!(f, "vm"),
             Self::Config => write!(f, "config"),
+            Self::SystemPath => write!(f, "systempath"),
         }
     }
 }
@@ -58,6 +63,31 @@ pub struct BackupTarget {
     /// Brief spec summary (e.g. "2 cores, 2GB RAM, Ubuntu 22.04")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub specs: Option<String>,
+    /// Host source paths (bind mounts / system sub-paths) and named-volume
+    /// names to SKIP when backing this target up. Empty (the default for
+    /// every existing config) preserves the original "back everything up"
+    /// behaviour exactly. Matched exactly, or as a trailing-slash prefix
+    /// (`/mnt/media` excludes `/mnt/media/...`).
+    #[serde(default)]
+    pub exclude_mounts: Vec<String>,
+    /// For `SystemPath` targets: the absolute host directory to archive.
+    /// Empty for every other target type.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system_path: String,
+}
+
+impl Default for BackupTarget {
+    fn default() -> Self {
+        Self {
+            target_type: BackupTargetType::Config,
+            name: String::new(),
+            hostname: None,
+            state: None,
+            specs: None,
+            exclude_mounts: Vec::new(),
+            system_path: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -138,6 +168,14 @@ pub struct BackupStorage {
     /// PBS namespace (optional, for organizing backups)
     #[serde(default)]
     pub pbs_namespace: String,
+    /// PBS file-level (pxar) backup. When false (the default, and what every
+    /// existing config has) WolfStack uploads its `.tar.gz` wrapped in a
+    /// single `backup.pxar` — opaque, restorable only as a whole. When true,
+    /// the workload's CONTENT directory is uploaded as native pxar archives so
+    /// PBS's per-file restore works. Golden-Rule safe: absent field → false →
+    /// byte-identical to the original behaviour.
+    #[serde(default)]
+    pub pbs_file_level: bool,
     // ── NFS direct backup destination ─────────────────
     /// `server:/export` — same syntax as `mount -t nfs`.
     #[serde(default)]
@@ -240,6 +278,7 @@ impl Default for BackupStorage {
             pbs_password: String::new(),
             pbs_fingerprint: String::new(),
             pbs_namespace: String::new(),
+            pbs_file_level: false,
             nfs_source: String::new(),
             nfs_options: String::new(),
             smb_source: String::new(),
@@ -502,6 +541,112 @@ mod tests {
         assert!(BackupStorage::validate_wolfdisk_subpath("backups/prod").is_ok());
         assert!(BackupStorage::validate_wolfdisk_subpath("/backups/prod/").is_ok());
     }
+
+    // ── Feature 1: mount exclusion matching ──
+
+    #[test]
+    fn mount_exclude_exact_match() {
+        let ex = vec!["/mnt/media".to_string()];
+        assert!(mount_is_excluded("/mnt/media", &ex));
+        assert!(mount_is_excluded("/mnt/media/", &ex)); // trailing slash normalised
+    }
+
+    #[test]
+    fn mount_exclude_prefix_match() {
+        let ex = vec!["/mnt/media".to_string()];
+        assert!(mount_is_excluded("/mnt/media/tv", &ex));
+        assert!(mount_is_excluded("/mnt/media/movies/4k", &ex));
+    }
+
+    #[test]
+    fn mount_exclude_no_false_prefix() {
+        // "/mnt/media2" must NOT be caught by an exclude of "/mnt/media".
+        let ex = vec!["/mnt/media".to_string()];
+        assert!(!mount_is_excluded("/mnt/media2", &ex));
+        assert!(!mount_is_excluded("/mnt/other", &ex));
+    }
+
+    #[test]
+    fn mount_exclude_volume_name() {
+        let ex = vec!["pgdata".to_string()];
+        assert!(mount_is_excluded("pgdata", &ex));
+        assert!(!mount_is_excluded("pgdata-backup", &ex));
+    }
+
+    #[test]
+    fn mount_exclude_empty_list_matches_nothing() {
+        // Golden Rule: no exclusions configured → nothing skipped, so existing
+        // targets back up byte-identically.
+        assert!(!mount_is_excluded("/mnt/media", &[]));
+        assert!(!mount_is_excluded("anyvol", &[]));
+    }
+
+    #[test]
+    fn mount_exclude_ignores_empty_entries() {
+        // An empty exclude entry must NOT match everything.
+        let ex = vec!["".to_string(), "   ".to_string()];
+        assert!(!mount_is_excluded("/mnt/media", &ex));
+    }
+
+    #[test]
+    fn mount_exclude_trailing_slash_on_entry() {
+        let ex = vec!["/mnt/media/".to_string()];
+        assert!(mount_is_excluded("/mnt/media", &ex));
+        assert!(mount_is_excluded("/mnt/media/tv", &ex));
+    }
+
+    // ── Feature 3: system-path validation ──
+
+    #[test]
+    fn system_path_rejects_relative() {
+        assert!(validate_system_path("etc").is_err());
+        assert!(validate_system_path("").is_err());
+    }
+
+    #[test]
+    fn system_path_rejects_dangerous_roots() {
+        assert!(validate_system_path("/").is_err());
+        assert!(validate_system_path("/proc").is_err());
+        assert!(validate_system_path("/sys").is_err());
+        assert!(validate_system_path("/dev").is_err());
+        assert!(validate_system_path("/proc/1").is_err());
+        assert!(validate_system_path("/sys/kernel").is_err());
+    }
+
+    #[test]
+    fn system_path_accepts_existing_dir() {
+        // /tmp always exists and is a directory on a Linux test host.
+        assert!(validate_system_path("/tmp").is_ok());
+        assert!(validate_system_path("/tmp/").is_ok());
+    }
+
+    #[test]
+    fn system_path_rejects_nonexistent() {
+        assert!(validate_system_path("/this/does/not/exist/anywhere-xyz").is_err());
+    }
+
+    // ── Feature 2: PBS file-level entry detection ──
+
+    #[test]
+    fn file_level_entry_detected_by_prefix_and_type() {
+        let mut e = BackupEntry {
+            id: "x".into(),
+            target: BackupTarget { target_type: BackupTargetType::Lxc, name: "ct1".into(), ..Default::default() },
+            storage: BackupStorage { storage_type: StorageType::Pbs, ..BackupStorage::default() },
+            filename: "pbsfl-ct-ct1-20260620-101010.pxar".into(),
+            size_bytes: 0, created_at: String::new(), status: BackupStatus::Completed,
+            error: String::new(), schedule_id: String::new(), comments: String::new(),
+            node_hostname: String::new(), docker_config: String::new(), mounts: Vec::new(),
+        };
+        assert!(is_pbs_file_level_entry(&e));
+        // A tarball-in-pxar PBS entry is NOT file-level.
+        e.filename = "lxc-ct1-20260620-101010.tar.gz".into();
+        assert!(!is_pbs_file_level_entry(&e));
+        // A local backup with a pbsfl-ish name is NOT file-level (wrong storage).
+        e.filename = "pbsfl-ct-ct1-20260620-101010.pxar".into();
+        e.storage.storage_type = StorageType::Local;
+        assert!(!is_pbs_file_level_entry(&e));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -635,6 +780,210 @@ fn bind_source_safe(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Does `candidate` (a bind source path or a named-volume name) match any
+/// entry in the operator's exclude list? Match is either exact, or a
+/// trailing-slash prefix so excluding `/mnt/media` also excludes
+/// `/mnt/media/tv`. Trailing slashes on the exclude entry itself are
+/// normalised away so `/mnt/media/` and `/mnt/media` behave the same.
+/// Empty exclude entries are ignored (they'd otherwise match everything).
+fn mount_is_excluded(candidate: &str, exclude_mounts: &[String]) -> bool {
+    let cand = candidate.trim_end_matches('/');
+    exclude_mounts.iter().any(|raw| {
+        let ex = raw.trim().trim_end_matches('/');
+        if ex.is_empty() {
+            return false;
+        }
+        cand == ex || cand.starts_with(&format!("{}/", ex))
+    })
+}
+
+/// One bind/volume mount discovered on a container, for the UI's
+/// "choose what to exclude" checklist. Distinct from `MountInfo` (which
+/// records what actually went INTO a backup) — this is a pre-backup
+/// inventory with no archive yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredMount {
+    /// "volume" | "bind"
+    #[serde(rename = "type")]
+    pub mount_type: String,
+    /// Named-volume name (volume) or host source path (bind). This is the
+    /// value the operator puts in `exclude_mounts` to skip it.
+    pub source: String,
+    /// Mount point inside the container.
+    pub destination: String,
+    /// On-disk size of the source in bytes, 0 if not cheaply known.
+    #[serde(default)]
+    pub size_bytes: u64,
+}
+
+/// Cheap directory size — used only for the mount-inventory UI so the
+/// operator can see which binds are the huge ones worth excluding. Bounded
+/// by `du`'s own traversal; failures return 0 rather than blocking the UI.
+fn quick_dir_size_bytes(path: &str) -> u64 {
+    // `du -sb` reports apparent total bytes for the whole tree. It's the
+    // same tool the rest of the codebase shells out to and avoids a manual
+    // recursive walk here. Failure (missing path, permission) → 0.
+    let out = match Command::new("du").args(["-sb", path]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return 0,
+    };
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.split_whitespace().next()
+        .and_then(|first| first.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Enumerate a Docker container's bind/volume mounts (no backup performed).
+/// Reuses the same `docker inspect` Mounts[] parsing as `backup_docker`.
+pub fn discover_docker_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String> {
+    let inspect = Command::new("docker")
+        .args(["inspect", name])
+        .output()
+        .map_err(|e| format!("Failed to run docker inspect: {}", e))?;
+    if !inspect.status.success() {
+        return Err(format!(
+            "docker inspect {} failed: {}",
+            name,
+            String::from_utf8_lossy(&inspect.stderr).trim()
+        ));
+    }
+    let inspect_val: serde_json::Value =
+        serde_json::from_slice(&inspect.stdout).unwrap_or(serde_json::Value::Null);
+    let mounts_arr = inspect_val
+        .get(0)
+        .and_then(|c| c.get("Mounts"))
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for m in &mounts_arr {
+        let mtype = m.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        let source = m.get("Source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let destination = m.get("Destination").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let vol_name = m.get("Name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match mtype {
+            "volume" => {
+                let label = if !vol_name.is_empty() { vol_name.clone() } else { source.clone() };
+                let data_dir = if !source.is_empty() && Path::new(&source).is_dir() {
+                    source.clone()
+                } else if !vol_name.is_empty() {
+                    format!("/var/lib/docker/volumes/{}/_data", vol_name)
+                } else {
+                    String::new()
+                };
+                let size = if data_dir.is_empty() { 0 } else { quick_dir_size_bytes(&data_dir) };
+                out.push(DiscoveredMount {
+                    mount_type: "volume".into(),
+                    source: label,
+                    destination,
+                    size_bytes: size,
+                });
+            }
+            "bind" => {
+                let size = if Path::new(&source).exists() { quick_dir_size_bytes(&source) } else { 0 };
+                out.push(DiscoveredMount {
+                    mount_type: "bind".into(),
+                    source,
+                    destination,
+                    size_bytes: size,
+                });
+            }
+            _ => { /* tmpfs/npipe — never backed up, omit from the checklist */ }
+        }
+    }
+    Ok(out)
+}
+
+/// Enumerate an LXC container's bind mounts (no backup performed).
+/// Native LXC: parse `lxc.mount.entry` lines in the container config.
+/// Proxmox: parse `mp<N>:` mountpoints from `pct config`.
+pub fn discover_lxc_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String> {
+    let mut out = Vec::new();
+    if crate::containers::is_proxmox() {
+        // `pct config <vmid>` → lines like `mp0: storage:vm-105-disk-1,mp=/data,size=8G`
+        // or bind form `mp0: /host/path,mp=/data`. We expose the host source
+        // (the part before the first comma) when it's an absolute path bind.
+        let cfg = Command::new("pct").args(["config", name]).output()
+            .map_err(|e| format!("Failed to run pct config: {}", e))?;
+        if !cfg.status.success() {
+            return Err(format!("pct config {} failed: {}", name,
+                String::from_utf8_lossy(&cfg.stderr).trim()));
+        }
+        let text = String::from_utf8_lossy(&cfg.stdout);
+        for line in text.lines() {
+            let line = line.trim();
+            // Match mp0:, mp1:, … (mountpoints). rootfs is excluded — it's the
+            // container's own rootfs, always backed up.
+            let rest = match line.strip_prefix("mp") {
+                Some(r) => r, None => continue,
+            };
+            let colon = match rest.find(':') {
+                Some(c) => c, None => continue,
+            };
+            let idx_part = &rest[..colon];
+            if idx_part.is_empty() || !idx_part.chars().all(|c| c.is_ascii_digit()) { continue; }
+            let spec = rest[colon + 1..].trim();
+            let volume = spec.split(',').next().unwrap_or("").trim();
+            // Bind mount form: the volume part is an absolute host path.
+            let mut mountpoint = String::new();
+            for opt in spec.split(',') {
+                if let Some(mp) = opt.trim().strip_prefix("mp=") {
+                    mountpoint = mp.to_string();
+                }
+            }
+            if volume.starts_with('/') {
+                let size = if Path::new(volume).exists() { quick_dir_size_bytes(volume) } else { 0 };
+                out.push(DiscoveredMount {
+                    mount_type: "bind".into(),
+                    source: volume.to_string(),
+                    destination: mountpoint,
+                    size_bytes: size,
+                });
+            } else {
+                // Storage-backed mountpoint (ZFS/LVM/dir volume). It IS part of
+                // the vzdump backup; expose it so the operator can exclude it
+                // by its volume id.
+                out.push(DiscoveredMount {
+                    mount_type: "volume".into(),
+                    source: volume.to_string(),
+                    destination: mountpoint,
+                    size_bytes: 0,
+                });
+            }
+        }
+        return Ok(out);
+    }
+
+    // Native LXC — parse the container config for `lxc.mount.entry` lines.
+    let base = crate::containers::lxc_base_dir(name);
+    let cfg_path = format!("{}/{}/config", base, name);
+    let text = fs::read_to_string(&cfg_path)
+        .map_err(|e| format!("Failed to read LXC config {}: {}", cfg_path, e))?;
+    for line in text.lines() {
+        let line = line.trim();
+        // lxc.mount.entry = <source> <mountpoint> <fstype> <options> <dump> <pass>
+        if let Some(rest) = line.strip_prefix("lxc.mount.entry") {
+            let rest = rest.trim_start_matches('=').trim();
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() < 2 { continue; }
+            let source = parts[0];
+            let mountpoint = parts[1];
+            // Only host-path bind mounts are interesting — skip the kernel
+            // pseudo-filesystems (proc/sysfs/etc.) whose source isn't a path.
+            if !source.starts_with('/') { continue; }
+            let size = if Path::new(source).exists() { quick_dir_size_bytes(source) } else { 0 };
+            out.push(DiscoveredMount {
+                mount_type: "bind".into(),
+                source: source.to_string(),
+                destination: mountpoint.to_string(),
+                size_bytes: size,
+            });
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupConfig {
     #[serde(default)]
@@ -698,7 +1047,7 @@ fn ensure_staging_dir() -> Result<PathBuf, String> {
 /// Bind mounts to system paths (/, /etc, /var/lib/docker, etc.) are
 /// refused with a recorded skipped_reason so the user can tell from the
 /// backup metadata what was excluded and why.
-pub fn backup_docker(name: &str) -> Result<(PathBuf, u64, String, Vec<MountInfo>), String> {
+pub fn backup_docker(name: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64, String, Vec<MountInfo>), String> {
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("docker-{}-{}.tar.gz", name, timestamp);
@@ -742,6 +1091,22 @@ pub fn backup_docker(name: &str) -> Result<(PathBuf, u64, String, Vec<MountInfo>
 
         match mtype.as_str() {
             "volume" => {
+                // Operator-excluded? Match on the volume name OR its host
+                // source path. Record it as skipped (empty archive) so the
+                // backup metadata shows what was deliberately left out.
+                if mount_is_excluded(&vol_name, exclude_mounts)
+                    || (!source.is_empty() && mount_is_excluded(&source, exclude_mounts))
+                {
+                    mounts.push(MountInfo {
+                        mount_type: "volume".into(),
+                        source: vol_name.clone(),
+                        destination: destination.clone(),
+                        archive_path: String::new(),
+                        size_bytes: 0,
+                        skipped_reason: "excluded by operator".into(),
+                    });
+                    continue;
+                }
                 // Named volume — find its data dir on the host. Source
                 // is usually /var/lib/docker/volumes/{name}/_data already.
                 let data_dir = if !source.is_empty() && Path::new(&source).is_dir() {
@@ -790,6 +1155,20 @@ pub fn backup_docker(name: &str) -> Result<(PathBuf, u64, String, Vec<MountInfo>
                 }
             }
             "bind" => {
+                // Operator-excluded? Match on the host source path (exact or
+                // prefix). This is the headline use case — sonarr/radarr media
+                // arrays bind-mounted in that would blow up the staging dir.
+                if mount_is_excluded(&source, exclude_mounts) {
+                    mounts.push(MountInfo {
+                        mount_type: "bind".into(),
+                        source,
+                        destination,
+                        archive_path: String::new(),
+                        size_bytes: 0,
+                        skipped_reason: "excluded by operator".into(),
+                    });
+                    continue;
+                }
                 if let Err(reason) = bind_source_safe(&source) {
                     warn!("backup_docker: skipping bind mount {} -> {}: {}", source, destination, reason);
                     mounts.push(MountInfo {
@@ -955,14 +1334,14 @@ fn tar_path_to_gz(src: &str, archive: &Path) -> Result<u64, String> {
 }
 
 /// Backup an LXC container — tar rootfs + config
-pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
+pub fn backup_lxc(name: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64), String> {
 
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
 
     // Proxmox: use vzdump which properly handles ZFS/LVM/Ceph storage backends
     if crate::containers::is_proxmox() {
-        return backup_lxc_proxmox(name, &staging, &timestamp.to_string());
+        return backup_lxc_proxmox(name, &staging, &timestamp.to_string(), exclude_mounts);
     }
 
     // Native LXC: tar the container directory (rootfs + config)
@@ -986,9 +1365,29 @@ pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
         return Err(format!("LXC container path not found: {}", lxc_path));
     }
 
-    // Create tar.gz of the entire container directory (rootfs + config)
-    let output = Command::new("tar")
-        .args(["czf", &tar_path.to_string_lossy(), "-C", &lxc_base, name])
+    // Create tar.gz of the entire container directory (rootfs + config).
+    // Honour operator exclusions: only paths that actually fall UNDER the
+    // backed-up tree (`lxc_path`) make sense as `tar --exclude` args — a
+    // native LXC bind mount whose source lives elsewhere on the host isn't
+    // inside the rootfs tarball anyway. We rewrite each excluded absolute
+    // path to one relative to `lxc_base` (tar's -C dir) so the glob matches.
+    let mut tar_cmd = Command::new("tar");
+    let lxc_prefix = format!("{}/", lxc_path);
+    for raw in exclude_mounts {
+        let ex = raw.trim().trim_end_matches('/');
+        if ex.is_empty() { continue; }
+        // Under the container tree? (the rootfs sits at lxc_path)
+        if ex != lxc_path && !ex.starts_with(&lxc_prefix) { continue; }
+        if let Ok(rel) = Path::new(ex).strip_prefix(&lxc_base) {
+            // GNU tar's `--exclude=<dir>` skips the directory AND its whole
+            // subtree (no trailing glob needed — and a `/*` glob would
+            // require `--wildcards` to even work). Match the archived
+            // member name, which is `name/rootfs/...` here.
+            tar_cmd.arg(format!("--exclude={}", rel.to_string_lossy()));
+        }
+    }
+    tar_cmd.args(["czf", &tar_path.to_string_lossy(), "-C", &lxc_base, name]);
+    let output = tar_cmd
         .output()
         .map_err(|e| format!("Failed to tar LXC container: {}", e))?;
 
@@ -1005,18 +1404,39 @@ pub fn backup_lxc(name: &str) -> Result<(PathBuf, u64), String> {
     Ok((tar_path, size))
 }
 
+/// Append operator mount-exclusions to a vzdump command. vzdump takes
+/// `--exclude-path <path>` (repeatable) — the path is the mountpoint as
+/// seen INSIDE the container, or a host path/glob. We pass each excluded
+/// entry through verbatim; the operator picked these from the discovered
+/// mount list which already reports container-relative mountpoints.
+/// Source: pve-docs vzdump.1 — `--exclude-path <string>` "Exclude certain
+/// files/directories", may be specified multiple times.
+fn vzdump_apply_excludes(cmd: &mut Command, exclude_mounts: &[String]) {
+    for raw in exclude_mounts {
+        let ex = raw.trim();
+        // vzdump `--exclude-path` expects a filesystem path/glob, not a storage
+        // volume id (`local-lvm:vm-105-disk-0`). discover_lxc_mounts exposes
+        // both; only forward the path-shaped ones so a volume id can't become a
+        // bogus exclude arg that vzdump rejects.
+        if ex.is_empty() || !ex.starts_with('/') { continue; }
+        cmd.arg("--exclude-path").arg(ex);
+    }
+}
+
 /// Proxmox LXC backup using vzdump — handles ZFS, LVM, Ceph, and directory storage
-fn backup_lxc_proxmox(vmid: &str, staging: &Path, timestamp: &str) -> Result<(PathBuf, u64), String> {
+fn backup_lxc_proxmox(vmid: &str, staging: &Path, timestamp: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64), String> {
     // vzdump creates a full container backup including rootfs on any storage backend
     // --mode snapshot uses LVM/ZFS snapshots for live backup when available,
     // falls back to suspend mode, then stop mode
-    let output = Command::new("vzdump")
-        .args([
-            vmid,
-            "--dumpdir", &staging.to_string_lossy(),
-            "--mode", "snapshot",
-            "--compress", "zstd",
-        ])
+    let mut cmd = Command::new("vzdump");
+    cmd.args([
+        vmid,
+        "--dumpdir", &staging.to_string_lossy(),
+        "--mode", "snapshot",
+        "--compress", "zstd",
+    ]);
+    vzdump_apply_excludes(&mut cmd, exclude_mounts);
+    let output = cmd
         .output()
         .map_err(|e| format!("vzdump failed to start: {}", e))?;
 
@@ -1027,13 +1447,15 @@ fn backup_lxc_proxmox(vmid: &str, staging: &Path, timestamp: &str) -> Result<(Pa
 
     if !output.status.success() {
         // Snapshot mode may not be supported (e.g. directory storage) — retry with stop mode
-        let output2 = Command::new("vzdump")
-            .args([
-                vmid,
-                "--dumpdir", &staging.to_string_lossy(),
-                "--mode", "stop",
-                "--compress", "zstd",
-            ])
+        let mut cmd2 = Command::new("vzdump");
+        cmd2.args([
+            vmid,
+            "--dumpdir", &staging.to_string_lossy(),
+            "--mode", "stop",
+            "--compress", "zstd",
+        ]);
+        vzdump_apply_excludes(&mut cmd2, exclude_mounts);
+        let output2 = cmd2
             .output()
             .map_err(|e| format!("vzdump (stop mode) failed to start: {}", e))?;
 
@@ -1494,6 +1916,153 @@ pub fn backup_config() -> Result<(PathBuf, u64), String> {
     Ok((tar_path, size))
 }
 
+/// Refuse the filesystem root and the kernel virtual filesystems (and any
+/// sub-path of them). Shared by backup + restore validation. `for_backup`
+/// tunes the message; `/` itself is always refused.
+fn reject_dangerous_root(path: &str, for_backup: bool) -> Result<(), String> {
+    let canonical = path.trim_end_matches('/');
+    let canonical = if canonical.is_empty() { "/" } else { canonical };
+    let kernel_fs: &[&str] = &["/proc", "/sys", "/dev"];
+    // "/" is refused as a BACKUP source (it would pull the whole host into
+    // staging) but is a LEGITIMATE RESTORE target: a top-level folder like
+    // /etc is archived with leaf member `etc/`, so extracting into "/" lands
+    // it back in place and writes only under /etc — nothing else at the root
+    // is touched. So allow "/" for restore, refuse it for backup.
+    if canonical == "/" {
+        return if for_backup {
+            Err("Refusing to back up '/' — it's the system root; \
+                 pick a specific folder like /etc or /home".to_string())
+        } else {
+            Ok(())
+        };
+    }
+    if kernel_fs.iter().any(|d| *d == canonical) {
+        return Err(if for_backup {
+            format!("Refusing to back up '{}' — kernel filesystem; \
+                     pick a specific folder like /etc or /home", canonical)
+        } else {
+            format!("Refusing to restore into '{}' — kernel filesystem", canonical)
+        });
+    }
+    for d in kernel_fs {
+        if canonical.starts_with(&format!("{}/", d)) {
+            return Err(format!("'{}' is under {} — kernel state, not application data", canonical, d));
+        }
+    }
+    Ok(())
+}
+
+/// Reject system-folder backup targets that point at dangerous roots.
+/// The path must be absolute, exist, and be a directory; the kernel
+/// virtual filesystems and the filesystem root are refused outright —
+/// archiving them is either meaningless (/proc, /sys, /dev) or a
+/// foot-gun (`/` would try to pull the entire host into staging).
+/// The path is canonicalised (symlinks resolved) before the deny-check so a
+/// `/data/evil -> /proc` symlink can't sneak past it.
+pub fn validate_system_path(path: &str) -> Result<(), String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err("System folder path is required".into());
+    }
+    if !p.starts_with('/') {
+        return Err("System folder path must be absolute (start with '/')".into());
+    }
+    // Check the literal path first (catches `/proc` typed directly).
+    reject_dangerous_root(p, true)?;
+    // Then resolve symlinks and re-check — a symlinked path that resolves to a
+    // forbidden root must also be rejected. canonicalize() also confirms the
+    // path exists.
+    let resolved = fs::canonicalize(p)
+        .map_err(|e| format!("Cannot access '{}': {}", p, e))?;
+    let resolved_str = resolved.to_string_lossy().to_string();
+    reject_dangerous_root(&resolved_str, true)?;
+    let meta = fs::metadata(&resolved)
+        .map_err(|e| format!("Cannot access '{}': {}", resolved_str, e))?;
+    if !meta.is_dir() {
+        return Err(format!("'{}' is not a directory", resolved_str));
+    }
+    Ok(())
+}
+
+/// Backup an arbitrary host system folder — tar.gz the directory to staging.
+/// `label` is the operator-supplied name baked into the filename so several
+/// folder backups are distinguishable; `path` is the absolute directory.
+/// `exclude_mounts` skips sub-paths (same exact/prefix matching as binds).
+pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64), String> {
+    validate_system_path(path)?;
+    let staging = ensure_staging_dir()?;
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+    // Filename uses the SAME `systempath-` prefix the scanner/guesser key off.
+    let safe_label = sanitize_archive_name(if label.trim().is_empty() {
+        Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("folder")
+    } else { label.trim() });
+    let filename = format!("systempath-{}-{}.tar.gz", safe_label, timestamp);
+    let tar_path = staging.join(&filename);
+
+    let src = path.trim_end_matches('/');
+    // Archive the folder itself (so restore lands it back where it was):
+    // `tar -C <parent> <basename>` keeps the leaf dir as the top archive
+    // entry. For a top-level folder like /etc the parent is "/".
+    let p = Path::new(src);
+    let parent = p.parent().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
+    let leaf = p.file_name().map(|n| n.to_string_lossy().to_string())
+        .ok_or_else(|| format!("Cannot determine folder name from '{}'", src))?;
+
+    let mut tar_cmd = Command::new("tar");
+    let prefix = format!("{}/", src);
+    for raw in exclude_mounts {
+        let ex = raw.trim().trim_end_matches('/');
+        if ex.is_empty() { continue; }
+        // Only sub-paths of the backed-up folder make sense to exclude.
+        if ex != src && !ex.starts_with(&prefix) { continue; }
+        if let Ok(rel) = Path::new(ex).strip_prefix(&parent) {
+            // `--exclude=<dir>` already excludes the subtree (see backup_lxc).
+            tar_cmd.arg(format!("--exclude={}", rel.to_string_lossy()));
+        }
+    }
+    tar_cmd.args(["czf", &tar_path.to_string_lossy(), "-C", &parent, &leaf]);
+    let output = tar_cmd
+        .output()
+        .map_err(|e| format!("Failed to tar system folder: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("System folder tar failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
+    Ok((tar_path, size))
+}
+
+/// Restore a system-folder backup by extracting the tarball into `target_dir`
+/// (the parent into which the archived top-level folder is unpacked). The
+/// archive stores the folder by its leaf name, so extracting into the
+/// ORIGINAL parent restores it in place. Destructive over existing data —
+/// callers must require explicit confirmation.
+pub fn restore_system_path(entry: &BackupEntry, target_dir: &str) -> Result<String, String> {
+    let dest = target_dir.trim();
+    if dest.is_empty() || !dest.starts_with('/') {
+        return Err("Restore target directory must be an absolute path".into());
+    }
+    // Refuse the kernel filesystems (/proc, /sys, /dev) as the restore
+    // destination. "/" IS allowed here: the archive's top member is the
+    // folder's leaf name (e.g. `etc/`), so extracting into "/" recreates only
+    // `/etc/...` in place and never touches other root entries — that's the
+    // correct in-place restore for a top-level folder. Destructive over
+    // existing data, so callers must require explicit confirmation.
+    reject_dangerous_root(dest, false)?;
+    fs::create_dir_all(dest)
+        .map_err(|e| format!("Cannot create restore target '{}': {}", dest, e))?;
+    let local_path = retrieve_backup(entry)?;
+    let output = Command::new("tar")
+        .args(["xzf", &local_path.to_string_lossy(), "-C", dest])
+        .output();
+    // Always drop the staging copy, on success and on every error path.
+    let _ = fs::remove_file(&local_path);
+    let output = output.map_err(|e| format!("Failed to extract system folder backup: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("System folder extract failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(format!("System folder restored into {}", dest))
+}
+
 /// Backup everything on the server
 pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
     let mut entries = Vec::new();
@@ -1510,7 +2079,7 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
             .collect();
         for name in names {
             entries.push(create_backup_entry(
-                BackupTarget { target_type: BackupTargetType::Docker, name: name.clone(), hostname: None, state: None, specs: None },
+                BackupTarget { target_type: BackupTargetType::Docker, name: name.clone(), ..Default::default() },
                 storage,
             ));
         }
@@ -1525,7 +2094,7 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
             .collect();
         for name in names {
             entries.push(create_backup_entry(
-                BackupTarget { target_type: BackupTargetType::Lxc, name: name.clone(), hostname: None, state: None, specs: None },
+                BackupTarget { target_type: BackupTargetType::Lxc, name: name.clone(), ..Default::default() },
                 storage,
             ));
         }
@@ -1553,7 +2122,7 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
                 BackupTarget {
                     target_type: BackupTargetType::Vm,
                     name: vm.name.clone(),
-                    hostname: None, state: None, specs: None,
+                    ..Default::default()
                 },
                 storage,
             ));
@@ -1575,7 +2144,7 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
                     entries.push(create_backup_entry(
                         BackupTarget {
                             target_type: BackupTargetType::Vm,
-                            name, hostname: None, state: None, specs: None,
+                            name, ..Default::default()
                         },
                         storage,
                     ));
@@ -1586,7 +2155,7 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
 
     // Backup config
     entries.push(create_backup_entry(
-        BackupTarget { target_type: BackupTargetType::Config, name: String::new(), hostname: None, state: None, specs: None },
+        BackupTarget { target_type: BackupTargetType::Config, name: String::new(), ..Default::default() },
         storage,
     ));
 
@@ -1654,6 +2223,13 @@ fn backup_comments_with_cluster(target: &BackupTarget, cluster: &str) -> String 
             format!("VM: {} (disks + config)", target.name)
         }
         BackupTargetType::Config => "WolfStack configuration files".to_string(),
+        BackupTargetType::SystemPath => {
+            if target.system_path.is_empty() {
+                format!("System folder: {}", target.name)
+            } else {
+                format!("System folder: {} ({})", target.name, target.system_path)
+            }
+        }
     };
     format!("[{}] {}", cluster, detail)
 }
@@ -1667,17 +2243,42 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
     let now = Utc::now().to_rfc3339();
     let hostname = local_hostname();
     let comments = backup_comments(&target);
+    let cluster = local_cluster_name();
+
+    // PBS file-level (pxar) path — see create_backup_with_log for the rationale.
+    if storage.storage_type == StorageType::Pbs && storage.pbs_file_level {
+        if let Some(res) = make_pbs_file_level_entry(&target, storage, &comments, &cluster, &hostname, None) {
+            match res {
+                Ok(entry) => return entry,
+                Err(e) => {
+                    error!("PBS file-level backup failed for {:?}: {}", target.target_type, e);
+                    return BackupEntry {
+                        id, target, storage: storage.clone(),
+                        filename: String::new(), size_bytes: 0, created_at: now,
+                        status: BackupStatus::Failed, error: e,
+                        schedule_id: String::new(), comments, node_hostname: hostname,
+                        docker_config: String::new(), mounts: Vec::new(),
+                    };
+                }
+            }
+        }
+        // else: fall through to the tarball path (VM/Proxmox-LXC/Config).
+    }
 
     let (result, docker_config, mounts) = match target.target_type {
         BackupTargetType::Docker => {
-            match backup_docker(&target.name) {
+            match backup_docker(&target.name, &target.exclude_mounts) {
                 Ok((path, size, config, m)) => (Ok((path, size)), config, m),
                 Err(e) => (Err(e), String::new(), Vec::new()),
             }
         }
-        BackupTargetType::Lxc => (backup_lxc(&target.name), String::new(), Vec::new()),
+        BackupTargetType::Lxc => (backup_lxc(&target.name, &target.exclude_mounts), String::new(), Vec::new()),
         BackupTargetType::Vm => (backup_vm(&target.name), String::new(), Vec::new()),
         BackupTargetType::Config => (backup_config(), String::new(), Vec::new()),
+        BackupTargetType::SystemPath => (
+            backup_system_path(&target.name, &target.system_path, &target.exclude_mounts),
+            String::new(), Vec::new(),
+        ),
     };
 
     match result {
@@ -2300,6 +2901,485 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
     }
 
     Ok(())
+}
+
+/// Return an Err carrying the standard MISSING_PACKAGE marker when
+/// `proxmox-backup-client` isn't installed, so the UI shows its install
+/// prompt instead of a raw spawn error.
+/// Source: storage::MISSING_PACKAGE_MARKER = "MISSING_PACKAGE|"; format is
+/// `MISSING_PACKAGE|<binary>|<debian_pkg>|<redhat_pkg>`.
+fn ensure_pbs_client_installed() -> Result<(), String> {
+    let present = Command::new("which")
+        .arg("proxmox-backup-client")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if present {
+        return Ok(());
+    }
+    Err(format!(
+        "{}{}|{}|{}",
+        crate::storage::MISSING_PACKAGE_MARKER,
+        "proxmox-backup-client",
+        "proxmox-backup-client",
+        "proxmox-backup-client",
+    ))
+}
+
+/// Apply the shared PBS auth/connection env + flags to a backup-client
+/// command. Centralises the fingerprint / namespace / password handling
+/// every PBS invocation repeats, so file-level backup + restore can't
+/// drift from the tarball path. `pbs_pw` chooses token-secret over
+/// password, exactly as `store_pbs_with_notes_and_log` does.
+fn pbs_apply_common(cmd: &mut Command, storage: &BackupStorage) {
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
+    }
+    if !storage.pbs_namespace.is_empty() {
+        cmd.arg("--ns").arg(&storage.pbs_namespace);
+    }
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+    if !pbs_pw.is_empty() {
+        cmd.env("PBS_PASSWORD", pbs_pw);
+    }
+}
+
+/// One `name.pxar:dir` pair for a file-level PBS snapshot.
+struct PxarPair {
+    /// Archive name as it appears in the snapshot, e.g. "root.pxar".
+    archive: String,
+    /// Absolute host directory to archive.
+    dir: PathBuf,
+    /// Cleaned up after the snapshot (true for the docker `docker export`
+    /// staging tree we materialise; false for paths we don't own such as a
+    /// live rootfs or a system folder).
+    ephemeral: bool,
+}
+
+/// Does PBS file-level apply to this target type, without performing any
+/// side-effecting work (no docker export)? Used to decide whether to take
+/// the file-level path or fall back to the tarball path. Docker / native LXC
+/// / SystemPath qualify; VM / Proxmox-LXC / Config do not.
+fn pbs_file_level_applies(target: &BackupTarget) -> bool {
+    match target.target_type {
+        BackupTargetType::Docker => true,
+        BackupTargetType::Lxc => !crate::containers::is_proxmox(),
+        BackupTargetType::SystemPath => true,
+        BackupTargetType::Vm | BackupTargetType::Config => false,
+    }
+}
+
+/// Build the pxar source pairs for a file-level PBS backup of `target`.
+/// Returns (backup_type, backup_id, pairs). For Docker the container's
+/// filesystem is materialised into a staging tree via `docker export`;
+/// volumes/binds become their own pxar archives. For LXC the live rootfs
+/// directory is used directly. For SystemPath the folder is used directly.
+/// VMs return Err — disk images aren't a file tree (caller falls back to
+/// the image backup).
+fn build_pxar_pairs(target: &BackupTarget) -> Result<(String, String, Vec<PxarPair>), String> {
+    let staging = ensure_staging_dir()?;
+    match target.target_type {
+        BackupTargetType::Docker => {
+            let mut pairs: Vec<PxarPair> = Vec::new();
+            // Materialise the container filesystem. `docker export` streams the
+            // flattened container fs as a tar; pipe it into a fresh dir.
+            let work = staging.join(format!("pbs-fl-docker-{}", Uuid::new_v4().simple()));
+            fs::create_dir_all(&work)
+                .map_err(|e| format!("file-level staging dir: {}", e))?;
+            let rootfs = work.join("rootfs");
+            fs::create_dir_all(&rootfs)
+                .map_err(|e| format!("file-level rootfs dir: {}", e))?;
+            // No shell — pipe `docker export <name>` directly into `tar -x`.
+            // Using two Command processes with an OS pipe avoids any shell
+            // metacharacter interpretation of the container name (a name like
+            // `$(rm -rf /)` is just an argv element to docker, never evaluated).
+            use std::process::Stdio;
+            // stderr is sent to null rather than piped: nothing drains it while
+            // we block on tar consuming stdout, and a full stderr pipe buffer
+            // would deadlock docker. `docker export` stderr is trivial anyway;
+            // the exit code is the signal we act on.
+            let mut exporter = Command::new("docker")
+                .arg("export")
+                .arg(&target.name)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| { let _ = fs::remove_dir_all(&work); format!("docker export failed to start: {}", e) })?;
+            let export_stdout = exporter.stdout.take()
+                .ok_or_else(|| { let _ = fs::remove_dir_all(&work); "docker export produced no stdout".to_string() })?;
+            let tar_status = Command::new("tar")
+                .arg("-x")
+                .arg("-C").arg(&rootfs)
+                .stdin(Stdio::from(export_stdout))
+                .status()
+                .map_err(|e| { let _ = fs::remove_dir_all(&work); format!("tar extract failed to start: {}", e) })?;
+            let exporter_status = exporter.wait()
+                .map_err(|e| { let _ = fs::remove_dir_all(&work); format!("docker export wait failed: {}", e) })?;
+            if !exporter_status.success() {
+                let _ = fs::remove_dir_all(&work);
+                return Err(format!("docker export failed (exit {})",
+                    exporter_status.code().unwrap_or(-1)));
+            }
+            if !tar_status.success() {
+                let _ = fs::remove_dir_all(&work);
+                return Err("docker export tar extract failed".to_string());
+            }
+            pairs.push(PxarPair { archive: "root.pxar".into(), dir: rootfs, ephemeral: false });
+            // The whole `work` dir is the ephemeral owner — track it via a
+            // sentinel pair so cleanup removes it once.
+            pairs.push(PxarPair { archive: String::new(), dir: work.clone(), ephemeral: true });
+
+            // Volumes + binds as separate pxar archives, honouring exclusions.
+            if let Ok(mounts) = discover_docker_mounts(&target.name) {
+                let mut vol_idx = 0usize;
+                let mut bind_idx = 0usize;
+                for m in mounts {
+                    if mount_is_excluded(&m.source, &target.exclude_mounts) { continue; }
+                    match m.mount_type.as_str() {
+                        "volume" => {
+                            let data_dir = if Path::new(&m.source).is_dir() {
+                                m.source.clone()
+                            } else {
+                                format!("/var/lib/docker/volumes/{}/_data", m.source)
+                            };
+                            if Path::new(&data_dir).is_dir() {
+                                pairs.push(PxarPair {
+                                    archive: format!("volume-{}.pxar", vol_idx),
+                                    dir: PathBuf::from(data_dir),
+                                    ephemeral: false,
+                                });
+                                vol_idx += 1;
+                            }
+                        }
+                        "bind" => {
+                            if bind_source_safe(&m.source).is_ok() && Path::new(&m.source).is_dir() {
+                                pairs.push(PxarPair {
+                                    archive: format!("bind-{}.pxar", bind_idx),
+                                    dir: PathBuf::from(&m.source),
+                                    ephemeral: false,
+                                });
+                                bind_idx += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(("ct".to_string(), target.name.clone(), pairs))
+        }
+        BackupTargetType::Lxc => {
+            if crate::containers::is_proxmox() {
+                // Proxmox rootfs commonly lives on ZFS/LVM (block) — not a
+                // plain directory we can hand to pxar. File-level isn't
+                // available there; caller falls back to the vzdump image.
+                return Err("PBS file-level backup isn't available for Proxmox LXC \
+                    (rootfs is on block storage) — using vzdump image backup instead".into());
+            }
+            let base = crate::containers::lxc_base_dir(&target.name);
+            let rootfs = format!("{}/{}/rootfs", base, target.name);
+            if !Path::new(&rootfs).is_dir() {
+                return Err(format!("LXC rootfs not found at {}", rootfs));
+            }
+            Ok(("ct".to_string(), target.name.clone(),
+                vec![PxarPair { archive: "root.pxar".into(), dir: PathBuf::from(rootfs), ephemeral: false }]))
+        }
+        BackupTargetType::SystemPath => {
+            validate_system_path(&target.system_path)?;
+            let dir = target.system_path.trim_end_matches('/').to_string();
+            Ok(("host".to_string(),
+                sanitize_archive_name(if target.name.trim().is_empty() {
+                    Path::new(&dir).file_name().and_then(|n| n.to_str()).unwrap_or("folder")
+                } else { target.name.trim() }),
+                vec![PxarPair { archive: "root.pxar".into(), dir: PathBuf::from(dir), ephemeral: false }]))
+        }
+        BackupTargetType::Config => {
+            // Config is the small tar bundle — no benefit to file-level; let
+            // the caller keep the tarball-in-pxar path.
+            Err("PBS file-level backup doesn't apply to config backups".into())
+        }
+        BackupTargetType::Vm => {
+            Err("PBS file-level backup isn't available for VMs (disk images are \
+                 not a file tree) — using the disk-image backup instead".into())
+        }
+    }
+}
+
+/// Perform a file-level (pxar) PBS backup for `target`. Uploads the
+/// workload's content directory as native pxar archives so PBS per-file
+/// restore works. `notes` becomes the snapshot comment. Returns the
+/// snapshot's backup-type/backup-id so the caller can record a matching
+/// BackupEntry (filename uses a `pbsfl-` marker so restore routes to the
+/// file-level path). On VM/Proxmox-LXC/Config the caller falls back to the
+/// tarball path — those return Err from build_pxar_pairs.
+fn backup_pbs_file_level(
+    target: &BackupTarget,
+    storage: &BackupStorage,
+    notes: Option<&str>,
+    log: Option<&std::sync::mpsc::Sender<String>>,
+) -> Result<(String, String), String> {
+    ensure_pbs_client_installed()?;
+    let repo = pbs_repo_string(storage);
+    let (backup_type, backup_id, pairs) = build_pxar_pairs(target)?;
+
+    // Owners we must clean up regardless of outcome.
+    let ephemeral_dirs: Vec<PathBuf> = pairs.iter()
+        .filter(|p| p.ephemeral)
+        .map(|p| p.dir.clone())
+        .collect();
+    let cleanup = |dirs: &[PathBuf]| { for d in dirs { let _ = fs::remove_dir_all(d); } };
+
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("backup");
+    let mut archive_count = 0;
+    for p in &pairs {
+        if p.archive.is_empty() { continue; } // sentinel cleanup-only pair
+        cmd.arg(format!("{}:{}", p.archive, p.dir.display()));
+        archive_count += 1;
+    }
+    if archive_count == 0 {
+        cleanup(&ephemeral_dirs);
+        return Err("file-level backup produced no archives to upload".into());
+    }
+    cmd.arg("--repository").arg(&repo)
+       .arg("--backup-id").arg(&backup_id)
+       .arg("--backup-type").arg(&backup_type);
+    pbs_apply_common(&mut cmd, storage);
+
+    if let Some(log_tx) = log {
+        let _ = log_tx.send(format!("  PBS file-level: {} archive(s) → {}/{}",
+            archive_count, backup_type, backup_id));
+    }
+
+    let output = cmd.output()
+        .map_err(|e| { cleanup(&ephemeral_dirs); format!("Failed to run proxmox-backup-client: {}", e) })?;
+    cleanup(&ephemeral_dirs);
+    if !output.status.success() {
+        return Err(format!("PBS file-level backup failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    if let Some(log_tx) = log {
+        let _ = log_tx.send("  PBS file-level: upload complete".to_string());
+    }
+
+    // Set snapshot notes — reuse the same "find latest matching snapshot"
+    // logic the tarball path uses.
+    if let Some(notes_text) = notes {
+        set_pbs_snapshot_notes(storage, &repo, &backup_type, &backup_id, notes_text, log);
+    }
+    Ok((backup_type, backup_id))
+}
+
+/// Filename marker that flags a BackupEntry as a PBS file-level (pxar)
+/// snapshot rather than a tarball-in-pxar. Restore keys off this prefix to
+/// route to the file-level restore path.
+const PBS_FILE_LEVEL_PREFIX: &str = "pbsfl-";
+
+/// True if this entry is a PBS file-level (pxar) snapshot.
+fn is_pbs_file_level_entry(entry: &BackupEntry) -> bool {
+    entry.storage.storage_type == StorageType::Pbs
+        && entry.filename.starts_with(PBS_FILE_LEVEL_PREFIX)
+}
+
+/// Run a file-level PBS backup for `target` and build the resulting
+/// BackupEntry. `None` means file-level doesn't apply to this target
+/// (VM/Proxmox-LXC/Config) — the caller falls back to the tarball path.
+/// `Some(Err)` means file-level applied but failed.
+fn make_pbs_file_level_entry(
+    target: &BackupTarget,
+    storage: &BackupStorage,
+    comments: &str,
+    cluster: &str,
+    hostname: &str,
+    log: Option<&std::sync::mpsc::Sender<String>>,
+) -> Option<Result<BackupEntry, String>> {
+    // Probe applicability without side effects first (build_pxar_pairs does a
+    // real `docker export` for Docker, so we must NOT call it just to test).
+    if !pbs_file_level_applies(target) {
+        return None;
+    }
+    let pbs_notes = format!("Cluster: {} | Node: {} | {}", cluster, hostname, comments);
+    let now = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    match backup_pbs_file_level(target, storage, Some(&pbs_notes), log) {
+        Ok((btype, bid)) => {
+            let ts = Utc::now().format("%Y%m%d-%H%M%S");
+            let filename = format!("{}{}-{}-{}.pxar", PBS_FILE_LEVEL_PREFIX, btype, bid, ts);
+            Some(Ok(BackupEntry {
+                id,
+                target: target.clone(),
+                storage: storage.clone(),
+                filename,
+                size_bytes: 0, // PBS dedups; per-snapshot byte size isn't reported here
+                created_at: now,
+                status: BackupStatus::Completed,
+                error: String::new(),
+                schedule_id: String::new(),
+                comments: comments.to_string(),
+                node_hostname: hostname.to_string(),
+                docker_config: String::new(),
+                mounts: Vec::new(),
+            }))
+        }
+        Err(e) => Some(Err(e)),
+    }
+}
+
+/// Full-archive restore of a PBS file-level (pxar) snapshot. Extracts the
+/// `root.pxar` filesystem tree into `target_dir` using
+/// `proxmox-backup-client restore <snapshot> <archive> <target>`.
+/// Per-FILE restore (picking one file out of the tree) is done through PBS's
+/// own web UI / `proxmox-backup-client catalog` + interactive restore — this
+/// function does the complete-archive case end to end.
+///
+/// `target_override` (non-empty) chooses where the tree lands; empty applies
+/// a type-appropriate default:
+///   • native LXC  → the container rootfs (`<base>/<name>/rootfs`)
+///   • SystemPath  → the original folder
+///   • Docker      → a staging dir under the restore area (operator then has
+///                   the files; container re-creation from a flat fs isn't
+///                   automatic — surfaced in the returned message)
+fn restore_pbs_file_level_entry(entry: &BackupEntry, target_override: &str) -> Result<String, String> {
+    ensure_pbs_client_installed()?;
+    let storage = &entry.storage;
+    let repo = pbs_repo_string(storage);
+
+    // Re-derive the snapshot type/id from the entry's target — robust against
+    // any filename-parsing fragility. These mirror exactly what
+    // build_pxar_pairs produced at backup time.
+    let backup_type = match entry.target.target_type {
+        BackupTargetType::SystemPath => "host",
+        _ => "ct",
+    }.to_string();
+    let backup_id = match entry.target.target_type {
+        BackupTargetType::SystemPath => sanitize_archive_name(if entry.target.name.trim().is_empty() {
+            Path::new(entry.target.system_path.trim_end_matches('/'))
+                .file_name().and_then(|n| n.to_str()).unwrap_or("folder")
+        } else { entry.target.name.trim() }),
+        _ => entry.target.name.clone(),
+    };
+
+    // Find the newest snapshot matching type/id.
+    let mut list_cmd = Command::new("proxmox-backup-client");
+    list_cmd.args(["snapshot", "list", "--output-format", "json", "--repository", &repo]);
+    pbs_apply_common(&mut list_cmd, storage);
+    let list_out = list_cmd.output()
+        .map_err(|e| format!("Failed to list PBS snapshots: {}", e))?;
+    if !list_out.status.success() {
+        return Err(format!("PBS snapshot list failed: {}",
+            String::from_utf8_lossy(&list_out.stderr).trim()));
+    }
+    let snaps: serde_json::Value = serde_json::from_slice(&list_out.stdout)
+        .unwrap_or(serde_json::Value::Array(vec![]));
+    let mut best_time: i64 = 0;
+    let mut snapshot = String::new();
+    if let Some(arr) = snaps.as_array() {
+        for s in arr {
+            let st = s.get("backup-type").and_then(|v| v.as_str()).unwrap_or("");
+            let si = s.get("backup-id").and_then(|v| v.as_str()).unwrap_or("");
+            let stime = s.get("backup-time").and_then(|v| v.as_i64()).unwrap_or(0);
+            if st != backup_type || si != backup_id || stime <= best_time { continue; }
+            if let Some(ts) = chrono::DateTime::from_timestamp(stime, 0) {
+                best_time = stime;
+                snapshot = format!("{}/{}/{}", st, si,
+                    ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+            }
+        }
+    }
+    if snapshot.is_empty() {
+        return Err(format!("No PBS file-level snapshot found for {}/{}", backup_type, backup_id));
+    }
+
+    // Decide the target directory.
+    let target_dir = if !target_override.trim().is_empty() {
+        target_override.trim().to_string()
+    } else {
+        match entry.target.target_type {
+            BackupTargetType::Lxc => {
+                let base = crate::containers::lxc_base_dir(&entry.target.name);
+                format!("{}/{}/rootfs", base, entry.target.name)
+            }
+            BackupTargetType::SystemPath => entry.target.system_path.trim_end_matches('/').to_string(),
+            _ => ensure_staging_dir()?
+                .join(format!("pbs-fl-restore-{}", Uuid::new_v4().simple()))
+                .to_string_lossy().to_string(),
+        }
+    };
+    // Guard the filesystem root + kernel filesystems as a restore destination.
+    // (A native-LXC rootfs target like `<base>/<name>/rootfs` is fine.)
+    reject_dangerous_root(&target_dir, false)?;
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Cannot create restore target '{}': {}", target_dir, e))?;
+
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("restore")
+       .arg(&snapshot)
+       .arg("root.pxar")
+       .arg(&target_dir)
+       .arg("--repository").arg(&repo);
+    pbs_apply_common(&mut cmd, storage);
+    let out = cmd.output()
+        .map_err(|e| format!("PBS file-level restore failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!("PBS file-level restore error: {}",
+            String::from_utf8_lossy(&out.stderr).trim()));
+    }
+
+    let note = match entry.target.target_type {
+        BackupTargetType::Docker =>
+            " — container filesystem extracted; rebuild the container from these \
+             files or use PBS's per-file restore for individual files.",
+        _ => "",
+    };
+    Ok(format!("PBS file-level snapshot '{}' restored into {}{}", snapshot, target_dir, note))
+}
+
+/// Find the latest snapshot matching backup-type/id and set its notes.
+/// Extracted so both the tarball and file-level paths share it.
+fn set_pbs_snapshot_notes(
+    storage: &BackupStorage,
+    repo: &str,
+    backup_type: &str,
+    backup_id: &str,
+    notes_text: &str,
+    log: Option<&std::sync::mpsc::Sender<String>>,
+) {
+    let mut list_cmd = Command::new("proxmox-backup-client");
+    list_cmd.args(["snapshot", "list", "--output-format", "json", "--repository", repo]);
+    pbs_apply_common(&mut list_cmd, storage);
+    let snap_out = match list_cmd.output() { Ok(o) => o, Err(_) => return };
+    let snaps: serde_json::Value = match serde_json::from_slice(&snap_out.stdout) {
+        Ok(v) => v, Err(_) => return,
+    };
+    let arr = match snaps.as_array() { Some(a) => a, None => return };
+    let mut best_time: i64 = 0;
+    let mut best_snap = String::new();
+    for s in arr {
+        let st = s.get("backup-type").and_then(|v| v.as_str()).unwrap_or("");
+        let si = s.get("backup-id").and_then(|v| v.as_str()).unwrap_or("");
+        let stime = s.get("backup-time").and_then(|v| v.as_i64()).unwrap_or(0);
+        if st != backup_type || si != backup_id || stime <= best_time { continue; }
+        if let Some(ts) = chrono::DateTime::from_timestamp(stime, 0) {
+            best_time = stime;
+            best_snap = format!("{}/{}/{}", st, si,
+                ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        }
+    }
+    if best_snap.is_empty() { return; }
+    let mut notes_cmd = Command::new("proxmox-backup-client");
+    notes_cmd.args(["snapshot", "notes", "update", "--repository", repo]);
+    // pbs_apply_common adds --ns + the auth env (all options, safe before the
+    // `--` positional separator below).
+    pbs_apply_common(&mut notes_cmd, storage);
+    notes_cmd.arg("--").arg(&best_snap).arg(notes_text);
+    match notes_cmd.output() {
+        Ok(out) if out.status.success() => {
+            if let Some(log_tx) = log { let _ = log_tx.send("  PBS: snapshot notes set".to_string()); }
+        }
+        Ok(out) => warn!("Failed to set PBS snapshot notes for {}: {}",
+            best_snap, String::from_utf8_lossy(&out.stderr).trim()),
+        Err(e) => warn!("Failed to run snapshot notes update: {}", e),
+    }
 }
 
 /// Extract the container/VM ID from a backup filename
@@ -3928,11 +5008,28 @@ pub fn restore_config_backup(entry: &BackupEntry) -> Result<String, String> {
 /// restore (`restore_by_id_with_log`) is the one that honours a storage
 /// the operator picked in the restore dialog.
 pub fn restore_backup(entry: &BackupEntry, overwrite: bool) -> Result<String, String> {
+    // PBS file-level (pxar) snapshots restore by extracting the tree, not via
+    // the tarball-based per-type restore paths.
+    if is_pbs_file_level_entry(entry) {
+        return restore_pbs_file_level_entry(entry, "");
+    }
     match entry.target.target_type {
         BackupTargetType::Docker => restore_docker(entry, overwrite),
         BackupTargetType::Lxc => restore_lxc(entry, "", overwrite, ""),
         BackupTargetType::Vm => restore_vm(entry),
         BackupTargetType::Config => restore_config_backup(entry),
+        // System-folder restore defaults to the PARENT of the original
+        // path so the folder lands back exactly where it came from. The
+        // streaming/targeted path (restore_entry_with_log) lets the
+        // operator choose a different parent.
+        BackupTargetType::SystemPath => {
+            let parent = Path::new(entry.target.system_path.trim_end_matches('/'))
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/".to_string());
+            restore_system_path(entry, &parent)
+        }
     }
 }
 
@@ -3990,12 +5087,53 @@ pub fn create_backup_with_log(
             i + 1, total, type_name, display_name));
 
         let comments = backup_comments_with_cluster(t, &cluster);
+        let hostname = local_hostname();
+
+        // PBS file-level (pxar) path — upload the workload's content directory
+        // directly so PBS per-file restore works. Applies to Docker, native
+        // LXC, and SystemPath; for VM / Proxmox-LXC / Config make_pbs_file_
+        // level_entry returns None and we fall through to the tarball path.
+        if storage.storage_type == StorageType::Pbs && storage.pbs_file_level {
+            let _ = log.send("  PBS file-level backup requested...".to_string());
+            if let Some(res) = make_pbs_file_level_entry(t, &storage, &comments, &cluster, &hostname, Some(&log)) {
+                match res {
+                    Ok(entry) => {
+                        let _ = log.send(format!("  ✓ {} file-level backup complete", type_name));
+                        entries.push(entry);
+                    }
+                    Err(e) => {
+                        let _ = log.send(format!("  ✗ PBS file-level backup failed: {}", e));
+                        entries.push(BackupEntry {
+                            id: Uuid::new_v4().to_string(),
+                            target: t.clone(),
+                            storage: storage.clone(),
+                            filename: String::new(),
+                            size_bytes: 0,
+                            created_at: Utc::now().to_rfc3339(),
+                            status: BackupStatus::Failed,
+                            error: e,
+                            schedule_id: String::new(),
+                            comments,
+                            node_hostname: hostname,
+                            docker_config: String::new(),
+                            mounts: Vec::new(),
+                        });
+                    }
+                }
+                continue;
+            }
+            let _ = log.send("  (file-level not applicable to this target — using image backup)".to_string());
+        }
 
         // Run the backup with line-by-line output for vzdump
         let (result, docker_config, mounts) = match t.target_type {
             BackupTargetType::Docker => {
                 let _ = log.send(format!("  Exporting Docker container '{}'...", t.name));
-                match backup_docker(&t.name) {
+                if !t.exclude_mounts.is_empty() {
+                    let _ = log.send(format!("  Excluding {} mount(s): {}",
+                        t.exclude_mounts.len(), t.exclude_mounts.join(", ")));
+                }
+                match backup_docker(&t.name, &t.exclude_mounts) {
                     Ok((path, size, config, m)) => {
                         if !m.is_empty() {
                             let archived = m.iter().filter(|x| !x.archive_path.is_empty()).count();
@@ -4011,12 +5149,16 @@ pub fn create_backup_with_log(
                 }
             }
             BackupTargetType::Lxc => {
+                if !t.exclude_mounts.is_empty() {
+                    let _ = log.send(format!("  Excluding {} mount(s): {}",
+                        t.exclude_mounts.len(), t.exclude_mounts.join(", ")));
+                }
                 let r = if crate::containers::is_proxmox() {
                     let _ = log.send(format!("  Running vzdump for container {}...", t.name));
-                    backup_lxc_proxmox_with_log(&t.name, &log)
+                    backup_lxc_proxmox_with_log(&t.name, &t.exclude_mounts, &log)
                 } else {
                     let _ = log.send(format!("  Tarring LXC rootfs for '{}'...", t.name));
-                    backup_lxc(&t.name)
+                    backup_lxc(&t.name, &t.exclude_mounts)
                 };
                 (r, String::new(), Vec::new())
             }
@@ -4028,11 +5170,18 @@ pub fn create_backup_with_log(
                 let _ = log.send("  Archiving WolfStack config files...".to_string());
                 (backup_config(), String::new(), Vec::new())
             }
+            BackupTargetType::SystemPath => {
+                let _ = log.send(format!("  Archiving system folder '{}'...", t.system_path));
+                if !t.exclude_mounts.is_empty() {
+                    let _ = log.send(format!("  Excluding {} sub-path(s): {}",
+                        t.exclude_mounts.len(), t.exclude_mounts.join(", ")));
+                }
+                (backup_system_path(&t.name, &t.system_path, &t.exclude_mounts), String::new(), Vec::new())
+            }
         };
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let hostname = local_hostname();
 
         let entry = match result {
             Ok((local_path, size)) => {
@@ -4106,6 +5255,7 @@ pub fn create_backup_with_log(
 /// Proxmox vzdump with real-time log output
 fn backup_lxc_proxmox_with_log(
     vmid: &str,
+    exclude_mounts: &[String],
     log: &std::sync::mpsc::Sender<String>,
 ) -> Result<(PathBuf, u64), String> {
     let staging = ensure_staging_dir()?;
@@ -4115,13 +5265,15 @@ fn backup_lxc_proxmox_with_log(
     for mode in &["snapshot", "stop"] {
         let _ = log.send(format!("  vzdump --mode {} ...", mode));
 
-        let mut child = Command::new("vzdump")
-            .args([
+        let mut cmd = Command::new("vzdump");
+        cmd.args([
                 vmid,
                 "--dumpdir", &staging.to_string_lossy(),
                 "--mode", mode,
                 "--compress", "zstd",
-            ])
+            ]);
+        vzdump_apply_excludes(&mut cmd, exclude_mounts);
+        let mut child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -4267,6 +5419,19 @@ fn restore_entry_with_log(entry: &BackupEntry, overwrite: bool, storage: &str, n
 
     let _ = log.send(format!("Starting {} restore: {}", type_name, display_name));
 
+    // PBS file-level (pxar) snapshot — extract the tree directly. `new_name`
+    // carries an optional target directory override (LXC rootfs / system
+    // folder / docker staging are the per-type defaults when empty).
+    if is_pbs_file_level_entry(entry) {
+        let _ = log.send("Restoring PBS file-level snapshot...".to_string());
+        let result = restore_pbs_file_level_entry(entry, new_name);
+        match &result {
+            Ok(msg) => { let _ = log.send(format!("✅ {}", msg)); }
+            Err(e) => { let _ = log.send(format!("❌ {}", e)); }
+        }
+        return result;
+    }
+
     // Check for container existence before downloading
     if entry.target.target_type == BackupTargetType::Docker {
         let check = Command::new("docker")
@@ -4321,6 +5486,27 @@ fn restore_entry_with_log(entry: &BackupEntry, overwrite: bool, storage: &str, n
             }
             result
         }
+        BackupTargetType::SystemPath => {
+            // `new_name` carries an operator-chosen restore-target directory
+            // (the PARENT into which the folder is unpacked). Empty = restore
+            // in place, i.e. the parent of the original `system_path`.
+            let target_dir = if new_name.trim().is_empty() {
+                Path::new(entry.target.system_path.trim_end_matches('/'))
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "/".to_string())
+            } else {
+                new_name.trim().to_string()
+            };
+            let _ = log.send(format!("Restoring system folder into {}...", target_dir));
+            let result = restore_system_path(entry, &target_dir);
+            match &result {
+                Ok(msg) => { let _ = log.send(format!("✅ {}", msg)); }
+                Err(e) => { let _ = log.send(format!("❌ {}", e)); }
+            }
+            result
+        }
     }
 }
 
@@ -4348,6 +5534,12 @@ pub fn restore_from_path(
     if matches!(target_type, BackupTargetType::Config) {
         return Err("Config backups can't be restored from a folder — restore them from the Backups list.".into());
     }
+    // System-folder backups don't carry their original target path in the
+    // filename, and extracting them touches arbitrary host paths — same
+    // write-anywhere concern as Config. Restore them from the Backups list.
+    if matches!(target_type, BackupTargetType::SystemPath) {
+        return Err("System-folder backups can't be restored from a folder — restore them from the Backups list.".into());
+    }
     let size_bytes = fs::metadata(Path::new(source_path).join(filename))
         .map(|m| m.len()).unwrap_or(0);
     let entry = BackupEntry {
@@ -4355,7 +5547,7 @@ pub fn restore_from_path(
         target: BackupTarget {
             target_type,
             name: extract_name_from_filename(filename),
-            hostname: None, state: None, specs: None,
+            ..Default::default()
         },
         storage: BackupStorage::local(source_path),
         filename: filename.to_string(),
@@ -4415,6 +5607,9 @@ pub fn scan_backup_folder(path: &str) -> Result<Vec<ScannedBackup>, String> {
             BackupTargetType::Lxc => "lxc",
             BackupTargetType::Vm => "vm",
             BackupTargetType::Config => "config",
+            // SystemPath files are filtered out above by `is_backup`, but the
+            // match must stay exhaustive.
+            BackupTargetType::SystemPath => "systempath",
         }.to_string();
         let name = extract_name_from_filename(&fname);
         out.push(ScannedBackup { filename: fname, target_type: type_str, name, size_bytes: size, modified });
@@ -4482,6 +5677,7 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
                 hostname: None,
                 state,
                 specs: if image.is_empty() { None } else { Some(image) },
+                ..Default::default()
             });
         }
     }
@@ -4556,6 +5752,7 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
                         hostname,
                         state: Some(state.clone()),
                         specs: if spec_parts.is_empty() { None } else { Some(spec_parts.join(", ")) },
+                        ..Default::default()
                     });
                 }
             }
@@ -4583,6 +5780,7 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
                     hostname,
                     state,
                     specs: None,
+                    ..Default::default()
                 });
             }
         }
@@ -4613,6 +5811,7 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
             hostname: None,
             state,
             specs,
+            ..Default::default()
         });
     }
 
@@ -4620,7 +5819,7 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
     targets.push(BackupTarget {
         target_type: BackupTargetType::Config,
         name: String::new(),
-        hostname: None, state: None, specs: None,
+        ..Default::default()
     });
 
     targets
@@ -4782,7 +5981,7 @@ pub fn import_backup(data: &[u8], filename: &str) -> Result<String, String> {
         target: BackupTarget {
             target_type: guess_target_type(filename),
             name: extract_name_from_filename(filename),
-            hostname: None, state: None, specs: None,
+            ..Default::default()
         },
         storage: BackupStorage::local(&dest_dir),
         filename: filename.to_string(),
@@ -4806,6 +6005,7 @@ fn guess_target_type(filename: &str) -> BackupTargetType {
     if filename.starts_with("docker-") { BackupTargetType::Docker }
     else if filename.starts_with("lxc-") { BackupTargetType::Lxc }
     else if filename.starts_with("vm-") { BackupTargetType::Vm }
+    else if filename.starts_with("systempath-") { BackupTargetType::SystemPath }
     else { BackupTargetType::Config }
 }
 
@@ -5095,12 +6295,50 @@ where
 
     on_progress("Detecting archive...".to_string(), Some(1.0));
 
-    let actual_archive = if archive.is_empty() || archive == "root.pxar" {
-        // WolfStack always uploads its backup wrapped as `backup.pxar`.
-        detect_pbs_archive(storage, &snapshot_fixed).unwrap_or_else(|| "backup.pxar".to_string())
-    } else {
+    // Detect the archive kind. A WolfStack *tarball* snapshot wraps its
+    // .tar.gz as `backup.pxar`; a WolfStack *file-level* snapshot stores the
+    // content tree as `root.pxar` (+ volume-*/bind-* pxars). The caller may
+    // request a specific archive; otherwise we sniff the snapshot's files.
+    let detected = detect_pbs_archive(storage, &snapshot_fixed);
+    let actual_archive = if !archive.is_empty() && archive != "root.pxar" {
         archive.to_string()
+    } else {
+        detected.clone().unwrap_or_else(|| "backup.pxar".to_string())
     };
+
+    // File-level snapshot: extract the `root.pxar` tree directly. There's no
+    // inner WolfStack archive to hand to restore_lxc_local — the snapshot IS
+    // the filesystem. Restore the whole tree into a clearly-named directory
+    // under the restore area; per-FILE restore is done from PBS's own UI.
+    let is_file_level = actual_archive == "root.pxar";
+    if is_file_level {
+        on_progress(format!("Restoring file-level tree {}...", actual_archive), Some(2.0));
+        let out_dir = ensure_staging_dir().unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!("pbs-fl-restore-{}-{}", snap_id, Uuid::new_v4().simple()));
+        let _ = fs::remove_dir_all(&stage); // not used on this branch
+        fs::create_dir_all(&out_dir)
+            .map_err(|e| format!("Failed to create restore dir: {}", e))?;
+        let mut cmd = Command::new("proxmox-backup-client");
+        cmd.arg("restore")
+           .arg(&snapshot_fixed)
+           .arg("root.pxar")
+           .arg(&out_dir)
+           .arg("--repository").arg(&repo)
+           .arg("--ignore-ownership").arg("true");
+        pbs_apply_common(&mut cmd, storage);
+        let out = cmd.output()
+            .map_err(|e| { let _ = fs::remove_dir_all(&out_dir); format!("PBS file-level restore failed: {}", e) })?;
+        if !out.status.success() {
+            let _ = fs::remove_dir_all(&out_dir);
+            return Err(format!("PBS file-level restore error: {}",
+                String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        on_progress("File-level restore complete".to_string(), Some(100.0));
+        return Ok(format!(
+            "File-level snapshot '{}' restored into {} — the container/folder \
+             filesystem is there; use PBS's per-file restore for individual files.",
+            snapshot, out_dir.display()));
+    }
 
     on_progress(format!("Downloading {}...", actual_archive), Some(2.0));
 
@@ -5307,6 +6545,18 @@ fn detect_pbs_archive(storage: &BackupStorage, snapshot: &str) -> Option<String>
     
     // Look for .pxar or .img archives (skip index.json and catalog)
     if let Some(arr) = files.as_array() {
+        // Prefer the well-known WolfStack archive names first so a file-level
+        // snapshot (root.pxar + volume-*/bind-*) resolves to `root.pxar` and a
+        // tarball snapshot to `backup.pxar`, regardless of PBS listing order.
+        for preferred in ["root.pxar", "backup.pxar"] {
+            for f in arr {
+                let filename = f.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+                let name = filename.trim_end_matches(".didx");
+                if name == preferred {
+                    return Some(name.to_string());
+                }
+            }
+        }
         for f in arr {
             let filename = f.get("filename").and_then(|v| v.as_str()).unwrap_or("");
             // Prefer .pxar (filesystem backup), then .img (disk image)
@@ -5390,6 +6640,10 @@ pub fn merge_pbs_secrets(storage: &mut BackupStorage) {
     if storage.pbs_password.is_empty()    { storage.pbs_password    = saved.pbs_password; }
     if storage.pbs_fingerprint.is_empty() { storage.pbs_fingerprint = saved.pbs_fingerprint; }
     if storage.pbs_namespace.is_empty()   { storage.pbs_namespace   = saved.pbs_namespace; }
+    // file-level is a saved preference of the PBS destination — adopt it when
+    // the caller (e.g. the cluster scheduler form sending only `{type:"pbs"}`)
+    // didn't explicitly request it. A POST that DID set it wins.
+    if !storage.pbs_file_level         { storage.pbs_file_level  = saved.pbs_file_level; }
 }
 
 /// PBS configuration — stored in /etc/wolfstack/pbs/config.json

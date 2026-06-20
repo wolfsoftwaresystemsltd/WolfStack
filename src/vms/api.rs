@@ -127,6 +127,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route("/{name}/volumes/{vol}", web::delete().to(remove_volume))
             .route("/{name}/volumes/{vol}/resize", web::post().to(resize_volume))
             .route("/{name}/vnc-password", web::get().to(vm_vnc_password))
+            .route("/{name}/start-command", web::get().to(vm_start_command))
             .route("/{name}", web::put().to(update_vm))
             .route("/{name}", web::delete().to(delete_vm))
             .route("/{name}", web::get().to(get_vm))
@@ -285,6 +286,14 @@ struct CreateVmRequest {
     /// Static gateway for bridge mode when `bridge_ip_mode == "static"`.
     #[serde(default)]
     bridge_gateway: Option<String>,
+    /// Free-text operator notes / description. Defaults to empty.
+    #[serde(default)]
+    notes: String,
+    /// Operator-supplied extra QEMU args (e.g. Windows-11 audio). Defaults to
+    /// empty. Tokenised server-side with a shell-style splitter; the string is
+    /// never passed through a shell.
+    #[serde(default)]
+    extra_qemu_args: String,
 }
 
 fn default_bios_type() -> String { "seabios".to_string() }
@@ -315,6 +324,8 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     config.bios_type = body.bios_type.clone();
     config.boot_order = body.boot_order.clone();
     config.vnc_external = body.vnc_external;
+    config.notes = body.notes.clone();
+    config.extra_qemu_args = body.extra_qemu_args.clone();
 
     // Network mode + bridge fields. Validate mode at the boundary so a
     // typo in the request can't silently fall through to the default
@@ -407,6 +418,11 @@ struct UpdateVmRequest {
     bridge_ip_mode: Option<String>,
     bridge_ip: Option<String>,
     bridge_gateway: Option<String>,
+    /// Free-text operator notes / description. Empty string clears it.
+    notes: Option<String>,
+    /// Operator-supplied extra QEMU args (e.g. Windows-11 audio). Empty
+    /// string clears it. Tokenised server-side; never shell-evaluated.
+    extra_qemu_args: Option<String>,
 }
 
 async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateVmRequest>) -> HttpResponse {
@@ -437,7 +453,9 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
                             body.bridge_ip.clone(),
                             body.bridge_gateway.clone(),
                             body.boot_order.clone(),
-                            body.vnc_external) {
+                            body.vnc_external,
+                            body.notes.clone(),
+                            body.extra_qemu_args.clone()) {
         // Some(msg) is a non-fatal advisory (e.g. libvirt hardware edits that
         // apply on next boot) the UI shows next to the success toast.
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": msg })),
@@ -619,6 +637,24 @@ async fn vm_vnc_password(req: HttpRequest, state: web::Data<AppState>, path: web
         "password": password,
         "vnc_port": port,
         "external": external,
+    }))
+}
+
+/// GET /api/vms/{name}/start-command — the raw command WolfStack/the
+/// hypervisor uses to start this VM, for display in the editor. Authed.
+/// Returns `{ command, source }` where source is native|proxmox|libvirt.
+/// Honest degradation: if a backend can't produce the command, `command`
+/// carries a clear message (never a fabricated command) and HTTP stays 200.
+async fn vm_start_command(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    let (command, source) = {
+        let manager = state.vms.lock().unwrap();
+        manager.start_command(&name)
+    };
+    HttpResponse::Ok().json(serde_json::json!({
+        "command": command,
+        "source": source,
     }))
 }
 
