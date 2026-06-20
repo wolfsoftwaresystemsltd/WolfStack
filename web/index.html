@@ -196,6 +196,13 @@
             }, 8000);
         })();
     </script>
+    <!-- Application menu bar — full-width slim strip pinned to the very top of
+         the viewport, above the sidebar and content. Built by fleetMenuBarInit()
+         in app.js. Collapses below 1100px; the sidebar remains the fallback. -->
+    <div class="app-menubar" id="app-menubar">
+        <nav class="fleet-menubar" id="fleet-menubar" role="menubar" aria-label="Fleet navigation"></nav>
+    </div>
+
     <!-- Mobile sidebar backdrop -->
     <div class="sidebar-backdrop" onclick="closeSidebarMobile()"></div>
 
@@ -285,10 +292,6 @@
             <div style="display:flex; align-items:center;">
                 <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle Sidebar"><span class="ws-icon-clean-wrap" data-icon="menu"></span></button>
                 <h2 id="page-title">Dashboard</h2>
-                <!-- Grouped fleet menu bar (additive). Built by fleetMenuBarInit()
-                     in app.js. Collapses below 1100px; the sidebar remains the
-                     navigation fallback on narrow screens. -->
-                <nav class="fleet-menubar" id="fleet-menubar" role="menubar" aria-label="Fleet navigation"></nav>
             </div>
             <div class="top-bar-actions" style="display:flex; align-items:center; gap:12px;">
                 <div class="global-search-wrap" style="position:relative;">
