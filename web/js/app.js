@@ -2082,7 +2082,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync' };
+    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', 'fleet-console': 'Terminal Console' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -2158,6 +2158,13 @@ function selectView(page) {
         fleetLogsInit();
     } else if (page === 'learn') {
         learnInit();
+    } else if (page === 'fleet-console') {
+        // Build the console shell once; thereafter just re-show it.
+        // Terminals + WebSockets are kept LIVE across navigation — we
+        // never dispose them on hide — so on re-show we only re-fit
+        // every visible pane and re-send the resize frame.
+        if (typeof fleetConsoleInit === 'function') fleetConsoleInit();
+        if (typeof fleetConsoleOnShow === 'function') fleetConsoleOnShow();
     }
 
     // Restore task log toggle button when leaving topology
@@ -65979,6 +65986,10 @@ window.predTermClose = predTermClose;
 
 const APP_DRAWER_TILES = [
     {
+        id: 'fleet-console', icon: '', name: 'Terminal Console',
+        desc: 'byobu-style multi-window, split-pane terminals across every node in your fleet — host shells, Docker, LXC and VM consoles, all in one persistent surface.',
+    },
+    {
         id: 'learn', icon: '', name: 'Getting Started',
         desc: 'New here? A short, calm course — one step at a time. Install an app, take a backup, set up alerts, without the overwhelm.',
     },
@@ -69644,3 +69655,1019 @@ window.wsAdoptOpen = wsAdoptOpen;
 window.wsAdoptLoadInventory = wsAdoptLoadInventory;
 window.wsAdoptSubmit = wsAdoptSubmit;
 window.wsCloseModal = wsCloseModal;
+
+// ════════════════════════════════════════════════════════════════════
+// Fleet Terminal Console — byobu-style multi-window, split-pane terminals
+// across every node in the fleet. ADDITIVE: leaves the existing
+// openInlineTerminal / page-terminal / openConsole pop-out untouched.
+//
+// State shape:
+//   fleetConsole = {
+//     windows: [ {
+//        id,                       // unique window id (fcw-N)
+//        name,                     // editable tab label
+//        node,                     // {id, hostname, is_self}
+//        panes: [ {
+//           id,                    // unique pane id (fcp-N)
+//           term, fit, ws,         // xterm instance, FitAddon, WebSocket
+//           type, target,         // host|docker|lxc|vm  + container/vm name
+//           node,                  // node object this pane targets
+//           sessionKey,            // node_id|type|name (Phase-2 reattach key)
+//           userClosing,           // true => onclose must NOT reconnect
+//           reconnect: {attempts,timer},
+//           el,                    // the pane DOM element
+//        } ],
+//        layout,                   // 'single' | 'h' (stacked) | 'v' (side)
+//        activePaneId,
+//     } ],
+//     activeWindow,                // window id
+//     nextWin, nextPane,           // id counters
+//     keyHandler,                  // bound keydown listener (page-scoped)
+//     built,                       // shell constructed?
+//   }
+//
+// Phase 2 note: server-side detach/reattach would slot in at
+// fleetConsoleConnectPane() — instead of opening a fresh shell it would
+// reattach to the existing session identified by pane.sessionKey. The
+// WS-URL builder (fleetConsoleWsUrl) and (re)connect path are already
+// centralised here for exactly that reason.
+// ────────────────────────────────────────────────────────────────────
+
+let fleetConsole = {
+    windows: [],
+    activeWindow: null,
+    nextWin: 1,
+    nextPane: 1,
+    keyHandler: null,
+    built: false,
+    clockTimer: null,
+};
+
+// Centralised WS-URL builder. type ∈ host|docker|lxc|vm. For the self
+// node we use the direct /ws/console path; for any other cluster node we
+// route through /ws/remote-console/{node_id}/… (server handles auth via
+// the cluster secret). Mirrors console.html:147-159 and predTermOpen.
+function fleetConsoleWsUrl(node, type, target) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const name = (type === 'host') ? 'host' : target;
+    if (node && node.is_self) {
+        return `${protocol}//${window.location.host}/ws/console/${encodeURIComponent(type)}/${encodeURIComponent(name)}`;
+    }
+    return `${protocol}//${window.location.host}/ws/remote-console/${encodeURIComponent(node.id)}/${encodeURIComponent(type)}/${encodeURIComponent(name)}`;
+}
+
+function fleetConsoleSelfNode() {
+    const nodes = (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) ? allNodes : [];
+    return nodes.find(n => n.is_self) || nodes[0] || null;
+}
+
+// Build the page shell once. Idempotent. Returns true if it built the
+// shell on THIS call (i.e. first build), false if it was already built —
+// callers that open their own initial window use this to avoid the
+// auto-default window racing theirs.
+function fleetConsoleInit(skipDefaultWindow) {
+    if (fleetConsole.built) return false;
+    const page = document.getElementById('page-fleet-console');
+    if (!page) return false;
+
+    page.innerHTML = `
+        <div class="fleet-console-shell" role="application" aria-label="Fleet Terminal Console">
+            <div class="fc-tabstrip" role="tablist" aria-label="Terminal windows" id="fc-tabstrip"></div>
+            <div class="fc-stage" id="fc-stage"></div>
+            <div class="fc-statusbar" role="status" aria-live="polite">
+                <div class="fc-status-left" id="fc-status-windows"></div>
+                <div class="fc-status-right">
+                    <button class="fc-status-help" id="fc-help-btn" type="button" aria-haspopup="dialog"
+                        aria-controls="fc-help-popover" title="Keyboard shortcuts">? shortcuts</button>
+                    <span class="fc-status-node" id="fc-status-node"></span>
+                    <span class="fc-status-clock" id="fc-status-clock" aria-label="Current time"></span>
+                </div>
+            </div>
+            <div class="fc-help-popover" id="fc-help-popover" role="dialog" aria-label="Keyboard shortcuts" hidden>
+                <div class="fc-help-title">Keyboard shortcuts</div>
+                <ul class="fc-help-list">
+                    <li><kbd>Alt</kbd>+<kbd>T</kbd> New window</li>
+                    <li><kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> Switch window</li>
+                    <li><kbd>Alt</kbd>+<kbd>\\</kbd> Split vertical</li>
+                    <li><kbd>Alt</kbd>+<kbd>-</kbd> Split horizontal</li>
+                    <li><kbd>Alt</kbd>+<kbd>W</kbd> Close pane</li>
+                    <li><kbd>Alt</kbd>+<kbd>R</kbd> Rename window</li>
+                </ul>
+                <div class="fc-help-foot">Shortcuts only fire while the Terminal Console is open.</div>
+            </div>
+        </div>`;
+
+    document.getElementById('fc-help-btn').addEventListener('click', fleetConsoleToggleHelp);
+    fleetConsole.built = true;
+
+    // Page-scoped keyboard handler — only acts while the console page is
+    // the visible view. Attached once; the visibility guard inside keeps
+    // it from hijacking keys on other pages.
+    fleetConsole.keyHandler = fleetConsoleKeydown;
+    document.addEventListener('keydown', fleetConsole.keyHandler, true);
+
+    // Live clock in the status bar.
+    fleetConsole.clockTimer = setInterval(fleetConsoleTickClock, 1000);
+    fleetConsoleTickClock();
+
+    // Open a default Host window on the self node so one click = a shell.
+    // Skipped when a caller (openInFleetConsole) will open its own first
+    // window — otherwise the operator gets an unrequested extra window.
+    const self = fleetConsoleSelfNode();
+    if (skipDefaultWindow) {
+        fleetConsoleRenderTabs();
+    } else if (self) {
+        fleetConsoleNewWindow({ node: self, type: 'host', target: 'host' });
+    } else {
+        document.getElementById('fc-stage').innerHTML =
+            `<div class="fc-empty">No nodes loaded yet. <button class="btn btn-sm btn-primary" type="button" onclick="fleetConsoleOpenPicker()">✚ New window</button></div>`;
+        fleetConsoleRenderTabs();
+    }
+    return true;
+}
+
+function fleetConsolePageVisible() {
+    const page = document.getElementById('page-fleet-console');
+    return page && page.style.display !== 'none';
+}
+
+// On re-show: re-fit every pane in the active window and re-send resize.
+function fleetConsoleOnShow() {
+    const win = fleetConsoleActiveWindow();
+    if (!win) return;
+    // Two passes — immediate + after layout settles — same rationale as
+    // predTermOpen's double-fit.
+    const refit = () => win.panes.forEach(fleetConsoleFitPane);
+    requestAnimationFrame(refit);
+    setTimeout(refit, 120);
+    const active = win.panes.find(p => p.id === win.activePaneId) || win.panes[0];
+    if (active && active.term) { try { active.term.focus(); } catch (_) {} }
+}
+
+function fleetConsoleActiveWindow() {
+    return fleetConsole.windows.find(w => w.id === fleetConsole.activeWindow) || null;
+}
+
+// ─── Windows ───
+// Each window owns a persistent grid element (win.gridEl) that lives in
+// #fc-stage for the window's whole lifetime. Switching windows toggles
+// display — it NEVER tears down terminals/sockets. Panes mount their
+// xterm exactly once; relayout (split/close) moves the existing pane DOM
+// nodes around the grid, so the live term + WS survive.
+function fleetConsoleNewWindow(opts) {
+    opts = opts || {};
+    const node = opts.node || fleetConsoleSelfNode();
+    if (!node) { showToast('No node available for a terminal', 'error'); return; }
+    const type = opts.type || 'host';
+    const target = (type === 'host') ? 'host' : (opts.target || '');
+    const winId = 'fcw-' + (fleetConsole.nextWin++);
+    const defaultName = `${node.hostname || node.address || node.id}:${type}${type === 'host' ? '' : ':' + target}`;
+
+    const stage = document.getElementById('fc-stage');
+    if (!stage) return null;
+    // Clear any "no windows / no nodes" placeholder.
+    const placeholder = stage.querySelector('.fc-empty');
+    if (placeholder && placeholder.parentElement === stage) stage.removeChild(placeholder);
+
+    const grid = document.createElement('div');
+    grid.className = 'fc-grid fc-grid-single';
+    grid.dataset.win = winId;
+    stage.appendChild(grid);
+
+    const win = {
+        id: winId,
+        name: defaultName,
+        node: node,
+        panes: [],
+        layout: 'single',
+        activePaneId: null,
+        gridEl: grid,
+    };
+    fleetConsole.windows.push(win);
+
+    const pane = fleetConsoleCreatePane(win, node, type, target);
+    win.panes.push(pane);
+    win.activePaneId = pane.id;
+    fleetConsoleMountPane(pane); // builds DOM + term once
+    fleetConsoleLayoutWindow(win);
+
+    fleetConsoleSwitchWindow(winId);
+    return win;
+}
+
+function fleetConsoleCloseWindow(winId) {
+    const idx = fleetConsole.windows.findIndex(w => w.id === winId);
+    if (idx < 0) return;
+    const win = fleetConsole.windows[idx];
+    // Tear down this window's splitter document-listeners before we drop
+    // its panes/grid, otherwise they leak permanently on every close.
+    if (win._splitterCleanups) { win._splitterCleanups.forEach(fn => { try { fn(); } catch (_) {} }); win._splitterCleanups = []; }
+    win.panes.forEach(p => fleetConsoleDestroyPane(p, /*userClosing*/true));
+    if (win.gridEl && win.gridEl.parentElement) win.gridEl.parentElement.removeChild(win.gridEl);
+    fleetConsole.windows.splice(idx, 1);
+    if (fleetConsole.activeWindow === winId) {
+        const next = fleetConsole.windows[Math.max(0, idx - 1)];
+        fleetConsole.activeWindow = next ? next.id : null;
+    }
+    if (fleetConsole.windows.length === 0) fleetConsoleShowEmptyStage();
+    fleetConsoleRenderTabs();
+    fleetConsoleShowActiveGrid();
+    if (fleetConsole.activeWindow) fleetConsoleOnShow();
+}
+
+function fleetConsoleShowEmptyStage() {
+    const stage = document.getElementById('fc-stage');
+    if (!stage) return;
+    if (!stage.querySelector('.fc-empty')) {
+        const div = document.createElement('div');
+        div.className = 'fc-empty';
+        div.innerHTML = `No windows open. <button class="btn btn-sm btn-primary" type="button" onclick="fleetConsoleOpenPicker()">✚ New window</button>`;
+        stage.appendChild(div);
+    }
+}
+
+// Toggle which window's grid is visible. Pure show/hide — no teardown.
+function fleetConsoleShowActiveGrid() {
+    fleetConsole.windows.forEach(w => {
+        if (w.gridEl) w.gridEl.style.display = (w.id === fleetConsole.activeWindow) ? 'flex' : 'none';
+    });
+    fleetConsoleRenderStatusWindows();
+    fleetConsoleRenderStatusNode();
+}
+
+function fleetConsoleSwitchWindow(winId) {
+    if (!fleetConsole.windows.some(w => w.id === winId)) return;
+    fleetConsole.activeWindow = winId;
+    fleetConsoleRenderTabs();
+    fleetConsoleShowActiveGrid();
+    fleetConsoleOnShow();
+}
+
+function fleetConsoleRenameWindow(winId) {
+    const win = fleetConsole.windows.find(w => w.id === winId);
+    if (!win) return;
+    const name = window.prompt('Rename window', win.name);
+    if (name === null) return;
+    win.name = name.trim() || win.name;
+    fleetConsoleRenderTabs();
+    fleetConsoleRenderStatusWindows();
+}
+
+// ─── Panes ───
+function fleetConsoleCreatePane(win, node, type, target) {
+    const paneId = 'fcp-' + (fleetConsole.nextPane++);
+    const name = (type === 'host') ? 'host' : target;
+    const pane = {
+        id: paneId,
+        term: null,
+        fit: null,
+        ws: null,
+        type: type,
+        target: target,
+        node: node,
+        sessionKey: `${node.id}|${type}|${name}`,
+        userClosing: false,
+        reconnect: { attempts: 0, timer: null },
+        el: null,    // inner .fc-pane
+        cell: null,  // outer .fc-cell (moved during relayout)
+    };
+    return pane;
+}
+
+// Mount a pane's DOM + xterm ONCE. Builds the .fc-cell wrapper (held on
+// pane.cell) so relayout can move it without recreating the terminal.
+// pane.el is the inner .fc-pane (used for overlay/active styling).
+function fleetConsoleMountPane(pane) {
+    const cell = document.createElement('div');
+    cell.className = 'fc-cell';
+    cell.dataset.cell = pane.id;
+    pane.cell = cell;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'fc-pane';
+    wrap.dataset.pane = pane.id;
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', `Terminal ${pane.type} ${pane.target || ''} on ${pane.node.hostname || pane.node.id}`);
+    wrap.innerHTML = `
+        <div class="fc-pane-head">
+            <span class="fc-pane-title">${escapeHtml((pane.node.hostname || pane.node.id) + ' · ' + pane.type + (pane.target ? ' · ' + pane.target : ''))}</span>
+            <span class="fc-pane-actions">
+                <button class="fc-pane-btn" type="button" title="Reconnect" data-act="reconnect" aria-label="Reconnect this terminal">↻</button>
+                <button class="fc-pane-btn" type="button" title="Close pane" data-act="close" aria-label="Close this terminal">✕</button>
+            </span>
+        </div>
+        <div class="fc-pane-term" id="${pane.id}-term"></div>
+        <div class="fc-pane-overlay" id="${pane.id}-overlay" hidden role="status" aria-live="polite"></div>`;
+    cell.appendChild(wrap);
+    pane.el = wrap;
+
+    // Click to make active.
+    wrap.addEventListener('mousedown', () => fleetConsoleSetActivePane(pane.id));
+    wrap.querySelector('[data-act="close"]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        fleetConsoleClosePane(pane.id);
+    });
+    wrap.querySelector('[data-act="reconnect"]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        fleetConsoleManualReconnect(pane);
+    });
+
+    if (typeof Terminal === 'undefined') {
+        wrap.querySelector('.fc-pane-term').innerHTML =
+            '<div class="fc-empty">xterm.js failed to load — refresh the page.</div>';
+        return;
+    }
+
+    const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "Courier New", monospace',
+        theme: { background: '#0a0a0a', foreground: '#f0f0f0', cursor: '#10b981', selectionBackground: 'rgba(16,185,129,0.3)' },
+        scrollback: 5000,
+    });
+    let fit = null;
+    if (typeof FitAddon !== 'undefined') {
+        fit = new FitAddon.FitAddon();
+        term.loadAddon(fit);
+    }
+    term.open(wrap.querySelector('.fc-pane-term'));
+    pane.term = term;
+    pane.fit = fit;
+
+    const refit = () => fleetConsoleFitPane(pane);
+    setTimeout(refit, 50);
+    setTimeout(refit, 250);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(refit).catch(() => {});
+
+    // Keystrokes → WS verbatim.
+    term.onData(d => { if (pane.ws && pane.ws.readyState === WebSocket.OPEN) pane.ws.send(d); });
+
+    fleetConsoleConnectPane(pane);
+}
+
+// Centralised (re)connect. Phase 2 reattach-by-sessionKey would live here.
+function fleetConsoleConnectPane(pane) {
+    if (!pane.term) return;
+    // Guard against double-connect: if a socket is already open/connecting
+    // for this pane, don't spin up a second one.
+    if (pane.ws && (pane.ws.readyState === WebSocket.OPEN || pane.ws.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+    const url = fleetConsoleWsUrl(pane.node, pane.type, pane.target);
+    let ws;
+    try {
+        ws = new WebSocket(url);
+    } catch (e) {
+        fleetConsoleShowOverlay(pane, 'Connection failed — bad URL');
+        return;
+    }
+    ws.binaryType = 'arraybuffer';
+    pane.ws = ws;
+
+    ws.onopen = () => {
+        pane.reconnect.attempts = 0;
+        fleetConsoleHideOverlay(pane);
+        fleetConsoleFitPane(pane); // sends resize frame too
+    };
+    ws.onmessage = (event) => {
+        if (typeof event.data === 'string') pane.term.write(event.data);
+        else pane.term.write(new Uint8Array(event.data));
+    };
+    ws.onerror = () => {
+        // onclose follows; reconnect logic handled there.
+    };
+    ws.onclose = () => {
+        if (pane.userClosing) return; // user-initiated — do not reconnect
+        fleetConsoleScheduleReconnect(pane);
+    };
+}
+
+function fleetConsoleScheduleReconnect(pane) {
+    if (pane.reconnect.timer) return; // already scheduled — no double timers
+    const attempt = pane.reconnect.attempts || 0;
+    const delay = Math.min(10000, 1000 * Math.pow(2, attempt)); // 1,2,4,8,10…
+    pane.reconnect.attempts = attempt + 1;
+    fleetConsoleShowOverlay(pane, `Disconnected — reconnecting in ${Math.round(delay / 1000)}s… (attempt ${pane.reconnect.attempts})`);
+    pane.reconnect.timer = setTimeout(() => {
+        pane.reconnect.timer = null;
+        if (pane.userClosing) return;
+        fleetConsoleShowOverlay(pane, 'Reconnecting…');
+        fleetConsoleConnectPane(pane);
+    }, delay);
+}
+
+function fleetConsoleManualReconnect(pane) {
+    if (pane.reconnect.timer) { clearTimeout(pane.reconnect.timer); pane.reconnect.timer = null; }
+    pane.reconnect.attempts = 0;
+    // Close any half-open socket cleanly first (mark non-user so the
+    // onclose handler doesn't fire a competing reconnect; we connect
+    // immediately ourselves below).
+    if (pane.ws && pane.ws.readyState !== WebSocket.CLOSED) {
+        try { pane.ws.onclose = null; pane.ws.close(); } catch (_) {}
+        pane.ws = null;
+    }
+    fleetConsoleShowOverlay(pane, 'Reconnecting…');
+    fleetConsoleConnectPane(pane);
+}
+
+function fleetConsoleShowOverlay(pane, msg) {
+    if (!pane.el) return;
+    const ov = pane.el.querySelector('.fc-pane-overlay');
+    if (!ov) return;
+    ov.hidden = false;
+    ov.innerHTML = `<div class="fc-overlay-inner">
+        <div class="fc-overlay-spin"></div>
+        <div>${escapeHtml(msg)}</div>
+        <button class="btn btn-sm" type="button" data-act="ov-reconnect">Reconnect now</button>
+    </div>`;
+    const btn = ov.querySelector('[data-act="ov-reconnect"]');
+    if (btn) btn.onclick = (e) => { e.stopPropagation(); fleetConsoleManualReconnect(pane); };
+}
+
+function fleetConsoleHideOverlay(pane) {
+    if (!pane.el) return;
+    const ov = pane.el.querySelector('.fc-pane-overlay');
+    if (ov) { ov.hidden = true; ov.innerHTML = ''; }
+}
+
+function fleetConsoleFitPane(pane) {
+    if (!pane.fit || !pane.term) return;
+    try { pane.fit.fit(); } catch (_) { return; }
+    // Send resize frame to the backend (console.rs expects this JSON).
+    if (pane.ws && pane.ws.readyState === WebSocket.OPEN) {
+        try {
+            pane.ws.send(JSON.stringify({ type: 'resize', cols: pane.term.cols, rows: pane.term.rows }));
+        } catch (_) {}
+    }
+}
+
+function fleetConsoleDestroyPane(pane, userClosing) {
+    pane.userClosing = !!userClosing;
+    if (pane.reconnect.timer) { clearTimeout(pane.reconnect.timer); pane.reconnect.timer = null; }
+    if (pane.ws) {
+        try { pane.ws.onclose = null; pane.ws.onmessage = null; pane.ws.onerror = null; pane.ws.close(); } catch (_) {}
+        pane.ws = null;
+    }
+    if (pane.term) { try { pane.term.dispose(); } catch (_) {} pane.term = null; }
+    pane.fit = null;
+    if (pane.cell && pane.cell.parentElement) pane.cell.parentElement.removeChild(pane.cell);
+    pane.cell = null;
+    pane.el = null;
+}
+
+function fleetConsoleClosePane(paneId) {
+    // Find the window that actually owns this pane — the close button
+    // belongs to a specific pane regardless of which window is active.
+    const win = fleetConsole.windows.find(w => w.panes.some(p => p.id === paneId));
+    if (!win) return;
+    const idx = win.panes.findIndex(p => p.id === paneId);
+    if (idx < 0) return;
+    // Last pane → close the whole window.
+    if (win.panes.length === 1) {
+        fleetConsoleCloseWindow(win.id);
+        return;
+    }
+    fleetConsoleDestroyPane(win.panes[idx], /*userClosing*/true);
+    win.panes.splice(idx, 1);
+    if (win.activePaneId === paneId) {
+        win.activePaneId = win.panes[Math.max(0, idx - 1)].id;
+    }
+    if (win.panes.length === 1) win.layout = 'single';
+    fleetConsoleLayoutWindow(win);
+}
+
+function fleetConsoleSetActivePane(paneId) {
+    const win = fleetConsoleActiveWindow();
+    if (!win) return;
+    win.activePaneId = paneId;
+    win.panes.forEach(p => {
+        if (p.el) p.el.classList.toggle('fc-pane-active', p.id === paneId);
+    });
+    const active = win.panes.find(p => p.id === paneId);
+    if (active && active.term) { try { active.term.focus(); } catch (_) {} }
+}
+
+// Split the active pane. dir = 'v' (side-by-side) | 'h' (stacked).
+function fleetConsoleSplit(dir) {
+    const win = fleetConsoleActiveWindow();
+    if (!win) return;
+    const active = win.panes.find(p => p.id === win.activePaneId) || win.panes[0];
+    if (!active) return;
+    // New pane inherits the active pane's target (a second shell on the
+    // same node/type) — fastest path; operator can open a New window for
+    // a different target.
+    const pane = fleetConsoleCreatePane(win, active.node, active.type, active.target);
+    win.panes.push(pane);
+    win.layout = dir;
+    win.activePaneId = pane.id;
+    fleetConsoleMountPane(pane); // build DOM + term once
+    fleetConsoleLayoutWindow(win);
+}
+
+// ─── Rendering ───
+function fleetConsoleRenderTabs() {
+    const strip = document.getElementById('fc-tabstrip');
+    if (!strip) return;
+    strip.innerHTML = '';
+    fleetConsole.windows.forEach((w, i) => {
+        const tab = document.createElement('div');
+        tab.className = 'fc-tab' + (w.id === fleetConsole.activeWindow ? ' fc-tab-active' : '');
+        tab.setAttribute('role', 'tab');
+        tab.setAttribute('tabindex', w.id === fleetConsole.activeWindow ? '0' : '-1');
+        tab.setAttribute('aria-selected', w.id === fleetConsole.activeWindow ? 'true' : 'false');
+        tab.innerHTML = `
+            <span class="fc-tab-num">${i + 1}</span>
+            <span class="fc-tab-name" title="Double-click to rename">${escapeHtml(w.name)}</span>
+            <button class="fc-tab-close" type="button" title="Close window" aria-label="Close window ${escapeAttr(w.name)}">✕</button>`;
+        tab.addEventListener('click', () => fleetConsoleSwitchWindow(w.id));
+        tab.querySelector('.fc-tab-name').addEventListener('dblclick', (e) => { e.stopPropagation(); fleetConsoleRenameWindow(w.id); });
+        tab.querySelector('.fc-tab-close').addEventListener('click', (e) => { e.stopPropagation(); fleetConsoleCloseWindow(w.id); });
+        strip.appendChild(tab);
+    });
+    const add = document.createElement('button');
+    add.className = 'fc-tab-add';
+    add.type = 'button';
+    add.title = 'New window (Alt+T)';
+    add.setAttribute('aria-label', 'New terminal window');
+    add.textContent = '✚ New window';
+    add.addEventListener('click', fleetConsoleOpenPicker);
+    strip.appendChild(add);
+
+    fleetConsoleRenderStatusWindows();
+}
+
+// Lay out a window's grid from its CURRENT panes, reusing each pane's
+// existing .fc-cell (so the live xterm + WebSocket are preserved — we
+// only re-parent the cell into a fresh splitter arrangement). Splitters
+// are recreated each layout; their document listeners are tracked per
+// window and torn down before relaying out.
+function fleetConsoleLayoutWindow(win) {
+    const grid = win.gridEl;
+    if (!grid) return;
+    // Tear down previous splitter listeners for this window.
+    if (win._splitterCleanups) win._splitterCleanups.forEach(fn => { try { fn(); } catch (_) {} });
+    win._splitterCleanups = [];
+
+    // Detach pane cells (keep their subtree intact — term stays mounted).
+    win.panes.forEach(p => { if (p.cell && p.cell.parentElement) p.cell.parentElement.removeChild(p.cell); });
+    // Remove leftover splitter nodes.
+    Array.from(grid.querySelectorAll('.fc-splitter')).forEach(s => s.remove());
+
+    const layout = (win.panes.length === 1) ? 'single' : win.layout;
+    grid.className = 'fc-grid fc-grid-' + layout;
+
+    win.panes.forEach((pane, i) => {
+        if (i > 0) {
+            const sp = document.createElement('div');
+            sp.className = 'fc-splitter fc-splitter-' + win.layout;
+            sp.setAttribute('role', 'separator');
+            sp.setAttribute('aria-orientation', win.layout === 'v' ? 'vertical' : 'horizontal');
+            sp.title = 'Drag to resize';
+            fleetConsoleWireSplitter(sp, win, i);
+            grid.appendChild(sp);
+        }
+        // Reset any stale flex from a prior layout so cells share evenly.
+        pane.cell.style.flex = '1 1 0';
+        grid.appendChild(pane.cell);
+    });
+
+    fleetConsoleSetActivePane(win.activePaneId || (win.panes[0] && win.panes[0].id));
+    const refit = () => win.panes.forEach(fleetConsoleFitPane);
+    requestAnimationFrame(refit);
+    setTimeout(refit, 120);
+    fleetConsoleRenderStatusWindows();
+    fleetConsoleRenderStatusNode();
+}
+
+// Draggable splitter between pane (i-1) and pane (i). Adjusts the
+// flex-basis of the two adjacent cells. Mirrors predictiveSetupSplitter's
+// drag approach but generalised to either orientation.
+function fleetConsoleWireSplitter(sp, win, paneIndex) {
+    let dragging = false;
+    const onDown = (e) => {
+        dragging = true;
+        sp.classList.add('fc-splitter-drag');
+        document.body.style.cursor = win.layout === 'v' ? 'col-resize' : 'row-resize';
+        e.preventDefault();
+    };
+    const onMove = (e) => {
+        if (!dragging) return;
+        const pa = win.panes[paneIndex - 1], pb = win.panes[paneIndex];
+        const a = pa && pa.cell, b = pb && pb.cell;
+        if (!a || !b) return;
+        const rectA = a.getBoundingClientRect(), rectB = b.getBoundingClientRect();
+        const total = (win.layout === 'v') ? (rectA.width + rectB.width) : (rectA.height + rectB.height);
+        if (total <= 0) return;
+        const pos = (win.layout === 'v') ? e.clientX : e.clientY;
+        const start = (win.layout === 'v') ? rectA.left : rectA.top;
+        let fracA = (pos - start) / total;
+        fracA = Math.max(0.12, Math.min(0.88, fracA));
+        a.style.flex = `${fracA} 1 0`;
+        b.style.flex = `${1 - fracA} 1 0`;
+        // Live-fit the two affected panes.
+        fleetConsoleFitPane(pa);
+        fleetConsoleFitPane(pb);
+    };
+    const onUp = () => {
+        if (!dragging) return;
+        dragging = false;
+        sp.classList.remove('fc-splitter-drag');
+        document.body.style.cursor = '';
+        win.panes.forEach(fleetConsoleFitPane);
+    };
+    sp.addEventListener('mousedown', onDown);
+    // Document-level listeners while this splitter exists. Tracked on the
+    // window so they're removed before the next layout (split/close),
+    // preventing accumulation across relayouts.
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    win._splitterCleanups.push(() => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+    });
+}
+
+function fleetConsoleRenderStatusWindows() {
+    const el = document.getElementById('fc-status-windows');
+    if (!el) return;
+    el.innerHTML = fleetConsole.windows.map((w, i) => {
+        const active = w.id === fleetConsole.activeWindow;
+        return `<span class="fc-statwin${active ? ' fc-statwin-active' : ''}">${i + 1}:${escapeHtml(w.name)}</span>`;
+    }).join(' ') || '<span class="fc-statwin">no windows</span>';
+}
+
+function fleetConsoleRenderStatusNode() {
+    const el = document.getElementById('fc-status-node');
+    if (!el) return;
+    const win = fleetConsoleActiveWindow();
+    el.textContent = win ? (win.node.hostname || win.node.address || win.node.id) : '';
+}
+
+function fleetConsoleTickClock() {
+    const el = document.getElementById('fc-status-clock');
+    if (el) el.textContent = new Date().toLocaleTimeString();
+}
+
+function fleetConsoleToggleHelp() {
+    const pop = document.getElementById('fc-help-popover');
+    const btn = document.getElementById('fc-help-btn');
+    if (!pop) return;
+    const show = pop.hidden;
+    pop.hidden = !show;
+    if (btn) btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+}
+
+// ─── New-window picker ───
+function fleetConsoleOpenPicker() {
+    const nodes = (typeof allNodes !== 'undefined' && Array.isArray(allNodes))
+        ? allNodes.filter(n => n.node_type !== 'proxmox') : [];
+    const self = fleetConsoleSelfNode();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'display:flex; z-index:10060;';
+    const nodeOpts = nodes.map(n => {
+        const label = (n.hostname || n.address || n.id) + (n.is_self ? ' (this node)' : '') + (n.online === false ? ' — offline' : '');
+        const sel = (self && n.id === self.id) ? ' selected' : '';
+        return `<option value="${escapeAttr(n.id)}"${sel}>${escapeHtml(label)}</option>`;
+    }).join('');
+    overlay.innerHTML = `
+        <div class="fc-picker" role="dialog" aria-label="Open a new terminal window" aria-modal="true"
+             style="background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:24px; max-width:440px; width:92%; box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <h3 style="color:var(--text-primary); font-size:16px; font-weight:700; margin:0 0 14px;">New terminal window</h3>
+            <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Node</label>
+            <select id="fc-pick-node" style="width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-primary); margin-bottom:12px;">${nodeOpts}</select>
+            <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Type</label>
+            <select id="fc-pick-type" style="width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-primary); margin-bottom:12px;">
+                <option value="host">Host shell</option>
+                <option value="docker">Docker container</option>
+                <option value="lxc">LXC container</option>
+                <option value="vm">Virtual machine</option>
+            </select>
+            <div id="fc-pick-target-wrap" style="display:none; margin-bottom:12px;">
+                <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:4px;">Target</label>
+                <select id="fc-pick-target" style="width:100%; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg-secondary); color:var(--text-primary);">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+            <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:6px;">
+                <button class="btn btn-sm" type="button" id="fc-pick-cancel">Cancel</button>
+                <button class="btn btn-primary btn-sm" type="button" id="fc-pick-open">Open window</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    const typeSel = overlay.querySelector('#fc-pick-type');
+    const nodeSel = overlay.querySelector('#fc-pick-node');
+    const targetWrap = overlay.querySelector('#fc-pick-target-wrap');
+    const targetSel = overlay.querySelector('#fc-pick-target');
+
+    const refreshTargets = () => {
+        const type = typeSel.value;
+        if (type === 'host') { targetWrap.style.display = 'none'; return; }
+        targetWrap.style.display = 'block';
+        targetSel.innerHTML = '<option value="">Loading…</option>';
+        fleetConsoleLoadTargets(nodeSel.value, type).then(list => {
+            if (!list.length) { targetSel.innerHTML = '<option value="">None found</option>'; return; }
+            targetSel.innerHTML = list.map(t => `<option value="${escapeAttr(t)}">${escapeHtml(t)}</option>`).join('');
+        });
+    };
+    typeSel.addEventListener('change', refreshTargets);
+    nodeSel.addEventListener('change', refreshTargets);
+
+    // Single teardown path so the Esc keydown listener is ALWAYS removed,
+    // whatever closes the picker (Cancel / click-outside / Open / Esc).
+    const closePicker = () => {
+        document.removeEventListener('keydown', esc, true);
+        if (overlay.parentElement) overlay.remove();
+    };
+    const esc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closePicker(); } };
+    document.addEventListener('keydown', esc, true);
+
+    overlay.querySelector('#fc-pick-cancel').addEventListener('click', closePicker);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closePicker(); });
+    overlay.querySelector('#fc-pick-open').addEventListener('click', () => {
+        const node = nodes.find(n => n.id === nodeSel.value) || self;
+        const type = typeSel.value;
+        const target = (type === 'host') ? 'host' : targetSel.value;
+        if (type !== 'host' && !target) { showToast('Pick a target', 'error'); return; }
+        closePicker();
+        fleetConsoleNewWindow({ node, type, target });
+    });
+    nodeSel.focus();
+}
+
+// Lazy-load target names (container/VM) for a node + type.
+async function fleetConsoleLoadTargets(nodeId, type) {
+    const self = fleetConsoleSelfNode();
+    const isSelf = self && self.id === nodeId;
+    try {
+        if (type === 'vm') {
+            const path = isSelf ? '/api/vms' : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/api/vms`;
+            const r = await fetch(path);
+            if (!r.ok) return [];
+            const vms = await r.json();
+            return (Array.isArray(vms) ? vms : []).map(v => v.name).filter(Boolean);
+        }
+        // docker / lxc — running containers list, filtered by runtime.
+        const path = isSelf ? '/api/containers/running' : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/api/containers/running`;
+        const r = await fetch(path);
+        if (!r.ok) return [];
+        const cs = await r.json();
+        return (Array.isArray(cs) ? cs : [])
+            .filter(c => c.runtime === type)
+            .map(c => c.name).filter(Boolean);
+    } catch (e) { return []; }
+}
+
+// ─── Keyboard ───
+function fleetConsoleKeydown(e) {
+    if (!fleetConsolePageVisible()) return; // scoped — never hijack other pages
+    // Only Alt-combos (no prefix mode). Let xterm get everything else.
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    const k = e.key;
+    if (k === 't' || k === 'T') { e.preventDefault(); fleetConsoleOpenPicker(); return; }
+    if (k === 'w' || k === 'W') { e.preventDefault(); const w = fleetConsoleActiveWindow(); if (w) fleetConsoleClosePane(w.activePaneId); return; }
+    if (k === 'r' || k === 'R') { e.preventDefault(); const w = fleetConsoleActiveWindow(); if (w) fleetConsoleRenameWindow(w.id); return; }
+    if (k === '\\') { e.preventDefault(); fleetConsoleSplit('v'); return; }
+    if (k === '-') { e.preventDefault(); fleetConsoleSplit('h'); return; }
+    if (k >= '1' && k <= '9') {
+        const idx = parseInt(k, 10) - 1;
+        if (fleetConsole.windows[idx]) { e.preventDefault(); fleetConsoleSwitchWindow(fleetConsole.windows[idx].id); }
+        return;
+    }
+}
+
+// Re-fit on window resize while the page is visible.
+window.addEventListener('resize', () => {
+    if (!fleetConsolePageVisible()) return;
+    const win = fleetConsoleActiveWindow();
+    if (win) win.panes.forEach(fleetConsoleFitPane);
+});
+
+// "Open in Terminal Console" — additive entry point other UI can call to
+// drop the operator into the fleet console targeting a specific shell.
+// Does NOT change any existing pop-out button's default behaviour.
+function openInFleetConsole(nodeId, type, target) {
+    const nodes = (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) ? allNodes : [];
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) { showToast('Node not found — open the Terminal Console and pick a target', 'error'); return; }
+    // Build the shell WITHOUT the auto-default window so the operator
+    // doesn't get an unrequested second window beside the one they asked
+    // for. If the shell already exists, our window is just added.
+    fleetConsoleInit(/*skipDefaultWindow*/true);
+    selectView('fleet-console');
+    fleetConsoleNewWindow({ node, type: type || 'host', target: target || 'host' });
+}
+
+window.fleetConsoleInit = fleetConsoleInit;
+window.fleetConsoleOnShow = fleetConsoleOnShow;
+window.fleetConsoleOpenPicker = fleetConsoleOpenPicker;
+window.openInFleetConsole = openInFleetConsole;
+
+// ════════════════════════════════════════════════════════════════════
+// Fleet Menu Bar — grouped top-of-app navigation (additive). Every item
+// routes to a REAL existing view/function. Per-node views (networking,
+// storage, backups, certificates) are reached via their global cluster
+// entry points where one exists; otherwise they stay in the sidebar and
+// are deliberately omitted here to avoid dead links.
+//
+// Each item: { label, action(), badge?: 'New'|'Enterprise' }
+// ────────────────────────────────────────────────────────────────────
+
+// Pick a sensible cluster for the cluster-scoped status-page view: the
+// self node's cluster, else the first known cluster, else 'WolfStack'.
+function fleetMenuDefaultCluster() {
+    const nodes = (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) ? allNodes : [];
+    const self = nodes.find(n => n.is_self);
+    if (self) return self.cluster_name || 'WolfStack';
+    if (nodes[0]) return nodes[0].cluster_name || 'WolfStack';
+    return 'WolfStack';
+}
+
+function fleetMenuGroups() {
+    const go = (page) => () => selectView(page);
+    return [
+        {
+            label: 'Fleet',
+            items: [
+                { label: 'Datacenter', action: go('datacenter') },
+                { label: 'App Store', action: go('appstore') },
+                { label: 'Issues', action: go('issues') },
+                { label: 'Predictive Inbox', action: go('inbox') },
+                { label: 'Fleet', action: go('fleet-manage') },
+                { label: 'Global View', action: go('global-wolfnet') },
+                { label: '3D Server Room', action: go('topology') },
+            ],
+        },
+        {
+            label: 'Compute',
+            items: [
+                { label: 'Control Panel', action: go('control-panel') },
+                { label: 'WolfKube', action: go('kubernetes') },
+                { label: 'XO Pools', action: go('xopools') },
+            ],
+        },
+        {
+            label: 'Storage & Network',
+            items: [
+                { label: 'Storage Array', action: go('array') },
+                { label: 'Shares', action: () => showSharesForCluster(fleetMenuDefaultCluster()) },
+                { label: 'Cluster Browser', action: go('cluster-browser') },
+            ],
+        },
+        {
+            label: 'Monitoring',
+            items: [
+                { label: 'Status Pages', action: () => showStatusPagesForCluster(fleetMenuDefaultCluster()) },
+                { label: 'Fleet Logs', action: go('fleet-logs'), badge: 'Enterprise' },
+                { label: 'Databases', action: go('databases') },
+                { label: 'WolfAgents', action: go('wolfagents') },
+                { label: 'WolfFlow', action: go('wolfflow') },
+                { label: 'Dashboard Sync', action: go('dashboard-sync') },
+            ],
+        },
+        {
+            label: 'Security',
+            items: [
+                { label: 'Fleet Security', action: go('fleet-security') },
+                { label: 'Certificates', action: () => openClusterCertManager() },
+                { label: 'Tenants', action: go('tenants') },
+            ],
+        },
+    ];
+}
+
+let _fleetMenuOpen = null; // currently-open .fc-menu element
+
+function fleetMenuBarInit() {
+    const bar = document.getElementById('fleet-menubar');
+    if (!bar || bar.dataset.built === '1') return;
+    bar.dataset.built = '1';
+
+    const groups = fleetMenuGroups();
+    groups.forEach((group, gi) => {
+        const menu = document.createElement('div');
+        menu.className = 'fc-menu';
+        menu.dataset.idx = String(gi);
+
+        const btn = document.createElement('button');
+        btn.className = 'fc-menu-btn';
+        btn.type = 'button';
+        btn.setAttribute('role', 'menuitem');
+        btn.setAttribute('aria-haspopup', 'menu');
+        btn.setAttribute('aria-expanded', 'false');
+        btn.innerHTML = `${escapeHtml(group.label)} <span class="fc-caret">▾</span>`;
+
+        const dd = document.createElement('div');
+        dd.className = 'fc-menu-dropdown';
+        dd.setAttribute('role', 'menu');
+        dd.setAttribute('aria-label', group.label);
+
+        group.items.forEach(item => {
+            const mi = document.createElement('button');
+            mi.className = 'fc-menu-item';
+            mi.type = 'button';
+            mi.setAttribute('role', 'menuitem');
+            mi.setAttribute('tabindex', '-1');
+            const badge = item.badge
+                ? `<span class="fc-menu-badge${item.badge === 'Enterprise' ? ' ent' : ''}">${escapeHtml(item.badge)}</span>`
+                : '';
+            mi.innerHTML = `<span>${escapeHtml(item.label)}</span>${badge}`;
+            mi.addEventListener('click', () => {
+                fleetMenuCloseAll();
+                try { item.action(); } catch (e) { showToast('Could not open that view', 'error'); }
+            });
+            dd.appendChild(mi);
+        });
+
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = menu.dataset.open === '1';
+            fleetMenuCloseAll();
+            if (!isOpen) fleetMenuOpen(menu);
+        });
+        btn.addEventListener('keydown', (e) => fleetMenuBtnKeydown(e, menu));
+
+        menu.appendChild(btn);
+        menu.appendChild(dd);
+        bar.appendChild(menu);
+    });
+
+    // Prominent standalone Terminal Console button.
+    const termBtn = document.createElement('button');
+    termBtn.className = 'fc-menu-btn fc-menu-term-btn fc-menu-top-btn';
+    termBtn.type = 'button';
+    termBtn.setAttribute('role', 'menuitem');
+    termBtn.title = 'Open the Fleet Terminal Console';
+    termBtn.innerHTML = '▸ Terminal Console';
+    termBtn.addEventListener('click', () => { fleetMenuCloseAll(); selectView('fleet-console'); });
+    // Arrow-key reachable from the group menus (it has no dropdown, so it
+    // just moves focus / activates on Enter).
+    termBtn.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { fleetMenuBtnKeydown(e, null); }
+    });
+    bar.appendChild(termBtn);
+
+    // Click-outside + Esc to close any open menu. Both guard on an open
+    // menu so they never interfere with other pages' handlers.
+    document.addEventListener('click', (e) => {
+        if (_fleetMenuOpen && !_fleetMenuOpen.contains(e.target)) fleetMenuCloseAll();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && _fleetMenuOpen) fleetMenuCloseAll();
+    });
+}
+
+// All keyboard-navigable top-level menubar buttons (group triggers +
+// the standalone Terminal Console button).
+function fleetMenuTopButtons() {
+    const bar = document.getElementById('fleet-menubar');
+    if (!bar) return [];
+    return Array.from(bar.querySelectorAll('.fc-menu > .fc-menu-btn, .fc-menu-top-btn'));
+}
+
+function fleetMenuOpen(menu) {
+    menu.dataset.open = '1';
+    _fleetMenuOpen = menu;
+    const btn = menu.querySelector('.fc-menu-btn');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+    // Focus first item for keyboard users.
+    const first = menu.querySelector('.fc-menu-item');
+    if (first) setTimeout(() => first.focus(), 0);
+    // Arrow-key navigation within the open menu.
+    const items = Array.from(menu.querySelectorAll('.fc-menu-item'));
+    items.forEach((it, i) => {
+        it.onkeydown = (e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); (items[i + 1] || items[0]).focus(); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); (items[i - 1] || items[items.length - 1]).focus(); }
+            else if (e.key === 'Escape') { e.preventDefault(); fleetMenuCloseAll(); if (btn) btn.focus(); }
+            else if (e.key === 'Tab') { fleetMenuCloseAll(); }
+        };
+    });
+}
+
+function fleetMenuCloseAll() {
+    document.querySelectorAll('.fleet-menubar .fc-menu').forEach(m => {
+        m.dataset.open = '0';
+        const b = m.querySelector('.fc-menu-btn');
+        if (b) b.setAttribute('aria-expanded', 'false');
+    });
+    _fleetMenuOpen = null;
+}
+
+// Menubar-level keyboard nav: Left/Right move between top-level buttons;
+// Down opens the group menu (menu===null for the standalone Terminal
+// button, which has no dropdown).
+function fleetMenuBtnKeydown(e, menu) {
+    const btns = fleetMenuTopButtons();
+    const thisBtn = menu ? menu.querySelector('.fc-menu-btn') : e.currentTarget;
+    const idx = btns.indexOf(thisBtn);
+    if (e.key === 'ArrowRight') { e.preventDefault(); (btns[idx + 1] || btns[0]).focus(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); (btns[idx - 1] || btns[btns.length - 1]).focus(); }
+    else if (menu && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault(); fleetMenuCloseAll(); fleetMenuOpen(menu);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', fleetMenuBarInit);
+window.fleetMenuBarInit = fleetMenuBarInit;

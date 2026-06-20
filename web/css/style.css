@@ -4467,3 +4467,202 @@ body.learn-drawer-open #task-log-footer { right: var(--learn-drawer-w) !importan
    .welcome-foot / .welcome-dontshow-lbl. The note is the only unique bit. */
 .nag-once-note { margin: 12px 0 0; font-size: 12px; color: var(--text-muted); line-height: 1.45; text-align: center; }
 .nag-once-note strong { color: var(--text-secondary); }
+
+/* ══════════════════════════════════════════════════════════════════
+   Fleet Terminal Console (byobu-style). On-theme: uses the existing
+   CSS variables (--bg-panel/--bg-secondary/--border/--accent/...).
+   ══════════════════════════════════════════════════════════════════ */
+.fleet-console-shell {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 58px); /* below the sticky top-bar */
+    min-height: 420px;
+    background: var(--bg-primary);
+    position: relative; /* anchor for the absolutely-positioned help popover */
+}
+.fc-tabstrip {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 6px 8px 0;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    flex-shrink: 0;
+}
+.fc-tab {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12.5px;
+    white-space: nowrap;
+    max-width: 260px;
+}
+.fc-tab:hover { color: var(--text-primary); }
+.fc-tab-active {
+    background: var(--bg-card, var(--bg-secondary));
+    color: var(--text-primary);
+    border-color: var(--accent);
+    box-shadow: inset 0 2px 0 var(--accent);
+}
+.fc-tab-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 18px; border-radius: 4px;
+    background: rgba(127,127,127,0.18); font-size: 11px; font-weight: 700;
+}
+.fc-tab-active .fc-tab-num { background: var(--accent); color: #fff; }
+.fc-tab-name { overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+.fc-tab-close, .fc-pane-btn {
+    background: transparent; border: none; color: var(--text-muted);
+    cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 4px;
+}
+.fc-tab-close:hover, .fc-pane-btn:hover { background: rgba(127,127,127,0.2); color: var(--text-primary); }
+.fc-tab-add {
+    display: inline-flex; align-items: center;
+    margin-left: 6px; padding: 7px 12px;
+    border: 1px dashed var(--border); border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    background: transparent; color: var(--text-secondary);
+    cursor: pointer; font-size: 12.5px; white-space: nowrap;
+}
+.fc-tab-add:hover { color: var(--accent); border-color: var(--accent); }
+
+.fc-stage { flex: 1 1 auto; min-height: 0; padding: 8px; overflow: hidden; }
+.fc-grid { display: flex; width: 100%; height: 100%; min-height: 0; gap: 0; }
+.fc-grid-single, .fc-grid-h { flex-direction: column; }
+.fc-grid-v { flex-direction: row; }
+.fc-cell { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; }
+
+.fc-splitter { flex: 0 0 8px; position: relative; }
+.fc-splitter-v { cursor: col-resize; margin: 0 2px; }
+.fc-splitter-h { cursor: row-resize; margin: 2px 0; flex-basis: 8px; }
+.fc-splitter::after {
+    content: ''; position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--border); border-radius: 2px;
+    transition: background 0.15s;
+}
+.fc-splitter-v::after { width: 2px; height: 40px; }
+.fc-splitter-h::after { height: 2px; width: 40px; }
+.fc-splitter:hover::after, .fc-splitter-drag::after { background: var(--accent); }
+
+.fc-pane {
+    flex: 1 1 0; min-width: 0; min-height: 0;
+    display: flex; flex-direction: column;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: #0a0a0a; overflow: hidden; position: relative;
+}
+.fc-pane-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.fc-pane-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 10px; background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 8px;
+}
+.fc-pane-title {
+    font-size: 11.5px; color: var(--text-secondary); font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fc-pane-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.fc-pane-term { flex: 1 1 auto; min-height: 0; padding: 6px; overflow: hidden; }
+.fc-pane-overlay {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(10,10,10,0.86); backdrop-filter: blur(2px); z-index: 4;
+    color: var(--text-secondary); font-size: 13px;
+}
+.fc-overlay-inner { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 16px; }
+.fc-overlay-spin {
+    width: 30px; height: 30px; border: 3px solid rgba(127,127,127,0.25);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: fcSpin 0.8s linear infinite;
+}
+@keyframes fcSpin { to { transform: rotate(360deg); } }
+.fc-empty { color: var(--text-muted); padding: 40px; text-align: center; font-size: 13px; width: 100%; align-self: center; }
+
+.fc-statusbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 5px 12px; background: var(--bg-secondary);
+    border-top: 1px solid var(--border); flex-shrink: 0;
+    font-size: 11.5px; color: var(--text-muted); overflow: hidden;
+}
+.fc-status-left { display: flex; gap: 6px; overflow-x: auto; white-space: nowrap; }
+.fc-status-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.fc-statwin { color: var(--text-muted); }
+.fc-statwin-active { color: var(--accent); font-weight: 700; }
+.fc-status-node { color: var(--text-secondary); font-weight: 600; }
+.fc-status-clock { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.fc-status-help {
+    background: transparent; border: 1px solid var(--border); color: var(--text-secondary);
+    border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 11px;
+}
+.fc-status-help:hover { color: var(--accent); border-color: var(--accent); }
+
+.fc-help-popover {
+    position: absolute; bottom: 46px; right: 16px; z-index: 60;
+    background: var(--bg-card, var(--bg-secondary)); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    width: 260px; color: var(--text-primary);
+}
+.fc-help-title { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+.fc-help-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-secondary); }
+.fc-help-list kbd {
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; font-size: 11px; font-family: monospace;
+}
+.fc-help-foot { margin-top: 10px; font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+
+@media (max-width: 640px) {
+    .fc-grid-v { flex-direction: column; } /* stack on phones */
+    .fc-splitter-v { cursor: row-resize; }
+    .fleet-console-shell, .fleet-console-shell { height: calc(100vh - 52px); }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Top menu bar (grouped fleet navigation). Sits in the left of the
+   existing .top-bar; collapses on narrow screens (sidebar takes over).
+   ══════════════════════════════════════════════════════════════════ */
+.fleet-menubar { display: flex; align-items: center; gap: 2px; margin-left: 4px; }
+.fc-menu { position: relative; }
+.fc-menu-btn {
+    background: transparent; border: 1px solid transparent; color: var(--text-secondary);
+    padding: 6px 10px; border-radius: 7px; cursor: pointer; font-size: 13px;
+    font-family: inherit; display: inline-flex; align-items: center; gap: 5px;
+}
+.fc-menu-btn:hover, .fc-menu[data-open="1"] .fc-menu-btn {
+    color: var(--text-primary); background: rgba(127,127,127,0.12); border-color: var(--border);
+}
+.fc-menu-btn .fc-caret { font-size: 9px; opacity: 0.7; }
+.fc-menu-term-btn {
+    color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 600;
+}
+.fc-menu-term-btn:hover { filter: brightness(1.08); color: #fff; background: var(--accent); }
+.fc-menu-dropdown {
+    position: absolute; top: calc(100% + 6px); left: 0; min-width: 220px;
+    background: var(--bg-card, var(--bg-secondary)); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    padding: 6px; z-index: 10040; display: none;
+}
+.fc-menu[data-open="1"] .fc-menu-dropdown { display: block; }
+.fc-menu-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    width: 100%; text-align: left; background: transparent; border: none;
+    color: var(--text-primary); padding: 8px 10px; border-radius: 7px;
+    cursor: pointer; font-size: 13px; font-family: inherit;
+}
+.fc-menu-item:hover, .fc-menu-item:focus { background: rgba(127,127,127,0.16); outline: none; }
+.fc-menu-item .fc-menu-badge {
+    font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+    padding: 2px 6px; border-radius: 4px; background: var(--accent); color: #fff;
+}
+.fc-menu-item .fc-menu-badge.ent { background: #a855f7; }
+.fc-menu-sep { height: 1px; background: var(--border); margin: 5px 2px; }
+
+@media (max-width: 1100px) {
+    .fleet-menubar { display: none; } /* fall back to sidebar/hamburger */
+}
