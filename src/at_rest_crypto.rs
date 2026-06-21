@@ -84,9 +84,20 @@ pub fn is_v2_format(stored: &str) -> bool {
 /// each store (dns / cloud / xo) a distinct key so a key leak from one
 /// can't trivially decrypt the others.
 fn derive_key(purpose: &[u8]) -> Result<Vec<u8>, String> {
-    use ring::hkdf;
     let secret = current_secret()
         .ok_or_else(|| "at_rest_crypto not initialised — call init() at startup".to_string())?;
+    derive_key_from(secret, purpose)
+}
+
+/// Same derivation as `derive_key`, but from an EXPLICIT cluster secret
+/// rather than the process-wide OnceLock. Used by the secret-rotation
+/// re-encrypt path, which must derive keys from the OLD and NEW secrets
+/// independently of whatever value `init()` cached at startup. The
+/// HKDF domain + per-store purpose label are identical to the cached
+/// path, so a value encrypted with `init`'s secret round-trips through
+/// `derive_key_from(<that same secret>, purpose)` byte-for-byte.
+fn derive_key_from(secret: &str, purpose: &[u8]) -> Result<Vec<u8>, String> {
+    use ring::hkdf;
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, HKDF_DOMAIN);
     let prk = salt.extract(secret.as_bytes());
     // `expand` takes a slice-of-slices; the inner array must outlive
@@ -138,10 +149,6 @@ pub fn is_key_stale() -> bool { false }
 /// The audit module continues to flag the file as needing migration,
 /// so the operator gets re-prompted to migrate after restart.
 pub fn encrypt(plaintext: &[u8], purpose: &[u8]) -> Result<String, String> {
-    use ring::aead;
-    use ring::rand::{SystemRandom, SecureRandom};
-    use base64::Engine;
-
     if is_key_stale() {
         return Err("at_rest_crypto: cluster secret rotated but wolfstack not \
                     restarted on this node yet — refusing to encrypt with the \
@@ -150,7 +157,19 @@ pub fn encrypt(plaintext: &[u8], purpose: &[u8]) -> Result<String, String> {
                     at-rest migration after restart.".into());
     }
     let key_bytes = derive_key(purpose)?;
-    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes)
+    seal_with_key_bytes(plaintext, &key_bytes)
+}
+
+/// Seal `plaintext` to a `v2:` stored string using a pre-derived
+/// 32-byte key. Shared by `encrypt` (cached-key path) and
+/// `encrypt_with_secret` (explicit-key rotation path) so both produce
+/// byte-compatible output and there's a single AES-GCM call site.
+fn seal_with_key_bytes(plaintext: &[u8], key_bytes: &[u8]) -> Result<String, String> {
+    use ring::aead;
+    use ring::rand::{SystemRandom, SecureRandom};
+    use base64::Engine;
+
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes)
         .map_err(|_| "AES key construct failed".to_string())?;
     let key = aead::LessSafeKey::new(unbound);
 
@@ -170,6 +189,46 @@ pub fn encrypt(plaintext: &[u8], purpose: &[u8]) -> Result<String, String> {
     Ok(format!("{}{}", V2_PREFIX, b64))
 }
 
+/// Open a `v2:` stored value using a pre-derived 32-byte key. Returns
+/// `None` if the value isn't v2 or the AES tag doesn't verify. Shared
+/// by `decrypt_v2` and `decrypt_v2_with_secret`.
+fn open_with_key_bytes(stored: &str, key_bytes: &[u8]) -> Option<Vec<u8>> {
+    use ring::aead;
+    use base64::Engine;
+    if !is_v2_format(stored) { return None; }
+    let body = &stored[V2_PREFIX.len()..];
+    let payload = base64::engine::general_purpose::STANDARD.decode(body).ok()?;
+    if payload.len() < 12 + 16 { return None; }
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes).ok()?;
+    let key = aead::LessSafeKey::new(unbound);
+    let (nonce_bytes, ciphertext_and_tag) = payload.split_at(12);
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes.try_into().ok()?);
+    let mut in_out = ciphertext_and_tag.to_vec();
+    let plaintext = key.open_in_place(nonce, aead::Aad::empty(), &mut in_out).ok()?;
+    Some(plaintext.to_vec())
+}
+
+/// Encrypt `plaintext` for store `purpose` using an EXPLICIT cluster
+/// secret rather than the cached startup key. This is the rotation
+/// re-encrypt write path — it derives the key from `secret` directly
+/// and does NOT consult `is_key_stale()` (the caller is deliberately
+/// supplying the secret to encrypt under, so the staleness guard that
+/// protects the normal write path would be wrong here).
+pub fn encrypt_with_secret(plaintext: &[u8], purpose: &[u8], secret: &str) -> Result<String, String> {
+    let key_bytes = derive_key_from(secret, purpose)?;
+    seal_with_key_bytes(plaintext, &key_bytes)
+}
+
+/// Decrypt a `v2:` stored value for store `purpose` using an EXPLICIT
+/// cluster secret. Returns `None` if the value isn't v2 or if the tag
+/// fails to verify under `secret` (i.e. it was written under a
+/// different secret — the rotation re-encrypt path treats that as
+/// "skip, leave unchanged" rather than an error).
+pub fn decrypt_v2_with_secret(stored: &str, purpose: &[u8], secret: &str) -> Option<Vec<u8>> {
+    let key_bytes = derive_key_from(secret, purpose).ok()?;
+    open_with_key_bytes(stored, &key_bytes)
+}
+
 /// Decrypt a v2 stored value. Returns `None` if the input isn't v2
 /// (the caller's responsibility to fall back to v1 XOR), if the
 /// nonce/tag/length is wrong, or if the AES tag doesn't verify.
@@ -177,20 +236,50 @@ pub fn encrypt(plaintext: &[u8], purpose: &[u8]) -> Result<String, String> {
 /// AUTHENTICATION is the point — a tampered v2 value returns `None`
 /// rather than silently producing garbage plaintext.
 pub fn decrypt_v2(stored: &str, purpose: &[u8]) -> Option<Vec<u8>> {
-    use ring::aead;
-    use base64::Engine;
-    if !is_v2_format(stored) { return None; }
-    let body = &stored[V2_PREFIX.len()..];
-    let payload = base64::engine::general_purpose::STANDARD.decode(body).ok()?;
-    if payload.len() < 12 + 16 { return None; }
     let key_bytes = derive_key(purpose).ok()?;
-    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes).ok()?;
-    let key = aead::LessSafeKey::new(unbound);
-    let (nonce_bytes, ciphertext_and_tag) = payload.split_at(12);
-    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes.try_into().ok()?);
-    let mut in_out = ciphertext_and_tag.to_vec();
-    let plaintext = key.open_in_place(nonce, aead::Aad::empty(), &mut in_out).ok()?;
-    Some(plaintext.to_vec())
+    open_with_key_bytes(stored, &key_bytes)
+}
+
+/// Outcome of re-keying a single stored field during a cluster-secret
+/// rotation. Drives the per-store accounting (rekeyed / skipped) and,
+/// crucially, distinguishes "left it alone deliberately" from "couldn't
+/// read it so left it alone" — both leave the field byte-identical.
+pub enum ReencryptOutcome {
+    /// Field was a v2 value sealed under `old`; now re-sealed under `new`.
+    Rekeyed(String),
+    /// Field is v2 but did NOT decrypt under `old` (sealed under a
+    /// different secret, or corrupt). Left unchanged, counted as skipped.
+    Skipped,
+    /// Field is empty or a legacy v1 (non-v2) value — not cluster-secret-
+    /// keyed, so a rotation does not affect it. Left unchanged, not
+    /// counted.
+    Untouched,
+}
+
+/// Re-key a single at-rest field from the OLD cluster secret to the NEW
+/// one. Shared by every `at_rest_crypto`-backed store's
+/// `reencrypt_at_rest` so the safety rules live in exactly one place.
+///
+/// LOSS-FREE GUARANTEE: this function never returns a value that would
+/// overwrite a secret it could not first decrypt. A v2 field that fails
+/// to open under `old` returns `Skipped` (field untouched); only a
+/// successful decrypt-then-reencrypt returns `Rekeyed`.
+pub fn reencrypt_v2_field(stored: &str, purpose: &[u8], old: &str, new: &str) -> ReencryptOutcome {
+    if stored.is_empty() || !is_v2_format(stored) {
+        // Empty, or legacy v1 XOR (static key, not cluster-secret-keyed).
+        return ReencryptOutcome::Untouched;
+    }
+    let plaintext = match decrypt_v2_with_secret(stored, purpose, old) {
+        Some(p) => p,
+        None => return ReencryptOutcome::Skipped,
+    };
+    match encrypt_with_secret(&plaintext, purpose, new) {
+        Ok(v) => ReencryptOutcome::Rekeyed(v),
+        // Encryption under the new key failed (should be unreachable —
+        // derive + seal don't depend on input content). Treat as skip so
+        // we never drop the original.
+        Err(_) => ReencryptOutcome::Skipped,
+    }
 }
 
 /// One-shot helper: decrypt a stored value with v2 if applicable,
@@ -316,6 +405,89 @@ mod tests {
             "v2-prefixed failures must NOT fall through to XOR — that \
              would silently corrupt values. Return empty so the caller's \
              empty-credential guard surfaces the problem.");
+    }
+
+    #[test]
+    fn explicit_secret_round_trip_and_cross_secret_skip() {
+        // The rotation re-encrypt path uses encrypt_with_secret /
+        // decrypt_v2_with_secret with EXPLICIT old/new secrets, bypassing
+        // the OnceLock. Verify: (1) round-trip under one secret works,
+        // (2) a value sealed under secret A does NOT open under secret B
+        //     (so a field already rotated, or written under a different
+        //     secret, is skipped — not destroyed).
+        let secret_a = "wsk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let secret_b = "wsk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let plain = b"super-secret-password";
+
+        let sealed_a = encrypt_with_secret(plain, b"dns-providers", secret_a).expect("seal A");
+        assert!(is_v2_format(&sealed_a));
+        let opened_a = decrypt_v2_with_secret(&sealed_a, b"dns-providers", secret_a)
+            .expect("open A with A");
+        assert_eq!(opened_a, plain);
+
+        // Wrong secret → None (AES-GCM tag fails to verify).
+        assert!(decrypt_v2_with_secret(&sealed_a, b"dns-providers", secret_b).is_none(),
+            "a value sealed under secret A must NOT open under secret B");
+
+        // Re-encrypt A→B then confirm it opens under B and no longer under A.
+        let sealed_b = encrypt_with_secret(&opened_a, b"dns-providers", secret_b).expect("seal B");
+        let opened_b = decrypt_v2_with_secret(&sealed_b, b"dns-providers", secret_b)
+            .expect("open B with B");
+        assert_eq!(opened_b, plain);
+        assert!(decrypt_v2_with_secret(&sealed_b, b"dns-providers", secret_a).is_none());
+    }
+
+    #[test]
+    fn reencrypt_v2_field_outcomes() {
+        let a = "wsk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "wsk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let c = "wsk_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+        // v2 sealed under A, rotate A→B → Rekeyed, opens under B only.
+        let sealed_a = encrypt_with_secret(b"creds", b"dns-providers", a).unwrap();
+        match reencrypt_v2_field(&sealed_a, b"dns-providers", a, b) {
+            ReencryptOutcome::Rekeyed(v) => {
+                assert_eq!(decrypt_v2_with_secret(&v, b"dns-providers", b).unwrap(), b"creds");
+                assert!(decrypt_v2_with_secret(&v, b"dns-providers", a).is_none());
+            }
+            _ => panic!("expected Rekeyed"),
+        }
+
+        // v2 sealed under C, rotate A→B → Skipped (can't decrypt with A).
+        let sealed_c = encrypt_with_secret(b"creds", b"dns-providers", c).unwrap();
+        assert!(matches!(
+            reencrypt_v2_field(&sealed_c, b"dns-providers", a, b),
+            ReencryptOutcome::Skipped
+        ));
+
+        // Empty + legacy v1 (non-v2) → Untouched.
+        assert!(matches!(
+            reencrypt_v2_field("", b"dns-providers", a, b),
+            ReencryptOutcome::Untouched
+        ));
+        assert!(matches!(
+            reencrypt_v2_field("legacyXORbase64==", b"dns-providers", a, b),
+            ReencryptOutcome::Untouched
+        ));
+    }
+
+    #[test]
+    fn explicit_secret_matches_cached_path() {
+        // A value sealed via the cached (init) path must open via the
+        // explicit-secret path when given the same secret — proves the
+        // two derivations are identical, so rotation can decrypt what
+        // the normal write path produced.
+        ensure_init();
+        // Read the ACTUAL cached secret — CLUSTER_SECRET is a process-global
+        // OnceLock, so another test in the same binary may have init()'d it
+        // first; the explicit open must use whatever secret the cached seal
+        // actually used, not a hardcoded guess.
+        let secret = CLUSTER_SECRET.get().expect("init ran").clone();
+        let plain = b"value-from-normal-write-path";
+        let sealed = encrypt(plain, b"cloud-providers").expect("cached seal");
+        let opened = decrypt_v2_with_secret(&sealed, b"cloud-providers", &secret)
+            .expect("explicit open of cached value");
+        assert_eq!(opened, plain);
     }
 
     #[test]

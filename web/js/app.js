@@ -10869,10 +10869,18 @@ async function addServer() {
     const port = parseInt(document.getElementById('new-server-port').value) || 8553;
     const wsClusterName = (document.getElementById('new-server-cluster-name') || {}).value.trim();
     const joinToken = (document.getElementById('new-server-join-token') || {}).value.trim();
+    const adminUser = (document.getElementById('new-server-admin-user') || {}).value.trim();
+    const adminPass = (document.getElementById('new-server-admin-pass') || {}).value || '';
 
     if (!address) { showToast('Enter a server address', 'error'); return; }
     if (!joinToken) {
         showToast('Join token is required. Get it from the remote server.', 'error');
+        return;
+    }
+    // Cluster-join hardening: the target admin credentials prove the
+    // operator controls the server being added. Both are required.
+    if (!adminUser || !adminPass) {
+        showToast('Enter the target node\'s admin username and password (proves you control the server you\'re adding).', 'error');
         return;
     }
 
@@ -10882,6 +10890,8 @@ async function addServer() {
         node_type: 'wolfstack',
         cluster_name: wsClusterName || 'WolfStack',
         join_token: joinToken,
+        target_admin_username: adminUser,
+        target_admin_password: adminPass,
     };
 
     try {
@@ -10892,16 +10902,26 @@ async function addServer() {
         });
         var data = await resp.json();
         if (data.error) {
-            showToast(data.error, 'error');
+            // Surface the already-in-cluster hard-block with its override
+            // guidance so the operator knows the recovery path.
+            if (data.override_required) {
+                showToast(data.error + ' To proceed, open the target node\'s dashboard → Settings → Cluster and arm "Allow re-cluster", then try again.', 'error');
+            } else {
+                showToast(data.error, 'error');
+            }
             taskLog('Add server: ' + address, 'failed');
             return;
         }
-        showToast('Server ' + address + ' added', 'success');
-        taskLog('Added server: ' + address);
+        var fpNote = data.cluster_fingerprint ? (' (cluster fingerprint ' + data.cluster_fingerprint + ')') : '';
+        showToast('Server ' + address + ' added' + fpNote, 'success');
+        taskLog('Added server: ' + address + fpNote);
         setTimeout(() => showToast('When done adding nodes, use "Update WolfNet Connections" in Cluster Settings to sync networking', 'info'), 1500);
         closeModal();
         document.getElementById('new-server-address').value = '';
         if (document.getElementById('new-server-join-token')) document.getElementById('new-server-join-token').value = '';
+        // Never leave the admin password sitting in the DOM after submit.
+        if (document.getElementById('new-server-admin-user')) document.getElementById('new-server-admin-user').value = '';
+        if (document.getElementById('new-server-admin-pass')) document.getElementById('new-server-admin-pass').value = '';
         fetchNodes();
     } catch (e) {
         showToast('Failed: ' + e.message, 'error');
@@ -10915,6 +10935,16 @@ async function fetchOwnJoinToken() {
         var data = await resp.json();
         var el = document.getElementById('own-join-token');
         if (el && data.join_token) el.textContent = data.join_token;
+        var meta = document.getElementById('own-join-token-meta');
+        if (meta) {
+            var bits = [];
+            if (data.cluster_fingerprint) bits.push('Cluster fingerprint: ' + data.cluster_fingerprint);
+            if (typeof data.pending_one_time === 'number' && data.pending_one_time > 0) {
+                bits.push(data.pending_one_time + ' one-time token(s) pending');
+            }
+            if (data.recluster_override_armed) bits.push('⚠ Re-cluster override ARMED');
+            meta.textContent = bits.join(' · ');
+        }
     } catch (e) { /* ignore */ }
 }
 
@@ -10923,6 +10953,51 @@ function copyOwnJoinToken() {
     if (el && el.textContent && el.textContent !== 'Loading...') {
         navigator.clipboard.writeText(el.textContent);
         showToast('Join token copied to clipboard', 'success');
+    }
+}
+
+// Rotate the static per-install join token. Confirm first — it invalidates
+// the old token (after the node restarts) so any pasted-but-unused copies
+// stop working.
+async function rotateJoinToken() {
+    var ok = await wolfConfirm('Rotate this server\'s join token? The current token keeps working until you restart wolfstack on this node, then only the new one is valid.', 'Rotate join token');
+    if (!ok) return;
+    try {
+        var resp = await fetch('/api/auth/join-token/rotate', { method: 'POST' });
+        var data = await resp.json();
+        if (data.error) { showToast(data.error, 'error'); return; }
+        var el = document.getElementById('own-join-token');
+        if (el && data.join_token) el.textContent = data.join_token;
+        showToast('Join token rotated. ' + (data.note || ''), 'success');
+        taskLog('Rotated join token');
+        fetchOwnJoinToken();
+    } catch (e) {
+        showToast('Failed to rotate join token: ' + e.message, 'error');
+    }
+}
+
+// Mint a single-use, ~15-minute join token and show it to the operator
+// once. The static token still works alongside this.
+async function generateOneTimeJoinToken() {
+    try {
+        var resp = await fetch('/api/auth/join-token/one-time', { method: 'POST' });
+        var data = await resp.json();
+        if (data.error) { showToast(data.error, 'error'); return; }
+        if (data.join_token) {
+            var copied = false;
+            try { await navigator.clipboard.writeText(data.join_token); copied = true; } catch (e) { /* clipboard may be unavailable */ }
+            // Show the one-time token in the PERSISTENT display element (not
+            // just an auto-dismissing toast) so it can't be lost before the
+            // operator copies it. The meta line notes its single-use/TTL.
+            var el = document.getElementById('own-join-token');
+            if (el) el.textContent = data.join_token;
+            var meta = document.getElementById('own-join-token-meta');
+            if (meta) meta.textContent = 'One-time token shown above — valid ~15 min, single use' + (copied ? ' (copied to clipboard)' : ' (copy it now)');
+            showToast('One-time join token generated' + (copied ? ' and copied' : '') + ' — shown above (valid 15 min, single use)', 'success');
+            taskLog('Generated one-time join token');
+        }
+    } catch (e) {
+        showToast('Failed to generate one-time token: ' + e.message, 'error');
     }
 }
 
@@ -39422,6 +39497,7 @@ function switchSettingsTab(tabName) {
         if (typeof switchAlertsSub === 'function') switchAlertsSub('overview');
     } else if (tabName === 'security') {
         loadClusterSecretStatus();
+        loadReclusterOverrideStatus();
         loadLeaveClusterContext();
     } else if (tabName === 'dnsproviders') {
         loadDnsProviders();
@@ -43389,6 +43465,61 @@ async function loadClusterSecretStatus() {
         }
     } catch (e) {
         el.textContent = 'Error';
+    }
+}
+
+// Re-cluster override (cluster-join hardening). Reflects whether this node
+// will accept a join into a DIFFERENT cluster. The status comes from the
+// same /api/auth/join-token endpoint that drives the join-token display.
+async function loadReclusterOverrideStatus() {
+    var el = document.getElementById('recluster-override-status');
+    if (!el) return;
+    try {
+        var resp = await fetch('/api/auth/join-token');
+        if (!resp.ok) { el.textContent = 'Error'; return; }
+        var data = await resp.json();
+        var armBtn = document.getElementById('btn-arm-recluster');
+        var clearBtn = document.getElementById('btn-clear-recluster');
+        if (data.recluster_override_armed) {
+            el.textContent = 'ARMED — will accept one join into a different cluster';
+            el.style.color = 'var(--danger)';
+            if (armBtn) armBtn.style.display = 'none';
+            if (clearBtn) clearBtn.style.display = '';
+        } else {
+            el.textContent = 'Not armed (safe default)';
+            el.style.color = 'var(--text-muted)';
+            if (armBtn) armBtn.style.display = '';
+            if (clearBtn) clearBtn.style.display = 'none';
+        }
+    } catch (e) {
+        el.textContent = 'Error';
+    }
+}
+
+async function armReclusterOverride() {
+    if (!(await wolfConfirm('Arm the re-cluster override on THIS node? It will accept ONE join into a different cluster, then disarm automatically. Only do this when deliberately moving this node to another fleet.', 'Arm re-cluster override', { danger: true }))) return;
+    try {
+        var resp = await fetch('/api/cluster/recluster-override', { method: 'POST' });
+        var data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed to arm override', 'error'); return; }
+        showToast('Re-cluster override armed. ' + (data.note || ''), 'success');
+        taskLog('Armed re-cluster override');
+        loadReclusterOverrideStatus();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
+    }
+}
+
+async function clearReclusterOverride() {
+    try {
+        var resp = await fetch('/api/cluster/recluster-override', { method: 'DELETE' });
+        var data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed to disarm override', 'error'); return; }
+        showToast('Re-cluster override disarmed', 'success');
+        taskLog('Disarmed re-cluster override');
+        loadReclusterOverrideStatus();
+    } catch (e) {
+        showToast('Failed: ' + e.message, 'error');
     }
 }
 
@@ -59301,14 +59432,60 @@ function dbOpenConnection(id) {
     dbMgrLoadTree();
 }
 
-async function dbMgrRunSql(sql, permission = 'read', timeout_secs = 30) {
+// Recovery after a cluster-secret rotation orphaned a stored DB password:
+// prompt the operator to re-enter it, POST it to be re-encrypted under the
+// CURRENT secret, and report success so the caller can retry. Returns true if
+// the password was re-saved, false if the operator cancelled or it failed.
+async function dbReenterPassword(connId) {
+    const input = document.getElementById('wolf-dialog-input');
+    const prevType = input ? input.type : 'text';
+    if (input) input.type = 'password';          // mask the entry
+    let pw;
+    try {
+        pw = await wolfPrompt(
+            `The saved password for "${connId}" can't be decrypted — the cluster secret was changed since it was saved. Re-enter the database password to fix this connection.`,
+            '', 'Re-enter database password',
+            { okText: 'Save & retry', placeholder: 'Database password' }
+        );
+    } finally {
+        // Restore the shared field type AND clear the password so it isn't
+        // left readable in the DOM after the dialog closes.
+        if (input) { input.type = prevType; input.value = ''; }
+    }
+    if (pw === null) return false;               // cancelled
+    if (!pw) { showToast('Password is required', 'error'); return false; }
+    try {
+        const resp = await fetch(`/api/sql-connections/${encodeURIComponent(connId)}/password`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pw }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { showToast(data.error || 'Failed to update password', 'error'); return false; }
+        showToast('Password updated — retrying.', 'success');
+        return true;
+    } catch (e) {
+        showToast('Failed to update password: ' + e.message, 'error');
+        return false;
+    }
+}
+
+async function dbMgrRunSql(sql, permission = 'read', timeout_secs = 30, _retried = false) {
     const resp = await fetch(`/api/sql-connections/${encodeURIComponent(_dbCurrentId)}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: sql, permission, timeout_secs }),
     });
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    if (!resp.ok) {
+        // Cluster secret rotated → stored password unreadable. Prompt once,
+        // re-save under the current secret, then retry the query.
+        if (!_retried && data.error_code === 'password_decrypt_failed') {
+            if (await dbReenterPassword(data.connection_id || _dbCurrentId)) {
+                return dbMgrRunSql(sql, permission, timeout_secs, true);
+            }
+        }
+        throw new Error(data.error || `HTTP ${resp.status}`);
+    }
     return data;
 }
 

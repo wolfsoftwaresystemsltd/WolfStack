@@ -88,6 +88,7 @@ mod netaddr;
 mod local_ca;
 #[allow(dead_code)]
 mod integrations;
+mod cluster_join;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
@@ -366,10 +367,24 @@ async fn main() -> std::io::Result<()> {
         let any_failed = result.files.iter().any(|f| f.error.is_some());
 
         if cli.rotate_cluster_secret {
+            // ORDERING: capture OLD on-disk secret before save so this
+            // node's local at-rest stores (SQL / OIDC / integrations /
+            // DNS / cloud / XO — none of them membership files) can be
+            // re-keyed old→new. The node comes back up standalone; without
+            // this its stored credentials would be undecryptable.
+            let old_secret = auth::load_cluster_secret();
             let new_secret = auth::generate_cluster_secret();
             match auth::save_cluster_secret(&new_secret) {
-                Ok(()) => println!("  rotated  {} (new secret written)",
-                                   paths::get().cluster_secret),
+                Ok(()) => {
+                    println!("  rotated  {} (new secret written)",
+                             paths::get().cluster_secret);
+                    let report = secret_rotation::reencrypt_all_at_rest(&old_secret, &new_secret);
+                    println!("  re-keyed {} at-rest secret(s){}",
+                             report.total(),
+                             if report.errors.is_empty() { String::new() }
+                             else { format!(" ({} store error(s): {})",
+                                            report.errors.len(), report.errors.join("; ")) });
+                }
                 Err(e) => {
                     eprintln!("  FAILED   rotate cluster secret: {}", e);
                     std::process::exit(2);
@@ -680,6 +695,7 @@ async fn main() -> std::io::Result<()> {
             vms: Mutex::new(vms_manager),
             cluster_secret: cluster_secret.clone(),
             join_token: api::load_join_token(),
+            one_time_join_tokens: Arc::new(cluster_join::OneTimeTokens::new()),
             pbs_restore_progress: Mutex::new(Default::default()),
             ai_agent: ai_agent.clone(),
             cached_status: cached_status.clone(),

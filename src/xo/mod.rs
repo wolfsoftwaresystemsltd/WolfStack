@@ -625,6 +625,41 @@ impl XoStore {
         Ok((migrated, already, errored))
     }
 
+    /// Re-encrypt every v2 (cluster-secret-keyed) XO pool token from the
+    /// OLD cluster secret to the NEW one, as part of a cluster-secret
+    /// rotation. Returns the number of tokens re-keyed. See
+    /// `at_rest_crypto::reencrypt_v2_field` for the loss-free / idempotent
+    /// safety contract — legacy v1 XOR tokens (static key) are left
+    /// untouched; v2 tokens that don't decrypt under `old` are skipped,
+    /// never destroyed.
+    pub fn reencrypt_at_rest(&mut self, old: &str, new: &str) -> Result<usize, String> {
+        if old == new {
+            return Ok(0);
+        }
+        let mut rekeyed = 0usize;
+        let mut skipped = 0usize;
+        for pool in &mut self.pools {
+            match crate::at_rest_crypto::reencrypt_v2_field(
+                &pool.token_enc, AT_REST_PURPOSE, old, new,
+            ) {
+                crate::at_rest_crypto::ReencryptOutcome::Rekeyed(v) => {
+                    pool.token_enc = v; rekeyed += 1;
+                }
+                crate::at_rest_crypto::ReencryptOutcome::Skipped => { skipped += 1; }
+                crate::at_rest_crypto::ReencryptOutcome::Untouched => {}
+            }
+        }
+        if rekeyed > 0 {
+            self.save()?;
+        }
+        if skipped > 0 {
+            tracing::info!(target: "secret_rotation",
+                "xo-tokens: re-keyed {} token(s), skipped {} (legacy-v1/undecryptable)",
+                rekeyed, skipped);
+        }
+        Ok(rekeyed)
+    }
+
     pub fn add(&mut self, mut pool: XoPool) -> Result<(), String> {
         if pool.id.is_empty() {
             pool.id = uuid::Uuid::new_v4().to_string();

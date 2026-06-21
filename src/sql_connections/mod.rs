@@ -327,10 +327,14 @@ pub fn save(cfg: &SqlConnectionsConfig) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(cfg)
         .map_err(|e| format!("serialize sql-connections: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("write sql-connections: {}", e))?;
-    // Tighten perms to 0o600.
+    // Atomic write: a truncate-then-write (std::fs::write) can leave a
+    // zero-byte / partial file if the process dies mid-write, losing EVERY
+    // connection. Write to a temp file then rename (atomic on the same fs).
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    let tmp = format!("{}.tmp", path);
+    std::fs::write(&tmp, &json).map_err(|e| format!("write sql-connections: {}", e))?;
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename sql-connections: {}", e))?;
     // Editing the config invalidates any cached pools; drop them so
     // the next call rebuilds with fresh credentials.
     POOLS.lock().unwrap().clear();
@@ -547,7 +551,7 @@ fn get_or_build_pool(conn: &SqlConnection, cluster_secret: &str) -> Result<PoolH
         String::new()
     } else {
         crate::auth::oidc::decrypt_secret(&conn.password, cluster_secret)
-            .map_err(|e| format!("decrypt sql password for '{}': {}", conn.id, e))?
+            .map_err(|_| password_decrypt_error(&conn.id))?
     };
 
     let handle = match conn.kind {
@@ -1216,6 +1220,53 @@ pub fn prepare_for_save(
     Ok(())
 }
 
+/// Marker prefix on the error returned when a stored SQL password cannot be
+/// decrypted with the current cluster secret — almost always because the
+/// secret was rotated since the password was saved. The API layer keys off
+/// this token to tell the UI to re-prompt for the password and re-save it
+/// under the current key (see `set_connection_password`).
+pub const PASSWORD_DECRYPT_FAILED: &str = "password_decrypt_failed";
+
+/// Build the user-facing decrypt-failure error for connection `id`.
+pub fn password_decrypt_error(id: &str) -> String {
+    format!(
+        "{}: the saved password for '{}' can't be decrypted — the cluster secret was \
+         changed since it was saved. Re-enter the password to fix this connection.",
+        PASSWORD_DECRYPT_FAILED, id
+    )
+}
+
+/// True if an error string is the "password can't be decrypted" marker.
+pub fn is_password_decrypt_error(e: &str) -> bool {
+    e.starts_with(PASSWORD_DECRYPT_FAILED)
+}
+
+/// Recovery path: re-encrypt ONLY the password of an existing connection under
+/// the current cluster secret. Used after a secret rotation orphaned the old
+/// ciphertext. `save()` drops all pools, so the next query rebuilds with the
+/// freshly-encrypted password. The caller is responsible for cluster
+/// replication (the API handler calls replicate_sql_connections_to_cluster).
+pub fn set_connection_password(id: &str, new_password: &str, cluster_secret: &str) -> Result<(), String> {
+    if new_password.is_empty() {
+        return Err("password is required".to_string());
+    }
+    let mut cfg = load();
+    let idx = cfg
+        .connections
+        .iter()
+        .position(|c| c.id == id)
+        .ok_or_else(|| format!("connection '{}' not found", id))?;
+    // Guard against double-encryption: if the caller pasted an already-
+    // encrypted blob (e.g. from a backup), store it verbatim rather than
+    // wrapping ciphertext in another layer (mirrors prepare_for_save).
+    cfg.connections[idx].password = if new_password.starts_with("encrypted:") {
+        new_password.to_string()
+    } else {
+        crate::auth::oidc::encrypt_secret(new_password, cluster_secret)?
+    };
+    save(&cfg)
+}
+
 /// Convenience: invalidate the pool for `id` after a mutating
 /// operation (update / delete). Next query rebuilds from scratch.
 #[allow(dead_code)]
@@ -1248,12 +1299,196 @@ pub fn gen_id(label: &str) -> String {
 /// Drop all pools — used when the cluster secret rotates (rare) or
 /// on test cleanup. Every subsequent query re-encrypts with the new
 /// secret and reopens connections.
-#[allow(dead_code)]
 pub fn invalidate_all_pools() {
     POOLS.lock().unwrap().clear();
+}
+
+/// Re-encrypt every stored SQL connection password from the OLD cluster
+/// secret to the NEW one, as an integral step of a cluster-secret
+/// rotation. Returns the number of passwords actually re-keyed.
+///
+/// Safety contract (loss-free, idempotent):
+///   • An empty password is left untouched (nothing to re-key).
+///   • A plaintext password (no `encrypted:` prefix — e.g. a legacy or
+///     hand-edited profile) is left untouched: it isn't keyed to any
+///     secret, so re-keying would be a no-op at best and a corruption
+///     risk at worst.
+///   • A password that FAILS to decrypt under `old` is left untouched
+///     and logged as skipped. Decrypt-failure means it wasn't sealed
+///     with `old` (already rotated, restored from a different-secret
+///     backup, or corrupt) — never overwrite a secret we couldn't read.
+///   • `old == new` short-circuits to a no-op (caller also guards this).
+///
+/// After re-keying, all pools are dropped so the next query rebuilds
+/// using the new-key password.
+pub fn reencrypt_at_rest(old: &str, new: &str) -> Result<usize, String> {
+    if old == new {
+        return Ok(0);
+    }
+    let mut cfg = load();
+    let (rekeyed, skipped) = reencrypt_connections(&mut cfg.connections, old, new)?;
+    if rekeyed > 0 {
+        save(&cfg)?;
+        // Drop cached pools so the next query rebuilds with the re-keyed
+        // password instead of a pool built from the old plaintext.
+        invalidate_all_pools();
+    }
+    if skipped > 0 {
+        tracing::warn!(target: "secret_rotation",
+            "sql_connections: re-keyed {} password(s), skipped {} (empty/plaintext/undecryptable — re-enter via the editor if a connection stops working)",
+            rekeyed, skipped);
+    }
+    Ok(rekeyed)
+}
+
+/// Pure in-memory re-key of a connection list — separated from disk I/O
+/// so the safety behaviour is unit-testable without writing to
+/// /etc/wolfstack/. Returns (rekeyed, skipped). Mutates `connections`
+/// in place; a skipped field is left BYTE-IDENTICAL.
+fn reencrypt_connections(
+    connections: &mut [SqlConnection],
+    old: &str,
+    new: &str,
+) -> Result<(usize, usize), String> {
+    let mut rekeyed = 0usize;
+    let mut skipped = 0usize;
+    for conn in connections.iter_mut() {
+        if conn.password.is_empty() {
+            continue;
+        }
+        // Only cluster-secret-keyed ciphertext is in scope. A plaintext
+        // value (no encrypted: prefix) is not keyed to any secret.
+        if !conn.password.starts_with("encrypted:") {
+            skipped += 1;
+            continue;
+        }
+        let plaintext = match crate::auth::oidc::decrypt_secret(&conn.password, old) {
+            Ok(p) => p,
+            Err(_) => {
+                // Couldn't decrypt with the old key — leave it exactly as
+                // it is. Re-keying a blob we can't read would destroy it.
+                tracing::warn!(target: "secret_rotation",
+                    "sql_connections: password for '{}' did not decrypt with the old \
+                     cluster secret during rotation — left unchanged (re-enter it via \
+                     the editor if this connection stops working)", conn.id);
+                skipped += 1;
+                continue;
+            }
+        };
+        // Defensive: decrypt_secret returns the input unchanged for a
+        // value that lacked the encrypted:aes256: prefix. We already
+        // filtered those out above, but if a future format slips
+        // through and round-trips to the same string, skip rather than
+        // re-wrap plaintext.
+        if plaintext == conn.password {
+            skipped += 1;
+            continue;
+        }
+        let reenc = crate::auth::oidc::encrypt_secret(&plaintext, new)
+            .map_err(|e| format!("re-encrypt sql password for '{}': {}", conn.id, e))?;
+        conn.password = reenc;
+        rekeyed += 1;
+    }
+    Ok((rekeyed, skipped))
 }
 
 /// Marker to keep the unused-import linter happy when this file is
 /// compiled without the API/agent surfaces wired in yet.
 #[allow(dead_code)]
 fn _link() -> Arc<()> { Arc::new(()) }
+
+#[cfg(test)]
+mod reencrypt_tests {
+    use super::*;
+
+    fn conn(id: &str, password: String) -> SqlConnection {
+        SqlConnection {
+            id: id.to_string(),
+            label: id.to_string(),
+            kind: SqlKind::Mysql,
+            cluster: String::new(),
+            node_id: String::new(),
+            host: "localhost".into(),
+            port: 3306,
+            database: "db".into(),
+            username: "u".into(),
+            password,
+            ssl_mode: SslMode::Disable,
+            allowed_users: Vec::new(),
+        }
+    }
+
+    const SECRET_A: &str = "wsk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SECRET_B: &str = "wsk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SECRET_C: &str = "wsk_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn reencrypt_round_trip_a_to_b() {
+        // Encrypt with A, re-key A→B, decrypt with B succeeds and yields
+        // the original plaintext.
+        let plain = "hunter2-prod-db";
+        let enc_a = crate::auth::oidc::encrypt_secret(plain, SECRET_A).expect("enc A");
+        let mut conns = vec![conn("c1", enc_a)];
+        let (rekeyed, skipped) =
+            reencrypt_connections(&mut conns, SECRET_A, SECRET_B).expect("reencrypt");
+        assert_eq!(rekeyed, 1);
+        assert_eq!(skipped, 0);
+        let dec_b = crate::auth::oidc::decrypt_secret(&conns[0].password, SECRET_B).expect("dec B");
+        assert_eq!(dec_b, plain);
+        // And it no longer decrypts under the OLD secret.
+        assert!(crate::auth::oidc::decrypt_secret(&conns[0].password, SECRET_A).is_err());
+    }
+
+    #[test]
+    fn reencrypt_leaves_plaintext_and_empty_untouched() {
+        let mut conns = vec![
+            conn("empty", String::new()),
+            conn("plain", "raw-not-encrypted".into()),
+        ];
+        let before: Vec<String> = conns.iter().map(|c| c.password.clone()).collect();
+        let (rekeyed, skipped) =
+            reencrypt_connections(&mut conns, SECRET_A, SECRET_B).expect("reencrypt");
+        assert_eq!(rekeyed, 0);
+        // empty is silently skipped (not counted); plaintext is counted skipped.
+        assert_eq!(skipped, 1);
+        let after: Vec<String> = conns.iter().map(|c| c.password.clone()).collect();
+        assert_eq!(before, after, "plaintext + empty passwords must be byte-identical after re-key");
+    }
+
+    #[test]
+    fn reencrypt_skips_field_encrypted_with_different_secret() {
+        // A password sealed under secret C must NOT be destroyed when we
+        // rotate A→B — it can't be decrypted with A, so it's skipped and
+        // left exactly as-is.
+        let enc_c = crate::auth::oidc::encrypt_secret("other-key-pw", SECRET_C).expect("enc C");
+        let mut conns = vec![conn("foreign", enc_c.clone())];
+        let (rekeyed, skipped) =
+            reencrypt_connections(&mut conns, SECRET_A, SECRET_B).expect("reencrypt");
+        assert_eq!(rekeyed, 0);
+        assert_eq!(skipped, 1);
+        assert_eq!(conns[0].password, enc_c, "undecryptable field must be left unchanged, never dropped");
+        // It still decrypts under its real secret C — proof we didn't corrupt it.
+        assert_eq!(
+            crate::auth::oidc::decrypt_secret(&conns[0].password, SECRET_C).expect("dec C"),
+            "other-key-pw"
+        );
+    }
+
+    #[test]
+    fn reencrypt_is_idempotent_on_equal_secrets() {
+        let enc_a = crate::auth::oidc::encrypt_secret("pw", SECRET_A).expect("enc A");
+        let mut conns = vec![conn("c1", enc_a.clone())];
+        // old == new at the inner helper means it still attempts decrypt
+        // with old and re-encrypt with new (same secret) — but the public
+        // reencrypt_at_rest short-circuits. Here we test that a same-secret
+        // re-key doesn't corrupt: decrypt(A)→encrypt(A) yields a value that
+        // still decrypts to the original under A.
+        let (rekeyed, _skipped) =
+            reencrypt_connections(&mut conns, SECRET_A, SECRET_A).expect("reencrypt");
+        assert_eq!(rekeyed, 1);
+        assert_eq!(
+            crate::auth::oidc::decrypt_secret(&conns[0].password, SECRET_A).expect("dec A"),
+            "pw"
+        );
+    }
+}

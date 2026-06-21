@@ -239,6 +239,10 @@ pub struct AppState {
     pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
     pub cluster_secret: String,
     pub join_token: String,
+    /// Pending one-time, short-TTL join tokens (cluster-join hardening).
+    /// In-memory, 15-minute TTL, single-use. The static per-install
+    /// `join_token` above still works alongside these for backward compat.
+    pub one_time_join_tokens: Arc<crate::cluster_join::OneTimeTokens>,
     pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
     pub ai_agent: Arc<crate::ai::AiAgent>,
     /// Pre-built agent status response, updated every 2s by background task
@@ -2923,28 +2927,459 @@ pub async fn get_node(req: HttpRequest, state: web::Data<AppState>, path: web::P
 
 /// GET /api/auth/join-token — display this server's join token (session-auth required)
 pub async fn get_join_token(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
-    HttpResponse::Ok().json(serde_json::json!({
+    let caller = match require_auth(&req, &state) { Ok(c) => c, Err(resp) => return resp };
+    // The token + fingerprint were already readable by any authed caller
+    // (pre-existing). The override + pending-one-time STATE is more sensitive
+    // — it tells an attacker when a re-cluster window is open — so expose it
+    // only to a local-admin session, never to cluster-node / api-key callers.
+    let local_admin = caller != "cluster-node" && !caller.starts_with("apikey:");
+    let mut out = serde_json::json!({
         "join_token": state.join_token,
+        "cluster_fingerprint": crate::cluster_join::cluster_fingerprint(),
+    });
+    if local_admin {
+        out["pending_one_time"] = serde_json::json!(state.one_time_join_tokens.pending_count());
+        out["recluster_override_armed"] = serde_json::json!(crate::cluster_join::recluster_override_armed());
+    }
+    HttpResponse::Ok().json(out)
+}
+
+/// POST /api/auth/join-token/rotate — regenerate the static per-install
+/// join token in /etc/wolfstack/join-token and return the NEW value once.
+/// Admin-gated. The in-memory `state.join_token` is process-immutable, so
+/// the new token takes effect for handshake verification after the next
+/// restart; until then BOTH old and new are written but only the
+/// in-memory (old) one verifies — we therefore tell the operator to
+/// restart. (Existing clusters keep polling on the cluster SECRET, not
+/// the join token, so this never disrupts steady-state traffic.)
+pub async fn rotate_join_token(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    // Local-admin only: a peer holding the cluster secret ("cluster-node")
+    // or an API key must NOT be able to rotate another node's join token
+    // remotely (it would disrupt legitimate joins to that node).
+    if caller == "cluster-node" || caller.starts_with("apikey:") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "The join token can only be rotated by a local admin session on this node.",
+        }));
+    }
+    // Generate a fresh 64-hex token from the CSPRNG; refuse (don't mint a
+    // weak token) if the CSPRNG is unavailable.
+    let token = match crate::cluster_join::generate_token() {
+        Ok(t) => t,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Could not generate join token: {}", e),
+        })),
+    };
+    if let Err(e) = crate::paths::write_secure("/etc/wolfstack/join-token", &token) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Could not write join token: {}", e),
+        }));
+    }
+    cluster_join_audit(&state, &caller, "warning",
+        "Join token rotated", "The static per-install join token was rotated", "");
+    HttpResponse::Ok().json(serde_json::json!({
+        "join_token": token,
+        "note": "New static join token saved. Restart wolfstack on this node for \
+                 it to take effect for verification; the previous token keeps \
+                 working until restart.",
     }))
 }
 
-/// GET /api/cluster/verify-token?token=xxx — verify a join token (unauthenticated, called by remote servers)
+/// POST /api/auth/join-token/one-time — mint a single-use, ~15-minute
+/// join token. Admin-gated. Returned ONCE; consumed on first successful
+/// join. The static token still works alongside these.
+pub async fn mint_one_time_join_token(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    // Local-admin only — same reasoning as rotate_join_token.
+    if caller == "cluster-node" || caller.starts_with("apikey:") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "One-time join tokens can only be minted by a local admin session on this node.",
+        }));
+    }
+    let token = match state.one_time_join_tokens.mint() {
+        Ok(t) => t,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Could not generate one-time join token: {}", e),
+        })),
+    };
+    cluster_join_audit(&state, &caller, "info",
+        "One-time join token minted",
+        "A single-use 15-minute join token was generated", "");
+    HttpResponse::Ok().json(serde_json::json!({
+        "join_token": token,
+        "expires_in_seconds": 900,
+        "single_use": true,
+        "note": "Single-use token, valid ~15 minutes. It is consumed on the first \
+                 successful join.",
+    }))
+}
+
+/// POST /api/cluster/recluster-override — arm the LOCAL re-cluster override
+/// on THIS node so it will accept a join into a DIFFERENT cluster (the
+/// otherwise hard-blocked silent re-cluster). Requires local admin auth on
+/// THIS node — a remote attacker with a stolen cluster secret can NOT arm
+/// it (require_auth accepts the cluster secret for inter-node calls, so we
+/// additionally reject the "cluster-node" actor here). Consumed on the
+/// next successful re-cluster.
+pub async fn arm_recluster_override(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    // Defence-in-depth: this override must be a LOCAL admin action. A
+    // request authenticated only by the cluster secret (actor
+    // "cluster-node") or an API key must not be able to arm it remotely.
+    if caller == "cluster-node" || caller.starts_with("apikey:") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "The re-cluster override can only be armed by a local admin \
+                      session on this node, not via inter-node or API-key auth.",
+        }));
+    }
+    if let Err(e) = crate::cluster_join::arm_recluster_override() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    cluster_join_audit(&state, &caller, "warning",
+        "Re-cluster override armed",
+        "Local override armed — this node will accept a join into a different cluster once", "");
+    HttpResponse::Ok().json(serde_json::json!({
+        "armed": true,
+        "note": "This node will accept ONE join into a different cluster. The \
+                 override is consumed on that join.",
+    }))
+}
+
+/// DELETE /api/cluster/recluster-override — disarm the local re-cluster
+/// override. Local-admin gated (same as arming).
+pub async fn clear_recluster_override(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    if caller == "cluster-node" || caller.starts_with("apikey:") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "The re-cluster override can only be changed by a local admin \
+                      session on this node.",
+        }));
+    }
+    let was_armed = crate::cluster_join::recluster_override_armed();
+    crate::cluster_join::clear_recluster_override();
+    if was_armed {
+        cluster_join_audit(&state, &caller, "info",
+            "Re-cluster override disarmed",
+            "Local re-cluster override was manually disarmed", "");
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "armed": false }))
+}
+
+/// GET /api/cluster/verify-token?token=xxx — verify a join token.
+///
+/// SECURITY (cluster-join hardening): the interactive admin "Add node"
+/// flow no longer uses this token-only GET path — it goes through the
+/// authenticated POST `/api/cluster/join-handshake` which additionally
+/// requires the TARGET node's admin username+password. A leaked join
+/// token (or cluster secret) alone must not let anyone graft a server
+/// onto a fleet.
+///
+/// This GET endpoint therefore now REFUSES token-only verification UNLESS
+/// the caller is the secret-gated automated pool-bootstrap flow, which
+/// signals itself with `&bootstrap=1` (see `cluster_bootstrap_add`, which
+/// is independently gated on the cluster's *custom* secret). The practical
+/// effect is the intended security upgrade: an OLD master (one running
+/// pre-hardening code that calls this GET path with no admin creds and no
+/// bootstrap marker) adding a NEW node will be REJECTED by this new
+/// target — exactly what we want; the operator must upgrade the master so
+/// the admin-credentialled handshake is used.
 pub async fn verify_join_token(state: web::Data<AppState>, query: web::Query<std::collections::HashMap<String, String>>) -> HttpResponse {
     let provided = query.get("token").map(|s| s.as_str()).unwrap_or("");
     if provided.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing token parameter" }));
     }
-    if crate::auth::validate_cluster_secret(provided, &state.join_token) {
+    // Only the automated, custom-secret-gated pool-bootstrap flow may use
+    // the token-only path. Everything else must use the admin handshake.
+    let bootstrap = query.get("bootstrap").map(|s| s == "1").unwrap_or(false);
+    if !bootstrap {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "valid": false,
+            "error": "This node requires the authenticated join handshake \
+                      (admin username + password). Upgrade the cluster master \
+                      so it sends admin credentials when adding a node.",
+            "requires_handshake": true,
+        }));
+    }
+    // Accept either the static per-install token (backward compat) or a
+    // valid unexpired one-time token (consumed on success).
+    let token_ok = crate::auth::validate_cluster_secret(provided, &state.join_token)
+        || state.one_time_join_tokens.verify_and_consume(provided);
+    if token_ok {
         HttpResponse::Ok().json(serde_json::json!({
             "valid": true,
             "hostname": hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_default(),
+            "cluster_fingerprint": crate::cluster_join::cluster_fingerprint(),
         }))
     } else {
         HttpResponse::Forbidden().json(serde_json::json!({
             "valid": false,
             "error": "Invalid join token",
         }))
+    }
+}
+
+/// Decide whether an incoming join is a SILENT RE-CLUSTER that must be
+/// hard-blocked (absent a local override). True when this node is already
+/// an active member of a cluster (`has_peers`) AND the master is NOT
+/// adding us back into our own cluster — i.e. the declared `incoming`
+/// cluster name either differs from `our_cluster` OR is empty/omitted.
+///
+/// The empty-name case is deliberately treated as a re-cluster for a node
+/// that already has peers: an already-joined node should only accept a
+/// re-add that explicitly names the cluster it's already in. This closes
+/// the bypass where a caller with a valid token + admin creds could skip
+/// the hard-block simply by omitting `cluster_name`. A fresh single-node
+/// install (`!has_peers`) is never a re-cluster regardless of the name, so
+/// first-time joins (which may legitimately omit the name) are unaffected.
+/// Pure function so the decision is unit-tested independently of HTTP
+/// state.
+fn is_silent_recluster(has_peers: bool, our_cluster: &str, incoming: &str) -> bool {
+    has_peers && incoming != our_cluster
+}
+
+/// Request body for the hardened POST join handshake. The master sends the
+/// join token PLUS the TARGET node's admin credentials, which the target
+/// verifies against its own auth before accepting the join. Credentials
+/// are forwarded over the existing TLS inter-node channel and are NEVER
+/// logged or persisted.
+#[derive(Deserialize)]
+pub struct JoinHandshakeRequest {
+    pub token: String,
+    /// TARGET node's admin username (verified by the target).
+    #[serde(default)]
+    pub admin_username: String,
+    /// TARGET node's admin password (verified by the target; never logged).
+    #[serde(default)]
+    pub admin_password: String,
+    /// The cluster name the master is adding this node into — used to
+    /// decide whether this is a silent re-cluster (hard-blocked) vs a
+    /// no-op join into the cluster the node already belongs to.
+    #[serde(default)]
+    pub cluster_name: Option<String>,
+}
+
+/// POST /api/cluster/join-handshake — the hardened, admin-credentialled
+/// join handshake (cluster-join security hardening).
+///
+/// Called by the master's `add_node` on the TARGET node to initiate
+/// membership. Self-authenticating (no `require_auth`): it validates the
+/// join token AND the target's admin credentials itself. Enforces, in
+/// order:
+///   1. Valid join token (static per-install OR one-time short-TTL).
+///   2. TARGET admin username+password (`verify_target_admin`) — proves
+///      the operator controls the server being added; a leaked secret or
+///      token alone is insufficient.
+///   3. Hard-block silent re-clustering: if this node is ALREADY a member
+///      of a different cluster, refuse unless the local re-cluster
+///      override is armed (a local-admin action on the target). Consumes
+///      the override on success.
+///
+/// On success it audits the join, raises a security ALERT, and returns the
+/// cluster fingerprint for mutual verification.
+pub async fn cluster_join_handshake(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<JoinHandshakeRequest>,
+) -> HttpResponse {
+    // Source IP of the joining master — recorded in the audit log so a
+    // join from an unexpected host is forensically visible. Canonicalised
+    // (a dual-stack listener reports v4 peers as ::ffff:a.b.c.d).
+    let peer_ip = req.peer_addr()
+        .map(|a| a.ip().to_canonical().to_string())
+        .unwrap_or_default();
+    let provided = body.token.trim();
+    if provided.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "valid": false, "error": "Missing join token",
+        }));
+    }
+    // Brute-force guard: reuse the same per-IP lockout the interactive login
+    // uses. An attacker holding the cluster secret + join token must not be
+    // able to hammer this endpoint to brute-force an admin password.
+    if state.login_limiter.is_locked_out(&peer_ip) {
+        state.login_limiter.audit_blocked(&peer_ip, "cluster-join");
+        return HttpResponse::TooManyRequests().json(serde_json::json!({
+            "valid": false, "error": "Too many failed attempts — temporarily locked out.",
+        }));
+    }
+
+    // 1) Join token: static per-install OR one-time. For a one-time token we
+    //    TAKE it atomically NOW (concurrency-safe single-use — two racing
+    //    requests can't both succeed). If a LATER step fails we reinsert it
+    //    (`ott_expiry`) so a failed admin attempt doesn't burn the operator's
+    //    token. A matching static token never touches the one-time pool.
+    let static_ok = crate::auth::validate_cluster_secret(provided, &state.join_token);
+    let ott_expiry = if static_ok { None } else { state.one_time_join_tokens.take(provided) };
+    if !static_ok && ott_expiry.is_none() {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "valid": false, "error": "Invalid join token",
+        }));
+    }
+
+    // 2) Admin credential proof against THIS node's own auth. Run the
+    //    crypt()/role check inside web::block — it reads /etc/shadow and
+    //    /etc/group and must not park an actix worker. The password is
+    //    moved in and dropped inside the closure; never logged.
+    let admin_user = body.admin_username.trim().to_string();
+    let admin_pass = body.admin_password.clone();
+    if admin_user.is_empty() || admin_pass.is_empty() {
+        if let Some(exp) = ott_expiry { state.one_time_join_tokens.reinsert(provided, exp); }
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "valid": false,
+            "error": "Admin username and password for THIS node are required to add it to a cluster.",
+        }));
+    }
+    let admin_ok = {
+        let u = admin_user.clone();
+        match web::block(move || crate::auth::verify_target_admin(&u, &admin_pass)).await {
+            Ok(v) => v,
+            Err(_) => {
+                // Blocking pool exhausted — fail-closed but don't tell the
+                // operator the password was wrong; signal "busy, retry".
+                if let Some(exp) = ott_expiry { state.one_time_join_tokens.reinsert(provided, exp); }
+                return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                    "valid": false, "error": "Server busy — try again in a moment.",
+                }));
+            }
+        }
+    };
+    if !admin_ok {
+        // Count toward the per-IP lockout AND leave an audit trail so a
+        // brute-force attempt against this endpoint is visible.
+        state.login_limiter.record_failure_with(&peer_ip, &admin_user);
+        cluster_join_audit(
+            &state, &admin_user, "warning", "Cluster join admin auth FAILED",
+            &format!("Rejected admin credentials for a join handshake from {}",
+                     if peer_ip.is_empty() { "unknown source" } else { &peer_ip }),
+            &peer_ip,
+        );
+        if let Some(exp) = ott_expiry { state.one_time_join_tokens.reinsert(provided, exp); }
+        return HttpResponse::Unauthorized().json(serde_json::json!({
+            "valid": false,
+            "error": "Admin credentials rejected — the supplied username/password \
+                      must be an admin account on the node being added.",
+        }));
+    }
+
+    // 3) Hard-block silent re-clustering. "Already a member of a different
+    //    cluster" = this node has peers OTHER than itself AND the cluster
+    //    name the master is adding us into differs from our own. A node
+    //    re-joining the cluster it's already in (same name), or a fresh
+    //    single-node install, is unaffected.
+    let our_cluster = state.cluster.get_self_cluster_name();
+    let has_peers = !has_no_other_peers(&state);
+    let incoming = body.cluster_name.clone().unwrap_or_default();
+    if is_silent_recluster(has_peers, &our_cluster, &incoming) {
+        if crate::cluster_join::recluster_override_armed() {
+            // Operator explicitly armed the override locally — allow, and
+            // consume it so it can't linger as a standing hole.
+            crate::cluster_join::clear_recluster_override();
+        } else {
+            if let Some(exp) = ott_expiry { state.one_time_join_tokens.reinsert(provided, exp); }
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "valid": false,
+                "error": format!(
+                    "This node is already a member of cluster '{}' — remove it from \
+                     that cluster first, or arm the local re-cluster override on this \
+                     node (Settings → Cluster → Allow re-cluster) before joining '{}'.",
+                    our_cluster, incoming
+                ),
+                "already_in_cluster": our_cluster,
+                "override_required": true,
+            }));
+        }
+    }
+
+    // 4) Audit + security alert — make a join loud. `admin_user` is
+    //    guaranteed non-empty here (rejected above), so it is the actor.
+    let actor = admin_user.clone();
+    let target_cluster = if incoming.is_empty() { our_cluster.clone() } else { incoming.clone() };
+    cluster_join_audit(
+        &state,
+        &actor,
+        "warning",
+        "Node joined cluster",
+        &format!(
+            "Authenticated join accepted (admin '{}', into cluster '{}', from {})",
+            actor, target_cluster,
+            if peer_ip.is_empty() { "unknown source" } else { &peer_ip }
+        ),
+        &peer_ip,
+    );
+    let alert_title = "Cluster join accepted";
+    let alert_body = format!(
+        "A node-join handshake was accepted on this host.\n\
+         Admin verified: {}\n\
+         Source IP:      {}\n\
+         Target cluster: {}\n\
+         If you did not initiate this, treat it as a possible hijack.",
+        actor,
+        if peer_ip.is_empty() { "unknown".into() } else { peer_ip.clone() },
+        target_cluster,
+    );
+    crate::alerting::send_local_alert(
+        crate::alerting::AlertCategory::Posture,
+        alert_title,
+        &alert_body,
+    ).await;
+
+    // The one-time token (if used) was already consumed atomically at step 1
+    // via `take`, and was reinserted on every failure path above — so a
+    // success here means it is correctly single-use with no consume race.
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "valid": true,
+        "hostname": hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_default(),
+        "cluster_fingerprint": crate::cluster_join::cluster_fingerprint(),
+        "cluster_name": our_cluster,
+    }))
+}
+
+/// Append a cluster-join / secret-change entry to BOTH the persistent
+/// audit log (`compat::audit_log`, the same store the API-key audit uses)
+/// AND the in-memory alert_log surfaced in the Tasks panel. Security-
+/// relevant events (join, secret change) must be investigable later.
+fn cluster_join_audit(
+    state: &web::Data<AppState>,
+    actor: &str,
+    severity: &str,
+    title: &str,
+    detail: &str,
+    // Source IP of the request, where one is meaningful (e.g. the join
+    // handshake's peer address). Empty for locally-initiated events
+    // (session-authed secret rotation, master-side add). Recorded in the
+    // persistent audit log so a join from an unexpected host is visible.
+    ip: &str,
+) {
+    // Persistent audit log — reuse the AuditEntry shape. We encode the
+    // event into the human-readable fields; status 200 = accepted.
+    crate::compat::audit_log(&crate::compat::AuditEntry {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        key_name: format!("{title} ({actor})"),
+        key_id: "cluster-join".to_string(),
+        method: "JOIN".to_string(),
+        path: detail.to_string(),
+        ip: ip.to_string(),
+        status: 200,
+    });
+    // In-memory alert log for the Tasks panel.
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    let hostname = state.cluster.get_all_nodes().into_iter()
+        .find(|n| n.is_self).map(|n| n.hostname).unwrap_or_default();
+    let cluster = state.cluster.get_self_cluster_name();
+    let mut log = state.alert_log.write().unwrap_or_else(|e| e.into_inner());
+    let id = log.last().map(|e| e.id + 1).unwrap_or(1);
+    log.push(AlertLogEntry {
+        id,
+        timestamp: now,
+        severity: severity.into(),
+        title: title.into(),
+        detail: format!("{} (by {})", detail, actor),
+        hostname,
+        cluster,
+    });
+    while log.len() > 200 {
+        log.remove(0);
     }
 }
 
@@ -2963,12 +3398,25 @@ pub async fn cluster_secret_status(req: HttpRequest, state: web::Data<AppState>)
 
 /// POST /api/cluster/secret/generate — generate a new cluster secret and propagate to all nodes
 pub async fn cluster_secret_generate(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
 
+    // ORDERING: capture the OLD on-disk secret BEFORE writing the new one
+    // (the secret IS the at-rest encryption key). Then persist the new
+    // secret, then re-key all at-rest stores from old→new so they remain
+    // decryptable after the restart that follows rotation.
+    let old_secret = crate::auth::load_cluster_secret();
     let new_secret = crate::auth::generate_cluster_secret();
     if let Err(e) = crate::auth::save_cluster_secret(&new_secret) {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
+    // Re-encrypt local at-rest secrets (no-op if old == new). Runs inside
+    // web::block — it's a sequence of std::fs reads/writes on
+    // /etc/wolfstack/ that must not park an actix worker on disk I/O.
+    let reencrypt = web::block({
+        let old = old_secret.clone();
+        let new = new_secret.clone();
+        move || crate::secret_rotation::reencrypt_all_at_rest(&old, &new)
+    }).await.ok();
 
     // Propagate to all online nodes across all clusters
     let nodes = state.cluster.get_all_nodes();
@@ -3008,9 +3456,27 @@ pub async fn cluster_secret_generate(req: HttpRequest, state: web::Data<AppState
         }));
     }
 
+    // Audit + alert the secret change — a cluster-secret rotation is a
+    // security-relevant event that must be loud and investigable.
+    cluster_join_audit(
+        &state,
+        &caller,
+        "warning",
+        "Cluster secret changed",
+        "Cluster secret rotated (generate) and propagated to peers",
+        "",
+    );
+    crate::alerting::send_local_alert(
+        crate::alerting::AlertCategory::Posture,
+        "Cluster secret changed",
+        &format!("The cluster secret was rotated by {}. If this was not you, \
+                  treat it as a possible compromise.", caller),
+    ).await;
+
     HttpResponse::Ok().json(serde_json::json!({
         "generated": true,
         "nodes": results,
+        "at_rest_reencrypt": reencrypt,
     }))
 }
 
@@ -3170,9 +3636,27 @@ pub async fn cluster_leave(
     let mut secret_rotated = false;
     let mut secret_error: Option<String> = None;
     if body.rotate_secret {
+        // ORDERING: capture OLD on-disk secret before save so the node's
+        // own at-rest stores (it keeps running standalone after leaving)
+        // can be re-keyed old→new. Without this, leaving + rotating would
+        // orphan every local SQL / OIDC / integration / DNS / cloud / XO
+        // credential after the restart below.
+        let old_secret = crate::auth::load_cluster_secret();
         let new_secret = crate::auth::generate_cluster_secret();
         match crate::auth::save_cluster_secret(&new_secret) {
-            Ok(()) => secret_rotated = true,
+            Ok(()) => {
+                secret_rotated = true;
+                let report = web::block(move || {
+                    crate::secret_rotation::reencrypt_all_at_rest(&old_secret, &new_secret)
+                }).await;
+                if let Ok(r) = report {
+                    if !r.errors.is_empty() {
+                        tracing::warn!(target: "secret_rotation",
+                            "cluster-leave rotation: {} store(s) failed re-encrypt: {}",
+                            r.errors.len(), r.errors.join("; "));
+                    }
+                }
+            }
             Err(e) => secret_error = Some(e),
         }
     }
@@ -3259,9 +3743,30 @@ pub async fn cluster_secret_receive(req: HttpRequest, state: web::Data<AppState>
     // restart path stays inactive — receiver falls back to "manual
     // restart required" semantics, preserving the legacy behaviour.
     let bootstrap_intent = body.get("bootstrap").and_then(|v| v.as_bool()).unwrap_or(false);
+    // ORDERING: capture the OLD on-disk secret BEFORE the save so we can
+    // re-key this node's own at-rest stores from old→new. (The secret is
+    // the at-rest encryption key; a received-but-not-re-keyed node would
+    // have undecryptable local credentials after its restart.)
+    let old_secret = crate::auth::load_cluster_secret();
     if let Err(e) = crate::auth::save_cluster_secret(secret) {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
+    // Re-key local at-rest secrets only when the value actually changed.
+    // Re-key when the ON-DISK old secret differs from the pushed value. We
+    // compare against `old_secret` (on disk), NOT the in-memory
+    // `secret_actually_changed`: a node that committed a new secret but hasn't
+    // restarted has disk != memory, and gating on the stale in-memory value
+    // could skip the re-key and silently orphan local data. (A fresh-bootstrap
+    // node typically has no stored credentials, so this is a cheap no-op; and
+    // reencrypt_all_at_rest also no-ops internally when old == new.)
+    let reencrypt = if secret != old_secret.as_str() {
+        let old = old_secret.clone();
+        let new = secret.to_string();
+        web::block(move || crate::secret_rotation::reencrypt_all_at_rest(&old, &new))
+            .await.ok()
+    } else {
+        None
+    };
     // Auto-restart only when ALL four guards pass:
     //   • caller explicitly tagged this as a bootstrap (`bootstrap: true`)
     //   • the secret actually changed (avoid pointless restarts on
@@ -3300,9 +3805,32 @@ pub async fn cluster_secret_receive(req: HttpRequest, state: web::Data<AppState>
             }).await;
         });
     }
+    // Audit + alert when the secret actually changed (skip idempotent
+    // re-pushes so steady-state propagation doesn't spam the log). The
+    // caller is an inter-node push, so the actor is the cluster.
+    if secret_actually_changed {
+        let push_ip = req.peer_addr()
+            .map(|a| a.ip().to_canonical().to_string())
+            .unwrap_or_default();
+        cluster_join_audit(
+            &state,
+            "cluster-node",
+            "warning",
+            "Cluster secret changed",
+            "Received a new cluster secret from the cluster admin node",
+            &push_ip,
+        );
+        crate::alerting::send_local_alert(
+            crate::alerting::AlertCategory::Posture,
+            "Cluster secret changed",
+            "This node received and stored a new cluster secret pushed by the \
+             cluster admin node. If this was unexpected, investigate.",
+        ).await;
+    }
     HttpResponse::Ok().json(serde_json::json!({
         "saved": true,
         "auto_restart_scheduled": restart_scheduled,
+        "at_rest_reencrypt": reencrypt,
         "note": if restart_scheduled {
             "Bootstrap secret saved. Self-restart scheduled in 3 seconds to \
              load the new secret into memory. The cluster will be fully \
@@ -3327,6 +3855,15 @@ pub struct AddServerRequest {
     pub node_type: Option<String>,       // "wolfstack" (default) or "proxmox" (rejected with 410)
     #[serde(default)]
     pub join_token: Option<String>,      // Required for WolfStack nodes — validates against remote
+    // Cluster-join hardening: the TARGET node's admin username + password.
+    // The target verifies these against its OWN auth before accepting the
+    // join, so a leaked join token / cluster secret alone can't graft a
+    // server onto a fleet. Forwarded over the existing TLS inter-node
+    // channel; NEVER logged or persisted on the master.
+    #[serde(default)]
+    pub target_admin_username: Option<String>,
+    #[serde(default)]
+    pub target_admin_password: Option<String>,
     // Legacy Proxmox-only fields: kept on the struct so old clients still get parsed
     // (and answered with a friendly 410) instead of a JSON deserialisation error.
     #[serde(default)]
@@ -3342,7 +3879,18 @@ pub struct AddServerRequest {
 }
 
 pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::Json<AddServerRequest>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Capture the operator identity up front — it gates the whole handler
+    // AND labels the post-add audit entry (no second require_auth call).
+    let add_actor = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    // Adding a node is a LOCAL-ADMIN action only. Reject cluster-node and
+    // api-key callers: otherwise a holder of the cluster secret could make
+    // this master relay an operator-supplied admin password to any reachable
+    // target's join-handshake, turning the master into a brute-force oracle.
+    if add_actor == "cluster-node" || add_actor.starts_with("apikey:") {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Adding a node requires an interactive admin session."
+        }));
+    }
 
     // SSRF prevention: block loopback and link-local addresses
     if is_ssrf_blocked_address(&body.address) {
@@ -3403,27 +3951,72 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         }));
     }
 
-    // Call the remote server to verify the token.
-    let verify_path = format!("/api/cluster/verify-token?token={}", join_token);
-    let urls = build_node_urls(&body.address, port, &verify_path);
+    // Cluster-join hardening: the operator must prove they control the
+    // TARGET node by supplying its admin username+password, which the
+    // target verifies against its own auth. We forward them over the
+    // existing TLS inter-node channel via the POST join-handshake; they
+    // are NEVER logged or persisted on this master.
+    let target_admin_username = body.target_admin_username.clone().unwrap_or_default();
+    let target_admin_password = body.target_admin_password.clone().unwrap_or_default();
+    if target_admin_username.trim().is_empty() || target_admin_password.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "The target node's admin username and password are required \
+                      (proves you control the server you're adding)."
+        }));
+    }
 
+    // Call the remote server's authenticated join handshake. This replaces
+    // the old token-only GET verify-token round-trip; the target now also
+    // verifies the admin credentials and hard-blocks a silent re-cluster.
     let client = &*API_HTTP_CLIENT;
+    let urls = build_node_urls(&body.address, port, "/api/cluster/join-handshake");
+    let handshake_body = serde_json::json!({
+        "token": join_token,
+        "admin_username": target_admin_username,
+        "admin_password": target_admin_password,
+        "cluster_name": cluster_name,
+    });
 
     let mut last_error = String::new();
     let mut verified = false;
+    let mut cluster_fingerprint: Option<String> = None;
     for url in &urls {
-        match client.get(url).timeout(std::time::Duration::from_secs(5)).send().await {
+        match client.post(url)
+            .timeout(std::time::Duration::from_secs(8))
+            .json(&handshake_body)
+            .send().await
+        {
             Ok(resp) => {
+                // Map the target's reqwest status into actix's StatusCode so
+                // the operator sees the same code (e.g. 409 for the
+                // already-in-cluster hard-block). The two crates' StatusCode
+                // types differ; bridge via the raw u16.
+                let http_status = actix_web::http::StatusCode::from_u16(resp.status().as_u16())
+                    .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
                 if let Ok(data) = resp.json::<serde_json::Value>().await {
                     if data.get("valid").and_then(|v| v.as_bool()) == Some(true) {
-
+                        cluster_fingerprint = data.get("cluster_fingerprint")
+                            .and_then(|v| v.as_str()).map(|s| s.to_string());
                         verified = true;
                         break;
                     } else {
-                        let err_msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("Invalid join token");
-                        return HttpResponse::Forbidden().json(serde_json::json!({
-                            "error": err_msg
-                        }));
+                        // Surface the target's specific refusal (bad token,
+                        // bad admin creds, or the already-in-cluster
+                        // hard-block) directly to the operator, preserving
+                        // the target's HTTP status so the frontend can
+                        // distinguish the override path (409).
+                        let err_msg = data.get("error").and_then(|v| v.as_str())
+                            .unwrap_or("Join handshake rejected").to_string();
+                        let mut out = serde_json::json!({ "error": err_msg });
+                        if let Some(obj) = out.as_object_mut() {
+                            if let Some(already) = data.get("already_in_cluster") {
+                                obj.insert("already_in_cluster".to_string(), already.clone());
+                            }
+                            if data.get("override_required").and_then(|v| v.as_bool()) == Some(true) {
+                                obj.insert("override_required".to_string(), serde_json::json!(true));
+                            }
+                        }
+                        return HttpResponse::build(http_status).json(out);
                     }
                 }
                 // Got a response but couldn't parse — try next URL
@@ -3633,12 +4226,36 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         });
     }
 
+    // Audit + alert the join on the MASTER side too (the target audited
+    // its own acceptance; this records who initiated it from here).
+    {
+        let actor = &add_actor;
+        cluster_join_audit(
+            &state,
+            actor,
+            "warning",
+            "Node added to cluster",
+            &format!("Added {}:{} into cluster '{}' (fingerprint {})",
+                body.address, port,
+                cluster_name.clone().unwrap_or_default(),
+                cluster_fingerprint.clone().unwrap_or_else(|| "n/a".into())),
+            "",
+        );
+        crate::alerting::send_local_alert(
+            crate::alerting::AlertCategory::Posture,
+            "Node added to cluster",
+            &format!("{} added node {}:{} to cluster '{}'.",
+                actor, body.address, port, cluster_name.clone().unwrap_or_default()),
+        ).await;
+    }
+
     let mut response = serde_json::json!({
         "id": id,
         "address": body.address,
         "port": port,
         "node_type": "wolfstack",
         "cluster_name": cluster_name,
+        "cluster_fingerprint": cluster_fingerprint,
     });
     if let Some(warning) = cap_warning {
         if let Some(obj) = response.as_object_mut() {
@@ -14086,11 +14703,24 @@ pub async fn security_cluster_secret_receive(
             "error": "new secret must start with 'wsk_' and be 16-256 chars",
         }));
     }
+    // ORDERING: capture OLD on-disk secret before the save so we can
+    // re-key this node's own at-rest stores from old→new.
+    let old_secret = crate::auth::load_cluster_secret();
     if let Err(e) = crate::auth::save_cluster_secret(&new) {
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": e,
         }));
     }
+    // Re-key local at-rest secrets (no-op if unchanged). The secret is
+    // the at-rest encryption key — without this the node's local SQL /
+    // OIDC / integration / DNS / cloud / XO credentials would be
+    // undecryptable after its restart.
+    let reencrypt = {
+        let old = old_secret.clone();
+        let new2 = new.clone();
+        web::block(move || crate::secret_rotation::reencrypt_all_at_rest(&old, &new2))
+            .await.ok()
+    };
     // W2 fix: use the actual configured path in the response — pre-fix
     // hardcoded "/etc/wolfstack/cluster-secret" misled operators on
     // installs with paths.json overrides.
@@ -14098,6 +14728,7 @@ pub async fn security_cluster_secret_receive(
     HttpResponse::Ok().json(serde_json::json!({
         "ok": true,
         "applied_at_restart": true,
+        "at_rest_reencrypt": reencrypt,
         "note": format!("Secret written to {}. Restart WolfStack to activate.", active_path),
     }))
 }
@@ -14111,6 +14742,9 @@ pub async fn fleet_security_rotate_cluster_secret(
     state: web::Data<AppState>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
+    // ORDERING: capture OLD on-disk secret before generating + saving the
+    // new one, so we can re-key local at-rest stores from old→new.
+    let old_secret = crate::auth::load_cluster_secret();
     let new_secret = crate::auth::generate_cluster_secret();
 
     // Apply locally first.
@@ -14119,6 +14753,13 @@ pub async fn fleet_security_rotate_cluster_secret(
             "error": format!("local save failed: {}", e),
         }));
     }
+    // Re-key local at-rest secrets (no-op if old == new).
+    let reencrypt = {
+        let old = old_secret.clone();
+        let new = new_secret.clone();
+        web::block(move || crate::secret_rotation::reencrypt_all_at_rest(&old, &new))
+            .await.ok()
+    };
 
     // Fan out to every WolfStack peer using the CURRENT (old) secret.
     // If the old secret has already been compromised AND used to
@@ -14183,6 +14824,7 @@ pub async fn fleet_security_rotate_cluster_secret(
         "ok": fail_count == 0,
         "new_secret": new_secret,
         "self_applied": true,
+        "at_rest_reencrypt": reencrypt,
         "peers": peer_results,
         "summary": format!(
             "Local + {}/{} peer(s) saved the new secret. {} failed. \
@@ -35375,6 +36017,14 @@ pub async fn cluster_bootstrap_add(
             "error": "address and join_token are required"
         }));
     }
+    // The token is interpolated into a query string below; join tokens are
+    // hex-only by construction, so reject anything else rather than risk a
+    // query-injection if the token format ever changes.
+    if !r.join_token.trim().chars().all(|c| c.is_ascii_hexdigit()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "join_token has an invalid format"
+        }));
+    }
     if is_ssrf_blocked_address(r.address.trim()) {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "address blocked (loopback / link-local)"
@@ -35382,8 +36032,12 @@ pub async fn cluster_bootstrap_add(
     }
     let port = r.port.unwrap_or(8553);
 
-    // Verify against the follower's daemon, mirroring add_node:2339.
-    let verify_path = format!("/api/cluster/verify-token?token={}", r.join_token.trim());
+    // Verify against the follower's daemon. The `bootstrap=1` marker tells
+    // the follower's hardened verify-token endpoint that this is the
+    // secret-gated automated pool-bootstrap flow (this endpoint is itself
+    // gated on the cluster's *custom* secret above), so it's exempt from
+    // the admin-handshake requirement that interactive adds must satisfy.
+    let verify_path = format!("/api/cluster/verify-token?token={}&bootstrap=1", r.join_token.trim());
     let urls = build_node_urls(r.address.trim(), port, &verify_path);
     let client = &*API_HTTP_CLIENT;
     let mut verified = false;
@@ -35898,8 +36552,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/systemd", web::get().to(list_services))
         .route("/api/systemd/{name}/action", web::post().to(systemd_service_action))
         .route("/api/auth/join-token", web::get().to(get_join_token))
+        .route("/api/auth/join-token/rotate", web::post().to(rotate_join_token))
+        .route("/api/auth/join-token/one-time", web::post().to(mint_one_time_join_token))
         // Cluster
         .route("/api/cluster/verify-token", web::get().to(verify_join_token))
+        .route("/api/cluster/join-handshake", web::post().to(cluster_join_handshake))
+        .route("/api/cluster/recluster-override", web::post().to(arm_recluster_override))
+        .route("/api/cluster/recluster-override", web::delete().to(clear_recluster_override))
         .route("/api/cluster/secret-status", web::get().to(cluster_secret_status))
         .route("/api/cluster/secret/generate", web::post().to(cluster_secret_generate))
         .route("/api/cluster/secret/repush", web::post().to(cluster_secret_repush))
@@ -36900,6 +37559,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/sql-connections/{id}", web::put().to(sql_connections_update))
         .route("/api/sql-connections/{id}", web::delete().to(sql_connections_delete))
         .route("/api/sql-connections/{id}/test", web::post().to(sql_connections_test))
+        .route("/api/sql-connections/{id}/password", web::post().to(sql_connections_set_password))
         .route("/api/sql-connections/{id}/validate", web::post().to(sql_connections_validate))
         .route("/api/sql-connections/{id}/query", web::post().to(sql_connections_query))
         .route("/api/sql-connections/{id}/query-multi", web::post().to(sql_connections_query_multi))
@@ -37006,6 +37666,33 @@ pub async fn sql_connections_update(
     HttpResponse::Ok().json(serde_json::json!({ "connection": incoming.to_safe_json() }))
 }
 
+#[derive(Deserialize)]
+pub struct SqlPasswordBody {
+    pub password: String,
+}
+
+/// POST /api/sql-connections/{id}/password — recovery after a cluster-secret
+/// rotation orphaned the stored password (decrypt fails). Re-encrypts the
+/// supplied password under the CURRENT cluster secret, re-saves, and re-
+/// replicates so every peer (which now shares the rotated secret) can decrypt
+/// it. The UI calls this when it sees `error_code: password_decrypt_failed`.
+pub async fn sql_connections_set_password(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<SqlPasswordBody>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    match crate::sql_connections::set_connection_password(&id, &body.password, &state.cluster_secret) {
+        Ok(()) => {
+            replicate_sql_connections_to_cluster(state.clone());
+            HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// DELETE /api/sql-connections/{id}
 pub async fn sql_connections_delete(
     req: HttpRequest,
@@ -37030,6 +37717,22 @@ pub async fn sql_connections_delete(
 /// POST /api/sql-connections/{id}/test — attempt a connection and run
 /// a cheap probe (SELECT VERSION() / SELECT version()). Returns the
 /// server version on success so the operator can eyeball it.
+/// When a SQL operation fails because the stored password can't be decrypted
+/// (the cluster secret was rotated since it was saved), return a structured
+/// 409 the Database Manager keys off to re-prompt for the password and re-save
+/// it under the current secret. Returns None for any other error.
+fn sql_decrypt_error_response(e: &str, id: &str) -> Option<HttpResponse> {
+    if crate::sql_connections::is_password_decrypt_error(e) {
+        Some(HttpResponse::Conflict().json(serde_json::json!({
+            "error": e,
+            "error_code": "password_decrypt_failed",
+            "connection_id": id,
+        })))
+    } else {
+        None
+    }
+}
+
 pub async fn sql_connections_test(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -37046,9 +37749,17 @@ pub async fn sql_connections_test(
         Ok(version) => HttpResponse::Ok().json(serde_json::json!({
             "ok": true, "version": version,
         })),
-        Err(e) => HttpResponse::Ok().json(serde_json::json!({
-            "ok": false, "error": e,
-        })),
+        Err(e) => {
+            // Surface the re-prompt signal even on the test path so "Test
+            // connection" after a secret rotation guides the operator to fix it.
+            let needs_pw = crate::sql_connections::is_password_decrypt_error(&e);
+            HttpResponse::Ok().json(serde_json::json!({
+                "ok": false,
+                "error": e,
+                "error_code": if needs_pw { "password_decrypt_failed" } else { "" },
+                "connection_id": id,
+            }))
+        }
     }
 }
 
@@ -37158,7 +37869,10 @@ pub async fn sql_connections_query(
             }
             HttpResponse::Ok().json(r)
         }
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => {
+            if let Some(r) = sql_decrypt_error_response(&e, &id) { return r; }
+            HttpResponse::BadRequest().json(serde_json::json!({ "error": e }))
+        }
     }
 }
 
@@ -37242,6 +37956,9 @@ pub async fn sql_connections_query_multi(
                 "elapsed_ms": r.elapsed_ms,
             })),
             Err(e) => {
+                // A decrypt failure hits every statement identically — short-
+                // circuit with the re-prompt signal instead of N copies.
+                if let Some(r) = sql_decrypt_error_response(&e, &id) { return r; }
                 results.push(serde_json::json!({ "ok": false, "error": e }));
                 if stop_on_error { failed_at = Some(i); break; }
             }
@@ -38107,5 +38824,73 @@ mod loopback_nfs_rewrite_tests {
         );
         // Malformed (no ":/") returned as-is.
         assert_eq!(rewrite_loopback_nfs_source("garbage", ip("10.0.0.5")), "garbage");
+    }
+}
+
+#[cfg(test)]
+mod cluster_join_hardening_tests {
+    use super::is_silent_recluster;
+
+    #[test]
+    fn fresh_single_node_install_is_not_recluster() {
+        // No peers yet — joining ANY cluster is fine (this is the normal
+        // first-time join). Must never be blocked.
+        assert!(!is_silent_recluster(false, "WolfStack", "ProdFleet"));
+        assert!(!is_silent_recluster(false, "WolfStack", ""));
+    }
+
+    #[test]
+    fn rejoin_same_cluster_is_not_recluster() {
+        // Already a member, but the master is adding us into the SAME
+        // cluster we're already in — a no-op join, allowed.
+        assert!(!is_silent_recluster(true, "ProdFleet", "ProdFleet"));
+    }
+
+    #[test]
+    fn join_into_different_cluster_with_peers_is_blocked() {
+        // The security case: an active member of cluster A is being grafted
+        // into cluster B. Hard-blocked (absent the local override).
+        assert!(is_silent_recluster(true, "ProdFleet", "AttackerFleet"));
+    }
+
+    #[test]
+    fn unnamed_incoming_on_fresh_node_is_allowed() {
+        // First-time join (no peers) with an omitted cluster name must NOT
+        // be blocked — legacy/unnamed first joins still work.
+        assert!(!is_silent_recluster(false, "WolfStack", ""));
+    }
+
+    #[test]
+    fn unnamed_incoming_on_active_member_is_blocked() {
+        // SECURITY: an already-joined node must only accept a re-add that
+        // explicitly names the cluster it's in. Omitting the name on a node
+        // with peers is treated as a silent re-cluster (hard-blocked) so it
+        // can't be used to bypass the guard.
+        assert!(is_silent_recluster(true, "ProdFleet", ""));
+    }
+}
+
+#[cfg(test)]
+mod target_admin_verification_tests {
+    // verify_target_admin is exercised here for its INPUT-VALIDATION and
+    // role-gating behaviour that doesn't depend on /etc/shadow. Empty
+    // credentials must always be rejected — a missing password must never
+    // be treated as a successful admin proof. (Full crypt()/group checks
+    // require a real /etc/shadow + /etc/group and are validated in
+    // integration / live testing, declared in the summary.)
+    use crate::auth::verify_target_admin;
+
+    #[test]
+    fn empty_credentials_rejected() {
+        assert!(!verify_target_admin("", ""));
+        assert!(!verify_target_admin("root", ""));
+        assert!(!verify_target_admin("", "hunter2"));
+    }
+
+    #[test]
+    fn unknown_user_with_garbage_password_rejected() {
+        // A user that exists in neither the WolfStack store nor /etc/shadow
+        // with a random password must not authenticate.
+        assert!(!verify_target_admin("definitely-not-a-real-user-xyz", "nope"));
     }
 }
