@@ -9341,20 +9341,34 @@ function _bridgeOptionLabel(b) {
 // Populate a bridge <select> from the classified bridge list. `selectId`
 // is the element ID; `warnId` is the ID of an inline-warning container
 // next to it (created by the caller). Returns the chosen bridge object.
-async function populateBridgeSelect(selectId, warnId, force) {
+async function populateBridgeSelect(selectId, warnId, force, preferName) {
     const sel = document.getElementById(selectId);
     if (!sel) return;
     const data = await fetchLanBridges(force);
     const bridges = data.bridges || [];
+    // The existing-LXC NIC editor exposes "Bridge / Link" as a free-text
+    // <input>, not a <select> (Gary KO4BSR 2026-06-21 — "don't see create LAN
+    // bridge option on existing LXC"). When the originating field is an input,
+    // just drop the chosen/created bridge name straight into it. updateBridge-
+    // Warning is select-only, so skip it here (it no-ops on an input anyway).
+    if (sel.tagName === 'INPUT') {
+        const name = preferName || (bridges.find(b => b.kind === 'lan') || {}).name;
+        // No preferred/LAN bridge to offer → leave whatever the user typed
+        // intact rather than blanking the field.
+        if (name) sel.value = name;
+        return;
+    }
     if (!bridges.length) return; // leave the static default option in place
     const prev = sel.value;
     sel.innerHTML = bridges.map(b =>
         `<option value="${escapeHtml(b.name)}" data-kind="${escapeHtml(b.kind)}">${escapeHtml(_bridgeOptionLabel(b))}</option>`
     ).join('');
-    // Prefer a LAN bridge by default (that's what users almost always
-    // want in "Bridged LAN" mode); fall back to the previous value.
+    // Prefer the just-created bridge, then the previously-selected value, then
+    // any LAN bridge (what users almost always want in "Bridged LAN" mode).
     const lan = bridges.find(b => b.kind === 'lan');
-    if (prev && bridges.some(b => b.name === prev)) {
+    if (preferName && bridges.some(b => b.name === preferName)) {
+        sel.value = preferName;
+    } else if (prev && bridges.some(b => b.name === prev)) {
         sel.value = prev;
     } else if (lan) {
         sel.value = lan.name;
@@ -9527,7 +9541,7 @@ async function submitCreateLanBridge() {
             modal.remove();
             // Refresh the originating dropdown to show the new LAN bridge.
             _lanBridgeData = null;
-            if (returnSelectId) await populateBridgeSelect(returnSelectId, returnWarnId, true);
+            if (returnSelectId) await populateBridgeSelect(returnSelectId, returnWarnId, true, bridge_name);
         }
     } catch (e) {
         showErr('Network error: ' + ((e && e.message) || String(e)));
@@ -9583,7 +9597,7 @@ function showLanBridgeConfirmBanner(token, seconds, bridgeName, returnSelectId, 
                 showToast(d.message || 'LAN bridge kept.', 'success', 8000);
                 banner.remove();
                 _lanBridgeData = null;
-                if (returnSelectId) await populateBridgeSelect(returnSelectId, returnWarnId, true);
+                if (returnSelectId) await populateBridgeSelect(returnSelectId, returnWarnId, true, bridgeName);
             } else {
                 msg.innerHTML = `<strong style="color:#fca5a5;">${escapeHtml(d.error || 'Confirmation failed — it may have already reverted.')}</strong>`;
                 keepBtn.remove();
@@ -9764,7 +9778,12 @@ async function collectVmNetFields(prefix) {
     };
     if (mode === 'wolfnet') {
         const ip = ((document.getElementById(`${prefix}-wolfnet-ip`) || {}).value || '').trim();
-        out.wolfnet_ip = ip || null;
+        // Send the empty string (NOT null) when the field is blanked: the
+        // backend treats Some("") as an explicit clear and None/null as
+        // "leave unchanged", so `null` here meant blanking the IP in WolfNet
+        // mode never removed the stored address (Gary KO4BSR 2026-06-21).
+        // Matches how notes/iso clear-on-empty.
+        out.wolfnet_ip = ip;
     } else if (mode === 'bridge') {
         const br = ((document.getElementById(`${prefix}-bridge-name`) || {}).value || '').trim();
         if (!br) throw new Error('Pick a bridge for Bridged LAN mode');
@@ -24040,7 +24059,11 @@ async function openLxcSettings(name) {
                                 </div>
                                 <div class="form-group" style="margin:0;">
                                     <label style="font-size:11px;">Bridge / Link</label>
-                                    <input type="text" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="link" value="${escapeHtml(nic.link)}" placeholder="e.g. lxcbr0, vmbr0">
+                                    <input type="text" id="lxc-nic-link-${nic.index}" class="form-control lxc-nic-field" data-nic="${nic.index}" data-field="link" value="${escapeHtml(nic.link)}" placeholder="e.g. lxcbr0, vmbr0">
+                                    <div style="margin-top:5px;">
+                                        <button type="button" class="btn btn-sm" onclick="openCreateLanBridge('lxc-nic-link-${nic.index}','')" style="font-size:11px; padding:3px 8px;">+ Create LAN bridge</button>
+                                        <span style="font-size:10px; color:var(--text-muted); margin-left:6px;">Builds a real LAN bridge and fills this field with its name.</span>
+                                    </div>
                                 </div>
                                 <div class="form-group" style="margin:0;">
                                     <label style="font-size:11px;">MAC Address</label>
@@ -28728,7 +28751,14 @@ async function showVmStartCommand(name) {
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100001;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease';
+    // opacity:1;pointer-events:all are REQUIRED: the base `.modal-overlay` CSS
+    // rule is opacity:0/pointer-events:none and only becomes visible with the
+    // `.active` class (which this body-appended overlay never gets). Without the
+    // inline override the fadeIn animation plays for 0.15s then reverts to
+    // opacity:0 (animation-fill-mode:none) — the modal "showed briefly and
+    // closed" so the operator couldn't read it (Gary 2026-06-21). Matches the
+    // pattern in showModal().
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100001;display:flex;align-items:center;justify-content:center;opacity:1;pointer-events:all;animation:fadeIn 0.15s ease';
     const modal = document.createElement('div');
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');

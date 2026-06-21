@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use chrono::{Utc, Datelike};
 use uuid::Uuid;
 
@@ -395,6 +395,23 @@ mod tests {
         // non-PBS storage → never a note.
         let local = BackupStorage { storage_type: StorageType::Local, pbs_file_level: true, ..Default::default() };
         assert!(pbs_file_level_skip_note(&vm, &local).is_none());
+    }
+
+    #[test]
+    fn pbs_notes_positionals_never_emit_dashdash_separator() {
+        // The PBS CLI (proxmox-router) does NOT honour `--` as an end-of-options
+        // separator — passing one made it the <snapshot> positional and pushed
+        // the real notes text into "got additional arguments", failing every
+        // snapshot-notes call (wabil 2026-06-21). Guard the exact argv: two
+        // positionals, in order, and no `--`.
+        let snap = "host/test-318c10c7/2026-06-21T18:18:21Z";
+        let notes = "Cluster: mycluster | Node: mypm | [mycluster] System folder: test (/mnt/x/test/)";
+        let p = pbs_notes_positionals(snap, notes);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], snap);
+        assert_eq!(p[1], notes);
+        assert!(!p.iter().any(|a| a == "--"),
+            "no `--` separator: PBS CLI treats it as a literal positional");
     }
 
     fn wd(path: &str, sub: &str) -> BackupStorage {
@@ -2303,6 +2320,10 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
     let now = Utc::now().to_rfc3339();
     let hostname = local_hostname();
     let mut comments = backup_comments(&target);
+    // Scheduled path has no live log, so record the format reason via tracing —
+    // parity with the streaming path's on-screen explainer (wabil 2026-06-21).
+    info!("Backup {} → {}: {}", target.name, storage_label(storage),
+        backup_format_explainer(&target, storage));
     // Make a file-level→tarball fallback (e.g. Proxmox LXC → vzdump) visible.
     if let Some(note) = pbs_file_level_skip_note(&target, storage) {
         comments = format!("{} | {}", comments, note);
@@ -2897,20 +2918,24 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
                     if !best_snap.is_empty() {
                         // proxmox-backup-client snapshot notes update [OPTIONS] <snapshot> <notes>
                         //
-                        // Both `snapshot` and `notes` are POSITIONAL.
-                        // Earlier versions passed `--notes <text>`, which the
-                        // PBS CLI parser dropped as an unknown-option value
-                        // and then rejected with "parameter verification
-                        // failed - 'notes': missing argument" (reported
+                        // Both `snapshot` and `notes` are POSITIONAL — pass them
+                        // in order, NOT as a `--notes` flag (older clients
+                        // rejected the flag form with "parameter verification
+                        // failed - 'notes': missing argument", reported
                         // 2026-05-05).
                         //
-                        // We put the trailing `--` before the positionals so
-                        // a notes string that happens to begin with `-`
-                        // (e.g. an operator-supplied comment field) can't
-                        // be re-interpreted as an option. Spaces in the
-                        // notes text are preserved automatically — every
-                        // arg goes to the child via execve as one argv
-                        // element, no shell expansion.
+                        // Do NOT insert a `--` end-of-options separator: the PBS
+                        // CLI (proxmox-router, not getopt/clap) does NOT treat
+                        // `--` as a separator. It consumes `--` as the first
+                        // positional (snapshot), shifts `best_snap` into the
+                        // notes slot, and reports the real notes text as
+                        // "got additional arguments" — so the notes call failed
+                        // on every PBS backup (wabil 2026-06-21). Both our
+                        // positionals are option-safe without it: the snapshot
+                        // is always `type/id/RFC3339` and the notes text always
+                        // begins with "Cluster:", so neither can be mistaken for
+                        // an option. Each arg reaches the child as one execve
+                        // argv element — spaces preserved, no shell expansion.
                         let mut notes_cmd = Command::new("proxmox-backup-client");
                         notes_cmd.args(["snapshot", "notes", "update", "--repository", &repo]);
                         if !storage.pbs_fingerprint.is_empty() {
@@ -2919,7 +2944,7 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
                         if !storage.pbs_namespace.is_empty() {
                             notes_cmd.arg("--ns").arg(&storage.pbs_namespace);
                         }
-                        notes_cmd.arg("--").arg(&best_snap).arg(notes_text);
+                        notes_cmd.args(pbs_notes_positionals(&best_snap, notes_text));
                         if !pbs_pw.is_empty() {
                             notes_cmd.env("PBS_PASSWORD", pbs_pw);
                         }
@@ -3039,6 +3064,10 @@ fn pbs_file_level_applies(target: &BackupTarget) -> bool {
 /// backup's details + live log instead of looking like "file-level is broken"
 /// (wabil 2026-06-21: "file level not implemented … lxc is tar.zst"). Returns
 /// None when file-level isn't requested or the target WILL use pxar.
+/// Prefix used by `pbs_file_level_skip_note`; shared so `backup_format_explainer`
+/// can strip it back off without the two drifting out of sync.
+const PBS_FL_SKIP_PREFIX: &str = "PBS file-level not applicable: ";
+
 fn pbs_file_level_skip_note(target: &BackupTarget, storage: &BackupStorage) -> Option<String> {
     if storage.storage_type != StorageType::Pbs || !storage.pbs_file_level || pbs_file_level_applies(target) {
         return None;
@@ -3052,7 +3081,54 @@ fn pbs_file_level_skip_note(target: &BackupTarget, storage: &BackupStorage) -> O
             "config backups are a single archive — pxar file-level doesn't apply",
         _ => "pxar file-level isn't available for this target — using image/tarball backup",
     };
-    Some(format!("PBS file-level not applicable: {}", why))
+    Some(format!("{}{}", PBS_FL_SKIP_PREFIX, why))
+}
+
+/// Short destination noun for operator-facing log lines ("Local folder",
+/// "NFS share", …) — distinct from `storage_label`, which includes the path.
+fn storage_kind_noun(storage: &BackupStorage) -> &'static str {
+    match storage.storage_type {
+        StorageType::Local => "Local folder",
+        StorageType::S3 => "S3",
+        StorageType::Remote => "remote",
+        StorageType::Wolfdisk => "WolfDisk",
+        StorageType::Pbs => "PBS",
+        StorageType::Nfs => "NFS share",
+        StorageType::Smb => "SMB share",
+    }
+}
+
+/// One concise, ALWAYS-logged line stating the archive format a backup will
+/// produce and why — so a `.tar.gz` is never mistaken for a broken feature
+/// (wabil 2026-06-21: "all backups tar.gz… I can't see the reason in the logs.
+/// Don't know why even a straight backup of a local folder has to be tar.gz").
+/// pxar file-level is a PBS-only format, so every non-PBS destination is a
+/// compressed archive by nature — this spells that out instead of leaving the
+/// operator guessing.
+fn backup_format_explainer(target: &BackupTarget, storage: &BackupStorage) -> String {
+    // Genuine pxar file-level: PBS destination + flag on + applicable target.
+    if storage.storage_type == StorageType::Pbs
+        && storage.pbs_file_level
+        && pbs_file_level_applies(target)
+    {
+        return "Format: pxar file-level — PBS per-file restore is available".to_string();
+    }
+    if storage.storage_type == StorageType::Pbs {
+        // PBS, but not pxar. Either file-level is off, or it can't apply here.
+        if let Some(note) = pbs_file_level_skip_note(target, storage) {
+            return format!("Format: image/tarball into PBS — {}",
+                note.trim_start_matches(PBS_FL_SKIP_PREFIX));
+        }
+        return "Format: compressed tar.gz stored in PBS — tick 'File-level (pxar)' \
+                in PBS settings for per-file restore".to_string();
+    }
+    // Non-PBS destination: pxar needs a PBS datastore, so it's always a tarball.
+    let dest = storage_kind_noun(storage);
+    if storage.pbs_file_level {
+        return format!("Format: compressed tar.gz — file-level (pxar) needs a Proxmox \
+                        Backup Server destination, not {}", dest);
+    }
+    format!("Format: compressed tar.gz — {} keeps each backup as one compressed archive", dest)
 }
 
 /// Build the pxar source pairs for a file-level PBS backup of `target`.
@@ -3419,6 +3495,21 @@ fn restore_pbs_file_level_entry(entry: &BackupEntry, target_override: &str) -> R
     Ok(format!("PBS file-level snapshot '{}' restored into {}{}", snapshot, target_dir, note))
 }
 
+/// The two trailing positionals for `proxmox-backup-client snapshot notes
+/// update`: `<snapshot> <notes>`, in that order, with NO `--` separator.
+///
+/// The PBS CLI is built on proxmox-router, which does not implement the
+/// getopt/clap `--` end-of-options convention — it treats a literal `--` as the
+/// first positional (snapshot), pushing the real snapshot into the notes slot
+/// and the real notes into "got additional arguments", so every notes call
+/// failed (wabil 2026-06-21). Both values are option-safe anyway: the snapshot
+/// is always `type/id/RFC3339` and the notes always begin with "Cluster:", so
+/// neither can be mistaken for an option. Centralised so both notes-setters
+/// stay in lock-step and the regression is unit-guarded.
+fn pbs_notes_positionals(snapshot: &str, notes: &str) -> [String; 2] {
+    [snapshot.to_string(), notes.to_string()]
+}
+
 /// Find the latest snapshot matching backup-type/id and set its notes.
 /// Extracted so both the tarball and file-level paths share it.
 fn set_pbs_snapshot_notes(
@@ -3453,10 +3544,12 @@ fn set_pbs_snapshot_notes(
     if best_snap.is_empty() { return; }
     let mut notes_cmd = Command::new("proxmox-backup-client");
     notes_cmd.args(["snapshot", "notes", "update", "--repository", repo]);
-    // pbs_apply_common adds --ns + the auth env (all options, safe before the
-    // `--` positional separator below).
+    // pbs_apply_common adds --ns + the auth env (all options).
     pbs_apply_common(&mut notes_cmd, storage);
-    notes_cmd.arg("--").arg(&best_snap).arg(notes_text);
+    // Positional <snapshot> <notes>, NO `--` separator (see
+    // pbs_notes_positionals). Matches the inline notes-setter in
+    // store_pbs_with_notes.
+    notes_cmd.args(pbs_notes_positionals(&best_snap, notes_text));
     match notes_cmd.output() {
         Ok(out) if out.status.success() => {
             if let Some(log_tx) = log { let _ = log_tx.send("  PBS: snapshot notes set".to_string()); }
@@ -5172,10 +5265,14 @@ pub fn create_backup_with_log(
             i + 1, total, type_name, display_name));
 
         let mut comments = backup_comments_with_cluster(t, &cluster);
-        // Surface why file-level fell back (e.g. Proxmox LXC → vzdump) so it's
-        // not mistaken for a broken feature.
+        // Always state the resulting archive format + reason in the live log so
+        // a .tar.gz is never mistaken for a broken file-level feature (wabil
+        // 2026-06-21: "I can't see the reason in the logs"). The fallback note
+        // is still folded into the persisted entry comments for the
+        // file-level-requested-but-inapplicable case only (unchanged on-disk
+        // behaviour — Golden Rule).
+        let _ = log.send(format!("  {}", backup_format_explainer(t, &storage)));
         if let Some(note) = pbs_file_level_skip_note(t, &storage) {
-            let _ = log.send(format!("  {}", note));
             comments = format!("{} | {}", comments, note);
         }
         let hostname = local_hostname();

@@ -1369,7 +1369,10 @@ impl VmManager {
                     warn!("WolfNet bridge setup for VMID {} failed (VM will still be created): {}", vmid, e);
                 }
                 args.push("--net1".to_string());
-                args.push(format!("virtio,bridge={}", bridge));
+                // net1 (WolfNet) uses the SAME adapter model as net0 so the
+                // guest can drive it — a Windows VM on e1000 can't use a
+                // hardcoded-virtio NIC without virtio drivers (Gary 2026-06-21).
+                args.push(format!("{},bridge={}", net0_model, bridge));
             }
         }
 
@@ -1960,10 +1963,12 @@ impl VmManager {
             if let Some(ref mode) = network_mode {
                 // WolfNet is "on" only when the mode is wolfnet AND a non-empty
                 // IP was supplied. Clearing the IP while staying in WolfNet mode
-                // (the UI sends wolfnet_ip:null) is an explicit REMOVAL — it used
-                // to fall through both arms below and no-op, so the VM kept its
-                // DHCP-leased WolfNet IP and the operator's removal "didn't take"
-                // (Gary KO4BSR 2026-06-19). Route it to the teardown path instead.
+                // (the UI sends wolfnet_ip:"" — an empty-string explicit clear;
+                // a null/None is also treated the same way here) is an explicit
+                // REMOVAL — it used to fall through both arms below and no-op, so
+                // the VM kept its DHCP-leased WolfNet IP and the operator's
+                // removal "didn't take" (Gary KO4BSR 2026-06-19/06-21). Route it
+                // to the teardown path instead.
                 let want_wolfnet = mode == "wolfnet"
                     && wolfnet_ip.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
                 if want_wolfnet {
@@ -1981,9 +1986,16 @@ impl VmManager {
                             vmid, e
                         )
                     })?;
+                    // Match net1's adapter to net0 (explicit override or the
+                    // model PVE already has) so a non-virtio guest can drive the
+                    // WolfNet NIC and actually DHCP its IP (Gary 2026-06-21).
+                    let net1_model = net_model.as_deref().map(str::trim)
+                        .filter(|m| !m.is_empty())
+                        .map(String::from)
+                        .unwrap_or_else(|| Self::read_qm_net0_model(&vmid_str));
                     let out = Command::new("qm").args([
                         "set", &vmid_str, "--net1",
-                        &format!("virtio,bridge={}", bridge)
+                        &format!("{},bridge={}", net1_model, bridge)
                     ]).output()
                         .map_err(|e| format!("qm set --net1 failed: {}", e))?;
                     if !out.status.success() {
@@ -2126,6 +2138,19 @@ impl VmManager {
                 synth.wolfnet_ip = if want_wolfnet {
                     wolfnet_ip.clone().filter(|s| !s.is_empty())
                 } else { None };
+                // Carry the real adapter model into the synth so the WolfNet NIC
+                // matches it (explicit override → persisted sidecar → virtio).
+                // Without this the synth's VmConfig::new default ("virtio")
+                // would force a virtio WolfNet NIC onto an e1000 Windows guest
+                // that can't drive it (Gary KO4BSR 2026-06-21).
+                synth.net_model = net_model.as_deref().map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .map(String::from)
+                    .or_else(|| fs::read_to_string(self.vm_config_path(name)).ok()
+                        .and_then(|t| serde_json::from_str::<VmConfig>(&t).ok())
+                        .map(|c| c.net_model)
+                        .filter(|m| !m.trim().is_empty()))
+                    .unwrap_or_else(|| "virtio".to_string());
                 // The previous wolfnet_ip isn't loaded from a sidecar on this
                 // branch, so recover it from the host /32 route on the WolfNet
                 // bridge. That lets reconcile GC the old MASQUERADE rule on
@@ -2453,6 +2478,31 @@ impl VmManager {
         Ok(None)
     }
 
+    /// Read the current `net0` NIC model (virtio/e1000/...) from `qm config`,
+    /// defaulting to virtio. The WolfNet `net1` matches it so the guest can
+    /// actually drive it: a Windows VM on e1000 can't bind a hardcoded-virtio
+    /// WolfNet NIC without virtio drivers, so DHCP never runs and the WolfNet
+    /// IP shows in the UI but never reaches the guest (Gary KO4BSR 2026-06-21).
+    fn read_qm_net0_model(vmid_str: &str) -> String {
+        let cfg = match Command::new("qm").args(["config", vmid_str]).output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return "virtio".to_string(),
+        };
+        for line in cfg.lines() {
+            let Some(val) = line.trim().strip_prefix("net0:") else { continue };
+            for part in val.split(',') {
+                let k = match part.trim().split_once('=') {
+                    Some((k, _)) => k,
+                    None => continue,
+                };
+                if matches!(k, "virtio" | "e1000" | "e1000e" | "rtl8139" | "vmxnet3") {
+                    return k.to_string();
+                }
+            }
+        }
+        "virtio".to_string()
+    }
+
     /// Bring the libvirt / PVE VM's WolfNet attachment in line with
     /// `config.wolfnet_ip`. Idempotent — safe to call from update_vm
     /// regardless of whether the VM already has a NIC on the WolfNet
@@ -2497,8 +2547,13 @@ impl VmManager {
                     // already points at the same bridge. If the user previously
                     // configured net1 manually, this overwrites — acceptable
                     // because they explicitly asked for WolfNet.
+                    // net1 matches the VM's chosen adapter so a non-virtio guest
+                    // can drive the WolfNet NIC and DHCP its IP (Gary 2026-06-21).
+                    let model = if config.net_model.trim().is_empty() {
+                        "virtio"
+                    } else { config.net_model.trim() };
                     let out = Command::new("qm")
-                        .args(["set", &vmid, "--net1", &format!("virtio,bridge={}", bridge)])
+                        .args(["set", &vmid, "--net1", &format!("{},bridge={}", model, bridge)])
                         .output();
                     match out {
                         Ok(o) if o.status.success() => {
@@ -2541,10 +2596,15 @@ impl VmManager {
                     // on a defined-but-not-running domain).
                     let mut flags: Vec<&str> = vec!["--config"];
                     if self.check_running(name) { flags.push("--live"); }
+                    // Match the VM's adapter so a non-virtio guest can drive the
+                    // WolfNet NIC and DHCP its IP (Gary 2026-06-21).
+                    let model = if config.net_model.trim().is_empty() {
+                        "virtio".to_string()
+                    } else { config.net_model.trim().to_string() };
                     let mut argv: Vec<&str> = vec![
                         "attach-interface", "--domain", name,
                         "--type", "bridge", "--source", &bridge,
-                        "--model", "virtio",
+                        "--model", &model,
                     ];
                     argv.extend_from_slice(&flags);
                     let out = Command::new("virsh").args(&argv).output();
