@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.54.0: Konsole-style terminals everywhere (tabs + split), shared engine** _(2026-06-20 — [`53228692`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/532286928e16977aec128f6ac0266338a203b6a1))_
 - **v24.53.1: move the fleet menu bar to a full-width application bar at the very top** _(2026-06-20 — [`23350ff5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/23350ff5f36e1b397d1d73a580d3973fe0b0ec0f))_
 - **v24.53.0: Fleet Terminal Console (byobu-style multi-window) + grouped top menu bar** _(2026-06-20 — [`e0e7e3db`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e0e7e3dbed52533d86256c1d34391ad0b8175d15))_
 - **v24.52.0: LAN bridge auto-create, VM/LXC notes, QEMU extra-args, backup excludes/PBS-pxar/system-folders + WireGuard & WolfNet fixes** _(2026-06-20 — [`ccddb60c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ccddb60cccb38d5cb5ba072156edcfd1920ea44a))_
