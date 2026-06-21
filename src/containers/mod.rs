@@ -2457,6 +2457,29 @@ fn lxc_has_external_gateway(container: &str) -> bool {
     gw_idxs.iter().any(|idx| links.get(idx).copied() != Some("lxcbr0"))
 }
 
+/// The container's primary NIC bridge — the value of `lxc.net.0.link` in its
+/// LXC config — or None if not set / unreadable.
+fn lxc_primary_bridge(container: &str) -> Option<String> {
+    let cfg = format!("{}/{}/config", lxc_base_dir(container), container);
+    let content = std::fs::read_to_string(&cfg).ok()?;
+    content
+        .lines()
+        .find(|l| l.trim().starts_with("lxc.net.0.link"))
+        .and_then(|l| l.split('=').nth(1))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether to SKIP the standalone (lxcbr0-based, eth0-flushing) WolfNet reapply
+/// for a container, based on its primary NIC bridge. We skip ONLY when the
+/// primary is a KNOWN, non-lxcbr0 bridge (a manual / migrated layout) — flushing
+/// eth0 there would destroy the operator's addressing. `lxcbr0` (the WolfStack
+/// default, used by every standard cluster) and `None` (unknown) both proceed
+/// unchanged, so existing installs see byte-identical behaviour.
+fn skip_standalone_wolfnet(primary_bridge: Option<&str>) -> bool {
+    matches!(primary_bridge, Some(b) if b != "lxcbr0")
+}
+
 /// Apply WolfNet IP inside a running container (called after lxc-start)
 fn lxc_apply_wolfnet(container: &str) {
     let base = lxc_base_dir(container);
@@ -2599,6 +2622,25 @@ fn lxc_apply_wolfnet(container: &str) {
                 }
             }
         } else {
+            // GOLDEN-RULE GATE: the standalone WolfNet path assumes eth0 is on
+            // lxcbr0 (the WolfStack default) and FLUSHES eth0 to reassign it.
+            // If the operator has put the container's primary NIC on a DIFFERENT
+            // bridge (a manual / migrated layout — e.g. a Hetzner vSwitch
+            // vmbrXXXX on 10.0.10.x), flushing eth0 would destroy their
+            // addressing on every restart. Skip in that case — WolfNet-over-
+            // lxcbr0 doesn't apply to a non-lxcbr0 primary anyway. lxcbr0 (the
+            // default, used by every standard cluster) and "unknown" both
+            // proceed UNCHANGED, so existing installs are unaffected.
+            if skip_standalone_wolfnet(lxc_primary_bridge(container).as_deref()) {
+                warn!(
+                    "LXC '{}': skipping WolfNet reapply — primary NIC is on '{}', not lxcbr0; \
+                     leaving its networking untouched (manage WolfNet manually for \
+                     custom-bridge containers)",
+                    container,
+                    lxc_primary_bridge(container).unwrap_or_default()
+                );
+                return;
+            }
             // Standalone LXC: original approach — bridge IP on eth0, WolfNet IP as secondary
             let bridge_ip = assign_container_bridge_ip(container);
 
@@ -6162,6 +6204,26 @@ fn apply_vswitch_uplinks(
                 nic.vlan = att.vlan_id.to_string();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wolfnet_gate_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_wolfnet_gate_preserves_default_clusters() {
+        // lxcbr0 (the WolfStack default — every standard cluster) must take the
+        // SAME path as before: do NOT skip.
+        assert!(!skip_standalone_wolfnet(Some("lxcbr0")));
+        // Unknown / unreadable bridge → assume default behaviour, do NOT skip
+        // (no regression for installs we can't read the config for).
+        assert!(!skip_standalone_wolfnet(None));
+        // A manual / migrated non-lxcbr0 primary (e.g. a Hetzner vSwitch) → SKIP
+        // so we never flush its eth0.
+        assert!(skip_standalone_wolfnet(Some("vmbr4001")));
+        assert!(skip_standalone_wolfnet(Some("br0")));
+        assert!(skip_standalone_wolfnet(Some("vmbr0")));
     }
 }
 
