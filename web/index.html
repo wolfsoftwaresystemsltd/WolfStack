@@ -6634,6 +6634,27 @@
                         <div id="cluster-secret-results" style="margin-top:16px;display:none;">
                         </div>
 
+                        <div style="background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--border);max-width:600px;margin-top:24px;">
+                            <h4 style="margin:0 0 8px 0;font-size:15px;">Allow Re-cluster (override)</h4>
+                            <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px 0;">
+                                For safety, this node refuses to join a <em>different</em> cluster while it is
+                                already a member of one &mdash; this stops a stolen secret being used to silently
+                                move a live node between fleets. If you genuinely want to re-home this node into a
+                                different cluster, arm the override here (a local action on this node), then run
+                                <em>Add Node</em> from the new master. The override is consumed on the next join.
+                            </p>
+                            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+                                <span style="font-size:13px;font-weight:600;">Status:</span>
+                                <span id="recluster-override-status" style="font-size:13px;padding:4px 10px;border-radius:6px;background:var(--bg-secondary);border:1px solid var(--border);">
+                                    Checking...
+                                </span>
+                            </div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn" onclick="armReclusterOverride()" id="btn-arm-recluster">Arm override</button>
+                                <button class="btn" onclick="clearReclusterOverride()" id="btn-clear-recluster" style="display:none;">Disarm</button>
+                            </div>
+                        </div>
+
                         <div style="background:var(--bg-input);border-radius:12px;padding:20px;border:1px solid var(--danger);max-width:600px;margin-top:24px;">
                             <h4 style="margin:0 0 8px 0;font-size:15px;color:var(--danger);">Leave Cluster</h4>
                             <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px 0;">
@@ -10129,6 +10150,18 @@ region = us-east-1"></textarea>
                     <label id="new-server-port-label">Port (default: 8553)</label>
                     <input type="number" class="form-control" id="new-server-port" value="8553">
                 </div>
+                <div class="form-group" id="ws-target-admin-field"
+                    style="border-top:1px solid var(--border); padding-top:12px;">
+                    <label for="new-server-admin-user">Target admin username <span style="color:var(--accent-danger,#e35);">*</span></label>
+                    <input type="text" class="form-control" id="new-server-admin-user"
+                        autocomplete="off" placeholder="admin user on the server you're adding">
+                    <label for="new-server-admin-pass" style="margin-top:8px;">Target admin password <span style="color:var(--accent-danger,#e35);">*</span></label>
+                    <input type="password" class="form-control" id="new-server-admin-pass"
+                        autocomplete="new-password" placeholder="that user's password">
+                    <small style="color: var(--text-muted);">Required — proves you control the server you're adding.
+                        The target verifies these against its own login; the password is sent over the encrypted
+                        inter-node channel and is never stored or logged.</small>
+                </div>
                 <p id="wolfstack-hint" style="font-size: 12px; color: var(--text-muted);">
                     If using WolfNet, enter the WolfNet IP (e.g. 10.10.10.x).
                     Otherwise, enter the server's regular IP or hostname.
@@ -10146,6 +10179,15 @@ region = us-east-1"></textarea>
                     </div>
                     <small style="color: var(--text-muted); font-size:11px;">Share this token with other WolfStack
                         admins so they can add this server.</small>
+                    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+                        <button onclick="rotateJoinToken()" class="btn-sm"
+                            style="padding:4px 10px; background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer; font-size:11px;"><span class="ws-icon-clean-wrap" data-icon="refresh-cw"></span>
+                            Rotate join token</button>
+                        <button onclick="generateOneTimeJoinToken()" class="btn-sm"
+                            style="padding:4px 10px; background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; cursor:pointer; font-size:11px;"><span class="ws-icon-clean-wrap" data-icon="clock"></span>
+                            Generate one-time token (15 min)</button>
+                    </div>
+                    <div id="own-join-token-meta" style="color: var(--text-muted); font-size:11px; margin-top:6px;"></div>
                 </div>
             </div>
             <div class="modal-footer">

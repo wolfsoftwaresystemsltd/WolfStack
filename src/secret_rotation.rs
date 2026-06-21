@@ -232,6 +232,136 @@ fn audit(line: &str) {
     }
 }
 
+// ─── At-rest re-encryption on rotation ──────────────────────────
+
+/// Per-store outcome of a rotation re-encrypt pass. `count` is the
+/// number of secret fields actually re-keyed in that store; `error` is
+/// `Some` if that store's pass failed (the other stores still run — one
+/// store's failure must never abort the whole rotation re-key).
+#[derive(Debug, Default, Serialize)]
+pub struct ReencryptReport {
+    pub sql_passwords: usize,
+    pub oidc_secrets: usize,
+    pub integration_credentials: usize,
+    pub dns_providers: usize,
+    pub cloud_providers: usize,
+    pub xo_tokens: usize,
+    /// Human-readable per-store errors, e.g. "oidc: parse failed". Empty
+    /// on a fully-clean pass. A non-empty list is NOT fatal: rotation
+    /// already committed the new secret; the affected store's blobs are
+    /// left intact (their plaintext re-enter prompts still work) and the
+    /// operator can re-run the migration after restart.
+    pub errors: Vec<String>,
+}
+
+impl ReencryptReport {
+    fn new() -> Self {
+        Self {
+            sql_passwords: 0,
+            oidc_secrets: 0,
+            integration_credentials: 0,
+            dns_providers: 0,
+            cloud_providers: 0,
+            xo_tokens: 0,
+            errors: Vec::new(),
+        }
+    }
+
+    /// Total secret fields re-keyed across every store.
+    pub fn total(&self) -> usize {
+        self.sql_passwords
+            + self.oidc_secrets
+            + self.integration_credentials
+            + self.dns_providers
+            + self.cloud_providers
+            + self.xo_tokens
+    }
+}
+
+/// Re-encrypt EVERY at-rest secret store on THIS node from the OLD
+/// cluster secret to the NEW one, as an integral step of a cluster
+/// secret rotation. Each store is independent: a failure in one is
+/// recorded in the report and the rest still run. Never panics.
+///
+/// ORDERING CONTRACT (caller's responsibility): the NEW secret must
+/// already be persisted to disk before this is called, and `old` must
+/// be the secret that was active when these blobs were written. A crash
+/// between writing the new secret and finishing this re-key leaves the
+/// node in the SAME recoverable state as today (some blobs orphaned;
+/// recoverable via the per-store "re-enter the credential" prompts) —
+/// never worse, because every store skips (rather than destroys) any
+/// field it can't decrypt with `old`.
+///
+/// No-op when `old == new` (each store also guards this).
+pub fn reencrypt_all_at_rest(old: &str, new: &str) -> ReencryptReport {
+    let mut report = ReencryptReport::new();
+    if old == new {
+        return report;
+    }
+
+    // SQL connection passwords (oidc::encrypt_secret scheme). Also drops
+    // the live SQL pools so the next query rebuilds with the new-key
+    // password.
+    match crate::sql_connections::reencrypt_at_rest(old, new) {
+        Ok(n) => report.sql_passwords = n,
+        Err(e) => report.errors.push(format!("sql-connections: {}", e)),
+    }
+
+    // OIDC client secrets (oidc.json).
+    match crate::auth::oidc::reencrypt_at_rest(old, new) {
+        Ok(n) => report.oidc_secrets = n,
+        Err(e) => report.errors.push(format!("oidc: {}", e)),
+    }
+
+    // Integration credential vault.
+    match crate::integrations::reencrypt_at_rest(old, new) {
+        Ok(n) => report.integration_credentials = n,
+        Err(e) => report.errors.push(format!("integrations: {}", e)),
+    }
+
+    // at_rest_crypto v2 stores: dns / cloud / xo.
+    {
+        let mut store = crate::dns_providers::DnsProviderStore::load();
+        match store.reencrypt_at_rest(old, new) {
+            Ok(n) => report.dns_providers = n,
+            Err(e) => report.errors.push(format!("dns-providers: {}", e)),
+        }
+    }
+    {
+        let mut store = crate::edge::CloudProviderStore::load();
+        match store.reencrypt_at_rest(old, new) {
+            Ok(n) => report.cloud_providers = n,
+            Err(e) => report.errors.push(format!("cloud-providers: {}", e)),
+        }
+    }
+    {
+        let mut store = crate::xo::XoStore::load();
+        match store.reencrypt_at_rest(old, new) {
+            Ok(n) => report.xo_tokens = n,
+            Err(e) => report.errors.push(format!("xo-tokens: {}", e)),
+        }
+    }
+
+    if report.errors.is_empty() {
+        tracing::info!(target: "secret_rotation",
+            "at-rest re-encrypt complete: re-keyed {} SQL password(s), {} OIDC secret(s), \
+             {} integration credential(s), {} DNS provider(s), {} cloud provider(s), \
+             {} XO token(s) — total {}",
+            report.sql_passwords, report.oidc_secrets, report.integration_credentials,
+            report.dns_providers, report.cloud_providers, report.xo_tokens, report.total());
+    } else {
+        // A partial failure is non-fatal but must be loud — the operator
+        // may need to re-enter a credential for the failed store(s).
+        tracing::warn!(target: "secret_rotation",
+            "at-rest re-encrypt finished with {} store error(s): {}. \
+             Re-keyed total {} field(s); affected store(s) left intact \
+             (re-enter their credentials after restart if they stop working).",
+            report.errors.len(), report.errors.join("; "), report.total());
+    }
+
+    report
+}
+
 // ─── Server-side endpoint handlers (peer-facing) ────────────────
 
 /// POST /api/cluster/secret/rotate-preflight — peer-side ping.
@@ -354,6 +484,12 @@ pub async fn api_rotate_commit(
     let active = crate::paths::get().cluster_secret;
     let pending = pending_path();
 
+    // Capture the OLD active secret BEFORE the rename so we can re-key
+    // this peer's own at-rest stores from old→new once the commit lands.
+    // load_cluster_secret() falls back to the built-in default when the
+    // file is absent, so this is always a usable "old" value.
+    let old_secret_for_reencrypt = crate::auth::load_cluster_secret();
+
     let pending_bytes = match std::fs::read(&pending) {
         Ok(b) => b,
         Err(e) => {
@@ -426,6 +562,23 @@ pub async fn api_rotate_commit(
     // stay misaligned).
     let new_secret_str = std::str::from_utf8(&pending_trimmed).unwrap_or("");
     crate::auth::realign_wolfusb_env_after_rotation(new_secret_str);
+    // Re-key this peer's own at-rest secrets from old→new. The secret is
+    // the at-rest encryption key; without this the peer's local SQL /
+    // OIDC / integration / DNS / cloud / XO credentials would be
+    // undecryptable after its restart. No-op if the value is unchanged.
+    // Best-effort: a re-key failure is logged inside the orchestrator and
+    // does NOT fail the commit (rotation already landed on disk; the
+    // affected store's plaintext re-enter prompts still recover it).
+    if !new_secret_str.is_empty() {
+        // Re-key off the actix worker — this does multi-file blocking I/O.
+        let old = old_secret_for_reencrypt.clone();
+        let news = new_secret_str.to_string();
+        let report = web::block(move || reencrypt_all_at_rest(&old, &news))
+            .await
+            .unwrap_or_default();
+        audit(&format!("COMMIT_REENCRYPT initiator={} rekeyed_total={} store_errors={}",
+                       body.initiated_by, report.total(), report.errors.len()));
+    }
     // H4: prune .bak files beyond BACKUP_RETENTION_COUNT.
     let _ = prune_old_backups(&active);
     audit(&format!("COMMIT_OK initiator={} fingerprint={} backup={}",
@@ -910,6 +1063,23 @@ pub async fn api_coordinated_rotate(
     crate::auth::realign_wolfusb_env_after_rotation(&new_secret);
     let _ = prune_old_backups(&active);
 
+    // Re-key the coordinator's own at-rest secrets from old→new (the
+    // secret is the at-rest encryption key). Best-effort: a failure is
+    // logged inside the orchestrator and does NOT fail the rotation —
+    // the new secret has already committed on every node, and any store
+    // that failed is left intact with its plaintext re-enter prompt.
+    // No-op if old == new.
+    let reencrypt_report = {
+        // Re-key off the actix worker — multi-file blocking I/O.
+        let old = old_secret.clone();
+        let news = new_secret.clone();
+        web::block(move || reencrypt_all_at_rest(&old, &news))
+            .await
+            .unwrap_or_default()
+    };
+    audit(&format!("ORCHESTRATE_REENCRYPT operator={} rekeyed_total={} store_errors={}",
+                   operator, reencrypt_report.total(), reencrypt_report.errors.len()));
+
     audit(&format!("ORCHESTRATE_OK operator={} fingerprint={} peer_count={}",
                    operator, fingerprint, peers.len()));
     // Re-review LOW: only report a self_backup path if one actually
@@ -929,6 +1099,7 @@ pub async fn api_coordinated_rotate(
         "new_secret": new_secret,
         "peer_count": peers.len(),
         "self_backup": backup_reported,
+        "at_rest_reencrypt": reencrypt_report,
         "restart_required": true,
         "important": "Coordinated rotation complete. Copy the new_secret to a \
                       password manager NOW — this is the only time it will be \

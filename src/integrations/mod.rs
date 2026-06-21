@@ -497,3 +497,195 @@ impl IntegrationState {
         }
     }
 }
+
+// ═══════════════════════════════════════════════
+// ─── Cluster-secret rotation: re-encrypt vault ───
+// ═══════════════════════════════════════════════
+
+/// Derive the integration vault's 32-byte AES-256 key from an EXPLICIT
+/// cluster secret. Byte-identical to the derivation in
+/// `IntegrationState::new` (HKDF-SHA256, salt `wolfstack-integrations-v1`,
+/// info `credential-encryption`) — kept in lockstep so a value the live
+/// state encrypted can be decrypted here during rotation.
+fn derive_vault_key(cluster_secret: &str) -> Result<Vec<u8>, String> {
+    let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"wolfstack-integrations-v1");
+    let prk = salt.extract(cluster_secret.as_bytes());
+    let okm = prk
+        .expand(&[b"credential-encryption"], &ring::aead::AES_256_GCM)
+        .map_err(|_| "HKDF expand failed".to_string())?;
+    let mut key_bytes = vec![0u8; 32];
+    okm.fill(&mut key_bytes).map_err(|_| "HKDF fill failed".to_string())?;
+    Ok(key_bytes)
+}
+
+/// AES-256-GCM seal: returns nonce(12) || ciphertext || tag(16). Mirrors
+/// `IntegrationState::encrypt` but keyed by explicit bytes.
+fn vault_seal(plaintext: &[u8], key_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use ring::aead;
+    use ring::rand::{SystemRandom, SecureRandom};
+    let key = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes)
+        .map_err(|_| "Failed to create AES key".to_string())?;
+    let key = aead::LessSafeKey::new(key);
+    let rng = SystemRandom::new();
+    let mut nonce_bytes = [0u8; 12];
+    rng.fill(&mut nonce_bytes).map_err(|_| "Failed to generate nonce".to_string())?;
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+    let mut in_out = plaintext.to_vec();
+    key.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
+        .map_err(|_| "Encryption failed".to_string())?;
+    let mut result = Vec::with_capacity(12 + in_out.len());
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&in_out);
+    Ok(result)
+}
+
+/// AES-256-GCM open of nonce(12) || ciphertext || tag(16). Returns `None`
+/// on any failure (too short, tag mismatch) so the rotation path can
+/// treat "didn't decrypt under old" as skip-not-destroy. Mirrors
+/// `IntegrationState::decrypt` but keyed by explicit bytes and
+/// non-erroring.
+fn vault_open(data: &[u8], key_bytes: &[u8]) -> Option<Vec<u8>> {
+    use ring::aead;
+    if data.len() < 12 + 16 {
+        return None;
+    }
+    let key = aead::UnboundKey::new(&aead::AES_256_GCM, key_bytes).ok()?;
+    let key = aead::LessSafeKey::new(key);
+    let (nonce_bytes, ciphertext_and_tag) = data.split_at(12);
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes.try_into().ok()?);
+    let mut in_out = ciphertext_and_tag.to_vec();
+    let plaintext = key.open_in_place(nonce, aead::Aad::empty(), &mut in_out).ok()?;
+    Some(plaintext.to_vec())
+}
+
+/// Re-key one base64(nonce||ct||tag) credential blob from `old_key` to
+/// `new_key`. Returns the new base64 on success, `None` if it didn't
+/// decrypt under `old_key` (caller leaves it byte-identical). Split out
+/// so the loss-free behaviour is unit-testable without disk I/O.
+fn reencrypt_vault_blob(encoded: &str, old_key: &[u8], new_key: &[u8]) -> Option<String> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let plaintext = vault_open(&raw, old_key)?;
+    let resealed = vault_seal(&plaintext, new_key).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(&resealed))
+}
+
+/// Re-encrypt every stored integration credential in `vault.json` from
+/// the OLD cluster secret to the NEW one, as part of a cluster-secret
+/// rotation. Returns the number of credentials re-keyed.
+///
+/// Operates directly on the file rather than the live `IntegrationState`
+/// (whose `encryption_key` was derived at startup and is immutable). A
+/// restart follows rotation, after which `IntegrationState::new` rebuilds
+/// with the new-secret-derived key and reads these re-keyed blobs.
+///
+/// Safety contract (loss-free, idempotent):
+///   • A blob that fails to decrypt under `old` (sealed under a different
+///     secret, or corrupt) is left BYTE-IDENTICAL and logged as skipped —
+///     never destroyed.
+///   • `old == new` short-circuits to a no-op.
+///   • A missing vault file is a no-op; an unparseable one is an error
+///     (refuse rather than truncate a recoverable file).
+pub fn reencrypt_at_rest(old: &str, new: &str) -> Result<usize, String> {
+    if old == new {
+        return Ok(0);
+    }
+    let path = vault_file();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Ok(0), // no vault on this node
+    };
+    let mut vault: Vec<StoredCredential> = serde_json::from_str(&raw)
+        .map_err(|e| format!("integrations vault.json parse failed during rotation \
+                              re-encrypt: {} — left unchanged", e))?;
+
+    let old_key = derive_vault_key(old)?;
+    let new_key = derive_vault_key(new)?;
+
+    let mut rekeyed = 0usize;
+    let mut skipped = 0usize;
+    for cred in &mut vault {
+        match reencrypt_vault_blob(&cred.encrypted_data, &old_key, &new_key) {
+            Some(reenc) => { cred.encrypted_data = reenc; rekeyed += 1; }
+            None => {
+                warn!(target: "secret_rotation",
+                    "integrations: credential for instance '{}' did not decrypt with the \
+                     old cluster secret during rotation — left unchanged (re-enter it in \
+                     the integration's settings if it stops working)", cred.instance_id);
+                skipped += 1;
+            }
+        }
+    }
+
+    if rekeyed > 0 {
+        // Checked, atomic write (NOT save_json, which swallows write errors):
+        // if this fails, the on-disk blobs are still old-key while the new
+        // secret has landed — we MUST surface that so the orchestrator records
+        // it instead of silently orphaning every integration credential.
+        std::fs::create_dir_all(INTEGRATIONS_DIR)
+            .map_err(|e| format!("integrations: create dir failed: {}", e))?;
+        let json = serde_json::to_string_pretty(&vault)
+            .map_err(|e| format!("integrations: serialize failed: {}", e))?;
+        let tmp = format!("{}.tmp", path);
+        std::fs::write(&tmp, &json)
+            .map_err(|e| format!("integrations: write {} failed: {}", tmp, e))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| format!("integrations: rename {} failed: {}", path, e))?;
+    }
+    if skipped > 0 {
+        warn!(target: "secret_rotation",
+            "integrations: re-keyed {} credential(s), skipped {} (undecryptable — \
+             re-enter them if the integration stops working)",
+            rekeyed, skipped);
+    }
+    Ok(rekeyed)
+}
+
+#[cfg(test)]
+mod reencrypt_tests {
+    use super::*;
+    use base64::Engine;
+
+    const A: &str = "wsk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "wsk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const C: &str = "wsk_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn b64(v: &[u8]) -> String { base64::engine::general_purpose::STANDARD.encode(v) }
+
+    #[test]
+    fn vault_blob_round_trip_a_to_b() {
+        let ka = derive_vault_key(A).unwrap();
+        let kb = derive_vault_key(B).unwrap();
+        let plain = br#"{"token":"abc123"}"#;
+        let sealed_a = b64(&vault_seal(plain, &ka).unwrap());
+        let reenc = reencrypt_vault_blob(&sealed_a, &ka, &kb).expect("rekey A->B");
+        // Opens under B, not under A.
+        let raw_b = base64::engine::general_purpose::STANDARD.decode(&reenc).unwrap();
+        assert_eq!(vault_open(&raw_b, &kb).unwrap(), plain);
+        assert!(vault_open(&raw_b, &ka).is_none());
+    }
+
+    #[test]
+    fn vault_blob_sealed_under_other_secret_is_skipped() {
+        // Sealed under C; rotating A->B must NOT decode it (returns None →
+        // caller leaves it byte-identical).
+        let kc = derive_vault_key(C).unwrap();
+        let ka = derive_vault_key(A).unwrap();
+        let kb = derive_vault_key(B).unwrap();
+        let sealed_c = b64(&vault_seal(b"secret", &kc).unwrap());
+        assert!(reencrypt_vault_blob(&sealed_c, &ka, &kb).is_none(),
+            "a blob sealed under a different secret must be skipped, not corrupted");
+        // Original still opens under C — proof nothing was mutated.
+        let raw_c = base64::engine::general_purpose::STANDARD.decode(&sealed_c).unwrap();
+        assert_eq!(vault_open(&raw_c, &kc).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn vault_blob_garbage_is_skipped() {
+        let ka = derive_vault_key(A).unwrap();
+        let kb = derive_vault_key(B).unwrap();
+        assert!(reencrypt_vault_blob("not-valid-base64!!!", &ka, &kb).is_none());
+        // Valid base64 but too short to be nonce+tag.
+        assert!(reencrypt_vault_blob(&b64(b"short"), &ka, &kb).is_none());
+    }
+}

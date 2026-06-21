@@ -97,6 +97,105 @@ pub fn save_cluster_secret(secret: &str) -> Result<(), String> {
         .map_err(|e| format!("Cannot write custom-cluster-secret: {}", e))
 }
 
+/// Verify that `username`+`password` identify an ADMIN/privileged user on
+/// THIS node, using the exact same credential check the interactive login
+/// path uses. This is the gate for the cluster-join handshake: a leaked
+/// cluster secret or join token alone must NOT let an attacker graft this
+/// server onto their fleet — they must additionally prove they control an
+/// admin account on this specific machine.
+///
+/// "Admin" is resolved the same way the rest of the app distinguishes
+/// privileged users:
+///   • WolfStack-account auth (`authenticate_wolfstack_user`) — the user
+///     must exist AND have `role == "admin"` (viewers are rejected).
+///   • Linux system auth (`authenticate_user`, the /etc/shadow crypt()
+///     check used by login) — the account must additionally be `root` or
+///     a member of the `sudo` / `wheel` group, i.e. an account that can
+///     already administer the box.
+///
+/// Returns `true` only when BOTH the password verifies AND the account is
+/// privileged. Never logs the password. The two sources are tried in the
+/// same order as the login handler so behaviour is identical.
+pub fn verify_target_admin(username: &str, password: &str) -> bool {
+    if username.is_empty() || password.is_empty() {
+        return false;
+    }
+    // WolfStack accounts first (mirrors the login handler ordering). A
+    // matching WolfStack account is authoritative — if the password is
+    // right but the role isn't admin, reject (don't fall through to Linux
+    // auth, which could accept a same-named system account and bypass the
+    // role check).
+    {
+        let store = crate::auth::users::UserStore::load();
+        if store.find(username).is_some() {
+            return match crate::auth::users::authenticate_wolfstack_user(username, password) {
+                Some(user) => user.role == "admin",
+                None => false,
+            };
+        }
+    }
+    // Linux system account: verify the password via the same crypt() path
+    // the login uses, then require the account be privileged (root or in
+    // sudo/wheel). The login itself proves control of the box; the group
+    // check enforces the "admin" requirement.
+    if authenticate_user(username, password) {
+        return linux_user_is_privileged(username);
+    }
+    false
+}
+
+/// True if a Linux account is `root` or belongs to the `sudo` / `wheel`
+/// group — the conventional "can administer this host" set across Debian
+/// (`sudo`) and RHEL/Arch (`wheel`). Reads /etc/group + /etc/passwd; if
+/// they can't be read we fail closed (return false) rather than granting.
+fn linux_user_is_privileged(username: &str) -> bool {
+    if username == "root" {
+        return true;
+    }
+    // Supplementary-group membership via /etc/group: a line is
+    // `name:passwd:gid:member1,member2,...`. We match the `sudo`/`wheel`
+    // groups' member lists.
+    let primary_gid: Option<String> = std::fs::read_to_string("/etc/passwd")
+        .ok()
+        .and_then(|passwd| {
+            passwd.lines().find_map(|line| {
+                let parts: Vec<&str> = line.split(':').collect();
+                // name:passwd:uid:gid:...
+                if parts.len() >= 4 && parts[0] == username {
+                    Some(parts[3].to_string())
+                } else {
+                    None
+                }
+            })
+        });
+    if let Ok(group) = std::fs::read_to_string("/etc/group") {
+        for line in group.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() < 4 {
+                continue;
+            }
+            let gname = parts[0];
+            let gid = parts[2];
+            let is_admin_group = gname == "sudo" || gname == "wheel";
+            if !is_admin_group {
+                continue;
+            }
+            // Primary group match (rare for sudo/wheel but possible).
+            if primary_gid.as_deref() == Some(gid) {
+                return true;
+            }
+            // Supplementary member list.
+            if parts[3]
+                .split(',')
+                .any(|m| !m.is_empty() && m == username)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Stage 2 of the cluster-secret migration: on a FRESH install (no
 /// custom-secret file AND no peers configured), generate a fresh
 /// per-install secret instead of inheriting the built-in default

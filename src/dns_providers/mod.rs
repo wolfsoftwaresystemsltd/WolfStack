@@ -390,6 +390,47 @@ impl DnsProviderStore {
         }
         Ok((migrated, already, errored))
     }
+
+    /// Re-encrypt every v2 (cluster-secret-keyed) credential blob from the
+    /// OLD cluster secret to the NEW one, as part of a cluster-secret
+    /// rotation. Returns the number of entries actually re-keyed.
+    ///
+    /// Safety contract (loss-free, idempotent):
+    ///   • Only `v2:` values are touched. Legacy v1 XOR values use a
+    ///     STATIC binary key independent of the cluster secret, so a
+    ///     rotation does not affect them — they're left untouched.
+    ///   • A v2 value that fails to decrypt under `old` (sealed under a
+    ///     different secret, or corrupt) is left BYTE-IDENTICAL and
+    ///     logged as skipped — never destroyed.
+    ///   • An empty field is left untouched.
+    ///   • `old == new` short-circuits to a no-op.
+    pub fn reencrypt_at_rest(&mut self, old: &str, new: &str) -> Result<usize, String> {
+        if old == new {
+            return Ok(0);
+        }
+        let mut rekeyed = 0usize;
+        let mut skipped = 0usize;
+        for entry in &mut self.providers {
+            match crate::at_rest_crypto::reencrypt_v2_field(
+                &entry.credentials_enc, AT_REST_PURPOSE, old, new,
+            ) {
+                crate::at_rest_crypto::ReencryptOutcome::Rekeyed(v) => {
+                    entry.credentials_enc = v; rekeyed += 1;
+                }
+                crate::at_rest_crypto::ReencryptOutcome::Skipped => { skipped += 1; }
+                crate::at_rest_crypto::ReencryptOutcome::Untouched => {}
+            }
+        }
+        if rekeyed > 0 {
+            self.save()?;
+        }
+        if skipped > 0 {
+            tracing::info!(target: "secret_rotation",
+                "dns-providers: re-keyed {} credential(s), skipped {} (legacy-v1/undecryptable)",
+                rekeyed, skipped);
+        }
+        Ok(rekeyed)
+    }
 }
 
 #[cfg(test)]

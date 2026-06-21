@@ -242,6 +242,73 @@ pub fn decrypt_secret(ciphertext: &str, cluster_secret: &str) -> Result<String, 
         .map_err(|e| format!("Decrypted secret is not valid UTF-8: {}", e))
 }
 
+/// Re-encrypt every OIDC provider's `client_secret` from the OLD cluster
+/// secret to the NEW one, as part of a cluster-secret rotation. Returns
+/// the number of client secrets actually re-keyed.
+///
+/// Reads `oidc.json`, re-keys each `encrypted:aes256:` field, writes it
+/// back. Safety contract (loss-free, idempotent):
+///   • An empty client_secret is left untouched (nothing to re-key).
+///   • A plaintext value (no `encrypted:` prefix) is left untouched — it
+///     isn't keyed to any secret.
+///   • A value that fails to decrypt under `old` is left untouched and
+///     logged as skipped (it was sealed under a different secret, or is
+///     corrupt — never overwrite a secret we couldn't read).
+///   • `old == new` short-circuits to a no-op.
+pub fn reencrypt_at_rest(old: &str, new: &str) -> Result<usize, String> {
+    if old == new {
+        return Ok(0);
+    }
+    // Read the file directly. If it's missing, there's nothing to do.
+    // If it's present but unparseable, refuse rather than risk writing a
+    // truncated config over a recoverable one.
+    let path = oidc_config_path();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Ok(0), // no OIDC config on this node
+    };
+    let mut cfg: OidcConfig = serde_json::from_str(&raw)
+        .map_err(|e| format!("oidc.json parse failed during rotation re-encrypt: {} \
+                              — left unchanged", e))?;
+
+    let mut rekeyed = 0usize;
+    let mut skipped = 0usize;
+    for provider in &mut cfg.providers {
+        if provider.client_secret.is_empty() {
+            continue;
+        }
+        if !provider.client_secret.starts_with("encrypted:aes256:") {
+            // Plaintext / unknown format — not cluster-secret-keyed.
+            skipped += 1;
+            continue;
+        }
+        let plaintext = match decrypt_secret(&provider.client_secret, old) {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(target: "secret_rotation",
+                    "oidc: client_secret for provider '{}' did not decrypt with the old \
+                     cluster secret during rotation — left unchanged (re-enter it in \
+                     Settings → SSO if this provider stops working)", provider.id);
+                skipped += 1;
+                continue;
+            }
+        };
+        let reenc = encrypt_secret(&plaintext, new)
+            .map_err(|e| format!("re-encrypt oidc client_secret for '{}': {}", provider.id, e))?;
+        provider.client_secret = reenc;
+        rekeyed += 1;
+    }
+    if rekeyed > 0 {
+        cfg.save()?;
+    }
+    if skipped > 0 {
+        tracing::info!(target: "secret_rotation",
+            "oidc: re-keyed {} client secret(s), skipped {} (empty/plaintext/undecryptable)",
+            rekeyed, skipped);
+    }
+    Ok(rekeyed)
+}
+
 /// Read random bytes from /dev/urandom
 fn read_urandom(buf: &mut [u8]) -> Result<(), String> {
     use std::io::Read;
