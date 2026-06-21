@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.55.3: orphaned-LXC adoption uses a real storage (not hardcoded local-lvm) + stops re-warning** _(2026-06-21 — [`a5a27754`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a5a27754d4366a775a62a6647320ef596c878927))_
 - **v24.55.2: cluster-join secret reconciliation + alert-toggle enforcement + backup folder fixes** _(2026-06-21 — [`7ebc4bec`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7ebc4becff368c746541565f44a429c077409d56))_
 - **v24.55.1: WolfNet reapply never flushes a non-lxcbr0 container's eth0 (Golden-Rule fix)** _(2026-06-21 — [`08eec421`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/08eec4213f82f6803587eb44d7f5f6b43e413ece))_
 - **v24.55.0: cluster-secret hardening — re-encrypt on rotation, DB password recovery, authenticated join** _(2026-06-21 — [`d4899b46`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d4899b4639431ec22818ec6e7f5f638bbd90d1ea))_
