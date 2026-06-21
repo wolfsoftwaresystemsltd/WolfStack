@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.55.1: WolfNet reapply never flushes a non-lxcbr0 container's eth0 (Golden-Rule fix)** _(2026-06-21 — [`08eec421`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/08eec4213f82f6803587eb44d7f5f6b43e413ece))_
 - **v24.55.0: cluster-secret hardening — re-encrypt on rotation, DB password recovery, authenticated join** _(2026-06-21 — [`d4899b46`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d4899b4639431ec22818ec6e7f5f638bbd90d1ea))_
 - **v24.54.0: Konsole-style terminals everywhere (tabs + split), shared engine** _(2026-06-20 — [`53228692`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/532286928e16977aec128f6ac0266338a203b6a1))_
 - **v24.53.1: move the fleet menu bar to a full-width application bar at the very top** _(2026-06-20 — [`23350ff5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/23350ff5f36e1b397d1d73a580d3973fe0b0ec0f))_
