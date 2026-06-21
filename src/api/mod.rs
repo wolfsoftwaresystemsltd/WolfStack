@@ -243,6 +243,12 @@ pub struct AppState {
     /// In-memory, 15-minute TTL, single-use. The static per-install
     /// `join_token` above still works alongside these for backward compat.
     pub one_time_join_tokens: Arc<crate::cluster_join::OneTimeTokens>,
+    /// Single-use bootstrap grants minted by THIS node's join-handshake on
+    /// success. The joining master presents one back on /api/cluster/secret/
+    /// receive, letting a node that currently holds a DIFFERENT secret adopt
+    /// the fleet secret right after an admin-authenticated join (closes the
+    /// "added a node but its containers don't show" gap). Consumed on use.
+    pub bootstrap_grants: Arc<crate::cluster_join::OneTimeTokens>,
     pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
     pub ai_agent: Arc<crate::ai::AiAgent>,
     /// Pre-built agent status response, updated every 2s by background task
@@ -3327,12 +3333,26 @@ pub async fn cluster_join_handshake(
     // via `take`, and was reinserted on every failure path above — so a
     // success here means it is correctly single-use with no consume race.
 
-    HttpResponse::Ok().json(serde_json::json!({
+    // Mint a single-use bootstrap grant. The master presents it on the
+    // immediately-following /api/cluster/secret/receive push so the fleet
+    // secret can be adopted even though we currently hold a DIFFERENT secret
+    // (otherwise that push fails inter-node auth and we stay divergent — our
+    // resources then never appear to the cluster). Best-effort: if minting
+    // fails (CSPRNG), the master falls back to the legacy secret/default auth.
+    let bootstrap_grant = state.bootstrap_grants.mint().ok();
+
+    let mut resp_body = serde_json::json!({
         "valid": true,
         "hostname": hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_default(),
         "cluster_fingerprint": crate::cluster_join::cluster_fingerprint(),
         "cluster_name": our_cluster,
-    }))
+    });
+    // Only include the grant when minting succeeded — never emit a null field
+    // (which would needlessly reveal a CSPRNG failure).
+    if let Some(g) = bootstrap_grant {
+        resp_body["bootstrap_grant"] = serde_json::json!(g);
+    }
+    HttpResponse::Ok().json(resp_body)
 }
 
 /// Append a cluster-join / secret-change entry to BOTH the persistent
@@ -3728,7 +3748,44 @@ fn has_no_other_peers(state: &AppState) -> bool {
 /// configured: a peerless node is fresh (case 1); a node with peers
 /// is active (case 2).
 pub async fn cluster_secret_receive(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+    // Auth: the normal inter-node secret, OR a single-use bootstrap grant this
+    // node minted in its own join-handshake moments ago. The grant path lets a
+    // node that currently holds a DIFFERENT secret adopt the fleet secret right
+    // after an admin-authenticated join (without it, this push fails inter-node
+    // auth, the node stays divergent, and its resources never appear to the
+    // cluster). The grant is checked ONLY when the normal auth fails — so an
+    // existing valid push is byte-identical and never consumes a grant — and it
+    // is single-use (consumed here).
+    let mut authed_via_grant = false;
+    match require_cluster_auth(&req, &state) {
+        Ok(_) => {}
+        Err(resp) => {
+            let grant_ok = body.get("bootstrap_grant")
+                .and_then(|v| v.as_str())
+                // Real grants are 64 hex chars; cap the input so an attacker
+                // can't feed enormous strings into the constant-time scan.
+                .filter(|g| g.len() <= 128)
+                .map(|g| state.bootstrap_grants.take(g).is_some())
+                .unwrap_or(false);
+            if !grant_ok { return resp; }
+            authed_via_grant = true;
+        }
+    }
+    if authed_via_grant {
+        // A secret adopted via the grant path = a freshly-joined node taking
+        // the fleet secret. Audit it (with source IP) so grant-path use is
+        // visible in the trail, distinct from a normal cluster-auth push.
+        let peer = req.peer_addr()
+            .map(|a| a.ip().to_canonical().to_string())
+            .unwrap_or_default();
+        cluster_join_audit(
+            &state, "cluster-node", "warning",
+            "Cluster secret adopted via bootstrap grant",
+            &format!("New cluster secret accepted via a single-use bootstrap grant from {}",
+                     if peer.is_empty() { "unknown source" } else { &peer }),
+            &peer,
+        );
+    }
     let secret = match body.get("secret").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
         _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing secret" })),
@@ -3980,6 +4037,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
     let mut last_error = String::new();
     let mut verified = false;
     let mut cluster_fingerprint: Option<String> = None;
+    let mut bootstrap_grant: Option<String> = None;
     for url in &urls {
         match client.post(url)
             .timeout(std::time::Duration::from_secs(8))
@@ -3996,6 +4054,10 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                 if let Ok(data) = resp.json::<serde_json::Value>().await {
                     if data.get("valid").and_then(|v| v.as_bool()) == Some(true) {
                         cluster_fingerprint = data.get("cluster_fingerprint")
+                            .and_then(|v| v.as_str()).map(|s| s.to_string());
+                        // Grant authorising the secret push below (lets a node
+                        // with its own secret adopt the fleet secret).
+                        bootstrap_grant = data.get("bootstrap_grant")
                             .and_then(|v| v.as_str()).map(|s| s.to_string());
                         verified = true;
                         break;
@@ -4142,12 +4204,25 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         let addr = body.address.clone();
         let secret = active_secret;
         let our_secret = state.cluster_secret.clone();
+        // Single-use grant from the handshake — lets the receiver adopt the
+        // fleet secret even if it currently holds its own (the X-WolfStack-
+        // Secret attempts below would otherwise be rejected, leaving it
+        // divergent and its resources invisible to the cluster).
+        let grant = bootstrap_grant.clone();
         tokio::spawn(async move {
             let client = &*API_HTTP_CLIENT;
             let urls = build_node_urls(&addr, port, "/api/cluster/secret/receive");
             for auth_value in [our_secret.as_str(), crate::auth::default_cluster_secret()] {
                 let mut pushed = false;
                 for url in &urls {
+                    // Only attach the bootstrap grant on the TLS (https) leg —
+                    // never on the plaintext-http fallback. Capturing the grant
+                    // then requires breaking TLS, at which point the secret in
+                    // the same body is already exposed, so the grant adds no
+                    // marginal on-wire risk. (build_node_urls puts https first;
+                    // the http legs are the WolfNet-overlay and last-resort
+                    // plaintext fallbacks.)
+                    let leg_grant = if url.starts_with("https://") { grant.clone() } else { None };
                     // `bootstrap: true` tells the receiving node "this is a
                     // first-time join; safe to self-restart so the new
                     // secret takes effect in-memory immediately". Old-code
@@ -4159,6 +4234,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                         .json(&serde_json::json!({
                             "secret": secret,
                             "bootstrap": true,
+                            "bootstrap_grant": leg_grant,
                         }))
                         .send()
                         .await
@@ -26608,6 +26684,13 @@ pub async fn alerts_config_save(req: HttpRequest, state: web::Data<AppState>, bo
     if let Some(b) = v.get("alert_cpu").and_then(|v| v.as_bool()) { config.alert_cpu = b; }
     if let Some(b) = v.get("alert_memory").and_then(|v| v.as_bool()) { config.alert_memory = b; }
     if let Some(b) = v.get("alert_disk").and_then(|v| v.as_bool()) { config.alert_disk = b; }
+    // Container monitoring toggle + threshold — these were MISSING here, so
+    // unchecking "Container memory alert" never persisted and reverted to on
+    // after Save (wabil 2026-06-21).
+    if let Some(b) = v.get("alert_containers").and_then(|v| v.as_bool()) { config.alert_containers = b; }
+    if let Some(t) = v.get("container_memory_threshold").and_then(|v| v.as_f64()) {
+        config.container_memory_threshold = t as f32;
+    }
     if let Some(i) = v.get("check_interval_secs").and_then(|v| v.as_u64()) {
         // Clamp to sensible range: 30 seconds to 1 hour
         config.check_interval_secs = i.max(30).min(3600);

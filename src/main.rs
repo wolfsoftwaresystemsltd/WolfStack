@@ -696,6 +696,11 @@ async fn main() -> std::io::Result<()> {
             cluster_secret: cluster_secret.clone(),
             join_token: api::load_join_token(),
             one_time_join_tokens: Arc::new(cluster_join::OneTimeTokens::new()),
+            // Bootstrap grants are consumed seconds after minting (handshake →
+            // immediate secret push), so a tight 120s TTL minimises the window.
+            bootstrap_grants: Arc::new(cluster_join::OneTimeTokens::with_ttl(
+                std::time::Duration::from_secs(120),
+            )),
             pbs_restore_progress: Mutex::new(Default::default()),
             ai_agent: ai_agent.clone(),
             cached_status: cached_status.clone(),

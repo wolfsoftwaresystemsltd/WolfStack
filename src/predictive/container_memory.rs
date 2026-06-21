@@ -130,6 +130,13 @@ pub fn analyze(
     acks: &AckStore,
     proposals: &crate::predictive::proposal::ProposalStore,
 ) -> Vec<Proposal> {
+    // Respect the Settings → Alerts "Container memory alert" toggle. Default
+    // true (existing behaviour unchanged); when off, emit nothing — existing
+    // findings auto-resolve since covered_scopes still reports their scopes
+    // (wabil 2026-06-21).
+    if !crate::alerting::AlertConfig::load().alert_containers {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for fact in current {
         let scope = ProposalScope {

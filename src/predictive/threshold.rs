@@ -111,12 +111,27 @@ pub fn analyze(
 ) -> Vec<Proposal> {
     let mut out = Vec::new();
 
+    // Honour the operator's Settings → Alerts event toggles. These default to
+    // true, so an existing install with default config behaves EXACTLY as
+    // before; turning "High CPU alert" / "High memory alert" / disk off now
+    // actually suppresses the finding (previously these toggles were wired to
+    // the retired legacy loop, not this engine — wabil 2026-06-21). A finding
+    // already in the Inbox auto-resolves on the next tick because the scope
+    // stays "covered" but is no longer emitted.
+    let acfg = crate::alerting::AlertConfig::load();
+
     // ── CPU ──
-    if let Some(p) = check_cpu(ctx, metrics, acks, proposals) { out.push(p); }
+    if acfg.alert_cpu {
+        if let Some(p) = check_cpu(ctx, metrics, acks, proposals) { out.push(p); }
+    }
     // ── Memory ──
-    if let Some(p) = check_memory(ctx, metrics, acks, proposals) { out.push(p); }
+    if acfg.alert_memory {
+        if let Some(p) = check_memory(ctx, metrics, acks, proposals) { out.push(p); }
+    }
     // ── Per-mount disk free space ──
-    out.extend(check_disks(ctx, metrics, acks, proposals));
+    if acfg.alert_disk {
+        out.extend(check_disks(ctx, metrics, acks, proposals));
+    }
     // ── Swap ──
     if let Some(p) = check_swap(ctx, metrics, acks, proposals) { out.push(p); }
     // ── Load ──

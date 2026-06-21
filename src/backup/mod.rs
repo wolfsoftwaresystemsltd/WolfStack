@@ -364,6 +364,39 @@ impl BackupStorage {
 mod tests {
     use super::*;
 
+    #[test]
+    fn path_discriminator_distinguishes_case_and_parent() {
+        // The whole point: case-only-differing paths must get DIFFERENT
+        // discriminators so they don't collide on a case-insensitive dest.
+        assert_ne!(short_path_discriminator("/data/temp"),
+                   short_path_discriminator("/data/Temp"));
+        // Same basename under different parents must differ too.
+        assert_ne!(short_path_discriminator("/a/x"),
+                   short_path_discriminator("/b/x"));
+        // Stable + hex (8 lowercase hex chars).
+        let d = short_path_discriminator("/data/temp");
+        assert_eq!(d, short_path_discriminator("/data/temp"));
+        assert_eq!(d.len(), 8);
+        assert!(d.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn pbs_file_level_skip_note_only_for_inapplicable_pbs() {
+        let mut pbs = BackupStorage { storage_type: StorageType::Pbs, pbs_file_level: true, ..Default::default() };
+        let vm = BackupTarget { target_type: BackupTargetType::Vm, ..Default::default() };
+        let docker = BackupTarget { target_type: BackupTargetType::Docker, ..Default::default() };
+        // VM can't do file-level → a note.
+        assert!(pbs_file_level_skip_note(&vm, &pbs).is_some());
+        // Docker WILL use pxar → no note.
+        assert!(pbs_file_level_skip_note(&docker, &pbs).is_none());
+        // file-level off → never a note, even for VM.
+        pbs.pbs_file_level = false;
+        assert!(pbs_file_level_skip_note(&vm, &pbs).is_none());
+        // non-PBS storage → never a note.
+        let local = BackupStorage { storage_type: StorageType::Local, pbs_file_level: true, ..Default::default() };
+        assert!(pbs_file_level_skip_note(&vm, &local).is_none());
+    }
+
     fn wd(path: &str, sub: &str) -> BackupStorage {
         BackupStorage {
             storage_type: StorageType::Wolfdisk,
@@ -1288,6 +1321,25 @@ fn sanitize_archive_name(s: &str) -> String {
         .collect()
 }
 
+/// Short, case-insensitive-safe discriminator derived from the FULL source
+/// path: the first 8 hex chars of SHA-256(path). Two paths that differ only by
+/// case (or share a basename under different parents) get DIFFERENT
+/// discriminators, so their backup filenames never collide — even on a
+/// case-insensitive destination filesystem. Hex is itself case-insensitive,
+/// so the discriminator can't re-introduce a case collision.
+fn short_path_discriminator(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(path.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(8);
+    use std::fmt::Write;
+    for b in digest.iter().take(4) {
+        let _ = write!(out, "{:02x}", b);
+    }
+    out
+}
+
 /// tar.gz a directory's contents (NOT the directory itself) into the
 /// given archive path. Returns the resulting archive size in bytes.
 fn tar_dir_to_gz(src_dir: &str, archive: &Path) -> Result<u64, String> {
@@ -1996,7 +2048,15 @@ pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) ->
     let safe_label = sanitize_archive_name(if label.trim().is_empty() {
         Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("folder")
     } else { label.trim() });
-    let filename = format!("systempath-{}-{}.tar.gz", safe_label, timestamp);
+    // Disambiguator derived from the FULL source path. Without it, two folders
+    // whose names differ only by case ("temp" vs "Temp") — or that share a
+    // basename under different parents ("/a/x" vs "/b/x") — collide on a
+    // case-insensitive backup destination (SMB / exFAT / APFS), so one
+    // overwrites the other (wabil 2026-06-21). A short hex hash of the exact
+    // path is case-insensitive-safe and unique per source, while the readable
+    // label is preserved.
+    let path_disc = short_path_discriminator(path);
+    let filename = format!("systempath-{}-{}-{}.tar.gz", safe_label, path_disc, timestamp);
     let tar_path = staging.join(&filename);
 
     let src = path.trim_end_matches('/');
@@ -2242,7 +2302,11 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let hostname = local_hostname();
-    let comments = backup_comments(&target);
+    let mut comments = backup_comments(&target);
+    // Make a file-level→tarball fallback (e.g. Proxmox LXC → vzdump) visible.
+    if let Some(note) = pbs_file_level_skip_note(&target, storage) {
+        comments = format!("{} | {}", comments, note);
+    }
     let cluster = local_cluster_name();
 
     // PBS file-level (pxar) path — see create_backup_with_log for the rationale.
@@ -2968,6 +3032,27 @@ fn pbs_file_level_applies(target: &BackupTarget) -> bool {
         BackupTargetType::SystemPath => true,
         BackupTargetType::Vm | BackupTargetType::Config => false,
     }
+}
+
+/// When PBS file-level is ENABLED but a target can't use it, return a plain-
+/// English reason. Makes the tarball/vzdump fallback visibly intentional in the
+/// backup's details + live log instead of looking like "file-level is broken"
+/// (wabil 2026-06-21: "file level not implemented … lxc is tar.zst"). Returns
+/// None when file-level isn't requested or the target WILL use pxar.
+fn pbs_file_level_skip_note(target: &BackupTarget, storage: &BackupStorage) -> Option<String> {
+    if storage.storage_type != StorageType::Pbs || !storage.pbs_file_level || pbs_file_level_applies(target) {
+        return None;
+    }
+    let why = match target.target_type {
+        BackupTargetType::Lxc =>
+            "Proxmox LXC rootfs is on block storage (ZFS/LVM) — pxar file-level isn't possible, using vzdump image",
+        BackupTargetType::Vm =>
+            "VMs back up as a disk image, not per-file — pxar file-level doesn't apply",
+        BackupTargetType::Config =>
+            "config backups are a single archive — pxar file-level doesn't apply",
+        _ => "pxar file-level isn't available for this target — using image/tarball backup",
+    };
+    Some(format!("PBS file-level not applicable: {}", why))
 }
 
 /// Build the pxar source pairs for a file-level PBS backup of `target`.
@@ -5086,7 +5171,13 @@ pub fn create_backup_with_log(
         let _ = log.send(format!("[{}/{}] Starting {} backup: {}",
             i + 1, total, type_name, display_name));
 
-        let comments = backup_comments_with_cluster(t, &cluster);
+        let mut comments = backup_comments_with_cluster(t, &cluster);
+        // Surface why file-level fell back (e.g. Proxmox LXC → vzdump) so it's
+        // not mistaken for a broken feature.
+        if let Some(note) = pbs_file_level_skip_note(t, &storage) {
+            let _ = log.send(format!("  {}", note));
+            comments = format!("{} | {}", comments, note);
+        }
         let hostname = local_hostname();
 
         // PBS file-level (pxar) path — upload the workload's content directory

@@ -64,13 +64,21 @@ struct PendingToken {
     expires: Instant,
 }
 
-/// In-memory store of pending one-time join tokens. Kept in-memory only:
-/// these are deliberately ephemeral (15-minute TTL) and a process restart
-/// invalidating them is the safe failure mode — an operator simply mints a
-/// fresh one. Keyed by the token string itself for O(1) verify+consume.
-#[derive(Default)]
+/// In-memory store of single-use, TTL-bounded tokens. Kept in-memory only:
+/// these are deliberately ephemeral and a process restart invalidating them is
+/// the safe failure mode — an operator simply mints a fresh one. Keyed by the
+/// token string itself for O(1) verify+consume. The TTL is per-store: join
+/// tokens use 15 min (`new()`); bootstrap grants use a much shorter window
+/// (`with_ttl`) since they're consumed seconds after minting.
 pub struct OneTimeTokens {
     inner: Mutex<HashMap<String, PendingToken>>,
+    ttl: Duration,
+}
+
+impl Default for OneTimeTokens {
+    fn default() -> Self {
+        Self::with_ttl(ONE_TIME_TTL)
+    }
 }
 
 impl OneTimeTokens {
@@ -78,7 +86,15 @@ impl OneTimeTokens {
         Self::default()
     }
 
-    /// Mint a new one-time token, store it with a 15-minute expiry, and
+    /// Store with a custom TTL (e.g. a short window for bootstrap grants).
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            ttl,
+        }
+    }
+
+    /// Mint a new one-time token, store it with this store's TTL, and
     /// return the plaintext (shown to the operator ONCE). Also prunes any
     /// already-expired entries so the map can't grow without bound.
     /// Returns `Err` if the system CSPRNG is unavailable — we refuse to
@@ -94,7 +110,7 @@ impl OneTimeTokens {
         guard.insert(
             token.clone(),
             PendingToken {
-                expires: Instant::now() + ONE_TIME_TTL,
+                expires: Instant::now() + self.ttl,
             },
         );
         Ok(token)
