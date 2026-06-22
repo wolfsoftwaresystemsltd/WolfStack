@@ -200,9 +200,19 @@ if [ -f /etc/unraid-version ]; then
 
     # Stop any agent we previously started (upgrade / re-run) so the new binary
     # takes over the port cleanly.
-    if pgrep -f "$WS_APPDATA/wolfstack --agent" >/dev/null 2>&1; then
+    #
+    # Match on "wolfstack --agent" only — NOT the absolute "$WS_APPDATA/..." path.
+    # We start the agent with `cd "$WS_APPDATA" && ./wolfstack --agent`, so its
+    # /proc/<pid>/cmdline is the RELATIVE `./wolfstack --agent`. The old absolute
+    # pattern never matched it, so on every update the running agent was never
+    # stopped: the new binary landed on disk but the old agent kept holding the
+    # port, the freshly-started one couldn't bind, and the node "updated"
+    # without errors yet stayed on the old version (klasSponsor, Unraid,
+    # 2026-06-22). "wolfstack --agent" matches both the relative and absolute
+    # forms; on an Unraid agent node it's the only such process.
+    if pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
         echo "  Stopping running WolfStack agent for upgrade..."
-        pkill -f "$WS_APPDATA/wolfstack --agent" 2>/dev/null || true
+        pkill -f "wolfstack --agent" 2>/dev/null || true
         sleep 2
     fi
 
