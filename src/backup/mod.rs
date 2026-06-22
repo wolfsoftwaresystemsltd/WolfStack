@@ -777,6 +777,14 @@ pub struct BackupSchedule {
     /// Last time this schedule ran (ISO 8601)
     #[serde(default)]
     pub last_run: String,
+    /// When this schedule was created (ISO 8601). Lets the freshness analyzer
+    /// give a brand-new schedule one full interval before alarming that it has
+    /// "never run" — otherwise a schedule created at 21:06 flags instantly even
+    /// though its first nightly run is hours away (wabil 2026-06-22). Empty on
+    /// schedules created before this field existed → treated as "unknown age",
+    /// which preserves the prior (fire-immediately) behaviour for them.
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

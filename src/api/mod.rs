@@ -17368,6 +17368,7 @@ pub async fn backup_schedule_create(
         storage,
         enabled: body.enabled,
         last_run: String::new(),
+        created_at: chrono::Utc::now().to_rfc3339(),
     };
     match backup::save_schedule(schedule) {
         Ok(s) => HttpResponse::Ok().json(serde_json::json!({

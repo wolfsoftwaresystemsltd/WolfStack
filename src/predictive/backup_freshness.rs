@@ -70,6 +70,11 @@ pub struct ScheduleFact {
     pub since_last_run_hours: Option<f64>,
     /// Raw last_run for the proposal evidence panel.
     pub last_run_iso: String,
+    /// Hours since the schedule was CREATED. `None` for schedules created
+    /// before `created_at` existed (treated as old enough to alarm). Used to
+    /// give a brand-new schedule one full interval before the "never run"
+    /// finding fires — its first run may simply not be due yet.
+    pub age_hours: Option<f64>,
 }
 
 /// Sample backup schedules. Synchronous — local file read only.
@@ -87,12 +92,16 @@ pub fn sample_backup_freshness_now() -> Vec<ScheduleFact> {
             let since = parse_iso(&s.last_run).map(|t|
                 (now - t).num_milliseconds() as f64 / 3_600_000.0
             );
+            let age = parse_iso(&s.created_at).map(|t|
+                (now - t).num_milliseconds() as f64 / 3_600_000.0
+            );
             ScheduleFact {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 interval_hours,
                 since_last_run_hours: since,
                 last_run_iso: s.last_run.clone(),
+                age_hours: age,
             }
         })
         .collect()
@@ -158,7 +167,17 @@ pub fn analyze(
                     None    => continue,
                 }
             }
-            None => (Severity::High, HIGH_MULT),
+            None => {
+                // Never run. A schedule younger than one full interval simply
+                // hasn't reached its first run yet (created 21:06, first nightly
+                // run still hours away) — don't alarm (wabil 2026-06-22). Once a
+                // whole interval has elapsed with still no run, it IS the
+                // pre-disaster condition this analyzer exists to catch.
+                if let Some(age) = fact.age_hours {
+                    if age < fact.interval_hours { continue; }
+                }
+                (Severity::High, HIGH_MULT)
+            }
         };
         out.push(build_proposal(fact, &scope, severity, mult));
     }
@@ -290,6 +309,9 @@ mod tests {
             interval_hours,
             since_last_run_hours: since_hours,
             last_run_iso: "2026-04-01T00:00:00Z".into(),
+            // None = unknown creation age → never-ran fires immediately, the
+            // legacy behaviour these tests assert. Grace is covered separately.
+            age_hours: None,
         }
     }
 
@@ -338,6 +360,27 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].severity, Severity::High);
         assert!(p[0].title.contains("never run"));
+    }
+
+    #[test]
+    fn never_ran_but_young_is_silent_then_fires_after_one_interval() {
+        // wabil 2026-06-22: a daily schedule created 5h ago whose first nightly
+        // run isn't due yet must NOT be flagged "never run".
+        let young = ScheduleFact {
+            id: "id-young".into(), name: "Nightly".into(), interval_hours: 24.0,
+            since_last_run_hours: None, last_run_iso: String::new(), age_hours: Some(5.0),
+        };
+        let p = analyze(&ctx(), &[young], &AckStore::default(), &ProposalStore::default());
+        assert!(p.is_empty(), "a schedule younger than one interval must stay silent");
+
+        // Past one full interval with still no run → the real problem fires.
+        let stale = ScheduleFact {
+            id: "id-stale".into(), name: "Nightly".into(), interval_hours: 24.0,
+            since_last_run_hours: None, last_run_iso: String::new(), age_hours: Some(30.0),
+        };
+        let p = analyze(&ctx(), &[stale], &AckStore::default(), &ProposalStore::default());
+        assert_eq!(p.len(), 1, "after one interval, never-run must alarm");
+        assert_eq!(p[0].severity, Severity::High);
     }
 
     #[test]

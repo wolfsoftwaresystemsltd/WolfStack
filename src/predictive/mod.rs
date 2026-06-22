@@ -231,9 +231,19 @@ pub fn classify_bind(bind: IpAddr, snap: &NetworkSnapshot) -> NetworkReachabilit
         if !snap.public_ipv4.is_empty() || !snap.public_ipv6.is_empty() {
             return NetworkReachability::PublicInternet;
         }
+        // A wildcard (`0.0.0.0` / `::`) binds to EVERY interface, so if the
+        // host has any real (non-overlay) LAN interface the service is
+        // LAN-exposed — NOT overlay-only. Gary 2026-06-22: postgres on
+        // `0.0.0.0:5432` on a node with both a LAN NIC and `wolfnet0` was
+        // mislabeled "listening on overlay 'wolfnet0'". OverlayOnly is only
+        // correct for a wildcard when the overlay is the SOLE non-loopback
+        // interface (checked next); a specific bind to the overlay's own
+        // address is handled by the non-wildcard branch below.
+        if any_non_overlay_lan_addr(snap) {
+            return NetworkReachability::LocalNetwork;
+        }
         if let Some(network) = overlay_interface_carrying(bind, snap) {
-            // Wildcard but the only non-loopback interface is an
-            // overlay — rare, but classify accordingly.
+            // Wildcard and the only non-loopback interface is an overlay.
             return NetworkReachability::OverlayOnly { network };
         }
         // Some non-loopback interface exists but no public addr —
@@ -363,6 +373,17 @@ fn overlay_interface_carrying(bind: IpAddr, snap: &NetworkSnapshot) -> Option<St
 fn any_non_loopback_addr(snap: &NetworkSnapshot) -> bool {
     snap.interfaces.iter().any(|i| {
         i.name != "lo" && i.addresses.iter().any(|a| {
+            a.address.parse::<IpAddr>().map(|ip| !ip.is_loopback()).unwrap_or(false)
+        })
+    })
+}
+
+/// True when the host has a non-loopback, NON-overlay interface carrying a real
+/// address — i.e. a wildcard bind would actually be reachable on the LAN (or
+/// beyond), so it must not be classified as overlay-only.
+fn any_non_overlay_lan_addr(snap: &NetworkSnapshot) -> bool {
+    snap.interfaces.iter().any(|i| {
+        i.name != "lo" && !is_overlay_vpn_interface(&i.name) && i.addresses.iter().any(|a| {
             a.address.parse::<IpAddr>().map(|ip| !ip.is_loopback()).unwrap_or(false)
         })
     })
@@ -549,6 +570,36 @@ mod tests {
         assert_eq!(
             classify_bind("0.0.0.0".parse().unwrap(), &s),
             NetworkReachability::Unknown
+        );
+    }
+
+    #[test]
+    fn wildcard_v4_with_lan_and_overlay_is_local_not_overlay() {
+        // Gary 2026-06-22: postgres on 0.0.0.0:5432 on a node with BOTH a LAN
+        // NIC and wolfnet0 was wrongly tagged "listening on overlay wolfnet0".
+        // A wildcard reaches the LAN too, so it's LocalNetwork, never overlay.
+        let s = snap(vec![
+            iface("lo", &[("127.0.0.1", "inet")]),
+            iface("eth0", &[("192.168.1.10", "inet")]),
+            iface("wolfnet0", &[("10.42.0.5", "inet")]),
+        ]);
+        assert_eq!(
+            classify_bind("0.0.0.0".parse().unwrap(), &s),
+            NetworkReachability::LocalNetwork
+        );
+    }
+
+    #[test]
+    fn wildcard_v4_overlay_only_when_overlay_is_sole_interface() {
+        // No LAN NIC — overlay is the only non-loopback interface, so a
+        // wildcard bind genuinely is overlay-only.
+        let s = snap(vec![
+            iface("lo", &[("127.0.0.1", "inet")]),
+            iface("wolfnet0", &[("10.42.0.5", "inet")]),
+        ]);
+        assert_eq!(
+            classify_bind("0.0.0.0".parse().unwrap(), &s),
+            NetworkReachability::OverlayOnly { network: "wolfnet0".into() }
         );
     }
 
