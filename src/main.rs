@@ -878,6 +878,14 @@ async fn main() -> std::io::Result<()> {
         crate::auth::set_protected_workload_subnets(
             networking::collect_workload_subnets(),
         );
+        // Install `ipset` if missing BEFORE the first ipset_available() probe
+        // below (it caches its result). Debian 13 / nftables-default hosts often
+        // ship without it, so the O(1) blocklist match-set never engaged and
+        // WolfStack walked one DROP rule per IP — on a router that per-packet
+        // FORWARD walk saturates ksoftirqd (PapaSchlumpf, recurred 2026-06-22:
+        // 546 per-IP rules, no ipset). migrate_legacy_block_rules() below then
+        // folds those legacy rules into the set.
+        crate::auth::ensure_ipset_installed();
         for ip in crate::auth::set_protected_node_ips(app_state.cluster.wolfstack_node_ips()) {
             crate::auth::kernel_unblock_ip(&ip);
         }

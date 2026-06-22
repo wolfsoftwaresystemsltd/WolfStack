@@ -1572,6 +1572,46 @@ fn ipset_available() -> bool {
     })
 }
 
+/// Ensure the `ipset` userspace tool is installed so the O(1) match-set
+/// blocklist path can engage. Many Debian 13 / nftables-default hosts ship
+/// WITHOUT it, so `ipset_available()` is false and WolfStack silently falls
+/// back to one `-s <ip> -j DROP` rule per blocked IP. On a router that per-packet
+/// FORWARD walk saturates ksoftirqd and collapses throughput — PapaSchlumpf's
+/// recurring issue, confirmed 2026-06-22 (546 legacy per-IP rules, no ipset,
+/// NET_RX softirqs in the tens of millions). threat_intel already auto-installs
+/// ipset; the brute-force/scan blocklist did not, which is why the v24.48 O(1)
+/// fix never engaged on these hosts.
+///
+/// Best-effort + idempotent: a no-op when ipset is already present. MUST run
+/// before the first `ipset_available()` call — that result is cached for the
+/// process, so installing afterwards wouldn't be picked up until a restart.
+pub fn ensure_ipset_installed() {
+    // Same probe `ipset_available()` uses (systemd PATH often omits /usr/sbin).
+    let present = std::process::Command::new("which")
+        .arg("ipset")
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+        || ["/usr/sbin/ipset", "/sbin/ipset", "/usr/bin/ipset", "/bin/ipset"]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists());
+    if present {
+        return;
+    }
+    match crate::installer::packages::install("ipset") {
+        Ok(_) => tracing::warn!(
+            "auth: ipset was missing — installed it so the O(1) blocklist match-set \
+             engages instead of a per-IP DROP rule walk (relieves router ksoftirqd)"
+        ),
+        Err(e) => tracing::warn!(
+            "auth: ipset missing and auto-install failed ({}); blocklist falls back to \
+             per-IP iptables rules — a large blocklist can saturate ksoftirqd on a \
+             router. Install manually: apt install ipset",
+            e
+        ),
+    }
+}
+
 /// Ensure `-m set --match-set <set> src -j DROP` exists at the top of `chain`
 /// for the given iptables variant. Idempotent (`-C` then `-I`). Returns true
 /// if the rule is present (or the binary is simply absent — e.g. no ip6tables,
