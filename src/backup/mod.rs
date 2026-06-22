@@ -3138,6 +3138,35 @@ fn backup_format_explainer(target: &BackupTarget, storage: &BackupStorage) -> St
 /// directory is used directly. For SystemPath the folder is used directly.
 /// VMs return Err — disk images aren't a file tree (caller falls back to
 /// the image backup).
+/// If a container is compose-managed, return (config_files_csv, working_dir)
+/// from its compose labels so the backup can capture the stack definition, not
+/// just the rebuildable rootfs (wabil 2026-06-22). None for non-compose.
+fn docker_compose_project(name: &str) -> Option<(String, String)> {
+    let out = Command::new("docker")
+        .args([
+            "inspect", "--format",
+            "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}|{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}",
+            name,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let (cf, wd) = line.split_once('|')?;
+    // A missing label renders as "<no value>" in Go templates — treat as empty.
+    let clean = |s: &str| -> String {
+        let s = s.trim();
+        if s == "<no value>" { String::new() } else { s.to_string() }
+    };
+    let (cf, wd) = (clean(cf), clean(wd));
+    if cf.is_empty() && wd.is_empty() {
+        return None;
+    }
+    Some((cf, wd))
+}
+
 fn build_pxar_pairs(target: &BackupTarget) -> Result<(String, String, Vec<PxarPair>), String> {
     let staging = ensure_staging_dir()?;
     match target.target_type {
@@ -3224,6 +3253,46 @@ fn build_pxar_pairs(target: &BackupTarget) -> Result<(String, String, Vec<PxarPa
                             }
                         }
                         _ => {}
+                    }
+                }
+            }
+
+            // Compose stack definition: for a compose-managed container also
+            // capture the compose file(s) + the project's `.env` as `compose.pxar`
+            // so the stack can be recreated, not just its rebuildable rootfs
+            // (wabil 2026-06-22). Additive — rootfs/volumes/binds are unchanged.
+            // Lives under `work`, which the ephemeral sentinel already cleans up.
+            if let Some((config_files, working_dir)) = docker_compose_project(&target.name) {
+                let compose_stage = work.join("compose");
+                if fs::create_dir_all(&compose_stage).is_ok() {
+                    let mut copied = 0usize;
+                    for (i, f) in config_files.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).enumerate() {
+                        let src = Path::new(f);
+                        if let Some(fname) = src.file_name() {
+                            // Prefix an index on basename collision (e.g. two
+                            // `docker-compose.yml` overrides) so neither is
+                            // silently overwritten.
+                            let mut dest = compose_stage.join(fname);
+                            if dest.exists() {
+                                dest = compose_stage.join(format!("{}-{}", i, fname.to_string_lossy()));
+                            }
+                            if fs::copy(src, &dest).is_ok() {
+                                copied += 1;
+                            }
+                        }
+                    }
+                    if !working_dir.is_empty() {
+                        let env = Path::new(&working_dir).join(".env");
+                        if env.is_file() && fs::copy(&env, compose_stage.join(".env")).is_ok() {
+                            copied += 1;
+                        }
+                    }
+                    if copied > 0 {
+                        pairs.push(PxarPair {
+                            archive: "compose.pxar".into(),
+                            dir: compose_stage,
+                            ephemeral: false,
+                        });
                     }
                 }
             }
@@ -6252,8 +6321,17 @@ fn retrieve_from_pbs(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
                 let si = s.get("backup-id").and_then(|v| v.as_str()).unwrap_or("");
                 let stime = s.get("backup-time").and_then(|v| v.as_i64()).unwrap_or(0);
                 if st == backup_type && si == backup_id && stime > best_time {
-                    best_time = stime;
-                    best_snap = format!("{}/{}/{}", st, si, stime);
+                    // PBS needs the snapshot's time component as RFC3339 (e.g.
+                    // host/newt/2026-06-22T10:21:09Z), NOT the raw epoch that
+                    // `snapshot list --output-format json` reports. Passing the
+                    // epoch made `restore` fail with "unable to parse backup
+                    // snapshot path 'host/newt/1782104469'" (wabil 2026-06-22).
+                    // Mirrors the conversion already done on the notes path.
+                    if let Some(ts) = chrono::DateTime::from_timestamp(stime, 0) {
+                        best_time = stime;
+                        best_snap = format!("{}/{}/{}", st, si,
+                            ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+                    }
                 }
             }
             if best_snap.is_empty() {

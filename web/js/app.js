@@ -3515,12 +3515,22 @@ function buildServerTree(nodes) {
         return;
     }
 
-    // Preserve expanded state before rebuild
-    const expandedNodes = new Set();
+    // Preserve expanded state before rebuild (in-session DOM scan)…
+    let expandedNodes = new Set();
     document.querySelectorAll('.server-node-children.expanded').forEach(el => {
         const id = el.id?.replace('children-', '');
         if (id) expandedNodes.add(id);
     });
+    // …and on a fresh build (page reload — DOM has no tree yet) restore the
+    // operator's last-saved expand/collapse state so it persists across reloads.
+    const domHadState = expandedNodes.size > 0;
+    if (!domHadState) {
+        const saved = loadSidebarTreeState();
+        if (saved) expandedNodes = saved;
+    }
+    // "Clusters collapsed by default" preference (wabil 2026-06-22) — when set,
+    // a fresh tree with no saved state starts collapsed instead of expanded.
+    const defaultCollapsed = localStorage.getItem('wolfstack_sidebar_default_collapsed') === '1';
 
     // Sort: self first, then alphabetically
     const sorted = [...nodes].sort((a, b) => {
@@ -3530,7 +3540,9 @@ function buildServerTree(nodes) {
     });
 
     // On first build (no expanded state saved yet), expand self node
-    const isFirstBuild = expandedNodes.size === 0;
+    // Legacy "expand self + all clusters" only when there's genuinely nothing
+    // to restore AND the operator hasn't opted into collapse-by-default.
+    const isFirstBuild = expandedNodes.size === 0 && !defaultCollapsed;
 
     // PVE-typed nodes (legacy API integration) are hidden from the sidebar — they're
     // surfaced through the deprecation banner instead. Only render WolfStack nodes here.
@@ -3729,7 +3741,33 @@ function toggleServerNode(nodeId) {
     if (children && toggle) {
         children.classList.toggle('expanded');
         toggle.classList.toggle('expanded');
+        // Remember the operator's choice across reloads (wabil 2026-06-22).
+        saveSidebarTreeState();
     }
+}
+
+// Persist which sidebar clusters/nodes are expanded so the tree comes back the
+// way the operator left it after a page reload (not just across in-session
+// rebuilds). Stored as a JSON array of the expanded children-container ids.
+function saveSidebarTreeState() {
+    try {
+        const ids = [];
+        document.querySelectorAll('.server-node-children.expanded').forEach(el => {
+            const id = el.id && el.id.replace('children-', '');
+            if (id) ids.push(id);
+        });
+        localStorage.setItem('wolfstack_sidebar_tree', JSON.stringify(ids));
+    } catch (_) { /* localStorage may be unavailable (private mode) */ }
+}
+
+// Restore the saved expanded set, or null if nothing has been saved yet.
+function loadSidebarTreeState() {
+    try {
+        const raw = localStorage.getItem('wolfstack_sidebar_tree');
+        if (!raw) return null;
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? new Set(arr) : null;
+    } catch (_) { return null; }
 }
 
 function openServerNode(nodeId) {
@@ -29768,6 +29806,23 @@ function onBackupStorageChange() {
     }
     if (lb) lb.style.display = isLocal ? '' : 'none';
     if (ls) ls.style.display = isLocal ? '' : 'none';
+    // PBS destination — reveal a per-backup File-level (pxar) toggle that
+    // overrides the connection default for THIS backup. Defaults to whatever
+    // the PBS connection is set to (loading the config if we don't have it yet).
+    const isPbs = val.startsWith('pbs:');
+    const flWrap = document.getElementById('backup-pbs-filelevel-wrap');
+    const flCb = document.getElementById('backup-pbs-filelevel');
+    if (flWrap) flWrap.style.display = isPbs ? 'inline-flex' : 'none';
+    if (isPbs && flCb) {
+        if (_cachedPbsConfig) {
+            flCb.checked = !!_cachedPbsConfig.pbs_file_level;
+        } else {
+            fetch(apiUrl('/api/backups/pbs/config'))
+                .then(r => r.ok ? r.json() : null)
+                .then(c => { if (c) { _cachedPbsConfig = c; flCb.checked = !!c.pbs_file_level; } })
+                .catch(() => {});
+        }
+    }
 }
 
 /// Launch the file browser starting at the currently-selected
@@ -29867,8 +29922,15 @@ async function getSelectedStorage() {
                 pbs_fingerprint: _cachedPbsConfig.pbs_fingerprint || '',
                 pbs_namespace: _cachedPbsConfig.pbs_namespace || '',
                 // File-level (pxar) preference travels with the PBS destination
-                // so backup_pbs_file_level routes correctly.
-                pbs_file_level: !!_cachedPbsConfig.pbs_file_level,
+                // so backup_pbs_file_level routes correctly. The per-backup
+                // toggle (if shown) overrides the connection default for THIS
+                // backup; otherwise fall back to the connection setting.
+                pbs_file_level: (function () {
+                    const cb = document.getElementById('backup-pbs-filelevel');
+                    const wrap = document.getElementById('backup-pbs-filelevel-wrap');
+                    if (cb && wrap && wrap.style.display !== 'none') return !!cb.checked;
+                    return !!_cachedPbsConfig.pbs_file_level;
+                })(),
                 // Secrets are stored on server, leave empty so backend preserves them
                 pbs_token_secret: '',
                 pbs_password: '',
@@ -30167,6 +30229,37 @@ function browseSystemFolderPath() {
 /// Back up an arbitrary host system folder to the selected destination.
 /// Builds a SystemPath target and runs it through the same streaming backup
 /// path as the container/VM targets.
+// When set, createSchedule() schedules THIS folder target instead of the
+// table-selected items. Lets local-folder backups be scheduled (wabil 2026-06-22).
+let _scheduleFolderTarget = null;
+
+// Build a SystemPath target from the folder fields and open the schedule modal
+// for it (recurring local-folder backup).
+async function scheduleSystemFolder() {
+    const pathEl = document.getElementById('sysfolder-path');
+    const labelEl = document.getElementById('sysfolder-label');
+    const exclEl = document.getElementById('sysfolder-excludes');
+    const path = (pathEl && pathEl.value || '').trim();
+    if (!path) { showToast('Enter a folder path to schedule', 'error'); return; }
+    if (!path.startsWith('/')) { showToast('Folder path must be absolute (start with /)', 'error'); return; }
+    const label = (labelEl && labelEl.value || '').trim();
+    const excludes = (exclEl && exclEl.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    const target = {
+        type: 'systempath',
+        name: label || path.replace(/\/+$/, '').split('/').pop() || 'folder',
+        system_path: path,
+    };
+    if (excludes.length) target.exclude_mounts = excludes;
+    _scheduleFolderTarget = target;
+
+    const storage = await getSelectedStorage();
+    if (!(await ensureBackupStorageReady(storage))) { _scheduleFolderTarget = null; return; }
+    const summary = document.getElementById('schedule-selected-summary');
+    if (summary) summary.textContent = `Will schedule backup of folder ${path} → ${storage.path || storage.type || 'destination'}`;
+    document.getElementById('schedule-name').value = target.name + ' folder';
+    document.getElementById('create-schedule-modal').classList.add('active');
+}
+
 async function backupSystemFolder() {
     const pathEl = document.getElementById('sysfolder-path');
     const labelEl = document.getElementById('sysfolder-label');
@@ -30497,6 +30590,7 @@ async function _runRestoreStream(id, overwrite, storage, name, progressEl, resul
 // ─── Schedule Modal ───
 
 async function showScheduleSelectedModal() {
+    _scheduleFolderTarget = null; // table-selection path — clear any folder target
     const targets = getSelectedTargets();
     if (targets.length === 0) {
         showToast('Please select at least one item to schedule', 'error');
@@ -30527,9 +30621,12 @@ async function createSchedule() {
     const frequency = document.getElementById('schedule-frequency').value;
     const time = document.getElementById('schedule-time').value.trim();
     const retention = parseInt(document.getElementById('schedule-retention').value) || 0;
-    const targets = getSelectedTargets();
+    // A folder schedule (scheduleSystemFolder) overrides the table selection.
+    const targets = _scheduleFolderTarget ? [_scheduleFolderTarget] : getSelectedTargets();
     const storage = await getSelectedStorage();
-    const allSelected = targets.length === document.querySelectorAll('.backup-target-cb').length;
+    const allSelected = !_scheduleFolderTarget
+        && targets.length === document.querySelectorAll('.backup-target-cb').length;
+    _scheduleFolderTarget = null; // consumed — don't leak into the next schedule
 
     const body = {
         name,
@@ -40556,7 +40653,25 @@ function loadHiddenFeatures() {
     applySidebarHidePrefs(readHiddenFeaturesLocal());
 }
 
+// Toggle "collapse clusters/nodes by default" and re-render the tree so the
+// change is visible immediately.
+function setSidebarDefaultCollapsed(on) {
+    // Store '1' when on; remove the key when off (missing = default), matching
+    // the "absent key = default" idiom used for the tree state.
+    try {
+        if (on) localStorage.setItem('wolfstack_sidebar_default_collapsed', '1');
+        else localStorage.removeItem('wolfstack_sidebar_default_collapsed');
+    } catch (_) {}
+    if (on) {
+        // Starting fresh: drop the remembered expand set so the tree collapses.
+        try { localStorage.removeItem('wolfstack_sidebar_tree'); } catch (_) {}
+    }
+    if (Array.isArray(allNodes)) buildServerTree(allNodes);
+}
+
 function renderSidebarPrefs() {
+    const dc = document.getElementById('sidebar-default-collapsed');
+    if (dc) dc.checked = localStorage.getItem('wolfstack_sidebar_default_collapsed') === '1';
     const grid = document.getElementById('sidebar-prefs-grid');
     if (!grid) return;
     const hidden = new Set(currentHiddenFeatures);

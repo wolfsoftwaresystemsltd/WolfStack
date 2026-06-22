@@ -3830,6 +3830,9 @@
                             style="display:none; width:auto; min-width:200px; padding:5px 10px; font-size:12px; border-radius:6px; border:1px solid var(--border); background:var(--bg-input); color:var(--text-primary); font-family:var(--font-mono);">
                         <button id="backup-local-browse" class="btn btn-sm" onclick="browseBackupLocalPath()" title="Browse for a folder" style="display:none; font-size:12px; padding:5px 10px;"><span class="ws-icon-clean-wrap" data-icon="folder"></span></button>
                         <button id="backup-local-save" class="btn btn-sm" onclick="saveBackupLocalDir()" title="Remember this folder as the default for Local backups" style="display:none; font-size:12px; padding:5px 10px;"><span class="ws-icon-clean-wrap" data-icon="save"></span></button>
+                        <label id="backup-pbs-filelevel-wrap" title="Store this backup as native pxar (file-level) so PBS per-file restore works. Overrides the PBS connection's default for this backup only." style="display:none; align-items:center; gap:5px; font-size:12px; color:var(--text-primary); white-space:nowrap; cursor:pointer;">
+                            <input type="checkbox" id="backup-pbs-filelevel"> File-level
+                        </label>
                         <button class="btn btn-sm btn-primary" onclick="backupSelected()"><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Backup Now</button>
                         <button class="btn btn-sm"
                             style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);"
@@ -3878,6 +3881,7 @@
                         </div>
                         <div style="margin-top:8px; display:flex; gap:8px;">
                             <button class="btn btn-sm btn-primary" onclick="backupSystemFolder()"><span class="ws-icon-clean-wrap" data-icon="lightning"></span> Back up folder now</button>
+                            <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);" onclick="scheduleSystemFolder()" title="Schedule recurring backups of this folder"><span class="ws-icon-clean-wrap" data-icon="calendar"></span> Schedule folder</button>
                         </div>
                     </div>
                 </div>
@@ -5835,6 +5839,10 @@
                             other users keep their own preferences, and nothing is uninstalled. Hidden features are still reachable
                             by direct URL.
                         </p>
+                        <label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;background:var(--bg-card);margin-bottom:16px;">
+                            <input type="checkbox" id="sidebar-default-collapsed" onchange="setSidebarDefaultCollapsed(this.checked)">
+                            <span style="font-size:13px;">Collapse clusters &amp; nodes by default<br><span style="font-size:11px;color:var(--text-muted);">The sidebar already remembers what you expand/collapse across reloads; tick this to start everything collapsed on a fresh browser.</span></span>
+                        </label>
                         <div id="sidebar-prefs-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px 16px;">
                             <!-- Populated by renderSidebarPrefs() -->
                         </div>
