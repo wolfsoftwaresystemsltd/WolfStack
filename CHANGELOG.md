@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.55.7: auto-install ipset so the O(1) blocklist engages on Debian 13 (ksoftirqd fix)** _(2026-06-22 — [`ee5bad2b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ee5bad2b7544015c126c9df09d4c2232b8da49ec))_
 - **v24.55.6: LXC on a non-lxcbr0 LAN bridge no longer reverts to lxcbr0 after start** _(2026-06-22 — [`d2f9c009`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d2f9c00927aaed92fdc921564a3aefbf6cdaf571))_
 - **v24.55.5: LAN bridge clones the physical NIC's MAC + existing-LXC create-LAN-bridge discoverability** _(2026-06-22 — [`42a24680`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/42a246805e566146738b293125b4da2b5e832bb5))_
 - **v24.55.4: PBS snapshot-notes fix + VM WolfNet NIC model/clear + LXC create-LAN-bridge + start-command modal** _(2026-06-21 — [`a0cbe251`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a0cbe2516471dcd3250c76b51a9d1bd3af1f2d92))_
