@@ -18298,6 +18298,205 @@ pub async fn ceph_add_manager(
     }
 }
 
+// ─── GlusterFS API ───
+//
+// Cluster-scoped Gluster management surfaced in the Storage area. Gluster is
+// inherently cluster-wide (any peer manages the whole trusted pool), so these
+// run against the targeted node (the frontend node-proxy picks the node); from
+// there the whole pool is visible/manageable. Mirrors the Ceph handler idiom:
+// every call wraps the shell-out in web::block.
+
+#[derive(Deserialize)]
+pub struct GlusterBootstrapRequest {
+    #[serde(default)]
+    pub cluster_name: String,
+}
+
+#[derive(Deserialize)]
+pub struct GlusterPeerRequest {
+    pub host: String,
+}
+
+#[derive(Deserialize)]
+pub struct GlusterCreateVolumeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub vol_type: String,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub bricks: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct GlusterOptionRequest {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+pub struct GlusterBricksRequest {
+    pub bricks: Vec<String>,
+}
+
+/// GET /api/gluster/status — peers, volumes, bricks, heal rollup
+pub async fn gluster_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match web::block(crate::gluster::get_status).await {
+        Ok(status) => HttpResponse::Ok().json(status),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+/// GET /api/gluster/install-status — installed / running / importable
+pub async fn gluster_install_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match web::block(crate::gluster::get_install_status).await {
+        Ok(v) => HttpResponse::Ok().json(v),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+/// GET /api/gluster/devices — block devices (lsblk) to help pick brick paths
+pub async fn gluster_devices(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match web::block(crate::gluster::available_devices).await {
+        Ok(Ok(v)) => HttpResponse::Ok().json(v),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+/// POST /api/gluster/install — install glusterfs + start glusterd
+pub async fn gluster_install(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    gluster_result(web::block(crate::gluster::install).await)
+}
+
+/// POST /api/gluster/bootstrap — start a fresh pool + record the cluster label
+pub async fn gluster_bootstrap(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<GlusterBootstrapRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = body.cluster_name.clone();
+    gluster_result(web::block(move || crate::gluster::bootstrap(&name)).await)
+}
+
+/// POST /api/gluster/import — adopt an already-running glusterd (existing pool)
+pub async fn gluster_import(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<GlusterBootstrapRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = body.cluster_name.clone();
+    match web::block(move || crate::gluster::import_existing(&name)).await {
+        Ok(Ok(status)) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "status": status})),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": format!("{}", e)})),
+    }
+}
+
+/// POST /api/gluster/peers — probe a peer into the pool
+pub async fn gluster_add_peer(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<GlusterPeerRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let host = body.host.clone();
+    gluster_result(web::block(move || crate::gluster::add_peer(&host)).await)
+}
+
+/// DELETE /api/gluster/peers/{host} — detach a peer
+pub async fn gluster_remove_peer(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let host = path.into_inner();
+    gluster_result(web::block(move || crate::gluster::remove_peer(&host)).await)
+}
+
+/// POST /api/gluster/volumes — create a volume
+pub async fn gluster_create_volume(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<GlusterCreateVolumeRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let b = body.into_inner();
+    gluster_result(web::block(move || crate::gluster::create_volume(&b.name, &b.vol_type, b.count, &b.bricks)).await)
+}
+
+/// DELETE /api/gluster/volumes/{name} — stop (if needed) + delete a volume
+pub async fn gluster_delete_volume(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    gluster_result(web::block(move || crate::gluster::delete_volume(&name)).await)
+}
+
+/// POST /api/gluster/volumes/{name}/start
+pub async fn gluster_start_volume(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    gluster_result(web::block(move || crate::gluster::start_volume(&name)).await)
+}
+
+/// POST /api/gluster/volumes/{name}/stop
+pub async fn gluster_stop_volume(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    gluster_result(web::block(move || crate::gluster::stop_volume(&name)).await)
+}
+
+/// POST /api/gluster/volumes/{name}/heal — trigger a full self-heal
+pub async fn gluster_heal_volume(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    gluster_result(web::block(move || crate::gluster::heal_volume(&name)).await)
+}
+
+/// PUT /api/gluster/volumes/{name} — set a volume option
+pub async fn gluster_set_option(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<GlusterOptionRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let (key, value) = (body.key.clone(), body.value.clone());
+    gluster_result(web::block(move || crate::gluster::set_volume_option(&name, &key, &value)).await)
+}
+
+/// POST /api/gluster/volumes/{name}/bricks — add bricks
+pub async fn gluster_add_brick(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<GlusterBricksRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let bricks = body.bricks.clone();
+    gluster_result(web::block(move || crate::gluster::add_brick(&name, &bricks)).await)
+}
+
+/// POST /api/gluster/volumes/{name}/remove-brick — remove bricks (committed)
+pub async fn gluster_remove_brick(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<GlusterBricksRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = path.into_inner();
+    let bricks = body.bricks.clone();
+    gluster_result(web::block(move || crate::gluster::remove_brick(&name, &bricks)).await)
+}
+
+/// Shared {ok,message}/{ok,error} responder for the gluster action handlers.
+fn gluster_result(r: Result<Result<String, String>, actix_web::error::BlockingError>) -> HttpResponse {
+    match r {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": format!("{}", e)})),
+    }
+}
+
 // ─── Storage Manager API ───
 
 /// GET /api/storage/mounts — list all storage mounts with live status
@@ -36890,6 +37089,23 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ceph/daemon", web::post().to(ceph_daemon_control))
         .route("/api/ceph/monitors", web::post().to(ceph_add_monitor))
         .route("/api/ceph/managers", web::post().to(ceph_add_manager))
+        // GlusterFS (cluster-scoped, surfaced in the Storage area)
+        .route("/api/gluster/status", web::get().to(gluster_status))
+        .route("/api/gluster/install-status", web::get().to(gluster_install_status))
+        .route("/api/gluster/devices", web::get().to(gluster_devices))
+        .route("/api/gluster/install", web::post().to(gluster_install))
+        .route("/api/gluster/bootstrap", web::post().to(gluster_bootstrap))
+        .route("/api/gluster/import", web::post().to(gluster_import))
+        .route("/api/gluster/peers", web::post().to(gluster_add_peer))
+        .route("/api/gluster/peers/{host}", web::delete().to(gluster_remove_peer))
+        .route("/api/gluster/volumes", web::post().to(gluster_create_volume))
+        .route("/api/gluster/volumes/{name}", web::delete().to(gluster_delete_volume))
+        .route("/api/gluster/volumes/{name}", web::put().to(gluster_set_option))
+        .route("/api/gluster/volumes/{name}/start", web::post().to(gluster_start_volume))
+        .route("/api/gluster/volumes/{name}/stop", web::post().to(gluster_stop_volume))
+        .route("/api/gluster/volumes/{name}/heal", web::post().to(gluster_heal_volume))
+        .route("/api/gluster/volumes/{name}/bricks", web::post().to(gluster_add_brick))
+        .route("/api/gluster/volumes/{name}/remove-brick", web::post().to(gluster_remove_brick))
         // Filesystem browser (operator-facing path picker)
         .route("/api/fs/browse", web::get().to(fs_browse))
         // Storage Manager

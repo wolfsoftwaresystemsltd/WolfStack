@@ -4525,11 +4525,12 @@ body.learn-drawer-open #task-log-footer { right: var(--learn-drawer-w) !importan
 }
 .fc-tab-active .fc-tab-num { background: var(--accent); color: #fff; }
 .fc-tab-name { overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
-.fc-tab-close, .fc-pane-btn {
+.fc-tab-close, .fc-tab-popout, .fc-pane-btn {
     background: transparent; border: none; color: var(--text-muted);
     cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 4px;
 }
 .fc-tab-close:hover, .fc-pane-btn:hover { background: rgba(127,127,127,0.2); color: var(--text-primary); }
+.fc-tab-popout:hover { background: rgba(127,127,127,0.2); color: var(--accent); }
 .fc-tab-add {
     display: inline-flex; align-items: center;
     margin-left: 6px; padding: 7px 12px;

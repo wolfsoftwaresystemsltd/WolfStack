@@ -2297,7 +2297,7 @@ function selectServerView(nodeId, view) {
         }
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadZfsStatus(), loadDiskInfo()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadZfsStatus(), loadDiskInfo(), loadGlusterStatus()]).finally(() => hidePageLoadingOverlay(el));
     if (view === 'shares') { _gwClusterMode = null; gwLoad().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'syslogs') { loadSystemLogs(); hidePageLoadingOverlay(el); }
     if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
@@ -6981,6 +6981,285 @@ async function cephDeleteRbd(pool, name) {
 
 const MOUNT_TYPE_ICONS = { s3: '☁️', nfs: '🗄️', smb: '🗄️', directory: '📁', wolfdisk: '🐺', sshfs: '🔑' };
 const MOUNT_TYPE_LABELS = { s3: 'S3', nfs: 'NFS', smb: 'SMB/CIFS', directory: 'Directory', wolfdisk: 'WolfDisk', sshfs: 'SSHFS' };
+
+// ─── GlusterFS distributed storage (cluster-scoped, in the Storage area) ───
+// Gluster is managed pool-wide: actions hit the targeted node via apiUrl() and
+// affect the whole trusted pool. Mirrors the Ceph UI shape but rendered into a
+// single Storage-page card.
+let _glusterStatus = null;
+
+function _glFmtBytes(b) {
+    if (!b || b <= 0) return '—';
+    const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    const i = Math.floor(Math.log(b) / Math.log(1024));
+    return (b / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+}
+
+async function loadGlusterStatus() {
+    const body = document.getElementById('gluster-body');
+    if (!body) return;
+    try {
+        const iRes = await fetch(apiUrl('/api/gluster/install-status'));
+        const install = iRes.ok ? await iRes.json() : {};
+        // Only fetch full status (peers/volumes — heavier) once gluster is
+        // actually installed and running; otherwise the install banner is built
+        // from install-status alone.
+        let status = {};
+        if (install.installed && install.glusterd_running) {
+            const sRes = await fetch(apiUrl('/api/gluster/status'));
+            status = sRes.ok ? await sRes.json() : {};
+        }
+        _glusterStatus = status;
+        renderGluster(install, status);
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--text-muted);">Could not load GlusterFS: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderGluster(install, status) {
+    const body = document.getElementById('gluster-body');
+    if (!body) return;
+
+    // Not installed → offer install.
+    if (!install.installed) {
+        body.innerHTML = `<div style="color:var(--text-secondary);margin-bottom:12px;">GlusterFS is not installed on this node. Install it to manage a distributed storage pool (peers, volumes, bricks) across the cluster.</div>
+            <button class="btn btn-sm btn-primary" onclick="glusterInstall()">Install GlusterFS</button>`;
+        return;
+    }
+    // Installed but daemon down → install() also (re)starts glusterd.
+    if (!install.glusterd_running) {
+        body.innerHTML = `<div style="color:var(--text-secondary);margin-bottom:12px;">GlusterFS is installed but the <code>glusterd</code> daemon isn't running.</div>
+            <button class="btn btn-sm btn-primary" onclick="glusterInstall()">Start glusterd</button>`;
+        return;
+    }
+    // Running but not adopted by WolfStack → bootstrap fresh or import existing.
+    if (!install.configured) {
+        let html = '';
+        if (install.importable) {
+            html += `<div style="padding:10px 12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.35);border-radius:8px;margin-bottom:12px;">
+                <strong>Existing GlusterFS pool detected</strong> — ${install.existing_peers||0} peer(s), ${install.existing_volumes||0} volume(s). Import it to manage it from here without disrupting the running pool.
+                <div style="margin-top:8px;"><button class="btn btn-sm btn-primary" onclick="glusterImport()">Import existing cluster</button></div>
+            </div>`;
+        }
+        html += `<div style="color:var(--text-secondary);margin-bottom:8px;">${install.importable ? 'Or start fresh:' : 'Set up a new GlusterFS pool on this node, then add peers and create volumes.'}</div>
+            <button class="btn btn-sm ${install.importable ? '' : 'btn-primary'}" onclick="glusterBootstrap()">Set up new pool</button>`;
+        body.innerHTML = html;
+        return;
+    }
+
+    // Configured → full management view.
+    const healthColor = { ok: '#22c55e', warn: '#f59e0b', error: '#ef4444' }[status.health] || 'var(--text-muted)';
+    const healthLabel = { ok: 'Healthy', warn: 'Degraded', error: 'Problem', unknown: 'Unknown' }[status.health] || 'Unknown';
+    let html = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+        <span style="font-weight:600;color:${healthColor};">● ${healthLabel}</span>
+        ${status.cluster_name ? `<span style="font-size:12px;color:var(--text-muted);">Cluster: ${escapeHtml(status.cluster_name)}</span>` : ''}
+        ${status.version ? `<span style="font-size:12px;color:var(--text-muted);">${escapeHtml(status.version)}</span>` : ''}
+        ${status.health_detail ? `<span style="font-size:12px;color:${healthColor};">${escapeHtml(status.health_detail)}</span>` : ''}
+    </div>`;
+
+    // Peers
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0;">
+        <h4 style="margin:0;font-size:13px;">Peers (${(status.peers||[]).length})</h4>
+        <button class="btn btn-sm" onclick="glusterAddPeer()">+ Add peer</button></div>`;
+    html += `<table class="data-table" style="width:100%;margin-bottom:16px;"><thead><tr><th>Hostname</th><th>State</th><th>UUID</th><th></th></tr></thead><tbody>`;
+    for (const p of (status.peers || [])) {
+        const dot = p.connected ? '#22c55e' : '#ef4444';
+        html += `<tr><td>${escapeHtml(p.hostname)}${p.is_localhost ? ' <span style="font-size:10px;color:var(--text-muted);">(this node)</span>' : ''}</td>
+            <td><span style="color:${dot};">●</span> ${escapeHtml(p.state)}</td>
+            <td style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">${escapeHtml((p.uuid||'').slice(0,8))}</td>
+            <td>${p.is_localhost ? '' : `<button class="btn btn-sm btn-danger" onclick="glusterRemovePeer('${escapeAttr(p.hostname)}')">Detach</button>`}</td></tr>`;
+    }
+    if (!(status.peers || []).length) html += `<tr><td colspan="4" style="color:var(--text-muted);">No peers — add one to form a pool.</td></tr>`;
+    html += `</tbody></table>`;
+
+    // Volumes
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0;">
+        <h4 style="margin:0;font-size:13px;">Volumes (${(status.volumes||[]).length})</h4>
+        <button class="btn btn-sm btn-primary" onclick="glusterCreateVolume()">+ Create volume</button></div>`;
+    if (!(status.volumes || []).length) {
+        html += `<div style="color:var(--text-muted);">No volumes yet.</div>`;
+    }
+    for (const v of (status.volumes || [])) {
+        const started = v.started;
+        const sColor = started ? '#22c55e' : 'var(--text-muted)';
+        html += `<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                <div><strong>${escapeHtml(v.name)}</strong>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${escapeHtml(v.vol_type)}${v.replica_count ? ' ×' + v.replica_count : ''}</span>
+                    <span style="font-size:11px;color:${sColor};margin-left:8px;">● ${escapeHtml(v.status)}</span>
+                    ${v.heal_pending ? `<span style="font-size:11px;color:#f59e0b;margin-left:8px;">${escapeHtml(v.heal_pending)} pending heal</span>` : ''}
+                    ${v.size_bytes ? `<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${_glFmtBytes(v.used_bytes)} / ${_glFmtBytes(v.size_bytes)}</span>` : ''}
+                </div>
+                <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                    ${started
+                        ? `<button class="btn btn-sm" onclick="glusterVol('${escapeAttr(v.name)}','stop')">Stop</button>
+                           <button class="btn btn-sm" onclick="glusterVol('${escapeAttr(v.name)}','heal')">Heal</button>`
+                        : `<button class="btn btn-sm btn-primary" onclick="glusterVol('${escapeAttr(v.name)}','start')">Start</button>`}
+                    <button class="btn btn-sm" onclick="glusterAddBrick('${escapeAttr(v.name)}')">+ Brick</button>
+                    <button class="btn btn-sm" onclick="glusterSetOption('${escapeAttr(v.name)}')">Option</button>
+                    <button class="btn btn-sm btn-danger" onclick="glusterDeleteVolume('${escapeAttr(v.name)}')">Delete</button>
+                </div>
+            </div>
+            <table class="data-table" style="width:100%;margin-top:8px;"><thead><tr><th>Brick</th><th>Online</th><th>Size</th><th></th></tr></thead><tbody>
+            ${(v.bricks||[]).map(b => `<tr>
+                <td style="font-family:var(--font-mono);font-size:11px;">${escapeHtml(b.spec)}${b.arbiter ? ' <span style="font-size:10px;color:var(--text-muted);">(arbiter)</span>' : ''}</td>
+                <td>${b.online ? '<span style="color:#22c55e;">● up</span>' : '<span style="color:#ef4444;">● down</span>'}</td>
+                <td style="font-size:11px;color:var(--text-muted);">${b.size_bytes ? _glFmtBytes(b.used_bytes) + ' / ' + _glFmtBytes(b.size_bytes) : '—'}</td>
+                <td><button class="btn btn-sm btn-danger" style="font-size:10px;padding:1px 6px;" onclick="glusterRemoveBrick('${escapeAttr(v.name)}','${escapeAttr(b.spec)}')">Remove</button></td>
+            </tr>`).join('')}
+            </tbody></table>
+        </div>`;
+    }
+    body.innerHTML = html;
+}
+
+// Small form-modal builder for gluster actions (opacity:1/pointer-events:all so
+// the overlay stays visible — see the start-command modal fix).
+function _glusterModal(title, fields, submitLabel, onSubmit) {
+    document.getElementById('gluster-modal')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'gluster-modal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100001;display:flex;align-items:center;justify-content:center;opacity:1;pointer-events:all;';
+    const fieldHtml = fields.map(f => {
+        const hint = f.hint ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px;">${escapeHtml(f.hint)}</div>` : '';
+        const label = `<label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">${escapeHtml(f.label)}</label>`;
+        let input;
+        if (f.type === 'select') {
+            input = `<select id="glm-${f.id}" class="form-control">${f.options.map(o => `<option value="${escapeAttr(o.value)}"${o.value === f.value ? ' selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}</select>`;
+        } else if (f.type === 'textarea') {
+            input = `<textarea id="glm-${f.id}" class="form-control" rows="4" placeholder="${escapeAttr(f.placeholder || '')}">${escapeHtml(f.value || '')}</textarea>`;
+        } else {
+            input = `<input id="glm-${f.id}" class="form-control" value="${escapeAttr(f.value || '')}" placeholder="${escapeAttr(f.placeholder || '')}">`;
+        }
+        return `<div style="margin-bottom:10px;">${label}${input}${hint}</div>`;
+    }).join('');
+    overlay.innerHTML = `<div class="modal" role="dialog" aria-modal="true" style="background:var(--bg-card,var(--bg-secondary));border:1px solid var(--border);border-radius:14px;padding:24px;max-width:560px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <h3 style="margin:0 0 14px;color:var(--text-primary);font-size:16px;">${escapeHtml(title)}</h3>
+        ${fieldHtml}
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+            <button class="btn btn-sm" onclick="document.getElementById('gluster-modal').remove()">Cancel</button>
+            <button class="btn btn-sm btn-primary" id="glm-submit">${escapeHtml(submitLabel)}</button>
+        </div></div>`;
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    document.body.appendChild(overlay);
+    document.getElementById('glm-submit').onclick = () => {
+        const values = {};
+        fields.forEach(f => { values[f.id] = (document.getElementById('glm-' + f.id)?.value || '').trim(); });
+        onSubmit(values);
+    };
+}
+
+async function _glusterPost(path, method, bodyObj, okMsg) {
+    try {
+        const opts = { method };
+        if (bodyObj) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(bodyObj); }
+        const res = await fetch(apiUrl(path), opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) {
+            showToast(data.error || ('GlusterFS action failed (' + res.status + ')'), 'error');
+            return false;
+        }
+        showToast(okMsg || data.message || 'Done', 'success');
+        document.getElementById('gluster-modal')?.remove();
+        loadGlusterStatus();
+        return true;
+    } catch (e) {
+        showToast('GlusterFS error: ' + e.message, 'error');
+        return false;
+    }
+}
+
+function glusterInstall() {
+    showToast('Installing GlusterFS… this can take a minute.', 'info', 4000);
+    _glusterPost('/api/gluster/install', 'POST', null, 'GlusterFS installed');
+}
+
+function glusterBootstrap() {
+    _glusterModal('Set up GlusterFS pool',
+        [{ id: 'cluster_name', label: 'Cluster label (optional)', placeholder: 'e.g. wolfstack', hint: 'Just a name to identify this pool in the UI.' }],
+        'Set up', (v) => _glusterPost('/api/gluster/bootstrap', 'POST', { cluster_name: v.cluster_name }, 'GlusterFS pool ready'));
+}
+
+function glusterImport() {
+    _glusterModal('Import existing GlusterFS cluster',
+        [{ id: 'cluster_name', label: 'Cluster label (optional)', placeholder: 'e.g. legacy-gluster', hint: 'Adopts the already-running pool — peers and volumes are left untouched.' }],
+        'Import', (v) => _glusterPost('/api/gluster/import', 'POST', { cluster_name: v.cluster_name }, 'Existing GlusterFS pool imported'));
+}
+
+function glusterAddPeer() {
+    _glusterModal('Add peer to the pool',
+        [{ id: 'host', label: 'Peer host or IP', placeholder: '10.0.10.12 or node2', hint: 'The node must already have glusterd running and be reachable.' }],
+        'Probe peer', (v) => {
+            if (!v.host) { showToast('Enter a peer host', 'error'); return; }
+            _glusterPost('/api/gluster/peers', 'POST', { host: v.host }, 'Peer added');
+        });
+}
+
+async function glusterRemovePeer(host) {
+    if (!(await showConfirm(`Detach peer "${host}" from the pool? Its bricks must not be in use by any volume.`))) return;
+    _glusterPost('/api/gluster/peers/' + encodeURIComponent(host), 'DELETE', null, 'Peer detached');
+}
+
+function glusterCreateVolume() {
+    _glusterModal('Create GlusterFS volume', [
+        { id: 'name', label: 'Volume name', placeholder: 'gv0' },
+        { id: 'vol_type', label: 'Type', type: 'select', value: 'replicate', options: [
+            { value: 'replicate', label: 'Replicate (mirrored — redundant)' },
+            { value: 'distribute', label: 'Distribute (striped — capacity, no redundancy)' },
+            { value: 'disperse', label: 'Disperse (erasure-coded)' },
+        ] },
+        { id: 'count', label: 'Replica / disperse count', value: '2', hint: 'Replica factor (e.g. 2 or 3). Ignored for Distribute.' },
+        { id: 'bricks', label: 'Bricks (one per line: host:/path)', type: 'textarea', placeholder: 'node1:/data/brick1/gv0\nnode2:/data/brick1/gv0', hint: 'For Replicate, the brick count must be a multiple of the replica count.' },
+    ], 'Create', (v) => {
+        const bricks = v.bricks.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+        if (!v.name) { showToast('Enter a volume name', 'error'); return; }
+        if (!bricks.length) { showToast('Add at least one brick', 'error'); return; }
+        _glusterPost('/api/gluster/volumes', 'POST', {
+            name: v.name, vol_type: v.vol_type, count: parseInt(v.count, 10) || 0, bricks,
+        }, 'Volume created');
+    });
+}
+
+function glusterVol(name, action) {
+    _glusterPost(`/api/gluster/volumes/${encodeURIComponent(name)}/${action}`, 'POST', null,
+        action === 'heal' ? 'Self-heal triggered' : ('Volume ' + action + 'ed'));
+}
+
+async function glusterDeleteVolume(name) {
+    if (!(await showConfirm(`Delete volume "${name}"? This stops it and removes the volume definition. Brick DATA on disk is NOT deleted, but the volume and its clients break immediately.`))) return;
+    _glusterPost('/api/gluster/volumes/' + encodeURIComponent(name), 'DELETE', null, 'Volume deleted');
+}
+
+function glusterAddBrick(name) {
+    _glusterModal(`Add bricks to ${name}`,
+        [{ id: 'bricks', label: 'Bricks (one per line: host:/path)', type: 'textarea', placeholder: 'node3:/data/brick1/' + name, hint: 'For a replicated volume the number of new bricks must match the replica count.' }],
+        'Add', (v) => {
+            const bricks = v.bricks.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+            if (!bricks.length) { showToast('Add at least one brick', 'error'); return; }
+            _glusterPost(`/api/gluster/volumes/${encodeURIComponent(name)}/bricks`, 'POST', { bricks }, 'Brick(s) added');
+        });
+}
+
+async function glusterRemoveBrick(name, spec) {
+    const vol = (_glusterStatus && _glusterStatus.volumes || []).find(v => v.name === name);
+    const isDistribute = vol && /distribute/i.test(vol.vol_type) && !/replicate|disperse/i.test(vol.vol_type);
+    const warn = isDistribute
+        ? `⚠ "${name}" is a DISTRIBUTE volume — this brick holds the ONLY copy of its files. Removing it with force PERMANENTLY DELETES that data. `
+        : `This reduces redundancy/capacity. `;
+    if (!(await showConfirm(`Remove brick "${spec}" from "${name}"? ${warn}It commits immediately — make sure data is healed/migrated off this brick first.`))) return;
+    _glusterPost(`/api/gluster/volumes/${encodeURIComponent(name)}/remove-brick`, 'POST', { bricks: [spec] }, 'Brick removed');
+}
+
+function glusterSetOption(name) {
+    _glusterModal(`Set option on ${name}`, [
+        { id: 'key', label: 'Option key', placeholder: 'performance.cache-size' },
+        { id: 'value', label: 'Value', placeholder: '256MB' },
+    ], 'Set', (v) => {
+        if (!v.key || !v.value) { showToast('Enter both key and value', 'error'); return; }
+        _glusterPost('/api/gluster/volumes/' + encodeURIComponent(name), 'PUT', { key: v.key, value: v.value }, 'Option set');
+    });
+}
 let allStorageMounts = [];  // cache for edit modal
 
 async function loadStorageMounts() {
@@ -27318,16 +27597,51 @@ let consoleTerm = null;
 let consoleWs = null;
 let consoleFitAddon = null;
 
-function openConsole(type, name) {
+// The single shared terminal popup. Interactive shells (host/docker/lxc/vm)
+// all live in this ONE window as tabs — opening a different container adds a tab
+// instead of spawning another window. Kept across opens so we can reuse it.
+let _termPopup = null;
+// Shared launcher for every interactive-shell entry point (Console buttons,
+// Fleet view, WolfScale). `nodeId` is the resolved remote node id, or '' for
+// the local/serving node. One-shot log consoles (install/upgrade/k8s/pve) do
+// NOT use this — they keep their own transient per-name window.
+function _openShellTab(type, name, nodeId, extra) {
+    extra = extra || {};
     let url = '/console.html?type=' + encodeURIComponent(type) + '&name=' + encodeURIComponent(name);
-    // For remote nodes, pass the node_id so the console proxies through the local server
+    if (nodeId) url += '&node_id=' + encodeURIComponent(nodeId);
+    // Proxmox shells carry the PVE node id + vmid instead of a cluster node id.
+    if (extra.pveNodeId) url += '&pve_node_id=' + encodeURIComponent(extra.pveNodeId);
+    if (extra.pveVmid) url += '&pve_vmid=' + encodeURIComponent(extra.pveVmid);
+    // Every live shell shares the one tabbed popup: host/docker/lxc/vm plus
+    // Proxmox (pve) and Kubernetes pod-exec (k8s). Only one-shot log consoles
+    // (install/upgrade) keep their own transient per-name window.
+    const interactive = ['host', 'docker', 'lxc', 'vm', 'pve', 'k8s'].indexOf(type) !== -1;
+    if (interactive && _termPopup && !_termPopup.closed) {
+        // Reuse the open terminal: focus it and tell it to add (or focus an
+        // existing) tab for this target — no new window.
+        try { _termPopup.focus(); } catch (_) {}
+        const descriptor = { type, name };
+        if (nodeId) descriptor.nodeId = nodeId;
+        if (extra.pveNodeId) descriptor.pveNodeId = extra.pveNodeId;
+        if (extra.pveVmid) descriptor.pveVmid = extra.pveVmid;
+        _termPopup.postMessage({ __wolfstackTerminal: 'addTab', descriptor }, window.location.origin);
+        return;
+    }
+    const win = window.open(url, interactive ? 'wolfstack_terminal' : ('console_' + name), 'width=1100,height=680,menubar=no,toolbar=no');
+    if (interactive) {
+        if (win) _termPopup = win;
+        else showToast('Pop-up blocked — allow pop-ups for this site to open the terminal', 'error');
+    }
+}
+
+function openConsole(type, name) {
+    // For remote nodes, proxy through the local server via node_id.
+    let nodeId = '';
     if (currentNodeId) {
         const node = allNodes.find(n => n.id === currentNodeId);
-        if (node && !node.is_self) {
-            url += '&node_id=' + encodeURIComponent(node.id);
-        }
+        if (node && !node.is_self) nodeId = node.id;
     }
-    window.open(url, 'console_' + name, 'width=960,height=600,menubar=no,toolbar=no');
+    _openShellTab(type, name, nodeId);
 }
 
 // ─── Inline Terminal (rendered inside the page content area) ───
@@ -27445,10 +27759,7 @@ async function inlineTermFetchTargets(nodeId, type) {
 // pve-console query params.
 function inlineTermPopOut() {
     if (inlineTermPveNodeId !== null && inlineTermPveVmid !== null) {
-        const url = '/console.html?type=pve&name=' + encodeURIComponent(inlineTermName || 'PVE Shell')
-            + '&pve_node_id=' + encodeURIComponent(inlineTermPveNodeId)
-            + '&pve_vmid=' + encodeURIComponent(inlineTermPveVmid);
-        window.open(url, 'console_pve_' + inlineTermPveVmid, 'width=960,height=600,menubar=no,toolbar=no');
+        openPveConsole(inlineTermPveNodeId, inlineTermPveVmid, inlineTermName || 'PVE Shell');
         return;
     }
     openConsole(inlineTermType || 'host', inlineTermName || '');
@@ -27708,10 +28019,10 @@ async function openPveVmVnc(nodeId, vmid, displayName) {
 
 // Open terminal for LXC containers (text console via termproxy)
 function openPveConsole(nodeId, vmid, displayName) {
-    const url = '/console.html?type=pve&name=' + encodeURIComponent(displayName || 'VMID ' + vmid)
-        + '&pve_node_id=' + encodeURIComponent(nodeId)
-        + '&pve_vmid=' + encodeURIComponent(vmid);
-    window.open(url, 'pve_console_' + vmid, 'width=960,height=600,menubar=no,toolbar=no');
+    // `nodeId` here is the PROXMOX node id (pve_node_id), not a cluster node —
+    // the pve-console proxy runs on the serving node. Funnel into the shared
+    // tabbed popup like every other shell.
+    _openShellTab('pve', displayName || ('VMID ' + vmid), '', { pveNodeId: nodeId, pveVmid: vmid });
 }
 
 // ===========================================================================
@@ -36893,12 +37204,13 @@ function fleetSetContext(nodeId) {
 
 // Fleet console opener — routes through node proxy for remote nodes
 function fleetOpenConsole(nodeId, type, name) {
-    var url = '/console.html?type=' + encodeURIComponent(type) + '&name=' + encodeURIComponent(name);
+    // Funnel into the one shared tabbed popup (see _openShellTab).
+    var resolved = '';
     if (nodeId && nodeId !== 'local') {
         var node = allNodes.find(function (n) { return n.id === nodeId; });
-        if (node && !node.is_self) url += '&node_id=' + encodeURIComponent(nodeId);
+        if (node && !node.is_self) resolved = nodeId;
     }
-    window.open(url, 'console_' + name, 'width=960,height=600,menubar=no,toolbar=no');
+    _openShellTab(type, name, resolved);
 }
 
 // Fleet VNC opener — connects to the correct host for remote VMs
@@ -48661,16 +48973,15 @@ let k8sPodDetailTab = 'overview';
 
 function openK8sPodConsole(podName, namespace, container) {
     const target = `${k8sCurrentCluster}/${podName}/${namespace}${container ? '/' + container : ''}`;
-    // K8s clusters may be on a different node — use the cluster's owner_node_id, not currentNodeId
+    // K8s clusters may be on a different node — use the cluster's owner_node_id,
+    // not currentNodeId. Funnel into the shared tabbed popup like every shell.
     const cluster = k8sClusters.find(c => c.id === k8sCurrentCluster);
-    let url = '/console.html?type=k8s&name=' + encodeURIComponent(target);
+    let nodeId = '';
     if (cluster && cluster.owner_node_id) {
         const node = allNodes.find(n => n.id === cluster.owner_node_id);
-        if (node && !node.is_self) {
-            url += '&node_id=' + encodeURIComponent(cluster.owner_node_id);
-        }
+        if (node && !node.is_self) nodeId = cluster.owner_node_id;
     }
-    window.open(url, 'console_' + target, 'width=960,height=600,menubar=no,toolbar=no');
+    _openShellTab('k8s', target, nodeId);
 }
 
 async function showK8sPodDetail(name, namespace) {
@@ -69507,10 +69818,11 @@ function wsBindDelegation() {
 
 function wsOpenConsole(container, host) {
     if (!container) return;
-    let url = '/console.html?type=lxc&name=' + encodeURIComponent(container);
+    // Funnel into the one shared tabbed popup (see _openShellTab).
+    let resolved = '';
     const node = (Array.isArray(allNodes) ? allNodes : []).find(n => n.id === host || n.self_id === host);
-    if (host && node && !node.is_self) url += '&node_id=' + encodeURIComponent(host);
-    window.open(url, 'ws_console_' + container.replace(/[^a-zA-Z0-9_.-]/g, '_'), 'width=980,height=620,menubar=no,toolbar=no');
+    if (host && node && !node.is_self) resolved = host;
+    _openShellTab('lxc', container, resolved);
 }
 
 async function wsNodeAction(clusterId, container, action) {

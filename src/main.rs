@@ -38,6 +38,7 @@ mod predictive;
 mod wolfrun;
 mod statuspage;
 mod ceph;
+mod gluster;
 mod gateway;
 mod federation;
 mod array;

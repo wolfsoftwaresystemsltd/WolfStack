@@ -195,6 +195,22 @@ const PACKAGES: &[PackageMapping] = &[
         alpine: Some("ipset"),
         service_unit: None,
     },
+    PackageMapping {
+        // GlusterFS distributed storage. The package ships both the `gluster`
+        // CLI and the `glusterd` management daemon (service_unit below), so a
+        // single install gives WolfStack everything it needs to manage a pool.
+        // RHEL/CentOS need the centos-release-gluster repo for current builds,
+        // but the base `glusterfs-server` name resolves on EL with that repo
+        // (or EPEL) present; we surface a clear error if the package is absent.
+        logical: "glusterfs",
+        binary: "gluster",
+        debian: Some("glusterfs-server"),
+        rhel: Some("glusterfs-server"),
+        arch: Some("glusterfs"),
+        suse: Some("glusterfs"),
+        alpine: Some("glusterfs"),
+        service_unit: Some("glusterd"),
+    },
 ];
 
 /// Outcome of an install attempt. Returned to the API caller (and

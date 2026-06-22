@@ -7508,6 +7508,16 @@ dns_cloudflare_api_token = your_token_here"
                     </p>
                 </div>
             </div>
+            <!-- GlusterFS distributed storage (cluster-scoped, rendered by renderGluster) -->
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>GlusterFS</h3>
+                    <button class="btn btn-sm" onclick="loadGlusterStatus()">Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div id="gluster-body">Loading GlusterFS…</div>
+                </div>
+            </div>
             <!-- ZFS Pools (shown if ZFS available) -->
             <div id="zfs-section" class="card" style="margin-top:20px; display:none;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">

@@ -179,7 +179,8 @@
                     <div class="fc-help-popover" id="wtc-help-popover" role="dialog" aria-label="Keyboard shortcuts" hidden>
                         <div class="fc-help-title">Keyboard shortcuts</div>
                         <ul class="fc-help-list">
-                            <li><kbd>Alt</kbd>+<kbd>T</kbd> New tab</li>
+                            <li><kbd>+</kbd> New tab (same server)</li>
+                            <li><kbd>Alt</kbd>+<kbd>T</kbd> New tab (pick a server)</li>
                             <li><kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> Switch tab</li>
                             <li><kbd>Alt</kbd>+<kbd>\\</kbd> Split vertical</li>
                             <li><kbd>Alt</kbd>+<kbd>-</kbd> Split horizontal</li>
@@ -254,6 +255,10 @@
                 id: winId, name: defaultName, node: node,
                 panes: [], layout: 'single', activePaneId: null, gridEl: grid,
                 _splitterCleanups: [],
+                // Remembered so "+ New Tab" can reopen the SAME server without
+                // re-prompting (the operator just wants another shell to where
+                // they already are).
+                _origin: { node, type, target, pveNodeId: o.pveNodeId, pveVmid: o.pveVmid, noReconnect: o.noReconnect },
             };
             inst.windows.push(win);
 
@@ -283,6 +288,30 @@
             renderTabs();
             showActiveGrid();
             if (inst.activeWindow) onShow();
+        }
+
+        // Detach a tab into its OWN standalone window (console.html). Because a
+        // live WebSocket can't move between windows, the pop-out opens a fresh
+        // session to the same target and then closes the source tab — unless the
+        // browser blocks the popup, in which case we keep the tab.
+        function popoutWindow(winId) {
+            const win = inst.windows.find(w => w.id === winId);
+            if (!win || !win._origin) return;
+            const o = win._origin;
+            // host/pve carry no connection-significant target (host always
+            // connects as 'host'; pve uses pveNodeId+vmid), so use the tab's
+            // display name for a friendly window title. Other types MUST pass
+            // the real target name — that's what the socket connects to.
+            const nm = (o.type === 'pve' || o.type === 'host') ? (win.name || o.target || '') : (o.target || '');
+            let url = '/console.html?type=' + encodeURIComponent(o.type) + '&name=' + encodeURIComponent(nm);
+            if (o.node && o.node.id && !isSelf(o.node)) url += '&node_id=' + encodeURIComponent(o.node.id);
+            if (o.pveNodeId) url += '&pve_node_id=' + encodeURIComponent(o.pveNodeId);
+            if (o.pveVmid) url += '&pve_vmid=' + encodeURIComponent(o.pveVmid);
+            // A UNIQUE window name so each pop-out is its own window — never the
+            // shared 'wolfstack_terminal' popup.
+            const w = window.open(url, 'wtc_popout_' + (inst.nextWin++), 'width=1000,height=640,menubar=no,toolbar=no');
+            if (w) { closeWindow(winId); try { w.focus(); } catch (_) {} }
+            else { toast('Pop-out blocked — allow pop-ups for this site', 'error'); }
         }
 
         function showEmptyStage() {
@@ -573,9 +602,11 @@
                 tab.innerHTML = `
                     <span class="fc-tab-num">${i + 1}</span>
                     <span class="fc-tab-name" title="Double-click to rename">${esc(w.name)}</span>
+                    <button class="fc-tab-popout" type="button" title="Pop out into its own window" aria-label="Pop out tab ${escAttr(w.name)}">⧉</button>
                     <button class="fc-tab-close" type="button" title="Close tab" aria-label="Close tab ${escAttr(w.name)}">✕</button>`;
                 tab.addEventListener('click', () => switchWindow(w.id));
                 tab.querySelector('.fc-tab-name').addEventListener('dblclick', (e) => { e.stopPropagation(); renameWindow(w.id); });
+                tab.querySelector('.fc-tab-popout').addEventListener('click', (e) => { e.stopPropagation(); popoutWindow(w.id); });
                 tab.querySelector('.fc-tab-close').addEventListener('click', (e) => { e.stopPropagation(); closeWindow(w.id); });
                 strip.appendChild(tab);
             });
@@ -583,10 +614,17 @@
             const add = document.createElement('button');
             add.className = 'fc-tab-add';
             add.type = 'button';
-            add.title = 'New tab (Alt+T)';
-            add.setAttribute('aria-label', 'New terminal tab');
+            add.title = 'New tab — same server (Alt+T to pick a different one)';
+            add.setAttribute('aria-label', 'New terminal tab for the same server');
             add.textContent = '➕ New Tab';
-            add.addEventListener('click', openPicker);
+            // Default: open another tab to the SAME server as the active tab, no
+            // prompt. Only fall back to the picker when there's nothing open to
+            // duplicate (the picker is still on Alt+T for a different server).
+            add.addEventListener('click', () => {
+                const w = activeWindow();
+                if (w && w._origin) newWindow(w._origin);
+                else openPicker();
+            });
             strip.appendChild(add);
 
             // Split controls live on the right of the tab strip so they are

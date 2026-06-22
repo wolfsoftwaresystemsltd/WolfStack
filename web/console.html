@@ -53,6 +53,9 @@
     </script>
     <script>
         (function () {
+            // The mounted WolfTermConsole handle — set once mount() runs; used by
+            // the postMessage listener below so the opener can add tabs.
+            let handle = null;
             const params = new URLSearchParams(window.location.search);
             const type = params.get('type') || 'lxc';
             const name = params.get('name') || '';
@@ -164,13 +167,25 @@
                 }
                 initial.noReconnect = noReconnect;
 
-                WolfTermConsole.mount(document.getElementById('console-root'), {
+                handle = WolfTermConsole.mount(document.getElementById('console-root'), {
                     initial: initial,
                     nodes: nodes,
                     selfNodeId: self ? self.id : null,
                     onAfterInitialConnect: autoRunOnInitial,
                 });
             }
+
+            // The opener (the main app) reuses this one window for every
+            // interactive shell: it posts an "addTab" descriptor instead of
+            // spawning another popup. Focus an existing tab for the same target,
+            // else add a new one — so opening a different LXC just adds a tab.
+            window.addEventListener('message', (e) => {
+                if (e.origin !== window.location.origin) return;
+                const d = e.data;
+                if (!d || d.__wolfstackTerminal !== 'addTab' || !d.descriptor || !handle) return;
+                if (!handle.focusTab(d.descriptor)) handle.addTab(d.descriptor);
+                try { window.focus(); } catch (_) {}
+            });
 
             if (typeof WolfTermConsole === 'undefined' || !WolfTermConsole.mount) {
                 document.getElementById('console-root').innerHTML =
