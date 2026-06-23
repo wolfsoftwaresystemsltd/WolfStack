@@ -272,6 +272,18 @@ pub struct VmConfig {
     /// previously-set passthrough). Defaults to empty for older configs.
     #[serde(default)]
     pub extra_qemu_args: String,
+
+    /// Whether the VM is currently paused/suspended (CPU frozen, RAM held).
+    /// Computed at list time from a `<name>.paused` marker we write on
+    /// pause_vm and clear on resume/start/stop — NOT read from a per-VM
+    /// `qm status`/`virsh domstate` call, which would reintroduce the
+    /// per-poll subprocess storm the Proxmox fast-path was built to avoid
+    /// (Cogswell 2026-04-29). Only ever true when `running` is also true.
+    /// Like `running`, it's recomputed each list and never authoritative
+    /// on disk. Tracks pauses WolfStack initiated; an external `qm suspend`
+    /// won't flip it (documented limitation).
+    #[serde(default)]
+    pub paused: bool,
 }
 
 fn default_net_model() -> String { "virtio".to_string() }
@@ -537,6 +549,7 @@ fn vnc_firewall_reap_stale(name: &str, keep_port: u16) {
 impl VmConfig {
     pub fn new(name: String, cpus: u32, memory_mb: u32, disk_size_gb: u32) -> Self {
         VmConfig {
+            paused: false,
             name,
             cpus,
             memory_mb,
@@ -816,11 +829,15 @@ impl VmManager {
     pub fn list_vms(&self) -> Vec<VmConfig> {
         // On Proxmox, discover VMs via qm list
         if containers::is_proxmox() {
-            return self.qm_list_all();
+            let mut vms = self.qm_list_all();
+            self.annotate_paused(&mut vms);
+            return vms;
         }
         // On libvirt, discover VMs via virsh
         if containers::is_libvirt() {
-            return self.virsh_list_all();
+            let mut vms = self.virsh_list_all();
+            self.annotate_paused(&mut vms);
+            return vms;
         }
 
         // Standalone: scan local config files. Parse failures are logged
@@ -864,6 +881,7 @@ impl VmManager {
                 vms.push(vm);
             }
         }
+        self.annotate_paused(&mut vms);
         vms
     }
 
@@ -1031,6 +1049,7 @@ impl VmManager {
                 };
 
                 Some(VmConfig {
+                    paused: false,
                     name,
                     cpus,
                     memory_mb,
@@ -2646,6 +2665,9 @@ impl VmManager {
     }
 
     pub fn start_vm(&self, name: &str) -> Result<(), String> {
+        // A fresh start clears any stale paused marker (a paused VM that was
+        // then force-stopped/host-rebooted would otherwise look paused).
+        let _ = std::fs::remove_file(self.paused_marker_path(name));
         // Start-time conflict guard: check no running VM on this host has already
         // claimed any USB/PCI device configured on the target VM. Applies to all
         // three backends (native, Proxmox, libvirt) because list_vms() pulls from
@@ -4541,6 +4563,10 @@ impl VmManager {
     /// plug). Graceful is the default for user-initiated stop actions;
     /// internal callers that need a fast, definite stop pass true.
     pub fn stop_vm(&self, name: &str, force: bool) -> Result<(), String> {
+        // Stopping clears any paused state (the marker is meaningless once the
+        // VM is down, and start would clear it anyway — do it here too so a
+        // graceful stop that lands before the next list looks right).
+        let _ = std::fs::remove_file(self.paused_marker_path(name));
         // On Proxmox: force = `qm stop` (immediate, block).
         // Graceful = `qm shutdown --timeout 60` backgrounded so the HTTP
         // response returns immediately — previously we blocked up to 30 s
@@ -4635,6 +4661,182 @@ impl VmManager {
 
 
         Ok(())
+    }
+
+    /// Path of the "this VM is paused" marker. Cheap (one `fs::exists`)
+    /// so list_vms can flag paused VMs without a per-VM `qm`/`virsh`/QMP
+    /// status call on every poll. See `VmConfig::paused`.
+    fn paused_marker_path(&self, name: &str) -> std::path::PathBuf {
+        self.base_dir.join(format!("{}.paused", name))
+    }
+
+    /// Set `vm.paused` for each VM from the marker file. paused implies
+    /// running — a marker for a no-longer-running VM is ignored (and
+    /// cleared on its next start/stop). Called once per list, after the
+    /// per-backend discovery has set `running`.
+    fn annotate_paused(&self, vms: &mut [VmConfig]) {
+        for vm in vms.iter_mut() {
+            let marker = self.paused_marker_path(&vm.name);
+            if marker.exists() {
+                if vm.running {
+                    vm.paused = true;
+                } else {
+                    // Stale marker for a VM that's no longer running (host
+                    // reboot, external kill) — self-heal so it doesn't sit on
+                    // disk and the UI never offers Resume on a dead VM.
+                    let _ = std::fs::remove_file(&marker);
+                }
+            }
+        }
+    }
+
+    /// Run a hypervisor CLI verb (`qm`/`virsh`) and map the exit status to
+    /// a Result. Shared by restart/pause/resume so the three read alike.
+    fn vm_cli(bin: &str, args: &[&str]) -> Result<(), String> {
+        let output = Command::new(bin).args(args).output()
+            .map_err(|e| format!("Failed to run {} {}: {}", bin, args.join(" "), e))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("{} {} failed: {}", bin, args.join(" "), stderr.trim()))
+    }
+
+    /// Send one QMP command to a native (raw-QEMU) VM's monitor socket and
+    /// wait for its reply. QEMU is launched with
+    /// `-qmp unix:/run/wolfstack-qmp-<name>.sock,server,nowait`, so this is
+    /// how native VMs get pause/resume/reset when there's no `qm`/`virsh`
+    /// CLI. Read/write timeouts guard against a wedged socket holding the
+    /// VM-manager mutex (this runs under `state.vms.lock()`, same as the
+    /// existing qm/virsh calls). Returns Ok on a QMP `return`, Err on a QMP
+    /// `error` or any I/O failure.
+    fn qmp_execute(&self, name: &str, command: &str) -> Result<(), String> {
+        use std::os::unix::net::UnixStream;
+        use std::io::{BufRead, BufReader, Write};
+        use std::time::Duration;
+
+        let sock = format!("/run/wolfstack-qmp-{}.sock", name);
+        let stream = UnixStream::connect(&sock).map_err(|e| {
+            format!(
+                "QMP monitor {} not reachable — is the VM running? (VMs started by a \
+                 build older than the QMP-socket support must be restarted once to gain it): {}",
+                sock, e
+            )
+        })?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+        let mut writer = stream.try_clone().map_err(|e| format!("QMP socket clone: {}", e))?;
+        let mut reader = BufReader::new(stream);
+
+        // Read QMP replies until a `return`/`error` object — skipping the
+        // `{"QMP":…}` greeting and any async `{"event":…}` lines.
+        let await_reply = |reader: &mut BufReader<UnixStream>| -> Result<(), String> {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let n = reader.read_line(&mut line).map_err(|e| format!("QMP read: {}", e))?;
+                if n == 0 {
+                    return Err("QMP socket closed before replying".to_string());
+                }
+                let v: serde_json::Value = match serde_json::from_str(line.trim()) {
+                    Ok(v) => v,
+                    Err(_) => continue, // ignore non-JSON noise
+                };
+                if let Some(err) = v.get("error") {
+                    let desc = err.get("desc").and_then(|d| d.as_str()).unwrap_or("unknown QMP error");
+                    return Err(format!("QMP error: {}", desc));
+                }
+                if v.get("return").is_some() {
+                    return Ok(());
+                }
+                // greeting / event — keep reading.
+            }
+        };
+
+        // Negotiate capabilities (mandatory before any command), then send
+        // the command. The greeting banner is consumed by await_reply.
+        writer.write_all(b"{\"execute\":\"qmp_capabilities\"}\n")
+            .map_err(|e| format!("QMP write: {}", e))?;
+        await_reply(&mut reader)?;
+        writer.write_all(format!("{{\"execute\":\"{}\"}}\n", command).as_bytes())
+            .map_err(|e| format!("QMP write: {}", e))?;
+        await_reply(&mut reader)
+    }
+
+    /// Restart (reboot) a running VM. Proxmox/libvirt issue a clean guest
+    /// reboot; native QEMU has no single ACPI-reboot command, so we QMP
+    /// `system_reset` — an in-place hard reset that keeps the process and
+    /// networking up (honest difference, documented for the operator).
+    pub fn restart_vm(&self, name: &str) -> Result<(), String> {
+        let result = if containers::is_proxmox() {
+            let vmid = self.qm_vmid_by_name(name)
+                .ok_or_else(|| format!("VM '{}' not found in Proxmox", name))?;
+            Self::vm_cli("qm", &["reboot", &vmid.to_string()])
+        } else if containers::is_libvirt() && self.virsh_has_domain(name) {
+            Self::vm_cli("virsh", &["reboot", name])
+        } else if !self.check_running(name) {
+            Err("VM is not running".to_string())
+        } else {
+            self.qmp_execute(name, "system_reset")
+        };
+        // Only clear the paused marker once the reboot actually succeeded —
+        // a failed `qm reboot` must not strip the operator's ability to Resume.
+        if result.is_ok() {
+            let _ = std::fs::remove_file(self.paused_marker_path(name));
+        }
+        result
+    }
+
+    /// Pause/suspend a running VM (freeze vCPUs, hold RAM). Proxmox
+    /// `qm suspend`, libvirt `virsh suspend`, native QMP `stop`. Writes the
+    /// paused marker so the UI shows a Resume control.
+    pub fn pause_vm(&self, name: &str) -> Result<(), String> {
+        let result = if containers::is_proxmox() {
+            let vmid = self.qm_vmid_by_name(name)
+                .ok_or_else(|| format!("VM '{}' not found in Proxmox", name))?;
+            // `--todisk 0` forces suspend-to-RAM (vCPUs frozen, process + RAM
+            // stay live) so it matches `virsh suspend` / QMP `stop` and keeps
+            // the VM "running" for the paused-implies-running invariant.
+            // Without it we'd risk a hibernate-to-disk that exits the process.
+            Self::vm_cli("qm", &["suspend", &vmid.to_string(), "--todisk", "0"])
+        } else if containers::is_libvirt() && self.virsh_has_domain(name) {
+            Self::vm_cli("virsh", &["suspend", name])
+        } else if !self.check_running(name) {
+            Err("VM is not running".to_string())
+        } else {
+            self.qmp_execute(name, "stop")
+        };
+        if result.is_ok() {
+            // Best-effort marker; a failure here just means the UI won't show
+            // the Resume control until the next state change — not fatal.
+            let _ = std::fs::write(self.paused_marker_path(name), b"");
+        }
+        result
+    }
+
+    /// Resume a paused VM. Proxmox `qm resume`, libvirt `virsh resume`,
+    /// native QMP `cont`. Clears the paused marker on success.
+    pub fn resume_vm(&self, name: &str) -> Result<(), String> {
+        let result = if containers::is_proxmox() {
+            let vmid = self.qm_vmid_by_name(name)
+                .ok_or_else(|| format!("VM '{}' not found in Proxmox", name))?;
+            Self::vm_cli("qm", &["resume", &vmid.to_string()])
+        } else if containers::is_libvirt() && self.virsh_has_domain(name) {
+            Self::vm_cli("virsh", &["resume", name])
+        } else if !self.check_running(name) {
+            // Stale marker — the native VM died while paused. Surface a clear
+            // error; the marker is cleared below so the UI stops offering Resume.
+            Err("VM is not running".to_string())
+        } else {
+            self.qmp_execute(name, "cont")
+        };
+        // Clear the marker on success OR when the VM is no longer running
+        // (dead VM with a leftover marker — stop offering Resume on it).
+        if result.is_ok() || !self.check_running(name) {
+            let _ = std::fs::remove_file(self.paused_marker_path(name));
+        }
+        result
     }
 
     /// Which hypervisor backend owns this VM: "proxmox", "libvirt", or
@@ -4751,6 +4953,11 @@ impl VmManager {
     }
 
     pub fn delete_vm(&self, name: &str) -> Result<(), String> {
+        // Clear any paused marker up front so a deleted-then-recreated VM of
+        // the same name can't inherit a ghost "Paused" state (all backends —
+        // the native path also clears it via stop_vm, but Proxmox/libvirt
+        // destroy directly without going through stop_vm).
+        let _ = std::fs::remove_file(self.paused_marker_path(name));
         // Capture the VM config BEFORE any destroy step. We need:
         //   • wolfnet_ip — to release it from the route cache below.
         //   • pci_devices — to hand back any vfio-pci-bound devices to
@@ -5210,6 +5417,7 @@ impl VmManager {
             // block — libvirt owns this once we've written it, so the XML is
             // authoritative (empty for any domain we never touched).
             extra_qemu_args: libvirt_xml_qemu_commandline(&dumpxml),
+            paused: false,
         };
 
         // Overlay adoption sidecar for WolfStack-specific fields that
@@ -5402,6 +5610,7 @@ impl VmManager {
             notes: libvirt_xml_description(&persistent),
             // Extra QEMU args from the persistent domain's <qemu:commandline>.
             extra_qemu_args: libvirt_xml_qemu_commandline(&persistent),
+            paused: false,
         };
 
         // Same WolfStack sidecar overlay as the subprocess path: the domain
@@ -5878,6 +6087,7 @@ impl VmManager {
             notes: libvirt_xml_description(&dumpxml),
             // Carry over any existing <qemu:commandline> passthrough args.
             extra_qemu_args: libvirt_xml_qemu_commandline(&dumpxml),
+            paused: false,
         };
 
         // Save config
@@ -7797,6 +8007,7 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         bridge_gateway: None,
         notes,
         extra_qemu_args,
+        paused: false,
     })
 }
 

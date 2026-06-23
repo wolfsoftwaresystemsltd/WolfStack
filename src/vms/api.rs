@@ -536,6 +536,11 @@ async fn vm_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path
         // Power-yank — equivalent to the old `stop` behaviour. For when
         // the guest is wedged or the user needs an immediate halt.
         "force-stop" => manager.stop_vm(&name, true),
+        // Reboot the guest (qm/virsh reboot; native QMP system_reset).
+        "restart" => manager.restart_vm(&name),
+        // Suspend/resume to RAM (qm/virsh suspend|resume; native QMP stop/cont).
+        "pause" => manager.pause_vm(&name),
+        "resume" => manager.resume_vm(&name),
         _ => Err(format!("Unknown action: {}", body.action)),
     };
     

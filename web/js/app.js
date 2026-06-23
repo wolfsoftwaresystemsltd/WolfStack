@@ -5858,8 +5858,8 @@ function renderVms(vms) {
     empty.style.display = 'none';
 
     table.innerHTML = vms.map(vm => {
-        const statusText = vm.running ? 'Running' : 'Stopped';
-        const statusColor = vm.running ? 'var(--success)' : 'var(--danger)';
+        const statusText = vm.paused ? 'Paused' : (vm.running ? 'Running' : 'Stopped');
+        const statusColor = vm.paused ? 'var(--warning)' : (vm.running ? 'var(--success)' : 'var(--danger)');
 
         // Determine the correct host for VNC connections (remote node vs local).
         // vncNodeParam routes vnc.html's websocket + password fetch through
@@ -5944,7 +5944,11 @@ function renderVms(vms) {
                         // Power controls — only one of start/stop is sensible at a time.
                         const powerBtn = vm.running
                             ? `<button class="btn btn-sm" style="${baseStyle}color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
-                               <button class="btn btn-sm" style="${baseStyle}color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>`
+                               <button class="btn btn-sm" style="${baseStyle}color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                               <button class="btn btn-sm" style="${vm.paused ? disabledStyle : baseStyle}" ${vm.paused ? 'disabled' : `onclick="vmAction('${vm.name}', 'restart', this)"`} title="Restart (reboot the guest)"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
+                               ${vm.paused
+                                   ? `<button class="btn btn-sm" style="${baseStyle}color:#22c55e;" onclick="vmAction('${vm.name}', 'resume', this)" title="Resume (unpause)"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>`
+                                   : `<button class="btn btn-sm" style="${baseStyle}" onclick="vmAction('${vm.name}', 'pause', this)" title="Pause (suspend to RAM)"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>`}`
                             : `<button class="btn btn-sm" style="${baseStyle}color:#22c55e;" onclick="vmAction('${vm.name}', 'start', this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>`;
                         // Console / VNC — only meaningful when running.
                         const vncBtn = vm.running
@@ -10559,14 +10563,23 @@ async function vmForceStopConfirm(name, btn) {
 
 async function vmAction(name, action, btn) {
     activityStart();
-    const row = btn?.closest('tr');
-    const buttons = row ? row.querySelectorAll('button') : [];
+    // List view rows VMs in <tr>; the card/detail view uses <div> containers.
+    // Fall back to the nearest button-group container so the in-flight disable
+    // AND the on-error restore work in BOTH views (otherwise a failed action
+    // from a card leaves the button stuck showing a spinner).
+    const row = btn?.closest('tr') || btn?.parentElement;
+    const buttons = row ? row.querySelectorAll('button') : (btn ? [btn] : []);
+    // Remember the clicked button's markup so we can restore it on failure.
+    const btnHtml = btn ? btn.innerHTML : null;
     buttons.forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.pointerEvents = 'none'; });
     if (btn) btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
 
     try {
         const actionVerb = action === 'stop' ? 'Stopping' :
                            action === 'force-stop' ? 'Force stopping' :
+                           action === 'pause' ? 'Pausing' :
+                           action === 'resume' ? 'Resuming' :
+                           action === 'restart' ? 'Restarting' :
                            action.charAt(0).toUpperCase() + action.slice(1) + 'ing';
         showToast(`${actionVerb} VM...`, 'info');
         const resp = await fetch(apiUrl(`/api/vms/${name}/action`), {
@@ -10578,6 +10591,9 @@ async function vmAction(name, action, btn) {
         if (resp.ok) {
             const pastTense = action === 'stop' ? 'stopped' :
                               action === 'force-stop' ? 'force stopped' :
+                              action === 'pause' ? 'paused' :
+                              action === 'resume' ? 'resumed' :
+                              action === 'restart' ? 'restarted' :
                               `${action}ed`;
             showToast(`VM ${pastTense}`, 'success');
             taskLog('VM ' + action + ': ' + name);
@@ -10592,11 +10608,13 @@ async function vmAction(name, action, btn) {
             showToast(data.error || 'Action failed', 'error');
             taskLog('VM ' + action + ': ' + name, 'failed');
             buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+            if (btn && btnHtml !== null) btn.innerHTML = btnHtml;
         }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
         taskLog('VM ' + action + ': ' + name, 'failed');
         buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+        if (btn && btnHtml !== null) btn.innerHTML = btnHtml;
     } finally {
         activityStop();
     }
@@ -22609,7 +22627,8 @@ function vmCardHtml(vm) {
     const bs = 'margin:1px;font-size:16px;line-height:1;padding:3px 5px;background:none;border:1px solid var(--border);border-radius:4px;cursor:pointer;';
     const bd = bs + 'opacity:0.3;cursor:not-allowed;pointer-events:none;';
     const isRunning = vm.running;
-    const borderColor = isRunning ? '#10b981' : '#6b7280';
+    const isPaused = !!vm.paused;
+    const borderColor = isPaused ? '#eab308' : (isRunning ? '#10b981' : '#6b7280');
     let vncHost = window.location.hostname;
     let vncNodeParam = '';
     if (currentNodeId) {
@@ -22629,6 +22648,10 @@ function vmCardHtml(vm) {
             <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','start',this)"`} title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
             <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','stop',this)"`} title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
             <button class="btn btn-sm" style="${!isRunning ? bd : bs}color:#b91c1c;" ${!isRunning ? 'disabled' : `onclick="vmForceStopConfirm('${vm.name}', this)"`} title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+            <button class="btn btn-sm" style="${isRunning && !isPaused ? bs : bd}" ${isRunning && !isPaused ? `onclick="vmAction('${vm.name}','restart',this)"` : 'disabled'} title="Restart (reboot the guest)"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
+            ${isPaused
+                ? `<button class="btn btn-sm" style="${bs}color:#22c55e;" onclick="vmAction('${vm.name}','resume',this)" title="Resume (unpause)"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>`
+                : `<button class="btn btn-sm" style="${isRunning ? bs : bd}" ${isRunning ? `onclick="vmAction('${vm.name}','pause',this)"` : 'disabled'} title="Pause (suspend to RAM)"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>`}
             ${vncLink ? `<button class="btn btn-sm" style="${bs}" onclick="window.open('${vncLink}')" title="VNC"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>` : ''}
             <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="openVmConsole('${vm.name}')"`} title="Serial terminal (guest must have serial console enabled)"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
             <button class="btn btn-sm" style="${bs}" onclick="showVmSettings('${vm.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
@@ -22642,7 +22665,7 @@ function vmCardHtml(vm) {
         <div style="padding:10px 12px;">
             <div style="display:flex;justify-content:space-between;align-items:start;">
                 <div><div style="font-weight:700;font-size:14px;">${escapeHtml(vm.name)}</div><div style="font-size:11px;color:var(--text-muted);">${vm.bios_type === 'ovmf' ? 'UEFI' : 'BIOS'} · ${vm.os_disk_bus} · ${vm.net_model || 'virtio'}</div></div>
-                <span style="font-size:10px;padding:2px 8px;border-radius:4px;background:${borderColor}22;color:${borderColor};font-weight:600;">${isRunning ? 'Running' : 'Stopped'}</span>
+                <span style="font-size:10px;padding:2px 8px;border-radius:4px;background:${borderColor}22;color:${borderColor};font-weight:600;">${isPaused ? 'Paused' : (isRunning ? 'Running' : 'Stopped')}</span>
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;margin-top:8px;font-size:11px;color:var(--text-muted);">
                 <span>${vm.cpus} vCPU</span>
