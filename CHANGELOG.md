@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.56.1: autostart fires on machine boot only, not on WolfStack restart (Restraint)** _(2026-06-23 — [`d1b763ec`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d1b763ec0c36b76459d5aca21ad1d058e560ea4d))_
 - **v24.56.0: TrueNAS 26 support — JSON-RPC WebSocket transport (REST-first fallback)** _(2026-06-23 — [`d69c70bd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d69c70bdc1d69560e41ad08fdd4634d2e4c5aece))_
 - **v24.55.16: stop binding docker0 to firewalld trusted zone (wabil)** _(2026-06-23 — [`7e4fa3d0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7e4fa3d07bac489dd19feccbe393fa6f8ee5915a))_
 - **v24.55.15: two predictive-inbox false positives (Gary + wabil)** _(2026-06-22 — [`bbcedc98`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bbcedc988b44e7ab5e82acfebee3eca96afc0840))_
