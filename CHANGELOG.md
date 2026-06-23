@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.55.15: two predictive-inbox false positives (Gary + wabil)** _(2026-06-22 — [`bbcedc98`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bbcedc988b44e7ab5e82acfebee3eca96afc0840))_
+- **v24.55.14: folder/LXC backup excludes actually work now (wabil)** _(2026-06-22 — [`a5c40c1d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a5c40c1d7575437bebe2dc0c6716ea9b0f59d4f2))_
 - **v24.55.13: WolfRun adopt picker shows container names, not just Proxmox VMIDs** _(2026-06-22 — [`8286264d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8286264dcee6f49b204e582b346a6a0afafeaf33))_
 - **v24.55.12: per-backup PBS file-level override now honors an explicit OFF (finish F3)** _(2026-06-22 — [`3c08932b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3c08932b39b8722f45f9f37eb4ed49b0499e5b18))_
 - **v24.55.11: stop adopting PVE VMID husks as ghost LXC + folder-backup trailing-slash semantics** _(2026-06-22 — [`cee8b6bd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cee8b6bd19744291174b182941c737f8308c30af))_
