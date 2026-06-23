@@ -389,6 +389,21 @@ mod tests {
     }
 
     #[test]
+    fn folder_exclude_patterns_absolute_and_relative() {
+        // Leaf mode (no trailing slash): members are "<leaf>/...".
+        assert_eq!(folder_exclude_pattern("/srv/data/big", "/srv/data", "data", false), Some("data/big".into()));
+        assert_eq!(folder_exclude_pattern("big", "/srv/data", "data", false), Some("data/big".into()));
+        assert_eq!(folder_exclude_pattern("big/sub", "/srv/data", "data", false), Some("data/big/sub".into()));
+        // Contents-only mode (trailing slash): members are "./..." → bare rel.
+        assert_eq!(folder_exclude_pattern("/srv/data/big", "/srv/data", "data", true), Some("big".into()));
+        assert_eq!(folder_exclude_pattern("./big", "/srv/data", "data", true), Some("big".into()));
+        // Out-of-folder, the folder itself, and empties are ignored.
+        assert_eq!(folder_exclude_pattern("/etc/ssl", "/srv/data", "data", false), None);
+        assert_eq!(folder_exclude_pattern("/srv/data", "/srv/data", "data", false), None);
+        assert_eq!(folder_exclude_pattern("  ", "/srv/data", "data", false), None);
+    }
+
+    #[test]
     fn pbs_file_level_override_both_directions_and_legacy() {
         // Per-backup override explicitly set → wins verbatim, BOTH directions.
         assert!(!resolve_pbs_file_level(true, false, true), "explicit OFF beats on-default");
@@ -762,6 +777,14 @@ pub struct BackupSchedule {
     /// Last time this schedule ran (ISO 8601)
     #[serde(default)]
     pub last_run: String,
+    /// When this schedule was created (ISO 8601). Lets the freshness analyzer
+    /// give a brand-new schedule one full interval before alarming that it has
+    /// "never run" — otherwise a schedule created at 21:06 flags instantly even
+    /// though its first nightly run is hours away (wabil 2026-06-22). Empty on
+    /// schedules created before this field existed → treated as "unknown age",
+    /// which preserves the prior (fire-immediately) behaviour for them.
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1490,7 +1513,10 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64
             tar_cmd.arg(format!("--exclude={}", rel.to_string_lossy()));
         }
     }
-    tar_cmd.args(["czf", &tar_path.to_string_lossy(), "-C", &lxc_base, name]);
+    // `-czf` (dashed): the `--exclude` flags above precede the operation, so the
+    // old-style bare `czf` (which must be the first argument) made tar abort
+    // whenever an exclusion was present. Same fix as backup_system_path.
+    tar_cmd.args(["-czf", &tar_path.to_string_lossy(), "-C", &lxc_base, name]);
     let output = tar_cmd
         .output()
         .map_err(|e| format!("Failed to tar LXC container: {}", e))?;
@@ -2092,6 +2118,27 @@ pub fn validate_system_path(path: &str) -> Result<(), String> {
 /// `label` is the operator-supplied name baked into the filename so several
 /// folder backups are distinguishable; `path` is the absolute directory.
 /// `exclude_mounts` skips sub-paths (same exact/prefix matching as binds).
+/// Turn one operator exclusion into the `tar --exclude=<pattern>` value for a
+/// system-folder backup, or `None` if it doesn't apply. Accepts an absolute
+/// sub-path of the folder ("/srv/data/big") OR a path relative to it ("big",
+/// "big/sub"). The pattern is built to match the archive member names for the
+/// mode: contents-only members are `./<rel>` (GNU tar matches the bare `<rel>`),
+/// leaf members are `<leaf>/<rel>`. Pure so the matching is unit-testable.
+fn folder_exclude_pattern(raw: &str, src: &str, leaf: &str, contents_only: bool) -> Option<String> {
+    let ex = raw.trim().trim_end_matches('/');
+    if ex.is_empty() { return None; }
+    let rel_to_src: String = if ex.starts_with('/') {
+        if ex == src { return None; } // excluding the whole folder is degenerate
+        let prefix = format!("{}/", src);
+        if !ex.starts_with(&prefix) { return None; } // outside the folder
+        Path::new(ex).strip_prefix(src).ok()?.to_string_lossy().to_string()
+    } else {
+        ex.trim_start_matches("./").to_string()
+    };
+    if rel_to_src.is_empty() { return None; }
+    Some(if contents_only { rel_to_src } else { format!("{}/{}", leaf, rel_to_src) })
+}
+
 pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64), String> {
     validate_system_path(path)?;
     let staging = ensure_staging_dir()?;
@@ -2123,30 +2170,19 @@ pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) ->
     let leaf = p.file_name().map(|n| n.to_string_lossy().to_string())
         .ok_or_else(|| format!("Cannot determine folder name from '{}'", src))?;
 
-    // tar's `-C` base: the folder itself for contents-only, else the parent
-    // (so the leaf dir becomes the top archive member). Excludes are made
-    // relative to that same base so `--exclude=<rel>` matches.
-    let tar_base = if contents_only { src } else { parent.as_str() };
-
     let mut tar_cmd = Command::new("tar");
-    let prefix = format!("{}/", src);
     for raw in exclude_mounts {
-        let ex = raw.trim().trim_end_matches('/');
-        if ex.is_empty() { continue; }
-        // Only sub-paths of the backed-up folder make sense to exclude.
-        if ex != src && !ex.starts_with(&prefix) { continue; }
-        if let Ok(rel) = Path::new(ex).strip_prefix(tar_base) {
-            // Excluding the archive root itself is degenerate — skip it (this
-            // is the `ex == src` case under contents-only, where rel is empty).
-            if rel.as_os_str().is_empty() { continue; }
-            // `--exclude=<dir>` already excludes the subtree (see backup_lxc).
-            tar_cmd.arg(format!("--exclude={}", rel.to_string_lossy()));
+        if let Some(pattern) = folder_exclude_pattern(raw, src, &leaf, contents_only) {
+            tar_cmd.arg(format!("--exclude={}", pattern));
         }
     }
+    // `-czf` (dashed) — old-style `czf` must be the FIRST argument, but the
+    // `--exclude` flags above precede it, so the bare form made tar abort the
+    // moment any exclusion was present (the root of wabil's "exclude ignored").
     if contents_only {
-        tar_cmd.args(["czf", &tar_path.to_string_lossy(), "-C", src, "."]);
+        tar_cmd.args(["-czf", &tar_path.to_string_lossy(), "-C", src, "."]);
     } else {
-        tar_cmd.args(["czf", &tar_path.to_string_lossy(), "-C", &parent, &leaf]);
+        tar_cmd.args(["-czf", &tar_path.to_string_lossy(), "-C", &parent, &leaf]);
     }
     let output = tar_cmd
         .output()
