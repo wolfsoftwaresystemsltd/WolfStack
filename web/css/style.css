@@ -2521,6 +2521,38 @@ body.sidebar-collapsed #task-log-footer {
     color: var(--text-muted);
 }
 
+/* Docker stats summary — compact variant (Gary KO4BSR 2026-06-23: the
+   default stat cards ate too much vertical/horizontal space for four
+   small numbers). Scoped to #docker-stats-summary so other .stats-grid
+   users are untouched: tighter columns, horizontal icon+value layout. */
+#docker-stats-summary {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+    margin-bottom: 14px;
+}
+#docker-stats-summary .stat-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+}
+#docker-stats-summary .stat-icon {
+    width: 24px;
+    height: 24px;
+    font-size: 13px;
+    flex-shrink: 0;
+    color: var(--text-secondary);
+}
+#docker-stats-summary .stat-value {
+    font-size: 16px;
+    margin-bottom: 0;
+    line-height: 1.1;
+}
+#docker-stats-summary .stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
 /* ─── Progress Bars ─── */
 .progress-bar {
     width: 100%;

@@ -3574,7 +3574,7 @@ function buildServerTree(nodes) {
         const escapedName = clusterName.replace(/'/g, "\\'");
 
         html += `
-        <div class="server-tree-node">
+        <div class="server-tree-node" data-search="${escapeAttr(clusterName.toLowerCase())}">
             <div class="server-node-header" data-cluster-id="${clusterId}" onclick="toggleServerNode('${clusterId}')" style="background: linear-gradient(90deg, rgba(59, 130, 246,0.05), transparent);">
                 <span class="tree-toggle ${shouldExpandCluster ? 'expanded' : ''}" id="toggle-${clusterId}">▶</span>
                 <span class="server-dot ${anyOnline ? 'online' : 'offline'}"></span>
@@ -3614,14 +3614,14 @@ function buildServerTree(nodes) {
                     <span class="icon ws-icon-clean-wrap" data-icon="database" style="font-size:15px;"></span> <span style="font-weight:600;">Galera</span>
                 </a>
                 <a class="nav-item server-child-item wolfscale-cluster-item" data-cluster="${escapedName}" data-view="wolfscale-cluster" onclick="showWolfScaleForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
-                    <span class="icon ws-icon-clean-wrap" data-icon="zap" style="font-size:15px;"></span> <span style="font-weight:600;">WolfScale</span>
+                    <span class="icon ws-icon-clean-wrap" data-icon="lightning" style="font-size:15px;"></span> <span style="font-weight:600;">WolfScale</span>
                 </a>`;
 
         // Each node within the cluster
         clusterNodes.forEach(node => {
             const shouldExpandNode = expandedNodes.has(node.id);
             html += `
-                <div class="server-tree-node" style="margin-left: 8px;">
+                <div class="server-tree-node" style="margin-left: 8px;" data-search="${escapeAttr(((node.display_name || '') + ' ' + (node.hostname || '') + ' ' + (node.id || '')).toLowerCase())}">
                     <div class="server-node-header" data-node-id="${node.id}" onclick="openServerNode('${node.id}')" style="padding-left: 8px;">
                         <span class="tree-toggle ${shouldExpandNode ? 'expanded' : ''}" id="toggle-${node.id}" onclick="event.stopPropagation(); toggleServerNode('${node.id}')">▶</span>
                         <span class="server-dot ${node.online ? 'online' : 'offline'}"></span>
@@ -3785,43 +3785,53 @@ function filterSidebarNodes() {
     const tree = document.getElementById('server-tree');
     if (!tree) return;
 
-    // Get all top-level cluster/node groups
-    const topNodes = tree.querySelectorAll(':scope > .server-tree-node');
+    // Top-level groups are the clusters.
+    const clusters = tree.querySelectorAll(':scope > .server-tree-node');
 
-    topNodes.forEach(clusterDiv => {
-        const header = clusterDiv.querySelector('.server-node-header');
+    clusters.forEach(clusterDiv => {
         const childContainer = clusterDiv.querySelector('.server-node-children');
-        if (!childContainer) return;
+        if (!childContainer) { clusterDiv.style.display = query ? 'none' : ''; return; }
 
-        const childNodes = childContainer.querySelectorAll(':scope > .server-tree-node');
+        // A cluster's direct children are its service links (Status Pages,
+        // WolfRun, …) and the node sub-trees. Partition them so a search
+        // narrows BOTH — otherwise the service links always stay visible and
+        // a single-node search looks like it did nothing (Gary KO4BSR).
+        const serviceItems = childContainer.querySelectorAll(':scope > a.server-child-item');
+        const nodeDivs = childContainer.querySelectorAll(':scope > .server-tree-node');
 
         if (!query) {
-            // No filter — show everything, restore default collapse state
             clusterDiv.style.display = '';
-            childNodes.forEach(cn => cn.style.display = '');
+            serviceItems.forEach(s => s.style.display = '');
+            nodeDivs.forEach(n => n.style.display = '');
             return;
         }
 
-        // Check cluster name match
-        const clusterText = (header?.textContent || '').toLowerCase();
-        const clusterMatch = clusterText.includes(query);
+        const clusterMatch = (clusterDiv.dataset.search || '').includes(query);
 
-        // Check child node matches
-        let anyChildMatch = false;
-        childNodes.forEach(childNode => {
-            const childText = (childNode.textContent || '').toLowerCase();
-            if (childText.includes(query) || clusterMatch) {
-                childNode.style.display = '';
-                anyChildMatch = true;
-            } else {
-                childNode.style.display = 'none';
-            }
+        // Nodes match on their OWN name/hostname/id (data-search), not the
+        // whole subtree text — the old textContent match hit every view
+        // label ("Docker", "Backups", …) so it never discriminated by node,
+        // and missed the hostname (which only lived in a title= attribute).
+        let anyNodeMatch = false;
+        nodeDivs.forEach(nodeDiv => {
+            const show = clusterMatch || (nodeDiv.dataset.search || '').includes(query);
+            nodeDiv.style.display = show ? '' : 'none';
+            if (show) anyNodeMatch = true;
         });
 
-        if (clusterMatch || anyChildMatch) {
+        // Service links match on their own label; also shown wholesale when
+        // the cluster name itself matches (operator searched the cluster).
+        let anyServiceMatch = false;
+        serviceItems.forEach(s => {
+            const show = clusterMatch || (s.textContent || '').toLowerCase().includes(query);
+            s.style.display = show ? '' : 'none';
+            if (show) anyServiceMatch = true;
+        });
+
+        if (clusterMatch || anyNodeMatch || anyServiceMatch) {
             clusterDiv.style.display = '';
-            // Auto-expand when filtering
-            if (childContainer && !childContainer.classList.contains('expanded')) {
+            // Auto-expand so matches are visible even if the cluster was collapsed.
+            if (!childContainer.classList.contains('expanded')) {
                 childContainer.classList.add('expanded');
                 const toggle = clusterDiv.querySelector('.tree-toggle');
                 if (toggle) toggle.classList.add('expanded');
@@ -5935,7 +5945,7 @@ function renderVms(vms) {
                         const powerBtn = vm.running
                             ? `<button class="btn btn-sm" style="${baseStyle}color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
                                <button class="btn btn-sm" style="${baseStyle}color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>`
-                            : `<button class="btn btn-sm" style="${baseStyle}color:#22c55e;" onclick="vmAction('${vm.name}', 'start', this)" title="Start">▶️</button>`;
+                            : `<button class="btn btn-sm" style="${baseStyle}color:#22c55e;" onclick="vmAction('${vm.name}', 'start', this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>`;
                         // Console / VNC — only meaningful when running.
                         const vncBtn = vm.running
                             ? (vm.vmid
@@ -22487,7 +22497,7 @@ function dockerCardHtml(c) {
 
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
-            ${isRunning ? `<button class="btn btn-sm" style="${bd}" disabled>▶️</button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','stop',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','restart',this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','pause',this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button><button class="btn btn-sm" style="${bs}" onclick="openConsole('docker','${c.name}')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>${_containerVncBtnHtml('docker', c.name, c.name, bs, true)}` : isPaused ? `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','unpause',this)">▶️</button>` : `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','start',this)">▶️</button><button class="btn btn-sm" style="${bd}" disabled></button><button class="btn btn-sm" style="${bd}" disabled></button>`}
+            ${isRunning ? `<button class="btn btn-sm" style="${bd}" disabled title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','stop',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','restart',this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button><button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','pause',this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button><button class="btn btn-sm" style="${bs}" onclick="openConsole('docker','${c.name}')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>${_containerVncBtnHtml('docker', c.name, c.name, bs, true)}` : isPaused ? `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','unpause',this)" title="Unpause"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>` : `<button class="btn btn-sm" style="${bs}" onclick="dockerAction('${c.name}','start',this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button><button class="btn btn-sm" style="${bd}" disabled></button><button class="btn btn-sm" style="${bd}" disabled></button>`}
             <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('docker','${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button><button class="btn btn-sm" style="${bs}" onclick="viewDockerVolumes('${c.name}')" title="Volumes"><span class="ws-icon-clean-wrap" data-icon="database"></span></button><button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('docker','${c.name}')" title="Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button><button class="btn btn-sm" style="${bs}" onclick="openDockerSettings('${c.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button><button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('docker','${c.name}')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button><button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('docker','${c.name}')" title="Updates"><span class="ws-icon-clean-wrap" data-icon="updates"></span></button><button class="btn btn-sm" style="${bs}" onclick="openContainerCron('docker','${c.name}')" title="Cron"><span class="ws-icon-clean-wrap" data-icon="calendar"></span></button><button class="btn btn-sm" style="${bs}" onclick="cloneDockerContainer('${c.name}')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button><button class="btn btn-sm" style="${bs}" onclick="migrateDockerContainer('${c.name}')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>${!isRunning ? `<button class="btn btn-sm" style="${bs}color:#ef4444;" onclick="dockerAction('${c.name}','remove',this)" title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>` : ''}
         </div>
         ${pies.length > 0 ? `<div style="display:flex;justify-content:space-evenly;padding:12px 8px;border-bottom:1px solid var(--border);">${pies.join('')}</div>` : ''}
@@ -22547,7 +22557,7 @@ function lxcCardHtml(c, s) {
 
         return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
             <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
-                <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','start',this)"` : ''} title="Start">▶️</button>
+                <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','start',this)"` : ''} title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
                 <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','stop',this)"` : ''} title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
                 <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','restart',this)"` : ''} title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
                 <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','freeze',this)"` : ''} title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
@@ -22616,7 +22626,7 @@ function vmCardHtml(vm) {
 
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div style="display:flex;flex-wrap:wrap;padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);gap:1px;">
-            <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','start',this)"`} title="Start">▶️</button>
+            <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','start',this)"`} title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
             <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="vmAction('${vm.name}','stop',this)"`} title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
             <button class="btn btn-sm" style="${!isRunning ? bd : bs}color:#b91c1c;" ${!isRunning ? 'disabled' : `onclick="vmForceStopConfirm('${vm.name}', this)"`} title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
             ${vncLink ? `<button class="btn btn-sm" style="${bs}" onclick="window.open('${vncLink}')" title="VNC"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>` : ''}
@@ -22728,7 +22738,7 @@ function renderDockerContainers(containers) {
             <td><input type="checkbox" ${c.autostart ? 'checked' : ''} onchange="toggleDockerAutostart('${c.id}', this.checked)"></td>
             <td><div style="display:flex; flex-wrap:wrap; gap:2px; min-width:0;">
                 ${isRunning ? `
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Start">▶️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'stop', this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'restart', this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause', this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button>
@@ -22736,9 +22746,9 @@ function renderDockerContainers(containers) {
                     ${_containerVncBtnHtml('docker', c.name, c.name, 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;', true)}
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 ` : isPaused ? `
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause', this)" title="Unpause">▶️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause', this)" title="Unpause"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
                 ` : `
-                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'start', this)" title="Start">▶️</button>
+                    <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'start', this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
@@ -22781,28 +22791,28 @@ function renderDockerStats(stats) {
 
     summary.innerHTML = `
         <div class="stat-card">
-            <div class="stat-icon"></div>
+            <div class="stat-icon"><span class="ws-icon-clean-wrap" data-icon="box"></span></div>
             <div class="stat-info">
                 <div class="stat-value">${running}</div>
                 <div class="stat-label">Running</div>
             </div>
         </div>
         <div class="stat-card">
-            <div class="stat-icon"></div>
+            <div class="stat-icon"><span class="ws-icon-clean-wrap" data-icon="cpu"></span></div>
             <div class="stat-info">
                 <div class="stat-value">${totalCpu.toFixed(1)}%</div>
                 <div class="stat-label">Total CPU</div>
             </div>
         </div>
         <div class="stat-card">
-            <div class="stat-icon"></div>
+            <div class="stat-icon"><span class="ws-icon-clean-wrap" data-icon="memory"></span></div>
             <div class="stat-info">
                 <div class="stat-value">${formatBytes(totalMem)}</div>
                 <div class="stat-label">Total Memory</div>
             </div>
         </div>
         <div class="stat-card">
-            <div class="stat-icon"></div>
+            <div class="stat-icon"><span class="ws-icon-clean-wrap" data-icon="list"></span></div>
             <div class="stat-info">
                 <div class="stat-value">${totalPids}</div>
                 <div class="stat-label">Total PIDs</div>
@@ -37567,17 +37577,17 @@ async function loadFleetContainers() {
         var h = '';
         // Control buttons
         if (r) {
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'stop\',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'restart\',this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'pause\',this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'docker\',\'' + eName + '\')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
         } else if (p) {
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'unpause\',this)" title="Unpause">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'unpause\',this)" title="Unpause"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
         } else {
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'docker\',\'' + eName + '\',\'start\',this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
@@ -37602,14 +37612,14 @@ async function loadFleetContainers() {
         var h = '';
         // Control buttons
         if (r) {
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'stop\',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'restart\',this)" title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'freeze\',this)" title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenConsole(\'' + nid + '\',\'lxc\',\'' + eName + '\')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
         } else {
-            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetAction(\'' + nid + '\',\'lxc\',\'' + eName + '\',\'start\',this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Restart"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
@@ -37631,14 +37641,14 @@ async function loadFleetContainers() {
         var eName = vm.name.replace(/'/g, "\\'");
         var h = '';
         if (vm.running) {
-            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             var fleetVncPort = vm.vnc_ws_port || vm.vnc_port;
             if (fleetVncPort) {
                 h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + fleetVncPort + ')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
             }
         } else {
-            h += '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start">▶️</button>';
+            h += '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';
             h += '<button class="btn btn-sm" style="' + DS + '" disabled title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');showVmSettings(\'' + eName + '\')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>';
             h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetDeleteVm(\'' + nid + '\',\'' + eName + '\')" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>';
@@ -45283,7 +45293,7 @@ function renderWolfRunServices(services) {
             <td>${nodeHtml}</td>
             <td>${vipHtml}</td>
             <td style="text-align:right; white-space:nowrap;" onclick="event.stopPropagation();">
-                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'start')" title="Start All" style="padding:4px 8px; font-size:12px; color:#10b981;">▶️</button>
+                <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'start')" title="Start All" style="padding:4px 8px; font-size:12px; color:#10b981;"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'stop')" title="Stop All" style="padding:4px 8px; font-size:12px; color:#eab308;"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
                 <button class="btn btn-sm" onclick="wolfrunAction('${svc.id}', 'restart')" title="Restart All" style="padding:4px 8px; font-size:12px; color:#3b82f6;"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
                 <button class="btn btn-sm" onclick="wolfrunScale('${svc.id}', ${desired - 1})" ${desired <= minR ? 'disabled' : ''} title="Scale down" style="padding:4px 8px; font-size:12px;"><span class="ws-icon-clean-wrap" data-icon="minus"></span></button>
@@ -70483,6 +70493,7 @@ function fleetMenuGroups() {
 }
 
 let _fleetMenuOpen = null; // currently-open .fc-menu element
+let _fleetMenuHoverTimer = null; // delayed-close timer for hover-to-open
 
 function fleetMenuBarInit() {
     const bar = document.getElementById('fleet-menubar');
@@ -70533,6 +70544,23 @@ function fleetMenuBarInit() {
         });
         btn.addEventListener('keydown', (e) => fleetMenuBtnKeydown(e, menu));
 
+        // Hover-to-open (Gary KO4BSR 2026-06-23). Opening on hover must NOT
+        // steal keyboard focus (focusFirst=false) — that would yank the
+        // caret out of whatever the operator was doing. mouseleave closes
+        // after a short delay so transiting the small button→dropdown gap
+        // (the dropdown sits `top: calc(100% + 6px)` below the button)
+        // doesn't slam it shut; re-entering the menu/dropdown cancels it.
+        menu.addEventListener('mouseenter', () => {
+            if (_fleetMenuHoverTimer) { clearTimeout(_fleetMenuHoverTimer); _fleetMenuHoverTimer = null; }
+            if (_fleetMenuOpen === menu) return;
+            fleetMenuCloseAll();
+            fleetMenuOpen(menu, false);
+        });
+        menu.addEventListener('mouseleave', () => {
+            if (_fleetMenuHoverTimer) clearTimeout(_fleetMenuHoverTimer);
+            _fleetMenuHoverTimer = setTimeout(() => { fleetMenuCloseAll(); _fleetMenuHoverTimer = null; }, 180);
+        });
+
         menu.appendChild(btn);
         menu.appendChild(dd);
         bar.appendChild(menu);
@@ -70555,14 +70583,17 @@ function fleetMenuTopButtons() {
     return Array.from(bar.querySelectorAll('.fc-menu > .fc-menu-btn'));
 }
 
-function fleetMenuOpen(menu) {
+function fleetMenuOpen(menu, focusFirst = true) {
     menu.dataset.open = '1';
     _fleetMenuOpen = menu;
     const btn = menu.querySelector('.fc-menu-btn');
     if (btn) btn.setAttribute('aria-expanded', 'true');
-    // Focus first item for keyboard users.
-    const first = menu.querySelector('.fc-menu-item');
-    if (first) setTimeout(() => first.focus(), 0);
+    // Focus first item for keyboard users — but NOT on hover-open, which
+    // must not steal the caret from elsewhere on the page.
+    if (focusFirst) {
+        const first = menu.querySelector('.fc-menu-item');
+        if (first) setTimeout(() => first.focus(), 0);
+    }
     // Arrow-key navigation within the open menu.
     const items = Array.from(menu.querySelectorAll('.fc-menu-item'));
     items.forEach((it, i) => {
@@ -70576,6 +70607,10 @@ function fleetMenuOpen(menu) {
 }
 
 function fleetMenuCloseAll() {
+    // Cancel any pending hover-close timer — otherwise an Escape/click-outside
+    // close followed by re-opening a menu (hover or click) would be slammed
+    // shut when that stale timer fires ~180ms later.
+    if (_fleetMenuHoverTimer) { clearTimeout(_fleetMenuHoverTimer); _fleetMenuHoverTimer = null; }
     document.querySelectorAll('.fleet-menubar .fc-menu').forEach(m => {
         m.dataset.open = '0';
         const b = m.querySelector('.fc-menu-btn');
