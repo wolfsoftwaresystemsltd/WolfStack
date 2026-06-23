@@ -8,6 +8,9 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.55.13: WolfRun adopt picker shows container names, not just Proxmox VMIDs** _(2026-06-22 — [`8286264d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8286264dcee6f49b204e582b346a6a0afafeaf33))_
+- **v24.55.12: per-backup PBS file-level override now honors an explicit OFF (finish F3)** _(2026-06-22 — [`3c08932b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3c08932b39b8722f45f9f37eb4ed49b0499e5b18))_
+- **v24.55.11: stop adopting PVE VMID husks as ghost LXC + folder-backup trailing-slash semantics** _(2026-06-22 — [`cee8b6bd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cee8b6bd19744291174b182941c737f8308c30af))_
 - **v24.55.10: backup/sidebar batch — schedulable folders, per-backup file-level, compose-aware docker file-level, sidebar persistence (wabil)** _(2026-06-22 — [`941fb6d6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/941fb6d6b09f56b9f4fb1f78488231eae896c374))_
 - **v24.55.9: PBS restore fixed — snapshot path used a raw epoch instead of RFC3339** _(2026-06-22 — [`02250cf3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/02250cf339f1ac30a33bdee929df8f0eb21b2f9d))_
 - **v24.55.8: GlusterFS management (cluster-scoped, in Storage) + one tabbed terminal popup** _(2026-06-22 — [`2d492251`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d492251df9e8cc5edfc50d80af6db8076fc781f))_
