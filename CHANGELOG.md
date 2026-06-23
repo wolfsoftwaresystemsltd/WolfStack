@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.0: VM restart + pause/resume across Proxmox/libvirt/native (Gary KO4BSR)** _(2026-06-23 — [`a9d81c7c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a9d81c7c9574043c892632527bd1a95878378d73))_
 - **v24.56.4: UI batch — clean-icon fixes, hover menus, working server search (Gary KO4BSR)** _(2026-06-23 — [`90a012f1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/90a012f1bf3a1d3724c1a367e1821ecd6a5e80ad))_
 - **v24.56.3: LAN bridge persists on netplan (completes the v24.55.5 MAC-clone)** _(2026-06-23 — [`30341f97`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/30341f97e23a57eea8a7944d827d328a39299825))_
 - **v24.56.2: fleet upgrade task tracking survives logout/login** _(2026-06-23 — [`f9e19b30`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f9e19b3029a59b2af61cef04a048937ad199a8a0))_
