@@ -635,26 +635,54 @@ fn get_driver(name: &str) -> Option<String> {
         .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
 }
 
+/// Resolve the absolute path to `systemctl`. A WolfStack process started
+/// with a stripped PATH (some systemd unit setups, minimal containers) hits
+/// ENOENT — "No such file or directory" — on `Command::new("systemctl")`
+/// even though systemd is perfectly present; that's exactly what surfaced as
+/// "Failed to stop wolfnet: No such file or directory" for a sponsor. Search
+/// PATH first (honours a custom install), then the standard absolute
+/// locations. `None` means this genuinely isn't a systemd host.
+fn systemctl_bin() -> Option<String> {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':').filter(|d| !d.is_empty()) {
+            let cand = format!("{}/systemctl", dir);
+            if std::path::Path::new(&cand).exists() {
+                return Some(cand);
+            }
+        }
+    }
+    for cand in ["/usr/bin/systemctl", "/bin/systemctl", "/usr/sbin/systemctl", "/sbin/systemctl"] {
+        if std::path::Path::new(cand).exists() {
+            return Some(cand.to_string());
+        }
+    }
+    None
+}
+
 /// Get WolfNet status
 pub fn get_wolfnet_status() -> WolfNetStatus {
+    let not_installed = || WolfNetStatus {
+        installed: false,
+        running: false,
+        interface: None,
+        ip: None,
+        peers: Vec::new(),
+    };
+    // No systemd on this host → WolfNet service can't exist here.
+    let Some(systemctl) = systemctl_bin() else { return not_installed(); };
+
     // Check if wolfnet service exists
-    let installed = Command::new("systemctl")
+    let installed = Command::new(&systemctl)
         .args(["cat", "wolfnet"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
     if !installed {
-        return WolfNetStatus {
-            installed: false,
-            running: false,
-            interface: None,
-            ip: None,
-            peers: Vec::new(),
-        };
+        return not_installed();
     }
 
-    let running = Command::new("systemctl")
+    let running = Command::new(&systemctl)
         .args(["is-active", "wolfnet"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
@@ -2063,7 +2091,9 @@ pub fn wolfnet_tombstone_list() -> Vec<String> {
 /// restart re-reads the file and the peer comes up with no static
 /// endpoint, ready for roaming.
 fn restart_wolfnet() {
-    let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
+    // Via wolfnet_service_action so the systemctl path is resolved robustly
+    // (a stripped PATH would otherwise ENOENT — see systemctl_bin).
+    let _ = wolfnet_service_action("restart");
 }
 
 fn reload_or_restart_wolfnet() {
@@ -2072,9 +2102,8 @@ fn reload_or_restart_wolfnet() {
         .output().map(|o| o.status.success()).unwrap_or(false);
 
     if !was_running {
-        // Not running at all — just start it
-
-        let _ = Command::new("systemctl").args(["start", "wolfnet"]).output();
+        // Not running at all — just start it (resolved systemctl path).
+        let _ = wolfnet_service_action("start");
         return;
     }
 
@@ -2090,26 +2119,43 @@ fn reload_or_restart_wolfnet() {
 
     if !still_running {
         warn!("WolfNet died after SIGHUP (old version?) — restarting via systemctl");
-        let _ = Command::new("systemctl").args(["restart", "wolfnet"]).output();
-    } else {
-
+        let _ = wolfnet_service_action("restart");
     }
 }
 
 /// Restart or start WolfNet service
 pub fn wolfnet_service_action(action: &str) -> Result<String, String> {
-    let output = Command::new("systemctl")
+    let systemctl = systemctl_bin().ok_or_else(|| {
+        "systemd (systemctl) isn't available on this host, so the WolfNet \
+         service can't be managed here.".to_string()
+    })?;
+
+    let output = Command::new(&systemctl)
         .args([action, "wolfnet"])
         .output()
-        .map_err(|e| format!("Failed to {} wolfnet: {}", action, e))?;
+        .map_err(|e| format!("Failed to {} WolfNet: {}", action, e))?;
 
     if output.status.success() {
-
-        Ok(format!("WolfNet {}", action))
-    } else {
-        Err(format!("Failed to {} WolfNet: {}", action,
-            String::from_utf8_lossy(&output.stderr)))
+        return Ok(format!("WolfNet {}", action));
     }
+
+    // Stopping/disabling a service that isn't loaded means the goal is
+    // already met — report success rather than a scary error (the operator
+    // wanted it off, and it's off).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if (action == "stop" || action == "disable")
+        && (stderr.contains("not loaded")
+            || stderr.contains("not-found")
+            || stderr.contains("not found")
+            || stderr.contains("No such file"))
+    {
+        return Ok(format!(
+            "WolfNet already {}",
+            if action == "stop" { "stopped" } else { "disabled" }
+        ));
+    }
+
+    Err(format!("Failed to {} WolfNet: {}", action, stderr.trim()))
 }
 
 /// Generate an invite token for a new peer to join this WolfNet network.
