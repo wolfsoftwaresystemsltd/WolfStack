@@ -12,17 +12,26 @@
 //! browser), and an optional per-instance `cluster` tag so a server shows under
 //! the right cluster's Storage view.
 //!
-//! REST API note: TrueNAS SCALE up to ~25.04 serves the full `/api/v2.0` REST
-//! API. 25.10+ (Goldeye) deprecates the ZFS REST endpoints — `/zfs/snapshot`
-//! returns 404 in favour of the JSON-RPC/WebSocket API — so snapshot
-//! create/delete surface a clear "not supported on this TrueNAS version"
-//! message there rather than failing opaquely. All size fields are parsed
-//! defensively (flat number OR nested `{parsed,rawvalue,value}`) so field-shape
-//! differences across versions don't break the read paths.
+//! Transport note: TrueNAS is migrating off REST. SCALE up to 25.04 serves the
+//! full `/api/v2.0` REST API; 25.10 removed the ZFS REST endpoints; TrueNAS 26
+//! removes REST entirely — everything moves to the versioned JSON-RPC 2.0 API
+//! over WebSocket at `wss://<host>/api/current`. We keep REST as the PRIMARY
+//! transport (so every existing instance — TrueNAS CORE and SCALE ≤25.04 — is
+//! byte-identical on upgrade) and fall back to the WebSocket JSON-RPC transport
+//! only when a REST call returns 404 (the endpoint has been removed). The chosen
+//! transport is cached per host so a TrueNAS 26 box pays the doomed REST probe
+//! just once. The middleware methods behind REST and JSON-RPC are the same
+//! (`/pool`↔`pool.query`, `/zfs/snapshot`↔`pool.snapshot.query`, …) so the
+//! response shapes — and therefore the parsing below — are identical either way.
+//! All size fields are parsed defensively (flat number OR nested
+//! `{parsed,rawvalue,value}`) so field-shape differences across versions don't
+//! break the read paths.
 
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::Message;
 
 /// Shared client that VERIFIES TLS — used when an instance is not flagged
 /// insecure.
@@ -239,12 +248,73 @@ fn jstr(v: &serde_json::Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
-// ─── REST client ───────────────────────────────────────────────────
+// ─── Transport selection (REST-first, WebSocket JSON-RPC fallback) ──
+
+/// Which transport a given host is using. Cached per base URL so a
+/// WebSocket-only TrueNAS (26+) doesn't repeat the doomed REST probe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Transport { Rest, Ws }
+
+static TN_TRANSPORT: LazyLock<Mutex<HashMap<String, Transport>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn transport_cached(base_url: &str) -> Option<Transport> {
+    TN_TRANSPORT.lock().ok().and_then(|m| m.get(base_url).copied())
+}
+fn transport_remember(base_url: &str, t: Transport) {
+    if let Ok(mut m) = TN_TRANSPORT.lock() { m.insert(base_url.to_string(), t); }
+}
+
+/// Structured request error so the transport layer can tell "endpoint removed"
+/// (404 → fall back to WebSocket) apart from auth/other failures (surfaced
+/// directly). `into_message` renders the operator-facing string.
+#[derive(Debug)]
+enum TnErr {
+    /// HTTP 404 — the REST endpoint no longer exists on this TrueNAS version.
+    NotFound,
+    /// Credentials rejected (REST 401/403, or WS auth returning false).
+    Auth,
+    Other(String),
+}
+
+impl TnErr {
+    fn into_message(self) -> String {
+        match self {
+            TnErr::NotFound => "TrueNAS returned 404 and the JSON-RPC WebSocket fallback was unavailable. Check the API URL and that the host is reachable.".to_string(),
+            TnErr::Auth => "TrueNAS rejected the API key. Create a new key in the TrueNAS UI under Credentials → API Keys (give it write access to manage snapshots).".to_string(),
+            TnErr::Other(s) => s,
+        }
+    }
+}
+
+/// Map a JSON-RPC 2.0 `error` object to a `TnErr`.
+fn map_ws_error(err: &serde_json::Value) -> TnErr {
+    let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    // -32601 = method not found: this TrueNAS version doesn't expose the method
+    // (e.g. auth.login_with_api_key was removed in v27 in favour of auth.login_ex).
+    if code == -32601 {
+        return TnErr::Other(format!("TrueNAS WebSocket API doesn't support this call on this version: {}", msg));
+    }
+    let lower = msg.to_lowercase();
+    if lower.contains("not authenticated") || lower.contains("api key")
+        || lower.contains("permission") || lower.contains("unauthorized") {
+        return TnErr::Auth;
+    }
+    let detail = err.get("data").and_then(|d| d.get("reason")).and_then(|r| r.as_str())
+        .map(str::to_string)
+        .unwrap_or(msg);
+    TnErr::Other(format!("TrueNAS WebSocket error: {}", detail))
+}
+
+// ─── Client (REST primary + WebSocket JSON-RPC fallback) ────────────
 
 pub struct TrueNasClient {
     base_url: String,
     api_key: String,
     client: &'static reqwest::Client,
+    /// Accept a self-signed cert — mirrors the REST client choice for the WS path.
+    insecure: bool,
 }
 
 impl TrueNasClient {
@@ -253,11 +323,12 @@ impl TrueNasClient {
             base_url: inst.api_url.trim_end_matches('/').to_string(),
             api_key: inst.api_key(),
             client: inst.client(),
+            insecure: inst.insecure_tls,
         }
     }
 
-    async fn request(&self, method: reqwest::Method, path: &str, body: Option<serde_json::Value>)
-        -> Result<serde_json::Value, String>
+    async fn rest_request(&self, method: reqwest::Method, path: &str, body: Option<serde_json::Value>)
+        -> Result<serde_json::Value, TnErr>
     {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.client.request(method, &url)
@@ -267,41 +338,180 @@ impl TrueNasClient {
             req = req.json(&b);
         }
         let resp = req.send().await
-            .map_err(|e| format!("TrueNAS request failed: {}", e))?;
+            .map_err(|e| TnErr::Other(format!("TrueNAS request failed: {}", e)))?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err("TrueNAS rejected the API key (401/403). Create a new key in the TrueNAS UI under Credentials → API Keys, and make sure it has write access if you want to manage snapshots.".into());
+            return Err(TnErr::Auth);
         }
         if status == reqwest::StatusCode::NOT_FOUND {
-            return Err("TrueNAS returned 404 for this endpoint. On TrueNAS SCALE 25.10+ the REST ZFS endpoints were removed in favour of the WebSocket API — snapshot management isn't available over REST on that version.".into());
+            return Err(TnErr::NotFound);
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("TrueNAS HTTP {}: {}", status, body.chars().take(300).collect::<String>()));
+            return Err(TnErr::Other(format!("TrueNAS HTTP {}: {}", status, body.chars().take(300).collect::<String>())));
         }
-        let text = resp.text().await.map_err(|e| format!("TrueNAS read failed: {}", e))?;
+        let text = resp.text().await.map_err(|e| TnErr::Other(format!("TrueNAS read failed: {}", e)))?;
         if text.trim().is_empty() {
             return Ok(serde_json::Value::Null);
         }
         serde_json::from_str(&text).map_err(|e| {
-            format!("TrueNAS response not JSON ({}): {}", e, text.chars().take(200).collect::<String>())
+            TnErr::Other(format!("TrueNAS response not JSON ({}): {}", e, text.chars().take(200).collect::<String>()))
         })
     }
 
-    async fn get(&self, path: &str) -> Result<serde_json::Value, String> {
-        self.request(reqwest::Method::GET, path, None).await
+    /// Run a request REST-first, falling back to the JSON-RPC WebSocket transport
+    /// when the REST endpoint is gone (404). `rest_*` is the legacy REST call;
+    /// `ws_method`/`ws_params` the equivalent JSON-RPC 2.0 call. Both reach the
+    /// same middleware method, so the returned `result` matches the REST body and
+    /// the existing parsers below work unchanged.
+    ///
+    /// Transitional note: on SCALE 25.10 only the ZFS REST endpoints 404 while
+    /// pool/dataset/disk/NFS reads still answer over REST. The first snapshot call
+    /// flips this host's cache to `Ws`, after which all reads also use the WS
+    /// transport (correct, identical data, just a per-call WS handshake instead of
+    /// a REST GET). The cache deliberately models two states, not a per-endpoint
+    /// matrix — the simplicity is worth the modest extra handshake on 25.10, and
+    /// 25.04/CORE (REST throughout) and 26 (WS throughout) are both optimal.
+    async fn dispatch(&self, rest_method: reqwest::Method, rest_path: &str,
+                      rest_body: Option<serde_json::Value>,
+                      ws_method: &str, ws_params: serde_json::Value)
+        -> Result<serde_json::Value, TnErr>
+    {
+        // A host already known to be WebSocket-only (REST removed) skips the
+        // doomed REST probe entirely.
+        if transport_cached(&self.base_url) == Some(Transport::Ws) {
+            return self.ws_jsonrpc(ws_method, ws_params).await;
+        }
+        match self.rest_request(rest_method, rest_path, rest_body).await {
+            Ok(v) => {
+                transport_remember(&self.base_url, Transport::Rest);
+                Ok(v)
+            }
+            Err(TnErr::NotFound) => {
+                // Endpoint removed (SCALE 25.10 ZFS endpoints, or all of REST on
+                // TrueNAS 26) — use the modern JSON-RPC WebSocket transport.
+                let v = self.ws_jsonrpc(ws_method, ws_params).await?;
+                transport_remember(&self.base_url, Transport::Ws);
+                Ok(v)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Modern JSON-RPC WebSocket endpoint derived from the REST base URL:
+    /// `https://host:port/api/v2.0` → `wss://host:port/api/current`.
+    fn ws_url(&self) -> Result<String, TnErr> {
+        let u = reqwest::Url::parse(&self.base_url)
+            .map_err(|e| TnErr::Other(format!("TrueNAS URL parse failed: {}", e)))?;
+        let host = u.host_str().ok_or_else(|| TnErr::Other("TrueNAS URL has no host".into()))?;
+        let scheme = if u.scheme() == "http" { "ws" } else { "wss" };
+        let port = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
+        Ok(format!("{}://{}{}/api/current", scheme, host, port))
+    }
+
+    /// One-shot JSON-RPC 2.0 call over the TrueNAS WebSocket API (`/api/current`):
+    /// connect, authenticate with the API key, issue `method(params)`, return the
+    /// `result`. This is the TrueNAS 26 transport (REST removed there).
+    async fn ws_jsonrpc(&self, method: &str, params: serde_json::Value)
+        -> Result<serde_json::Value, TnErr>
+    {
+        let ws_url = self.ws_url()?;
+
+        // TrueNAS ships a self-signed cert by default; honour the instance's
+        // insecure_tls flag for WSS exactly as the REST client does. Mirror the
+        // project's existing outbound-WS pattern (src/api/pve_console.rs).
+        let connector = if self.insecure && ws_url.starts_with("wss") {
+            let mut b = native_tls::TlsConnector::builder();
+            b.danger_accept_invalid_certs(true);
+            b.danger_accept_invalid_hostnames(true);
+            let c = b.build().map_err(|e| TnErr::Other(format!("TrueNAS TLS connector: {}", e)))?;
+            Some(tokio_tungstenite::Connector::NativeTls(c))
+        } else {
+            None
+        };
+
+        let connect = tokio_tungstenite::connect_async_tls_with_config(
+            ws_url.as_str(), None, false, connector);
+        let (mut stream, _resp) = match tokio::time::timeout(Duration::from_secs(20), connect).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(TnErr::Other(format!("TrueNAS WebSocket connect failed: {}", e))),
+            Err(_) => return Err(TnErr::Other("TrueNAS WebSocket connect timed out".into())),
+        };
+
+        // 1) Authenticate. auth.login_with_api_key(["<key>"]) → true/false.
+        //    Close the socket on any auth failure (error or false) so the server
+        //    isn't left waiting on a half-open connection for the TCP timeout.
+        let auth = match Self::ws_rpc(&mut stream, 1, "auth.login_with_api_key",
+            serde_json::json!([self.api_key])).await
+        {
+            Ok(v) => v,
+            Err(e) => { let _ = stream.close(None).await; return Err(e); }
+        };
+        if !auth.as_bool().unwrap_or(false) {
+            let _ = stream.close(None).await;
+            return Err(TnErr::Auth);
+        }
+
+        // 2) The actual call.
+        let result = Self::ws_rpc(&mut stream, 2, method, params).await;
+        let _ = stream.close(None).await;
+        result
+    }
+
+    /// Send one JSON-RPC request and read until the matching response `id`,
+    /// skipping server-pushed notifications (different/absent id). Honours pings
+    /// and a 20s read timeout to match the REST client.
+    async fn ws_rpc(
+        stream: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        id: u64, method: &str, params: serde_json::Value,
+    ) -> Result<serde_json::Value, TnErr> {
+        use futures::{SinkExt, StreamExt};
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+        });
+        stream.send(Message::Text(req.to_string())).await
+            .map_err(|e| TnErr::Other(format!("TrueNAS WebSocket send failed: {}", e)))?;
+
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(20), stream.next()).await
+                .map_err(|_| TnErr::Other("TrueNAS WebSocket read timed out".into()))?;
+            match next {
+                Some(Ok(Message::Text(t))) => {
+                    let v: serde_json::Value = serde_json::from_str(&t)
+                        .map_err(|e| TnErr::Other(format!("TrueNAS WS response not JSON: {}", e)))?;
+                    // Skip notifications / responses to a different id.
+                    if v.get("id").and_then(|x| x.as_u64()) != Some(id) {
+                        continue;
+                    }
+                    if let Some(err) = v.get("error") {
+                        return Err(map_ws_error(err));
+                    }
+                    return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                }
+                Some(Ok(Message::Ping(p))) => {
+                    let _ = stream.send(Message::Pong(p)).await;
+                }
+                Some(Ok(Message::Close(_))) | None =>
+                    return Err(TnErr::Other("TrueNAS WebSocket closed before responding".into())),
+                Some(Ok(_)) => continue, // binary / pong / frame — ignore
+                Some(Err(e)) =>
+                    return Err(TnErr::Other(format!("TrueNAS WebSocket error: {}", e))),
+            }
+        }
     }
 
     /// Cheap probe used by Test Connection — confirms the key works and
     /// returns the TrueNAS version for the UI.
     pub async fn test_connection(&self) -> Result<String, String> {
-        let info = self.get("/system/info").await?;
+        let info = self.dispatch(reqwest::Method::GET, "/system/info", None,
+            "system.info", serde_json::json!([])).await.map_err(TnErr::into_message)?;
         Ok(jstr(&info, "version"))
     }
 
     /// Pool + datasets + disks in one shot.
     pub async fn overview(&self, pool_name: &str) -> Result<TrueNasOverview, String> {
-        let pools = self.get("/pool").await?;
+        let pools = self.dispatch(reqwest::Method::GET, "/pool", None,
+            "pool.query", serde_json::json!([[], {}])).await.map_err(TnErr::into_message)?;
         let pool = self.pick_pool(&pools, pool_name);
         let chosen = pool.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| pool_name.to_string());
 
@@ -338,7 +548,8 @@ impl TrueNasClient {
     /// shape (pool root dataset with a `children` array) and the flat shape
     /// (one object per dataset, filtered by `<pool>/<child>`).
     async fn datasets_for(&self, pool: &str) -> Result<Vec<DatasetInfo>, String> {
-        let data = self.get("/pool/dataset").await?;
+        let data = self.dispatch(reqwest::Method::GET, "/pool/dataset", None,
+            "pool.dataset.query", serde_json::json!([[], {}])).await.map_err(TnErr::into_message)?;
         let arr = data.as_array().cloned().unwrap_or_default();
         let mut out = Vec::new();
 
@@ -367,7 +578,8 @@ impl TrueNasClient {
     }
 
     async fn disks(&self) -> Result<Vec<DiskInfo>, String> {
-        let data = self.get("/disk").await?;
+        let data = self.dispatch(reqwest::Method::GET, "/disk", None,
+            "disk.query", serde_json::json!([[], {}])).await.map_err(TnErr::into_message)?;
         let arr = data.as_array().cloned().unwrap_or_default();
         Ok(arr.iter().map(|d| DiskInfo {
             name: jstr(d, "name"),
@@ -379,7 +591,8 @@ impl TrueNasClient {
     }
 
     pub async fn nfs_exports(&self) -> Result<Vec<NfsExport>, String> {
-        let data = self.get("/sharing/nfs").await?;
+        let data = self.dispatch(reqwest::Method::GET, "/sharing/nfs", None,
+            "sharing.nfs.query", serde_json::json!([[], {}])).await.map_err(TnErr::into_message)?;
         let arr = data.as_array().cloned().unwrap_or_default();
         Ok(arr.iter().map(|s| {
             // Newer SCALE uses a single `path`; older used `paths: []`.
@@ -404,7 +617,8 @@ impl TrueNasClient {
     }
 
     pub async fn snapshots(&self) -> Result<Vec<SnapshotInfo>, String> {
-        let data = self.get("/zfs/snapshot").await?;
+        let data = self.dispatch(reqwest::Method::GET, "/zfs/snapshot", None,
+            "pool.snapshot.query", serde_json::json!([[], {}])).await.map_err(TnErr::into_message)?;
         let arr = data.as_array().cloned().unwrap_or_default();
         Ok(arr.iter().map(|s| {
             let created = s.get("properties")
@@ -428,15 +642,20 @@ impl TrueNasClient {
     /// Create a ZFS snapshot. `dataset` is the full path (e.g. "vault/projects"),
     /// `name` is the snapshot label (the part after `@`).
     pub async fn create_snapshot(&self, dataset: &str, name: &str, recursive: bool) -> Result<(), String> {
-        let body = serde_json::json!({ "dataset": dataset, "name": name, "recursive": recursive });
-        self.request(reqwest::Method::POST, "/zfs/snapshot", Some(body)).await?;
+        // REST POST body and the JSON-RPC `pool.snapshot.create` arg are the same
+        // dict (REST wraps that very middleware method).
+        let data = serde_json::json!({ "dataset": dataset, "name": name, "recursive": recursive });
+        self.dispatch(reqwest::Method::POST, "/zfs/snapshot", Some(data.clone()),
+            "pool.snapshot.create", serde_json::json!([data])).await.map_err(TnErr::into_message)?;
         Ok(())
     }
 
     /// Delete a ZFS snapshot by its id (e.g. "vault/projects@daily-2026-06-06").
     pub async fn delete_snapshot(&self, id: &str) -> Result<(), String> {
+        // REST: DELETE /zfs/snapshot/id/{id}. JSON-RPC: pool.snapshot.delete(id, {}).
         let path = format!("/zfs/snapshot/id/{}", urlencoding_encode(id));
-        self.request(reqwest::Method::DELETE, &path, None).await?;
+        self.dispatch(reqwest::Method::DELETE, &path, None,
+            "pool.snapshot.delete", serde_json::json!([id, {}])).await.map_err(TnErr::into_message)?;
         Ok(())
     }
 }
@@ -629,6 +848,42 @@ mod tests {
     #[test]
     fn url_segment_encoding_escapes_at_and_slash() {
         assert_eq!(urlencoding_encode("vault/projects@daily-1"), "vault%2Fprojects%40daily-1");
+    }
+
+    #[test]
+    fn ws_url_derives_from_rest_base() {
+        // https → wss, default port elided.
+        let c = TrueNasClient {
+            base_url: "https://10.2.0.153/api/v2.0".into(), api_key: "k".into(),
+            client: &TN_CLIENT_INSECURE, insecure: true,
+        };
+        assert_eq!(c.ws_url().unwrap(), "wss://10.2.0.153/api/current");
+        // http → ws, explicit port preserved.
+        let c2 = TrueNasClient {
+            base_url: "http://nas.local:8080/api/v2.0".into(), api_key: "k".into(),
+            client: &TN_CLIENT_STRICT, insecure: false,
+        };
+        assert_eq!(c2.ws_url().unwrap(), "ws://nas.local:8080/api/current");
+    }
+
+    #[test]
+    fn transport_cache_round_trips() {
+        let url = "https://cache-probe.example/api/v2.0";
+        assert_eq!(transport_cached(url), None);
+        transport_remember(url, Transport::Ws);
+        assert_eq!(transport_cached(url), Some(Transport::Ws));
+        transport_remember(url, Transport::Rest);
+        assert_eq!(transport_cached(url), Some(Transport::Rest));
+    }
+
+    #[test]
+    fn ws_error_maps_method_not_found_and_auth() {
+        // -32601 → version/method unsupported (Other, not Auth).
+        let e = map_ws_error(&serde_json::json!({"code": -32601, "message": "Method not found"}));
+        assert!(matches!(e, TnErr::Other(_)));
+        // Auth-shaped message → Auth.
+        let a = map_ws_error(&serde_json::json!({"code": 1, "message": "Not authenticated"}));
+        assert!(matches!(a, TnErr::Auth));
     }
 }
 

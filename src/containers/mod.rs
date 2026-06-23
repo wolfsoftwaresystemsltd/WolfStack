@@ -127,6 +127,45 @@ pub fn ensure_firewalld_trusted(ifaces: &[&str]) {
     if !running { return; }
 
     for iface in ifaces {
+        // Docker manages its own bridges' firewalld zone (the `docker` zone,
+        // target ACCEPT). If we bind docker0 / br-<id> to `trusted` instead,
+        // the next dockerd start aborts with
+        //   ZONE_CONFLICT: 'docker0' already bound to 'trusted'
+        // and the daemon refuses to come up — which is how a WolfStack restart
+        // "killed Docker" on firewalld hosts (wabil, Oracle Linux), and why a
+        // Docker reinstall didn't help: the bad binding lives in firewalld's
+        // *permanent* config, not in Docker's packages. So: never claim a
+        // Docker-managed bridge, and actively undo it if a prior WolfStack
+        // version already did, so broken hosts heal on upgrade. WolfNet↔
+        // container forwarding does not need the trusted zone — it's handled by
+        // the explicit iptables FORWARD/DOCKER-USER ACCEPT rules above.
+        //
+        // Match docker0 and br-<id> by name (ordering-safe: docker0 must be
+        // healed even while the daemon is down, since its binding is what's
+        // keeping it down), plus anything Docker already owns in its own
+        // `docker` zone — that catches a custom bridge renamed via
+        // com.docker.network.bridge.name=… .
+        let docker_managed = *iface == "docker0"
+            || iface.starts_with("br-")
+            || Command::new("firewall-cmd")
+                .args(["--permanent", "--zone=docker", "--query-interface", iface])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+        if docker_managed {
+            let in_trusted = Command::new("firewall-cmd")
+                .args(["--permanent", "--zone=trusted", "--query-interface", iface])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if in_trusted {
+                let _ = Command::new("firewall-cmd")
+                    .args(["--permanent", "--zone=trusted", "--remove-interface", iface])
+                    .output();
+            }
+            continue;
+        }
+
         // Check if already in trusted zone (avoid unnecessary reloads)
         let already = Command::new("firewall-cmd")
             .args(["--permanent", "--zone=trusted", "--query-interface", iface])
