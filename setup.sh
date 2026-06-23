@@ -645,8 +645,12 @@ ws_install_pkgs() {
     local cmd
     case "$PKG_MANAGER" in
         apt)    cmd="apt install -y" ;;
-        dnf)    cmd="dnf install -y" ;;
-        yum)    cmd="yum install -y" ;;
+        # skip_if_unavailable: a leftover broken docker-ce.repo (a prior
+        # failed install whose $releasever 404s) must not abort the whole
+        # dependency install — skip the dead repo instead of wedging dnf,
+        # which is how a WolfStack update "killed Docker" on Oracle Linux.
+        dnf)    cmd="dnf install -y --setopt=*.skip_if_unavailable=True" ;;
+        yum)    cmd="yum install -y --setopt=*.skip_if_unavailable=True" ;;
         zypper) cmd="zypper install -y" ;;
         pacman) cmd="pacman -Sy --noconfirm --needed" ;;
         *) echo "  ⚠ Unknown package manager '$PKG_MANAGER' — skipping install of: $*"; return 0 ;;
