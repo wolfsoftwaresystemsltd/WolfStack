@@ -887,6 +887,11 @@ async fn main() -> std::io::Result<()> {
         // 546 per-IP rules, no ipset). migrate_legacy_block_rules() below then
         // folds those legacy rules into the set.
         crate::auth::ensure_ipset_installed();
+        // Self-heal the systemd unit so a WolfStack restart/upgrade no longer
+        // kills daemonized QEMU VMs and other children (PapaSchlumpf 2026-06).
+        // setup.sh patches the unit on install/upgrade; this covers hosts that
+        // swap the binary without re-running setup.sh.
+        ensure_killmode_process();
         for ip in crate::auth::set_protected_node_ips(app_state.cluster.wolfstack_node_ips()) {
             crate::auth::kernel_unblock_ip(&ip);
         }
@@ -3908,6 +3913,77 @@ fn node_api_url(node: &crate::agent::Node, path: &str) -> String {
         format!("https://{}:{}{}", host, node.port, path)
     } else {
         format!("http://{}:{}{}", host, node.port, path)
+    }
+}
+
+/// Self-heal the systemd unit so a WolfStack restart/upgrade leaves running
+/// guests alone. WolfStack daemonizes native QEMU VMs (`qemu -daemonize`) and
+/// spawns other long-lived children; units created before mid-2026 carry no
+/// `KillMode=` line and therefore inherit systemd's `control-group` default, so
+/// `systemctl restart wolfstack` (every in-app upgrade ends in one) SIGTERMs
+/// those guests too — PapaSchlumpf 2026-06: a Home Assistant VM was killed by an
+/// upgrade on a raw/native host and never came back (autostart only fires on a
+/// real machine boot, not a WolfStack restart). setup.sh patches the unit on the
+/// install path; this covers binary-swap upgrades that never re-run setup.sh.
+///
+/// Idempotent: only rewrites + reloads when `KillMode=` is genuinely absent, so
+/// steady-state restarts do nothing. Best-effort — any failure is logged and
+/// swallowed; it must never block startup. Honours the Golden Rule: it only
+/// narrows what a WolfStack restart kills, changing nothing else about the unit.
+fn ensure_killmode_process() {
+    let unit = std::path::Path::new("/etc/systemd/system/wolfstack.service");
+    let content = match std::fs::read_to_string(unit) {
+        Ok(c) => c,
+        // No unit (container/dev run, or a non-systemd install) → nothing to heal.
+        Err(_) => return,
+    };
+    // Already has an explicit KillMode= directive — respect whatever the
+    // operator/installer set and stay silent.
+    if content
+        .lines()
+        .any(|l| l.trim_start().starts_with("KillMode="))
+    {
+        return;
+    }
+    // Insert KillMode=process immediately after the [Service] section header so
+    // it lands in the right section regardless of the unit's exact layout.
+    let mut out = String::with_capacity(content.len() + 32);
+    let mut inserted = false;
+    for line in content.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !inserted && line.trim() == "[Service]" {
+            out.push_str("KillMode=process\n");
+            inserted = true;
+        }
+    }
+    if !inserted {
+        // No [Service] section we recognise — don't guess; leave it untouched.
+        return;
+    }
+    if let Err(e) = std::fs::write(unit, out) {
+        tracing::warn!(
+            "startup: could not add KillMode=process to wolfstack.service ({}); a \
+             WolfStack restart may still stop daemonized VMs until the unit is patched",
+            e
+        );
+        return;
+    }
+    // The file now has KillMode=process, but systemd still has the OLD unit
+    // loaded until daemon-reload. Only claim success if the reload actually
+    // applied — otherwise the directive won't take effect until the next boot.
+    match std::process::Command::new("systemctl")
+        .arg("daemon-reload")
+        .output()
+    {
+        Ok(o) if o.status.success() => tracing::info!(
+            "startup: added KillMode=process to wolfstack.service — WolfStack \
+             restarts/upgrades now leave running VMs and containers alone"
+        ),
+        _ => tracing::warn!(
+            "startup: wrote KillMode=process to wolfstack.service but `systemctl \
+             daemon-reload` did not succeed; it takes effect on the next reload/boot"
+        ),
     }
 }
 

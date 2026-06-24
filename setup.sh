@@ -2169,6 +2169,16 @@ Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
 
+# Only signal the main WolfStack process on stop/restart — never the whole
+# control group. WolfStack daemonizes native QEMU VMs (qemu -daemonize) and
+# spawns other long-lived children; with the systemd default of
+# KillMode=control-group a routine WolfStack restart/upgrade would SIGTERM
+# those guests too, taking running VMs down with the management plane.
+# KillMode=process leaves them running so "restart WolfStack" updates only
+# WolfStack — guests survive (PapaSchlumpf 2026-06: Home Assistant VM killed
+# by an in-app upgrade on a raw/native WolfStack host).
+KillMode=process
+
 # Must run as root for Linux auth and service management
 User=root
 Group=root
@@ -2234,6 +2244,18 @@ else
         sed -i -E 's|^(ExecStart=/usr/local/bin/wolfstack[^\n]*?)\s+--agent(\s.*)?$|\1\2|' "$UNIT_FILE"
         echo "    Backup saved at ${UNIT_FILE}.pre-agent-flip"
         echo "    Pass --agent on the next rerun to flip back."
+    fi
+    # Ensure KillMode=process on existing units. Installs created before this
+    # change have no KillMode= line and therefore inherit systemd's
+    # control-group default, so a restart/upgrade SIGTERMs daemonized QEMU VMs
+    # and other children along with WolfStack (PapaSchlumpf 2026-06). Patch
+    # idempotently and BEFORE the daemon-reload below so the upgrade restart at
+    # the end of this script already runs with KillMode=process — the guest
+    # survives even the very upgrade that introduces the fix. (Golden Rule:
+    # this only narrows what a WolfStack restart kills; nothing else changes.)
+    if ! grep -qE '^[[:space:]]*KillMode=' "$UNIT_FILE" 2>/dev/null; then
+        echo "  → Adding KillMode=process (WolfStack restarts no longer stop VMs/containers)"
+        sed -i '/^\[Service\]/a KillMode=process' "$UNIT_FILE"
     fi
     systemctl daemon-reload
     # Restart only if we actually changed the unit, otherwise leave
