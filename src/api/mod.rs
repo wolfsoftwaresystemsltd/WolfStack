@@ -17313,6 +17313,19 @@ pub async fn backup_delete(
     }
 }
 
+/// POST /api/backups/delete-failed — remove every failed backup entry + file
+pub async fn backup_delete_failed(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match web::block(backup::delete_failed_backups).await {
+        Ok(Ok(removed)) => HttpResponse::Ok().json(serde_json::json!({
+            "removed": removed,
+            "message": format!("Removed {} failed backup{}", removed, if removed == 1 { "" } else { "s" }),
+        })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("task failed: {}", e) })),
+    }
+}
+
 /// POST /api/backups/{id}/restore — restore from a backup
 pub async fn backup_restore(
     req: HttpRequest, state: web::Data<AppState>,
@@ -37357,6 +37370,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups", web::get().to(backup_list))
         .route("/api/backups", web::post().to(backup_create))
         .route("/api/backups/stream", web::post().to(backup_stream))
+        .route("/api/backups/delete-failed", web::post().to(backup_delete_failed))
         .route("/api/backups/targets", web::get().to(backup_targets))
         .route("/api/backup/mounts/{type}/{name}", web::get().to(backup_container_mounts))
         .route("/api/backups/schedules", web::get().to(backup_schedules_list))
