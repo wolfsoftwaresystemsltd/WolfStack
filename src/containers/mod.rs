@@ -11212,7 +11212,11 @@ pub fn install_component_in_container(
         "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
         "wolfproxy" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh",
         "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh",
-        "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh",
+        // WolfScale/main/setup.sh installs WolfScale (DB replication), NOT
+        // WolfDisk — using it here installed the wrong thing, so the wolfdisk
+        // binary + wolfdisk.service never appeared ("Unit wolfdisk.service not
+        // found"). The WolfDisk installer lives at wolfdisk/setup.sh.
+        "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh",
         "wolfscale" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
         other => return Err(format!("Unknown Wolf component: '{}'. Available: wolfnet, wolfproxy, wolfserve, wolfdisk, wolfscale", other)),
     };

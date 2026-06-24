@@ -4905,8 +4905,13 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: "amd64".into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl fuse3".into(),
+                    // setup.sh installs the binary, writes /etc/systemd/system/
+                    // wolfdisk.service, then enables + starts it. The separate
+                    // `systemctl enable wolfdisk` that used to follow here threw
+                    // "Unit wolfdisk.service not found" whenever setup.sh failed
+                    // before the service block — masking the real error. Let
+                    // setup.sh own the whole install.
                     "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh | bash".into(),
-                    "systemctl enable wolfdisk".into(),
                 ],
             }),
             bare_metal: Some(BareMetalTarget {
