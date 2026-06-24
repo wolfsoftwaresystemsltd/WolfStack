@@ -3524,9 +3524,15 @@ function buildServerTree(nodes) {
     // …and on a fresh build (page reload — DOM has no tree yet) restore the
     // operator's last-saved expand/collapse state so it persists across reloads.
     const domHadState = expandedNodes.size > 0;
+    // Whether a saved state was restored — INCLUDING an empty one. "Everything
+    // collapsed" saves as [], which is a real choice, not the absence of a
+    // choice; we must not confuse it with a first-ever build (wabil 2026-06-24:
+    // collapsing all clusters was undone on the next rebuild because empty-saved
+    // looked like no-saved → "expand everything" default kicked back in).
+    let hadSavedState = false;
     if (!domHadState) {
         const saved = loadSidebarTreeState();
-        if (saved) expandedNodes = saved;
+        if (saved) { expandedNodes = saved; hadSavedState = true; }
     }
     // "Clusters collapsed by default" preference (wabil 2026-06-22) — when set,
     // a fresh tree with no saved state starts collapsed instead of expanded.
@@ -3541,8 +3547,9 @@ function buildServerTree(nodes) {
 
     // On first build (no expanded state saved yet), expand self node
     // Legacy "expand self + all clusters" only when there's genuinely nothing
-    // to restore AND the operator hasn't opted into collapse-by-default.
-    const isFirstBuild = expandedNodes.size === 0 && !defaultCollapsed;
+    // to restore — neither a live DOM tree NOR a saved set (even an empty,
+    // all-collapsed one) — AND the operator hasn't opted into collapse-by-default.
+    const isFirstBuild = !domHadState && !hadSavedState && !defaultCollapsed;
 
     // PVE-typed nodes (legacy API integration) are hidden from the sidebar — they're
     // surfaced through the deprecation banner instead. Only render WolfStack nodes here.

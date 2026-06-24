@@ -326,6 +326,25 @@ fn docker_count_inner() -> u32 {
 }
 
 /// Count all LXC containers with a single subprocess call.
+/// Does a `pct list` line describe a ghost husk? Mirrors the `possible_ghost`
+/// rule in `pct_list_all` exactly (stopped CT whose hostname is a bare VMID
+/// that isn't its own VMID) so the menu count and the list — which HIDES
+/// ghosts — agree. The `pct list` Name column is the hostname PVE reports.
+fn pct_list_line_is_ghost(line: &str) -> bool {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let vmid = match parts.first() { Some(v) => *v, None => return false };
+    let status = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+    // The Name column sits after an optional Lock column (same handling as
+    // pct_list_all's parser).
+    let lock = parts.get(2).copied().unwrap_or("");
+    let name = if matches!(lock, "backup" | "snapshot" | "migrate" | "rollback" | "create" | "mounted") {
+        parts.get(3..).map(|p| p.join(" ")).unwrap_or_default()
+    } else {
+        parts.get(2..).map(|p| p.join(" ")).unwrap_or_default()
+    };
+    status != "running" && is_pve_vmid_name(&name) && name != vmid
+}
+
 fn lxc_count_inner() -> u32 {
     // Check for pct (Proxmox) first
     let is_proxmox = Command::new("which").arg("pct").output()
@@ -338,7 +357,10 @@ fn lxc_count_inner() -> u32 {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
                     .skip(1) // header
-                    .filter(|l| !l.is_empty())
+                    .filter(|l| !l.trim().is_empty())
+                    // Exclude ghost husks so the menu count matches the list,
+                    // which hides them (Paul 2026-06-24).
+                    .filter(|l| !pct_list_line_is_ghost(l))
                     .count() as u32
             })
             .unwrap_or(0);
@@ -12216,6 +12238,22 @@ mod orphan_guard_tests {
             assert!(!is_pve_vmid_name(n), "{} should remain adoptable", n);
         }
         assert!(!is_pve_vmid_name(""), "empty name is not a vmid husk");
+    }
+
+    #[test]
+    fn pct_list_ghost_count_matches_list_rule() {
+        // `pct list` columns: VMID  Status  [Lock]  Name(hostname)
+        // Ghost = stopped CT whose hostname is a bare VMID that isn't its own.
+        assert!(pct_list_line_is_ghost("109   stopped   104"), "stopped + foreign-vmid hostname = ghost");
+        // Running CT is in use — never a ghost, even with a numeric hostname.
+        assert!(!pct_list_line_is_ghost("109   running   104"), "running is never a ghost");
+        // Hostname == own vmid = an unnamed CT, not a husk.
+        assert!(!pct_list_line_is_ghost("113   stopped   113"), "hostname == own vmid is not a ghost");
+        // Real human-named container.
+        assert!(!pct_list_line_is_ghost("116   running   regions11"), "human-named CT is not a ghost");
+        assert!(!pct_list_line_is_ghost("116   stopped   regions11"), "stopped human-named CT is not a ghost");
+        // Lock column present between status and name — still parsed correctly.
+        assert!(pct_list_line_is_ghost("109   stopped   backup   104"), "lock column doesn't fool the parser");
     }
 }
 
