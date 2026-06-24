@@ -10991,6 +10991,51 @@ fn lxc_cgroup_stat_key(name: &str, file: &str, key: &str) -> Option<u64> {
         .and_then(|v| v.parse::<u64>().ok())
 }
 
+/// Reclaim a running LXC container's clean page cache via cgroup v2
+/// `memory.reclaim`, BOUNDED to its reclaimable file cache (`inactive_file`)
+/// so the kernel satisfies the request from clean file pages first and never
+/// has to touch the container's anonymous / working-set memory — no app
+/// disruption, no swap-out, no OOM risk. The bound is the whole safety story:
+/// asking for exactly the easily-reclaimable cache means there's no reason for
+/// the kernel to reach into anon. Returns the bytes actually freed (the
+/// `memory.current` delta — best-effort). Requires cgroup v2; on cgroup v1
+/// (no `memory.reclaim`) it returns a clear, non-fatal error.
+pub fn lxc_reclaim_cache(name: &str) -> Result<u64, String> {
+    if !lxc_is_running(name) {
+        return Err("Container is not running — nothing to reclaim".to_string());
+    }
+    // The reclaimable clean file cache. Capping the reclaim request at this
+    // keeps it cache-only.
+    let reclaimable = lxc_cgroup_stat_key(name, "memory.stat", "inactive_file")
+        .or_else(|| lxc_cgroup_stat_key(name, "memory.stat", "total_inactive_file"))
+        .unwrap_or(0);
+    if reclaimable == 0 {
+        return Ok(0); // no reclaimable cache — nothing to do, not an error
+    }
+
+    let before = lxc_cgroup_read(name, "memory.current").unwrap_or(0);
+
+    // Write the byte count to the cgroup's `memory.reclaim` (cgroup v2). lxc-cgroup
+    // resolves the per-container cgroup path for us (same as the read path).
+    let base = lxc_base_dir(name);
+    let reclaim_str = reclaimable.to_string();
+    let mut args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+    args.extend_from_slice(&["-n", name, "memory.reclaim", &reclaim_str]);
+    let out = Command::new("lxc-cgroup").args(&args).output()
+        .map_err(|e| format!("lxc-cgroup memory.reclaim: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "Cache reclaim not available for '{}' (needs cgroup v2): {}",
+            name, stderr.trim()
+        ));
+    }
+
+    let after = lxc_cgroup_read(name, "memory.current").unwrap_or(before);
+    Ok(before.saturating_sub(after))
+}
+
 /// Get CPU usage percentage for an LXC container
 fn lxc_cpu_percent(name: &str) -> f64 {
     // Read cpu.stat usage_usec (cgroup v2)
