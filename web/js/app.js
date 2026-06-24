@@ -22581,6 +22581,7 @@ function lxcCardHtml(c, s) {
                 <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}','freeze',this)"` : ''} title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
                 <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}','${c.hostname || c.name}')"` : ''} title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                 ${_containerVncBtnHtml('lxc', c.name, c.hostname || c.name, bs, isRunning)}
+                ${isRunning ? `<button class="btn btn-sm" style="${bs}" onclick="reclaimLxcCache('${c.name}', this)" title="Reclaim cache — free this container's clean page cache. Safe: never touches its working memory, so the running app is not disrupted."><span class="ws-icon-clean-wrap" data-icon="memory"></span></button>` : ''}
                 <button class="btn btn-sm" style="${isRunning ? bd : bs}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}','destroy',this)"` : ''} title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 <button class="btn btn-sm" style="${bs}" onclick="viewContainerLogs('lxc','${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
                 <button class="btn btn-sm" style="${bs}" onclick="browseContainerFiles('lxc','${c.name}','${(c.storage_path||'').replace(/'/g,"\\'")}')" title="Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>
@@ -23571,6 +23572,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze', this)"` : ''} title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                 ${_containerVncBtnHtml('lxc', c.name, c.hostname || c.name, btnStyle, isRunning)}
+                ${isRunning ? `<button class="btn btn-sm" style="${btnStyle}" onclick="reclaimLxcCache('${c.name}', this)" title="Reclaim cache — free this container's clean page cache. Safe: never touches its working memory, so the running app is not disrupted."><span class="ws-icon-clean-wrap" data-icon="memory"></span></button>` : ''}
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy', this)"` : ''} title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="browseContainerFiles('lxc', '${c.name}', '${(c.storage_path || '').replace(/'/g, "\\'")}')" title="Browse Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>
@@ -23586,6 +23588,39 @@ function renderLxcContainers(containers, stats) {
             </div></td>
         </tr>${statsSubRow}`;
     }).join('');
+}
+
+// Reclaim a running LXC container's clean page cache (cgroup v2
+// memory.reclaim, cache-only on the backend — never touches its working set,
+// so the app keeps running). No confirm: it's non-destructive.
+async function reclaimLxcCache(container, btn) {
+    activityStart();
+    const origHtml = btn ? btn.innerHTML : null;
+    if (btn) {
+        btn.disabled = true; btn.style.pointerEvents = 'none';
+        btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
+    }
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/lxc/${container}/reclaim-cache`), { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+            const freed = data.freed_bytes || 0;
+            showToast(freed > 0 ? `Reclaimed ${formatBytes(freed)} of cache from ${container}` : `No reclaimable cache in ${container}`, 'success');
+            taskLog('LXC reclaim-cache: ' + container + ' freed ' + formatBytes(freed));
+            setTimeout(loadLxcContainers, 500);
+        } else {
+            showToast(data.error || 'Cache reclaim failed', 'error');
+            taskLog('LXC reclaim-cache: ' + container, 'failed');
+        }
+    } catch (e) {
+        showToast(`Failed: ${e.message}`, 'error');
+        taskLog('LXC reclaim-cache: ' + container, 'failed');
+    } finally {
+        // Restore the button (works in both the table and card views, neither
+        // of which is guaranteed to re-render before this runs).
+        if (btn && origHtml !== null) { btn.disabled = false; btn.style.pointerEvents = ''; btn.innerHTML = origHtml; }
+        activityStop();
+    }
 }
 
 async function lxcAction(container, action, btn) {

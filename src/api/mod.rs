@@ -10381,6 +10381,20 @@ pub async fn lxc_logs(req: HttpRequest, state: web::Data<AppState>, path: web::P
     HttpResponse::Ok().json(serde_json::json!({ "logs": logs }))
 }
 
+/// POST /api/containers/lxc/{name}/reclaim-cache — drop the container's clean
+/// page cache (cgroup v2 memory.reclaim, bounded to reclaimable file cache so
+/// it's cache-only — never touches the working set, so the app keeps running).
+pub async fn lxc_reclaim_cache(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+    // Subprocess + synchronous kernel reclaim — off the async worker.
+    match web::block(move || containers::lxc_reclaim_cache(&name)).await {
+        Ok(Ok(freed)) => HttpResponse::Ok().json(serde_json::json!({ "freed_bytes": freed })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("reclaim task failed: {}", e) })),
+    }
+}
+
 /// GET /api/containers/lxc/{name}/config — get LXC container config
 pub async fn lxc_config(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -36979,6 +36993,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/remote-list", web::get().to(remote_storage_list))
         .route("/api/containers/lxc/stats", web::get().to(lxc_stats))
         .route("/api/containers/lxc/{name}/logs", web::get().to(lxc_logs))
+        .route("/api/containers/lxc/{name}/reclaim-cache", web::post().to(lxc_reclaim_cache))
         .route("/api/containers/lxc/{name}/config", web::get().to(lxc_config))
         .route("/api/containers/lxc/{name}/config", web::put().to(lxc_save_config))
         .route("/api/containers/lxc/{name}/exists", web::get().to(lxc_exists))
