@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.5: hide ghost PVE husks from the LXC list (don't badge them)** _(2026-06-24 — [`8498215d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8498215d7d81d9ede22f94812c99e7f2188a1196))_
 - **v24.57.4: per-container "Reclaim cache" button (safe, cache-only)** _(2026-06-24 — [`cbaedcb2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cbaedcb261bda2f70f4744868fa82e4a22da89cc))_
 - **v24.57.3: LXC working-set memory, Edge login cookie, ghost-CT badge** _(2026-06-24 — [`f273e706`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f273e706c98837856c053588af57c9481f270bc8))_
 - **v24.57.2: RPS auto-config for PPPoE WANs — lift the single-core download ceiling** _(2026-06-24 — [`1b0e3328`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1b0e3328306b7f5995856d1f6281262ea48583f4))_
