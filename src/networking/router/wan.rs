@@ -408,6 +408,75 @@ fn remove_ppp_hooks(peer_name: &str) {
     let _ = fs::remove_file(format!("{}iface", state_prefix));
 }
 
+/// Build a CPU bitmask with the low `n_cpus` bits set, in the kernel's
+/// `rps_cpus` sysfs format: 32-bit hex words, most-significant first,
+/// comma-separated (e.g. 4 CPUs → "f"; 40 CPUs → "ff,ffffffff"). Pure so
+/// it's unit-testable without sysfs.
+fn rps_mask(n_cpus: usize) -> String {
+    let n = n_cpus.min(4096); // sanity cap; real routers have a handful
+    let words = n.div_ceil(32).max(1);
+    let mut groups = Vec::with_capacity(words);
+    for w in 0..words {
+        let mut word: u32 = 0;
+        for bit in 0..32 {
+            if w * 32 + bit < n {
+                word |= 1 << bit;
+            }
+        }
+        groups.push(word);
+    }
+    // Most-significant 32-bit word first.
+    groups.iter().rev().map(|g| format!("{:x}", g)).collect::<Vec<_>>().join(",")
+}
+
+/// Spread receive-side softirq processing for `iface` across all CPUs via
+/// RPS (Receive Packet Steering). PPPoE has no NIC hardware offload, so its
+/// whole RX chain — frame receive, PPPoE decapsulation, netfilter, and the
+/// forwarding decision — otherwise runs in softirq on the **single** core
+/// that takes the NIC's interrupt. On a weak multi-core CPU that one core
+/// saturates under sustained download and caps throughput well below line
+/// rate (PapaSchlumpf: recurring ~210→120 Mbps that only a reboot clears).
+/// Writing the all-CPU mask to each RX queue's `rps_cpus` lets the kernel
+/// hash incoming packets across every core, multiplying the ceiling.
+///
+/// Applied to the **physical** WAN NIC (`conn.interface`) — that's where the
+/// PPPoE RX softirq actually runs; the virtual `ppp0` only sees already-
+/// decapsulated traffic. No-op on a single-core host (nothing to steer to)
+/// and entirely best-effort: a missing sysfs path or a NIC that doesn't
+/// expose `rps_cpus` logs and returns, never failing the WAN bring-up.
+fn apply_rps(iface: &str) {
+    let n_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if n_cpus <= 1 {
+        return; // RPS has nowhere to spread to on a uniprocessor.
+    }
+    let mask = rps_mask(n_cpus);
+    let queues_dir = format!("/sys/class/net/{}/queues", iface);
+    let entries = match fs::read_dir(&queues_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("WolfRouter RPS: cannot read {} ({}) — RX softirq stays single-core for {}",
+                  queues_dir, e, iface);
+            return;
+        }
+    };
+    let mut applied = 0u32;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("rx-") {
+            continue;
+        }
+        let path = entry.path().join("rps_cpus");
+        match fs::write(&path, format!("{}\n", mask)) {
+            Ok(()) => applied += 1,
+            Err(e) => warn!("WolfRouter RPS: write {} failed: {}", path.display(), e),
+        }
+    }
+    if applied > 0 {
+        info!("WolfRouter RPS: spread RX softirq for {} across {} CPUs (mask {}, {} queue(s)) \
+               — PPPoE has no NIC offload, so this lifts the single-core download ceiling",
+              iface, n_cpus, mask, applied);
+    }
+}
+
 /// Write the pppd peers file + chap/pap secrets for a PPPoE connection
 /// and start the link. Idempotent: stops the link first if it's
 /// already running so config updates take effect cleanly.
@@ -486,6 +555,13 @@ pub fn pppoe_apply(conn: &WanConnection, cfg: &PppoeConfig) -> Result<(), String
             stderr.trim()));
     }
     info!("WolfRouter: PPPoE link '{}' (peer {}) started on {}", conn.name, peer_name, conn.interface);
+
+    // Spread the PPPoE RX softirq across all cores. The physical NIC stays up
+    // across PPPoE reconnects, and `apply()` re-runs on every WolfRouter
+    // startup, so this re-asserts after a reboot (rps_cpus is reset by the
+    // kernel on boot / NIC down). Best-effort — never fails the bring-up.
+    apply_rps(&conn.interface);
+
     Ok(())
 }
 
@@ -740,5 +816,35 @@ pub fn apply(conn: &WanConnection) -> Result<(), String> {
             nat_ensure(&conn.interface)?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rps_mask;
+
+    #[test]
+    fn rps_mask_common_core_counts() {
+        // Single 32-bit word: low n bits set, no leading zeros.
+        assert_eq!(rps_mask(1), "1");
+        assert_eq!(rps_mask(2), "3");
+        assert_eq!(rps_mask(4), "f");      // the N3150 quad-core case
+        assert_eq!(rps_mask(8), "ff");
+        assert_eq!(rps_mask(16), "ffff");
+        assert_eq!(rps_mask(32), "ffffffff");
+    }
+
+    #[test]
+    fn rps_mask_spans_multiple_words() {
+        // >32 CPUs → comma-separated 32-bit words, most-significant first.
+        assert_eq!(rps_mask(33), "1,ffffffff");
+        assert_eq!(rps_mask(40), "ff,ffffffff");
+        assert_eq!(rps_mask(64), "ffffffff,ffffffff");
+    }
+
+    #[test]
+    fn rps_mask_never_empty() {
+        // Even a degenerate 0 yields a parseable single word, never "".
+        assert_eq!(rps_mask(0), "0");
     }
 }
