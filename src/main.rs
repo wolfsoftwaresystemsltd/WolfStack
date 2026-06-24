@@ -3687,6 +3687,15 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             let https_bind = netaddr::host_port(&cli.bind, api_port);
             let https_server = HttpServer::new(move || {
                 let app = App::new()
+                    // Compress responses (gzip/brotli/zstd, negotiated via
+                    // Accept-Encoding). web/js/app.js is ~3.9 MB uncompressed —
+                    // without this every page load shipped the whole thing in
+                    // the clear, which is what got reset (ERR_CONNECTION_RESET)
+                    // on slow/proxied links and broke the entire UI
+                    // ("toggleLayoutDropdown is not defined" = app.js never
+                    // finished loading, so none of its functions existed).
+                    // Compressed it's ~10x smaller and far less reset-prone.
+                    .wrap(actix_web::middleware::Compress::default())
                     .app_data(app_state.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                     .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
@@ -3734,6 +3743,9 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     let http_bind = netaddr::host_port(&cli.bind, p);
                     let srv = HttpServer::new(move || {
                         let app = App::new()
+                            // Compress responses — see the main server above
+                            // (app.js is ~3.9 MB uncompressed otherwise).
+                            .wrap(actix_web::middleware::Compress::default())
                             .app_data(app_state2.clone())
                             .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                             .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
@@ -3816,6 +3828,15 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             // Start HTTP server (same as before — no breaking changes)
             let main_server = HttpServer::new(move || {
                 let app = App::new()
+                    // Compress responses (gzip/brotli/zstd, negotiated via
+                    // Accept-Encoding). web/js/app.js is ~3.9 MB uncompressed —
+                    // without this every page load shipped the whole thing in
+                    // the clear, which is what got reset (ERR_CONNECTION_RESET)
+                    // on slow/proxied links and broke the entire UI
+                    // ("toggleLayoutDropdown is not defined" = app.js never
+                    // finished loading, so none of its functions existed).
+                    // Compressed it's ~10x smaller and far less reset-prone.
+                    .wrap(actix_web::middleware::Compress::default())
                     .app_data(app_state.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                     .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))

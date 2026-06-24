@@ -7036,6 +7036,9 @@ pub async fn node_proxy(
                     });
                     return HttpResponse::build(actix_web::http::StatusCode::from_u16(status).unwrap_or(actix_web::http::StatusCode::OK))
                         .insert_header(("Content-Type", "text/event-stream"))
+                        // identity so the Compress middleware skips this forwarded
+                        // SSE stream (gzip would buffer it and stall live output).
+                        .insert_header(("Content-Encoding", "identity"))
                         .insert_header(("Cache-Control", "no-cache"))
                         .insert_header(("Connection", "keep-alive"))
                         .insert_header(("X-Accel-Buffering", "no"))
@@ -9772,6 +9775,10 @@ pub async fn cluster_browser_start_stream(
 
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
+        // identity encoding so the Compress middleware leaves this stream
+        // alone — gzip-ing an SSE stream buffers it and breaks the live
+        // progress/console output the UI relies on.
+        .insert_header(("Content-Encoding", "identity"))
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
         .insert_header(("X-Accel-Buffering", "no"))
@@ -16545,6 +16552,10 @@ pub async fn backup_stream(
 
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
+        // identity encoding so the Compress middleware leaves this stream
+        // alone — gzip-ing an SSE stream buffers it and breaks the live
+        // progress/console output the UI relies on.
+        .insert_header(("Content-Encoding", "identity"))
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
         .insert_header(("X-Accel-Buffering", "no"))
@@ -16608,6 +16619,10 @@ pub async fn backup_restore_stream(
 
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
+        // identity encoding so the Compress middleware leaves this stream
+        // alone — gzip-ing an SSE stream buffers it and breaks the live
+        // progress/console output the UI relies on.
+        .insert_header(("Content-Encoding", "identity"))
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
         .insert_header(("X-Accel-Buffering", "no"))
@@ -16685,6 +16700,10 @@ pub async fn backup_restore_from_path_stream(
     };
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
+        // identity encoding so the Compress middleware leaves this stream
+        // alone — gzip-ing an SSE stream buffers it and breaks the live
+        // progress/console output the UI relies on.
+        .insert_header(("Content-Encoding", "identity"))
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
         .insert_header(("X-Accel-Buffering", "no"))
@@ -16837,6 +16856,10 @@ where
     };
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
+        // identity encoding so the Compress middleware leaves this stream
+        // alone — gzip-ing an SSE stream buffers it and breaks the live
+        // progress/console output the UI relies on.
+        .insert_header(("Content-Encoding", "identity"))
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
         .insert_header(("X-Accel-Buffering", "no"))
@@ -23662,6 +23685,10 @@ pub async fn appstore_install_stream(
 
     HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
+        // identity encoding so the Compress middleware leaves this stream
+        // alone — gzip-ing an SSE stream buffers it and breaks the live
+        // progress/console output the UI relies on.
+        .insert_header(("Content-Encoding", "identity"))
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
         .insert_header(("X-Accel-Buffering", "no"))
