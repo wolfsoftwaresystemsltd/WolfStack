@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.4: per-container "Reclaim cache" button (safe, cache-only)** _(2026-06-24 — [`cbaedcb2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cbaedcb261bda2f70f4744868fa82e4a22da89cc))_
+- **v24.57.3: LXC working-set memory, Edge login cookie, ghost-CT badge** _(2026-06-24 — [`f273e706`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f273e706c98837856c053588af57c9481f270bc8))_
 - **v24.57.2: RPS auto-config for PPPoE WANs — lift the single-core download ceiling** _(2026-06-24 — [`1b0e3328`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1b0e3328306b7f5995856d1f6281262ea48583f4))_
 - **v24.57.1: resolve systemctl robustly in the WolfNet service path** _(2026-06-23 — [`26edd58a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/26edd58abfd713336bf008f56deaa1e94b5c2354))_
 - **v24.57.0: VM restart + pause/resume across Proxmox/libvirt/native (Gary KO4BSR)** _(2026-06-23 — [`a9d81c7c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a9d81c7c9574043c892632527bd1a95878378d73))_
