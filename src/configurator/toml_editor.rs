@@ -68,6 +68,20 @@ pub fn save_config(target: &ExecTarget, component: &str, data: &serde_json::Valu
     };
     deep_merge(&mut merged, data);
 
+    // Authoritative-replace map fields. The structured form renders the COMPLETE
+    // table (e.g. wolfdisk's [s3.buckets] bucket→folder map), so a removal in the
+    // form must delete the entry on disk. deep_merge only adds/overwrites keys and
+    // never removes them, which would resurrect a mapping the operator just
+    // deleted. For these specific keypaths, overwrite the merged subtree wholesale
+    // with exactly what the form submitted — but only when the form actually sent
+    // the key, so an older frontend that doesn't know the field is left untouched
+    // (Golden Rule: existing configs keep their buckets on a partial post).
+    for path in authoritative_replace_paths(comp) {
+        if let Some(incoming) = value_at_path(data, path) {
+            set_at_path(&mut merged, path, incoming.clone());
+        }
+    }
+
     let toml_value = json_to_toml(&merged)
         .ok_or_else(|| "Failed to convert config to TOML format".to_string())?;
     let toml_string = toml::to_string_pretty(&toml_value)
@@ -151,6 +165,50 @@ fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
             if !src_ref.is_null() { *dst_ref = src_ref.clone(); }
         }
     }
+}
+
+/// Keypaths whose value the structured form owns in full — saved as a complete
+/// replacement instead of a deep merge, so removing an entry in the form actually
+/// deletes it on disk. Currently just wolfdisk's `[s3.buckets]` bucket→folder map
+/// (the form always shows every mapping, so it is authoritative for that table).
+fn authoritative_replace_paths(comp: Component) -> &'static [&'static [&'static str]] {
+    match comp {
+        Component::WolfDisk => &[&["s3", "buckets"]],
+        _ => &[],
+    }
+}
+
+/// Follow a keypath into a JSON value, returning the value at that path if every
+/// segment exists (and the intermediate segments are objects). None otherwise.
+fn value_at_path<'a>(v: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    let mut cur = v;
+    for key in path {
+        cur = cur.get(*key)?;
+    }
+    Some(cur)
+}
+
+/// Set `val` at `path` in `root`, creating intermediate objects as needed and
+/// replacing any non-object encountered along the way. No-op for an empty path.
+fn set_at_path(root: &mut serde_json::Value, path: &[&str], val: serde_json::Value) {
+    let Some((last, parents)) = path.split_last() else { return; };
+    let mut cur = root;
+    for key in parents {
+        if !cur.is_object() {
+            *cur = serde_json::Value::Object(serde_json::Map::new());
+        }
+        cur = cur
+            .as_object_mut()
+            .unwrap()
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    }
+    if !cur.is_object() {
+        *cur = serde_json::Value::Object(serde_json::Map::new());
+    }
+    cur.as_object_mut()
+        .unwrap()
+        .insert((*last).to_string(), val);
 }
 
 /// List dotted keypaths present in `template` but absent from `actual`.
@@ -396,6 +454,59 @@ mod tests {
         let incoming = serde_json::json!({ "server": { "host": null } });
         deep_merge(&mut existing, &incoming);
         assert_eq!(existing["server"]["host"], "0.0.0.0");
+    }
+
+    #[test]
+    fn authoritative_replace_deletes_removed_map_entries() {
+        // wolfdisk [s3.buckets] is form-authoritative: a bucket removed in the
+        // form must vanish on disk. deep_merge alone would resurrect it, so the
+        // wholesale replace must run on top.
+        let mut merged = serde_json::json!({
+            "s3": { "enabled": true, "buckets": { "photos": "/data/photos", "backups": "/srv/backups" } }
+        });
+        // The form re-submits the COMPLETE table, now without "backups".
+        let data = serde_json::json!({
+            "s3": { "enabled": true, "buckets": { "photos": "/data/photos" } }
+        });
+        deep_merge(&mut merged, &data);
+        // After merge alone, the removed "backups" key is still present.
+        assert!(merged["s3"]["buckets"].get("backups").is_some());
+        // Authoritative replace for wolfdisk wipes it.
+        for path in authoritative_replace_paths(Component::WolfDisk) {
+            if let Some(incoming) = value_at_path(&data, path) {
+                set_at_path(&mut merged, path, incoming.clone());
+            }
+        }
+        assert_eq!(merged["s3"]["buckets"]["photos"], "/data/photos");
+        assert!(merged["s3"]["buckets"].get("backups").is_none(),
+            "removed bucket should be gone: {:?}", merged["s3"]["buckets"]);
+        // A sibling scalar in the same section is untouched.
+        assert_eq!(merged["s3"]["enabled"], true);
+    }
+
+    #[test]
+    fn authoritative_replace_skips_when_form_omits_key() {
+        // An older frontend that never sends s3.buckets must NOT lose existing
+        // mappings (Golden Rule). value_at_path returns None → no replace.
+        let mut merged = serde_json::json!({
+            "s3": { "enabled": true, "buckets": { "photos": "/data/photos" } }
+        });
+        let data = serde_json::json!({ "s3": { "enabled": false } });
+        deep_merge(&mut merged, &data);
+        for path in authoritative_replace_paths(Component::WolfDisk) {
+            if let Some(incoming) = value_at_path(&data, path) {
+                set_at_path(&mut merged, path, incoming.clone());
+            }
+        }
+        assert_eq!(merged["s3"]["buckets"]["photos"], "/data/photos");
+        assert_eq!(merged["s3"]["enabled"], false);
+    }
+
+    #[test]
+    fn set_at_path_creates_missing_parents() {
+        let mut root = serde_json::json!({});
+        set_at_path(&mut root, &["s3", "buckets"], serde_json::json!({ "a": "/b" }));
+        assert_eq!(root["s3"]["buckets"]["a"], "/b");
     }
 
     #[test]

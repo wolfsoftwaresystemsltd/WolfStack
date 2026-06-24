@@ -15396,6 +15396,7 @@ function getTomlSchema(component) {
                 { key: 'bind', label: 'S3 Bind Address', type: 'string', default: '0.0.0.0:9878', placeholder: '0.0.0.0:9878', help: 'IP and port the S3 API listens on. Use 0.0.0.0 for all interfaces, or a specific IP / 127.0.0.1 to keep it local-only' },
                 { key: 'access_key', label: 'Access Key', type: 'string', default: '', placeholder: 'auto-generated', help: 'The S3 access key ID your clients authenticate with. A strong default is generated — copy it into your S3 client (e.g. aws-cli), or replace it with your own' },
                 { key: 'secret_key', label: 'Secret Key', type: 'string', default: '', placeholder: 'auto-generated', help: 'The S3 secret access key. Shown so you can copy it into your client; treat it like a password. A strong default is generated so the gateway is never left unauthenticated' },
+                { key: 'buckets', label: 'Bucket → Folder Mappings', type: 'map', keyLabel: 'bucket', keyPlaceholder: 'photos', valuePlaceholder: '/data/photos', help: 'Optionally map an S3 bucket name to a specific folder inside WolfDisk instead of a top-level directory of the same name — e.g. bucket "photos" → "/data/photos". Buckets not listed here keep the default behaviour (a top-level directory matching the bucket name). Paths are from the WolfDisk root; leading/trailing slashes are ignored. Removing a row here removes the mapping.' },
             ]},
         ];
     }
@@ -15663,9 +15664,73 @@ function renderTomlField(section, field, value) {
                 ${helpText}
             </div>`;
         }
+        case 'map':
+            // Key→value table (e.g. wolfdisk [s3.buckets] bucket→folder map).
+            // Rows are dynamic (add/remove), so save reads the live DOM rows
+            // rather than fixed element IDs — placeholders are stashed on the
+            // container so "+ Add" can build a matching empty row.
+            return `<div class="form-group" style="grid-column:span 2;">
+                <label style="font-weight:600; margin-bottom:4px; display:block; font-size:13px;">${escapeHtml(field.label)}</label>
+                ${tomlMapFieldHtml(id, field, value)}
+                ${helpText}
+            </div>`;
         default:
             return '';
     }
+}
+
+// One editable row of a key→value `map` field. Standalone so both the initial
+// render and the "+ Add" button produce identical markup. The remove button
+// drops just this row; an empty key on save means the row is ignored.
+function tomlMapRowHtml(keyPlaceholder, valuePlaceholder, k, v) {
+    return `<div class="toml-map-row" style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
+        <input type="text" class="form-control toml-map-key" value="${escapeHtml(String(k ?? ''))}" placeholder="${escapeHtml(keyPlaceholder)}" style="flex:1 1 0; min-width:0; font-family:var(--font-mono); font-size:12px;">
+        <span style="color:var(--text-muted); flex:0 0 auto;">→</span>
+        <input type="text" class="form-control toml-map-val" value="${escapeHtml(String(v ?? ''))}" placeholder="${escapeHtml(valuePlaceholder)}" style="flex:2 1 0; min-width:0; font-family:var(--font-mono); font-size:12px;">
+        <button type="button" class="btn btn-sm" title="Remove mapping" onclick="this.closest('.toml-map-row').remove()" style="flex:0 0 auto;">✕</button>
+    </div>`;
+}
+
+// Append a fresh empty row to a `map` field container and focus its key input.
+function tomlAddMapRow(containerId) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    const kp = c.getAttribute('data-key-ph') || '';
+    const vp = c.getAttribute('data-val-ph') || '';
+    c.insertAdjacentHTML('beforeend', tomlMapRowHtml(kp, vp, '', ''));
+    const rows = c.querySelectorAll('.toml-map-row');
+    const last = rows[rows.length - 1];
+    const inp = last && last.querySelector('.toml-map-key');
+    if (inp) inp.focus();
+}
+
+// Read the live rows of a `map` field container into a plain object. Blank-key
+// rows are dropped; last write wins on duplicate keys. Shared by every save
+// path (the configurator form AND the inline WolfDisk install/config modal) so
+// the bucket→folder map collects identically everywhere.
+function collectMapRows(container) {
+    const obj = {};
+    if (!container) return obj;
+    container.querySelectorAll('.toml-map-row').forEach(row => {
+        const k = (row.querySelector('.toml-map-key') && row.querySelector('.toml-map-key').value || '').trim();
+        const v = (row.querySelector('.toml-map-val') && row.querySelector('.toml-map-val').value || '').trim();
+        if (k) obj[k] = v;
+    });
+    return obj;
+}
+
+// Build the markup for a `map` field's rows + "+ Add" button into a container of
+// the given id. Shared by both render paths (renderTomlField and the inline
+// WolfDisk modal) so the bucket→folder editor looks and behaves identically.
+function tomlMapFieldHtml(id, field, value) {
+    const entries = (value && typeof value === 'object' && !Array.isArray(value))
+        ? Object.entries(value) : [];
+    const kp = field.keyPlaceholder || '';
+    const vp = field.valuePlaceholder || '';
+    const rowsHtml = entries.map(([k, v]) => tomlMapRowHtml(kp, vp, k, v)).join('');
+    const addLabel = field.keyLabel ? `Add ${field.keyLabel}` : 'Add mapping';
+    return `<div id="${escapeHtml(id)}" data-key-ph="${escapeHtml(kp)}" data-val-ph="${escapeHtml(vp)}">${rowsHtml}</div>
+        <button type="button" class="btn btn-sm" style="margin-top:6px;" onclick="tomlAddMapRow('${escapeHtml(id)}')">+ ${escapeHtml(addLabel)}</button>`;
 }
 
 async function tomlSaveStructured(component) {
@@ -15687,6 +15752,12 @@ async function tomlSaveStructured(component) {
                     break;
                 case 'array':
                     config[section.key][field.key] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+                    break;
+                case 'map':
+                    // Always send the key (even when empty) so the backend can
+                    // authoritatively replace the table — that's what makes a
+                    // removed row actually delete the mapping on disk.
+                    config[section.key][field.key] = collectMapRows(el);
                     break;
                 case 'password':
                 case 'string':
@@ -47357,9 +47428,14 @@ async function wdOpenConfig(mid) {
                 var val = (raw !== undefined && raw !== null && (f.type === 'boolean' || f.type === 'number' || raw !== ''))
                     ? raw : (f.default !== undefined ? f.default : '');
                 var inputId = 'wd-cfg-' + section.key + '-' + f.key;
-                html += '<div' + (f.type === 'array' ? ' style="grid-column:span 2;"' : '') + '>';
+                html += '<div' + (f.type === 'array' || f.type === 'map' ? ' style="grid-column:span 2;"' : '') + '>';
                 html += '<label style="font-size:11px; color:var(--text-muted); display:block; margin-bottom:3px;">' + f.label + '</label>';
-                if (f.type === 'select') {
+                if (f.type === 'map') {
+                    // Bucket→folder map editor — same widget as the standalone
+                    // configurator, so the inline install/config modal can edit
+                    // [s3.buckets] too (not just render it as [object Object]).
+                    html += tomlMapFieldHtml(inputId, f, val);
+                } else if (f.type === 'select') {
                     html += '<select id="' + inputId + '" class="form-control" style="font-size:12px;">';
                     for (var oi = 0; oi < f.options.length; oi++) {
                         html += '<option value="' + f.options[oi] + '"' + (val === f.options[oi] ? ' selected' : '') + '>' + f.options[oi] + '</option>';
@@ -47470,6 +47546,7 @@ async function wdSaveAndInstall() {
             else if (f.type === 'number') config[section.key][f.key] = el.value ? Number(el.value) : (f.default || 0);
             else if (f.type === 'array' && f.key === 'peers') config[section.key][f.key] = wdCollectPeers();
             else if (f.type === 'array') config[section.key][f.key] = el.value.split('\n').map(s => s.trim()).filter(s => s);
+            else if (f.type === 'map') config[section.key][f.key] = collectMapRows(el);
             else config[section.key][f.key] = el.value || f.default || '';
         }
     }
@@ -47525,6 +47602,8 @@ async function wdSaveConfig(startAfter) {
             else if (f.type === 'array' && f.key === 'peers') config[section.key][f.key] = wdCollectPeers();
             else if (f.type === 'array') {
                 config[section.key][f.key] = el.value.split('\n').map(s => s.trim()).filter(s => s);
+            } else if (f.type === 'map') {
+                config[section.key][f.key] = collectMapRows(el);
             } else {
                 config[section.key][f.key] = el.value || f.default || '';
             }
