@@ -8307,8 +8307,10 @@ dns_cloudflare_api_token = your_token_here"
                     </div>
                 </div>
                 <div class="card-body" style="padding:0;">
-                    <!-- Tab bar for table view -->
-                    <div id="wr-tabs" style="display:none; gap:2px; padding:8px 12px 0; border-bottom:1px solid var(--border); flex-wrap:wrap;">
+                    <!-- Tool tab bar — always visible as navigation (rack view
+                         shows the 3D rack below it; clicking a tab switches to
+                         that tool in table view). -->
+                    <div id="wr-tabs" style="display:flex; gap:2px; padding:8px 12px 0; border-bottom:1px solid var(--border); flex-wrap:wrap;">
                         <button class="wr-tab active" data-tab="firewall" onclick="wrSelectTab('firewall')"><span class="ws-icon-clean-wrap" data-icon="fire"></span> Firewall</button>
                         <button class="wr-tab" data-tab="lans" onclick="wrSelectTab('lans')"><span class="ws-icon-clean-wrap" data-icon="globe"></span> DHCP / LANs</button>
                         <button class="wr-tab" data-tab="leases" onclick="wrSelectTab('leases')"><span class="ws-icon-clean-wrap" data-icon="satellite"></span> DHCP Leases</button>

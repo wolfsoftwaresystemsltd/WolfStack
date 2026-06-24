@@ -1015,7 +1015,12 @@
         if (!rack || !tabs) return;
         if (view === 'rack') {
             rack.style.display = 'block';
-            tabs.style.display = 'none';
+            // Keep the tab bar visible in rack view too (Gary KO4BSR 2026-06-24:
+            // the tools were hidden until you switched to table view). The tabs
+            // are always-on navigation — clicking one switches to that tool
+            // (wrSelectTab forces table view). Only the tab PANELS are hidden so
+            // they don't render under the 3D rack.
+            tabs.style.display = 'flex';
             document.querySelectorAll('.wr-tab-panel').forEach(p => p.style.display = 'none');
             btnRack.classList.add('btn-primary');
             btnTable.classList.remove('btn-primary');
