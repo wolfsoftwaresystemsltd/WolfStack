@@ -5756,7 +5756,7 @@ async function installComponent(name) {
 
     const cName = name.charAt(0).toUpperCase() + name.slice(1);
     let targetOptions = `
-        <div style="text-align:left; margin-bottom:16px;">
+        <div style="text-align:left; margin-bottom:16px; overflow-y:auto; -webkit-overflow-scrolling:touch; flex:1 1 auto; min-height:0;">
             <label style="display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:8px; cursor:pointer; margin-bottom:8px; background:var(--bg-secondary);">
                 <input type="radio" name="install-target" value="host" checked>
                 <div>
@@ -5780,11 +5780,11 @@ async function installComponent(name) {
     targetOptions += '</div>';
 
     overlay.innerHTML = `
-        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:460px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalSlideIn 0.3s ease;">
-            <h3 style="color:var(--text-primary); font-size:17px; margin-bottom:4px; font-weight:700;">Install ${escapeHtml(cName)}</h3>
-            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:16px;">Choose where to install this component:</p>
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:460px; width:90%; max-height:90vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalSlideIn 0.3s ease;">
+            <h3 style="color:var(--text-primary); font-size:17px; margin-bottom:4px; font-weight:700; flex:0 0 auto;">Install ${escapeHtml(cName)}</h3>
+            <p style="color:var(--text-secondary); font-size:13px; margin-bottom:16px; flex:0 0 auto;">Choose where to install this component:</p>
             ${targetOptions}
-            <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <div style="display:flex; gap:8px; justify-content:flex-end; flex:0 0 auto;">
                 <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
                 <button class="btn btn-primary btn-sm" id="install-confirm-btn" onclick="doInstallComponent('${escapeHtml(name)}', this.closest('.modal-overlay'))">Install</button>
             </div>
