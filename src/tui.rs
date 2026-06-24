@@ -208,7 +208,9 @@ pub async fn tui_login_submit(
         let mut cookie = actix_web::cookie::Cookie::build("wolfstack_session", &token)
             .path("/")
             .http_only(true)
-            .same_site(actix_web::cookie::SameSite::Strict)
+            // Lax, not Strict — Strict drops the cookie on top-level
+            // navigation and broke login on Microsoft Edge. See api/mod.rs.
+            .same_site(actix_web::cookie::SameSite::Lax)
             .max_age(actix_web::cookie::time::Duration::hours(8))
             .finish();
         if state.tls_enabled {

@@ -3267,6 +3267,16 @@ pub struct ContainerInfo {
     /// see the silent failure that previously left the inbox blank.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_mappings: Vec<PortMapping>,
+    /// Heuristic flag: this PVE container looks like a leftover "ghost" husk.
+    /// When a CT is migrated/destroyed on a rebuilt cluster, its
+    /// `/var/lib/lxc/<vmid>/` staging dir can linger and (on a pre-guard
+    /// build) get auto-adopted into a fresh VMID with the OLD vmid stuck on as
+    /// the hostname — leaving an empty container whose hostname is a bare
+    /// number that isn't even its own VMID. We surface that as a UI badge so
+    /// the operator can spot and remove these; never auto-deleted (a stopped
+    /// empty CT could still be one the operator means to keep).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub possible_ghost: bool,
 }
 
 /// One requested host→container port mapping, with the published flag
@@ -3632,6 +3642,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                 network_name: net_name,
                 restart_count: Some(fields.restart_count),
                 port_mappings: fields.port_mappings.clone(),
+                possible_ghost: false, // docker containers are never PVE husks
             }
         })
         .collect()
@@ -4952,6 +4963,9 @@ fn build_lxc_container_info(
         network_name: lxc_link,
         restart_count: None,  // LXC: see ContainerInfo::restart_count doc
         port_mappings: Vec::new(),
+        // Native-LXC builder (non-PVE listing path) — ghost-husk detection is
+        // a PVE-adoption artifact, so never flagged here.
+        possible_ghost: false,
     }
 }
 
@@ -5240,6 +5254,12 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                     vec![]
                 };
 
+                // Ghost-husk heuristic: a hostname that's a bare VMID number
+                // which ISN'T this CT's own VMID is the fingerprint of a
+                // mis-adopted husk (old vmid carried over as the hostname). A
+                // genuinely unnamed CT whose hostname equals its own vmid is
+                // NOT flagged.
+                let possible_ghost = is_pve_vmid_name(&hostname) && hostname != vmid;
                 ContainerInfo {
                     id: vmid.clone(),
                     name: vmid,
@@ -5263,6 +5283,7 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                     network_name: pve_bridge,
                     restart_count: None,  // PVE-LXC: see ContainerInfo::restart_count doc
                     port_mappings: Vec::new(),
+                    possible_ghost,
                 }
             })
         }).collect();
@@ -5395,10 +5416,27 @@ struct LxcDetailInfo {
 }
 
 fn lxc_info(name: &str) -> LxcDetailInfo {
-    // Memory usage via lxc-cgroup (works on cgroup v1 and v2)
-    let memory_usage = lxc_cgroup_read(name, "memory.current")
+    // Memory usage via lxc-cgroup (works on cgroup v1 and v2).
+    //
+    // Raw `memory.current` / `memory.usage_in_bytes` INCLUDES reclaimable
+    // page cache, so a container that has read/written a lot of files reports
+    // a usage that dwarfs — and can exceed — the host's own "used" figure
+    // (which is `MemTotal - MemAvailable`, i.e. cache-excluded). That's how a
+    // container showed 137 GB "used" on a host reporting only 80 GB used in
+    // total (the difference was reclaimable cache the host counts as
+    // available). Subtract the reclaimable file cache to get the "working
+    // set" (the cAdvisor / Kubernetes definition), which is directly
+    // comparable to the host figure. cgroup v2 (the modern default, and what
+    // PVE CTs run under here) exposes `inactive_file`; cgroup v1 exposes
+    // `total_inactive_file` (the hierarchy rollup). Try the v2 key first since
+    // it's the common case — one fewer lxc-cgroup call — then the v1 key.
+    let raw_usage = lxc_cgroup_read(name, "memory.current")
         .or_else(|| lxc_cgroup_read(name, "memory.usage_in_bytes"))
         .unwrap_or(0);
+    let inactive_file = lxc_cgroup_stat_key(name, "memory.stat", "inactive_file")
+        .or_else(|| lxc_cgroup_stat_key(name, "memory.stat", "total_inactive_file"))
+        .unwrap_or(0);
+    let memory_usage = raw_usage.saturating_sub(inactive_file);
 
     let mut memory_limit = lxc_cgroup_read(name, "memory.max")
         .or_else(|| lxc_cgroup_read(name, "memory.limit_in_bytes"))
@@ -10935,6 +10973,22 @@ fn lxc_cgroup_read(name: &str, key: &str) -> Option<u64> {
             if val == "max" || val.is_empty() { return None; }
             val.parse::<u64>().ok()
         })
+}
+
+/// Read one key from a multi-line cgroup stat file (e.g. `memory.stat`) via
+/// lxc-cgroup. Matches the key as the exact first whitespace token so
+/// `inactive_file` never accidentally matches `total_inactive_file`.
+fn lxc_cgroup_stat_key(name: &str, file: &str, key: &str) -> Option<u64> {
+    let base = lxc_base_dir(name);
+    let mut args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+    args.extend_from_slice(&["-n", name, file]);
+    let out = Command::new("lxc-cgroup").args(&args).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find(|l| l.split_whitespace().next() == Some(key))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
 }
 
 /// Get CPU usage percentage for an LXC container

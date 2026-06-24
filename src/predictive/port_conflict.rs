@@ -547,6 +547,7 @@ mod tests {
             network_name: String::new(),
             restart_count: None,
             port_mappings: mappings,
+            possible_ghost: false,
         }
     }
 

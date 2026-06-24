@@ -586,7 +586,12 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
                 .http_only(true)
-                .same_site(actix_web::cookie::SameSite::Strict)
+                // Lax, not Strict: Strict withholds the session cookie on
+                // top-level navigations/redirects, which broke login on
+                // Microsoft Edge (stricter tracking-prevention than Chrome) —
+                // users authenticated then immediately appeared logged out.
+                // Lax still blocks cross-site POSTs (CSRF) for this same-origin SPA.
+                .same_site(actix_web::cookie::SameSite::Lax)
                 .max_age(actix_web::cookie::time::Duration::hours(8))
                 .finish();
             if state.tls_enabled {
@@ -609,7 +614,12 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
                 .http_only(true)
-                .same_site(actix_web::cookie::SameSite::Strict)
+                // Lax, not Strict: Strict withholds the session cookie on
+                // top-level navigations/redirects, which broke login on
+                // Microsoft Edge (stricter tracking-prevention than Chrome) —
+                // users authenticated then immediately appeared logged out.
+                // Lax still blocks cross-site POSTs (CSRF) for this same-origin SPA.
+                .same_site(actix_web::cookie::SameSite::Lax)
                 .max_age(actix_web::cookie::time::Duration::hours(8))
                 .finish();
             if state.tls_enabled {
@@ -1229,6 +1239,10 @@ pub async fn logout(req: HttpRequest, state: web::Data<AppState>) -> HttpRespons
     }
     let mut cookie = Cookie::build("wolfstack_session", "")
         .path("/")
+        // Match the login cookie's SameSite=Lax so the removal reliably
+        // clears it on a top-level navigation (don't rely on the browser
+        // default, which could tighten to Strict and strand the cookie).
+        .same_site(actix_web::cookie::SameSite::Lax)
         .finish();
     cookie.make_removal();
 
@@ -1455,7 +1469,12 @@ pub async fn passkey_login_finish(req: HttpRequest, state: web::Data<AppState>, 
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
                 .http_only(true)
-                .same_site(actix_web::cookie::SameSite::Strict)
+                // Lax, not Strict: Strict withholds the session cookie on
+                // top-level navigations/redirects, which broke login on
+                // Microsoft Edge (stricter tracking-prevention than Chrome) —
+                // users authenticated then immediately appeared logged out.
+                // Lax still blocks cross-site POSTs (CSRF) for this same-origin SPA.
+                .same_site(actix_web::cookie::SameSite::Lax)
                 .max_age(actix_web::cookie::time::Duration::hours(8))
                 .finish();
             if state.tls_enabled { cookie.set_secure(true); }
