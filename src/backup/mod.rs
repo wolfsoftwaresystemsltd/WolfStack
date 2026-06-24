@@ -5765,14 +5765,11 @@ fn storage_label(storage: &BackupStorage) -> String {
 }
 
 /// Delete a backup entry and its file
-pub fn delete_backup(id: &str) -> Result<String, String> {
-    let mut config = load_config();
-    let idx = config.entries.iter().position(|e| e.id == id)
-        .ok_or_else(|| format!("Backup not found: {}", id))?;
-
-    let entry = config.entries.remove(idx);
-
-    // Try to delete the file from storage
+/// Best-effort removal of a backup's on-disk file. Local/WolfDisk/NFS/SMB are
+/// handled; S3/Remote/PBS file deletion isn't implemented here (the caller
+/// still drops the index entry). Shared by single- and bulk-delete so the two
+/// can't drift.
+fn delete_backup_file(entry: &BackupEntry) {
     match entry.storage.storage_type {
         StorageType::Local | StorageType::Wolfdisk => {
             let path = Path::new(&entry.storage.resolved_local_path()).join(&entry.filename);
@@ -5794,9 +5791,43 @@ pub fn delete_backup(id: &str) -> Result<String, String> {
         },
         _ => {} // S3, Remote, PBS deletion not implemented yet
     }
+}
+
+pub fn delete_backup(id: &str) -> Result<String, String> {
+    let mut config = load_config();
+    let idx = config.entries.iter().position(|e| e.id == id)
+        .ok_or_else(|| format!("Backup not found: {}", id))?;
+
+    let entry = config.entries.remove(idx);
+    delete_backup_file(&entry);
 
     save_config(&config)?;
     Ok(format!("Backup {} deleted", id))
+}
+
+/// Delete every backup whose status is `Failed` — a one-click cleanup for the
+/// dead-entry clutter that builds up from interrupted or erroring jobs. Only
+/// `Failed` entries are touched: `Completed` and `InProgress` are left alone
+/// (never wipe a finished backup or a running job's record). Files are removed
+/// best-effort and the index is rewritten ONCE (not once per entry). Returns
+/// the number removed.
+pub fn delete_failed_backups() -> Result<usize, String> {
+    let mut config = load_config();
+    let mut removed = 0usize;
+    let mut kept = Vec::with_capacity(config.entries.len());
+    for entry in std::mem::take(&mut config.entries) {
+        if entry.status == BackupStatus::Failed {
+            delete_backup_file(&entry);
+            removed += 1;
+        } else {
+            kept.push(entry);
+        }
+    }
+    config.entries = kept;
+    if removed > 0 {
+        save_config(&config)?;
+    }
+    Ok(removed)
 }
 
 /// Restore from a backup by ID

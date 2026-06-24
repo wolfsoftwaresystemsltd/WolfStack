@@ -30035,6 +30035,14 @@ function renderBackupHistory(backups) {
     const empty = document.getElementById('backups-empty');
     if (!tbody) return;
 
+    // Show the "Remove failed" button (with a live count) only when there's
+    // something to clean up.
+    const failedCount = (backups || []).filter(b => b && b.status === 'failed').length;
+    const rfBtn = document.getElementById('backups-remove-failed-btn');
+    const rfCount = document.getElementById('backups-failed-count');
+    if (rfBtn) rfBtn.style.display = failedCount > 0 ? '' : 'none';
+    if (rfCount) rfCount.textContent = failedCount;
+
     if (!backups || backups.length === 0) {
         tbody.innerHTML = '';
         if (empty) empty.style.display = 'block';
@@ -30414,6 +30422,32 @@ async function deleteBackup(id) {
     } catch (e) {
         showToast(`Delete error: ${e.message}`, 'error');
         taskLog('Delete backup: ' + id, 'failed');
+    }
+    loadBackups();
+}
+
+// Bulk-remove every failed backup entry (and its file). Only failed entries
+// are touched server-side — completed/in-progress are never affected.
+async function removeFailedBackups(btn) {
+    const countEl = document.getElementById('backups-failed-count');
+    const n = countEl ? (parseInt(countEl.textContent, 10) || 0) : 0;
+    if (!(await showConfirm(`Remove ${n} failed backup${n === 1 ? '' : 's'}? Their entries and any partial files are deleted permanently. Completed backups are not touched.`))) return;
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; btn.style.pointerEvents = 'none'; }
+    try {
+        const res = await fetch(apiUrl('/api/backups/delete-failed'), { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.message || `Removed ${data.removed || 0} failed backups`, 'success');
+            taskLog('Removed failed backups: ' + (data.removed || 0));
+        } else {
+            showToast(`Remove failed: ${data.error || 'unknown error'}`, 'error');
+            taskLog('Remove failed backups', 'failed');
+        }
+    } catch (e) {
+        showToast(`Remove failed: ${e.message}`, 'error');
+        taskLog('Remove failed backups', 'failed');
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = ''; btn.style.pointerEvents = ''; }
     }
     loadBackups();
 }
