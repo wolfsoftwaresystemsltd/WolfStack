@@ -5259,7 +5259,14 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                 // mis-adopted husk (old vmid carried over as the hostname). A
                 // genuinely unnamed CT whose hostname equals its own vmid is
                 // NOT flagged.
-                let possible_ghost = is_pve_vmid_name(&hostname) && hostname != vmid;
+                //
+                // The frontend HIDES flagged CTs from the list, so this gate is
+                // a hard safety rule: a RUNNING container is in use and is never
+                // a husk — never flag (and therefore never hide) one, even if
+                // its hostname happens to be numeric. Only stopped CTs qualify.
+                let possible_ghost = state != "running"
+                    && is_pve_vmid_name(&hostname)
+                    && hostname != vmid;
                 ContainerInfo {
                     id: vmid.clone(),
                     name: vmid,

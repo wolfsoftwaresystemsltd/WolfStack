@@ -22598,7 +22598,7 @@ function lxcCardHtml(c, s) {
             ${pies.length > 0 ? `<div style="display:flex;justify-content:space-evenly;padding:12px 8px;border-bottom:1px solid var(--border);">${pies.join('')}</div>` : ''}
             <div style="padding:10px 12px;">
                 <div style="display:flex;justify-content:space-between;align-items:start;">
-                    <div><div style="font-weight:700;font-size:14px;">${escapeHtml(c.hostname || c.name)}${c.possible_ghost ? `<span title="Likely a leftover &quot;ghost&quot; container — a husk auto-adopted with an old VMID as its hostname. Safe to delete if empty and unrecognised." style="margin-left:6px;font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(245,158,11,0.15);color:var(--warning);border:1px solid rgba(245,158,11,0.4);font-weight:600;cursor:help;">ghost?</span>` : ''}</div>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}<div style="font-size:11px;color:var(--text-secondary);">${c.version || ''}</div></div>
+                    <div><div style="font-weight:700;font-size:14px;">${escapeHtml(c.hostname || c.name)}</div>${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}<div style="font-size:11px;color:var(--text-secondary);">${c.version || ''}</div></div>
                     <span style="font-size:10px;padding:2px 8px;border-radius:4px;background:${borderColor}22;color:${borderColor};font-weight:600;">${c.state}</span>
                 </div>
                 ${svcItems ? `<div style="margin-top:4px;">${svcItems}</div>` : ''}
@@ -23479,7 +23479,15 @@ async function loadLxcContainers() {
 
         const containersData = containersResp.ok ? await containersResp.json() : [];
         const statsData = statsResp.ok ? await statsResp.json() : [];
-        const containers = Array.isArray(containersData) ? containersData : [];
+        const allContainers = Array.isArray(containersData) ? containersData : [];
+        // Hide ghost husks entirely (Paul 2026-06-24). Leftover PVE husks
+        // (numeric old-VMID hostname, stopped) were never meant to be here;
+        // listing them — even with a badge — led to an accidental destroy of
+        // the wrong-looking VMID. The backend flag is stopped-only, so a
+        // running container can never be hidden.
+        const containers = allContainers.filter(c => !c.possible_ghost);
+        const hiddenGhosts = allContainers.length - containers.length;
+        if (hiddenGhosts > 0) console.info(`Hid ${hiddenGhosts} ghost husk container(s) from the LXC list`);
         const stats = Array.isArray(statsData) ? statsData : [];
 
         // Index stats by name
@@ -23557,10 +23565,9 @@ function renderLxcContainers(containers, stats) {
             return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;">${s.name}</span>`;
         }).join('') : '';
         const lxcBadgeRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;">${lxcSvcItems}<span data-update-badge="lxc:${c.name}"></span></div>`;
-        const ghostBadge = c.possible_ghost ? `<span title="Likely a leftover &quot;ghost&quot; container: a husk from a CT that was migrated/destroyed on a rebuilt cluster, auto-adopted into a fresh VMID with an old VMID left on as its hostname. If it's empty and you don't recognise it, it's safe to delete." style="margin-left:6px;font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(245,158,11,0.15);color:var(--warning);border:1px solid rgba(245,158,11,0.4);font-weight:600;cursor:help;">ghost?</span>` : '';
 
         return `<tr>
-            <td><strong>${c.hostname || c.name}</strong>${ghostBadge}${lxcBadgeRow}${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
+            <td><strong>${c.hostname || c.name}</strong>${lxcBadgeRow}${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
             <td style="font-size:12px;color:var(--text-secondary);">${c.version || '<span style="color:var(--text-muted)">—</span>'}</td>
             <td><span style="color:${stateColor}">●</span> ${c.state}</td>
             <td style="font-size:12px; font-family:monospace;">${c.ip_address || '-'}${c.gateway ? '<div style="font-size:10px;color:var(--text-muted);">GW: ' + escapeHtml(c.gateway) + '</div>' : ''}${c.mac_address ? '<div style="font-size:10px;color:var(--text-muted);">MAC: ' + escapeHtml(c.mac_address) + '</div>' : ''}</td>
