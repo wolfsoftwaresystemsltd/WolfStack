@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.14: component-install target picker scrolls on mobile** _(2026-06-24 — [`3294ad80`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3294ad805e38432df883a761e1f6a38c57512152))_
+- **v24.57.13: WolfStack restart/upgrade no longer kills running VMs/containers** _(2026-06-24 — [`ff9a56cd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff9a56cdffad380cf38d2b3ae4b420f33a197f28))_
 - **v24.57.12: fix WolfDisk install paths ("Unit wolfdisk.service not found")** _(2026-06-24 — [`05ba21d6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/05ba21d6455bf316834d39bd7d0035138086b05e))_
 - **v24.57.11: warn before reusing a previously-used WolfNet IP (don't silently recycle)** _(2026-06-24 — [`0b2a2bb6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0b2a2bb6257773cf8bc9cf18f41e18548c6cb4d3))_
 - **v24.57.10: WolfRouter tool tabs always visible (don't hide them in Rack view)** _(2026-06-24 — [`95a64737`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/95a647374fecd4835f7144495d98b011ede6b4b0))_
