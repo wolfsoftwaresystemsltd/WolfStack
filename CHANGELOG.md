@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.17: Proxmox LXC terminal uses pct enter; help drawer clears the menubar** _(2026-06-25 — [`47b3c04e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/47b3c04e94f26cfb706cee3ff137ea489f44fd4a))_
 - **v24.57.16: all Wolf component installers use setup.sh (prebuilt binary)** _(2026-06-25 — [`8d517a4d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d517a4df797bcac6057c7003f2afa1eb2a1d5f3))_
 - **v24.57.15: configurator UI for wolfdisk bucket→folder mappings** _(2026-06-24 — [`300a6079`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/300a6079765912d1a3d7916c216f4870a83e9836))_
 - **v24.57.14: component-install target picker scrolls on mobile** _(2026-06-24 — [`3294ad80`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3294ad805e38432df883a761e1f6a38c57512152))_
