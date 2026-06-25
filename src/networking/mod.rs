@@ -3274,7 +3274,52 @@ fn remove_rules_by_comment(comment: &str) -> usize {
 }
 
 /// Run an iptables command with base args + protocol + port + tail args
+/// Transform a rule's add-form `base` (which begins with `-A <chain>` or
+/// `-I <chain> [pos]`, optionally prefixed by `-t <table>`) into its `-C`
+/// check-existence form: `-A`/`-I` becomes `-C` and the numeric `-I` position is
+/// dropped. The proto/port/tail match args are identical for check vs add, so the
+/// caller appends them unchanged. Used to make rule application idempotent.
+fn iptables_check_base(base: &[&str]) -> Vec<String> {
+    let mut check: Vec<String> = Vec::with_capacity(base.len());
+    let mut i = 0;
+    while i < base.len() {
+        match base[i] {
+            "-A" | "-I" => {
+                let is_insert = base[i] == "-I";
+                check.push("-C".into());
+                if i + 1 < base.len() { check.push(base[i + 1].into()); } // chain
+                i += 2;
+                // `-I <chain> <pos>` carries a numeric position the `-C` form omits.
+                if is_insert && i < base.len() && base[i].parse::<u32>().is_ok() {
+                    i += 1;
+                }
+            }
+            other => { check.push(other.into()); i += 1; }
+        }
+    }
+    check
+}
+
 fn run_iptables(base: &[&str], proto: &[String], port: &[String], tail: &[&str]) -> Result<(), String> {
+    // IDEMPOTENT add: the reconciliation loop re-applies these mapping rules on
+    // every tick. With a bare `-A`/`-I` that appended another identical rule each
+    // pass, so PapaSchlumpf's FORWARD chain grew to ~4000 duplicate ACCEPT rules
+    // and throttled the router (the kernel walks the whole chain per packet — a
+    // reboot cleared it, then it grew back). Modify-in-place: build the `-C`
+    // (check) form of the exact rule and only add what's actually missing, so a
+    // steady reconcile is a no-op and rules never duplicate. (No purge churn.)
+    let mut check: Vec<String> = iptables_check_base(base);
+    for p in proto { check.push(p.clone()); }
+    for p in port { check.push(p.clone()); }
+    for t in tail { check.push((*t).to_string()); }
+
+    // Rule already present → nothing to do.
+    if Command::new("iptables").args(&check).output()
+        .map(|o| o.status.success()).unwrap_or(false)
+    {
+        return Ok(());
+    }
+
     let mut args: Vec<&str> = base.to_vec();
     for p in proto { args.push(p.as_str()); }
     for p in port { args.push(p.as_str()); }
@@ -4588,6 +4633,22 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn ip(s: &str) -> Ipv4Addr { s.parse().unwrap() }
+
+    #[test]
+    fn iptables_check_base_builds_the_check_form() {
+        // -I <chain> <pos>  ->  -C <chain>  (position dropped)
+        assert_eq!(
+            iptables_check_base(&["-I", "FORWARD", "1", "-d", "10.0.0.5"]),
+            vec!["-C", "FORWARD", "-d", "10.0.0.5"]);
+        // -t nat -A <chain>  ->  -t nat -C <chain>
+        assert_eq!(
+            iptables_check_base(&["-t", "nat", "-A", "PREROUTING", "-d", "1.2.3.4"]),
+            vec!["-t", "nat", "-C", "PREROUTING", "-d", "1.2.3.4"]);
+        // -I without a position still maps cleanly.
+        assert_eq!(
+            iptables_check_base(&["-I", "FORWARD", "-i", "eth0"]),
+            vec!["-C", "FORWARD", "-i", "eth0"]);
+    }
 
     // ─── is_in_subnet ───
     #[test]
