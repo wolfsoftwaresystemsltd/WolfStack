@@ -92,6 +92,13 @@ let currentPage = 'datacenter';
 let currentComponent = null;
 let currentNodeId = null;  // null = datacenter, node ID = specific server
 let allNodes = [];         // cached node list
+// True once buildServerTree() has successfully rendered the sidebar. If the very
+// first render fails or is interrupted (a transient DOM/data race on load),
+// allNodes is already set, so later polls take the in-place-update branch and
+// NEVER rebuild — the sidebar stays stuck on "Loading…" forever. This flag forces
+// a rebuild on every poll until one actually succeeds. (Intermittent stuck-load
+// reported 2026-06-25.)
+let _serverTreeRendered = false;
 let serverTlsEnabled = false; // whether the server has TLS (HTTPS) enabled
 let cpuHistory = [];
 let memHistory = [];
@@ -3512,6 +3519,7 @@ function buildServerTree(nodes) {
 
     if (nodes.length === 0) {
         tree.innerHTML = renderEmptyState({ title: 'No servers yet', body: 'Click + Add Server.' });
+        _serverTreeRendered = true; // empty state is a valid render — stops the load watchdog
         return;
     }
 
@@ -3728,6 +3736,7 @@ function buildServerTree(nodes) {
     });
 
     tree.innerHTML = html;
+    _serverTreeRendered = true; // sidebar painted — clears the "Loading…" load watchdog
 
     // Restore active highlight
     if (currentPage === 'wolfrun' && wolfrunCurrentCluster) {
@@ -5554,7 +5563,16 @@ async function fetchNodes() {
         }
 
         allNodes = nodes;
-        if (structureChanged) {
+        // Force a full rebuild if the tree has never successfully rendered, even
+        // when the node set is unchanged — otherwise a failed first render leaves
+        // the sidebar stuck on "Loading…" permanently (the in-place branch below
+        // only touches dots/badges, never the placeholder). _serverTreeRendered is
+        // set true only AFTER buildServerTree returns without throwing, so a throw
+        // here is retried on the next poll.
+        if (structureChanged || !_serverTreeRendered) {
+            // buildServerTree sets _serverTreeRendered true only when it actually
+            // paints the tree (it silently no-ops if #server-tree is missing), so
+            // a no-op render is retried on the next poll instead of being masked.
             buildServerTree(nodes);
         } else {
             // Update dots and badges in-place without rebuilding
@@ -15819,6 +15837,15 @@ try {
 
 loadUserPreferences().then(loadHiddenFeatures); // sync prefs then apply sidebar hides
 fetchNodes();
+// Load watchdog — guarantees the sidebar can't stay stuck on "Loading…".
+// Registered BEFORE the rest of init (and before the main poll setInterval) so
+// it still fires even if a later init line throws and skips the poll wiring, or
+// if the first /api/nodes hangs / its render no-ops. Retries every 5s until the
+// tree actually paints, then clears itself. (Intermittent stuck-load 2026-06-25.)
+var _loadWatchdog = setInterval(function () {
+    if (_serverTreeRendered) { clearInterval(_loadWatchdog); return; }
+    fetchNodes();
+}, 5000);
 refreshProxmoxCleanupBanner(); // show deprecation banner if startup auto-cleanup ran
 fetchMetricsHistory(); // Initial history load
 loadTaskLog(); // Restore task log from localStorage

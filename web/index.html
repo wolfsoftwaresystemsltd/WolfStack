@@ -213,7 +213,10 @@
     <aside class="sidebar">
         <div class="sidebar-logo">
             <img src="images/wolfstack-logo.png" alt="WolfStack">
-            <span class="version">v11.24.0</span>
+            <!-- Blank until /api/nodes returns the real version (set in fetchNodes).
+                 A hardcoded number here just shows a stale, misleading version
+                 (e.g. "v11.24.0") whenever the first node fetch is slow or hangs. -->
+            <span class="version"></span>
         </div>
         <nav class="sidebar-nav">
             <!-- Top quick-jump icons. Grid capped at 5 columns so a long
