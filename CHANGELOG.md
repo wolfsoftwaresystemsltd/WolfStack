@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.19: terminal tabs route to the right node (2nd tab no longer hijacks the 1st's host)** _(2026-06-25 — [`6fa68420`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6fa68420583689bb585f6a6ef2b467dc4a56c8d7))_
+- **v24.57.18: sidebar can no longer get stuck on 'Loading…' on load** _(2026-06-25 — [`efb83a31`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/efb83a31f4eb3d7a3398da25050a9f7d6fdbee06))_
 - **v24.57.17: Proxmox LXC terminal uses pct enter; help drawer clears the menubar** _(2026-06-25 — [`47b3c04e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/47b3c04e94f26cfb706cee3ff137ea489f44fd4a))_
 - **v24.57.16: all Wolf component installers use setup.sh (prebuilt binary)** _(2026-06-25 — [`8d517a4d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d517a4df797bcac6057c7003f2afa1eb2a1d5f3))_
 - **v24.57.15: configurator UI for wolfdisk bucket→folder mappings** _(2026-06-24 — [`300a6079`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/300a6079765912d1a3d7916c216f4870a83e9836))_
