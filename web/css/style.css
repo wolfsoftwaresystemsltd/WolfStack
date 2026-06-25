@@ -4349,7 +4349,12 @@ body.sidebar-collapsed #task-log-footer {
 :root { --learn-drawer-w: 440px; }
 
 .learn-drawer {
-    position: fixed; top: 0; right: 0; bottom: 0;
+    /* Start BELOW the fixed full-width app menubar (z-index 300, above this
+       panel's 160). With top:0 the drawer's header — and its close button —
+       slid under the menubar, so the help system couldn't be closed and
+       appeared to sit on top of the menu. var(--app-menubar-h) is 0 on mobile,
+       where the drawer bottom-docks anyway. */
+    position: fixed; top: var(--app-menubar-h); right: 0; bottom: 0;
     width: var(--learn-drawer-w); max-width: 100vw;
     display: flex; flex-direction: column;
     background-color: #0a0e1a; background-image: linear-gradient(var(--bg-card), var(--bg-card)); border-left: 1px solid var(--border);

@@ -103,17 +103,29 @@ async fn console_session(
             ));
         }
         "lxc" => {
-            let base = crate::containers::lxc_base_dir(&name);
-            let p_flag = if base != crate::containers::LXC_DEFAULT_PATH {
-                format!("-P {} ", base)
+            if crate::containers::is_proxmox() {
+                // Proxmox manages LXC through `pct`, not raw `lxc-attach`. On a
+                // PVE node `lxc-attach -n <vmid>` can't reach the container's
+                // monitor and dies with "Failed to get init pid - Connection
+                // refused"; `pct enter` uses Proxmox's own lxcpath/monitor and
+                // works. TERM is inherited from the CommandBuilder env set above.
+                // No lxc-attach fallback here: on Proxmox it's exactly what's
+                // broken, and chaining it with `||` would spawn a second shell
+                // whenever the user's pct-enter shell exits non-zero.
+                cmd.arg(format!("pct enter {}", name));
             } else {
-                String::new()
-            };
-            cmd.arg(format!(
-                "lxc-attach {}-n {} --set-var TERM=xterm-256color -- /bin/sh -c \
-                 'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'",
-                p_flag, name
-            ));
+                let base = crate::containers::lxc_base_dir(&name);
+                let p_flag = if base != crate::containers::LXC_DEFAULT_PATH {
+                    format!("-P {} ", base)
+                } else {
+                    String::new()
+                };
+                cmd.arg(format!(
+                    "lxc-attach {}-n {} --set-var TERM=xterm-256color -- /bin/sh -c \
+                     'if [ -x /bin/bash ]; then exec /bin/bash --login; else exec /bin/sh -l; fi'",
+                    p_flag, name
+                ));
+            }
         }
         "vm" => {
             // Three backends, one frontend route. The guest still needs a
