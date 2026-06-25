@@ -134,6 +134,23 @@
             if (id) return node.id === id;
             return !!node.is_self;
         }
+        // Resolve the node for a session descriptor. An EXPLICIT nodeId must
+        // NEVER be silently downgraded to selfNode()/nodes[0]: if it isn't in
+        // this window's (possibly stale or popup-local) node list, honour it as
+        // a remote node by id so the socket routes to /ws/remote-console/<id>
+        // and the right runtime runs on the right host. Without this, a 2nd tab
+        // whose node wasn't resolvable fell back to the 1st tab's / self node
+        // and ran the wrong command — pct enter on a native LXC, or lxc-attach
+        // on a Proxmox LXC ("Failed to get init pid" / "vmid type check failed
+        // - got 'gateway'"). A bare nodeId (none given) means the local session.
+        function resolveNode(nodeId) {
+            if (!nodeId) return selfNode() || null;
+            const found = nodeById(nodeId);
+            if (found) return found;
+            const sid = selfNodeId();
+            if (sid && nodeId === sid) return selfNode() || null;
+            return { id: nodeId }; // explicit remote node we can't (yet) resolve
+        }
         function wsBase() {
             if (opts.wsBase) return opts.wsBase.replace(/\/+$/, '');
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -867,7 +884,7 @@
         // instead of spawning a duplicate).
         function descriptorKey(o) {
             o = o || {};
-            const node = (o.nodeId && nodeById(o.nodeId)) || selfNode() || null;
+            const node = resolveNode((o || {}).nodeId);
             const nodeKey = (node && node.id) || 'local';
             const type = o.type || 'host';
             if (type === 'pve') return `${nodeKey}|pve|${o.pveNodeId}|${o.pveVmid}`;
@@ -888,8 +905,10 @@
 
         function addTab(o) {
             o = o || {};
-            // null node = local serving node (see newWindow/wsUrlForPane).
-            const node = (o.nodeId && nodeById(o.nodeId)) || selfNode() || null;
+            // Honour an explicit nodeId even if it isn't in this window's node
+            // list (see resolveNode) — never fall back to the wrong host, which
+            // ran pct/lxc-attach against the previous tab's node.
+            const node = resolveNode(o.nodeId);
             const type = o.type || 'host';
             const target = (type === 'host' || type === 'pve') ? '' : (o.name || o.target || '');
             const win = newWindow({
@@ -924,7 +943,7 @@
         // target — open it as tab 1 even when no node object resolves (a local
         // host shell needs no node id; the node list is only for the picker).
         const hasInitial = !!(initial.type || initial.name || initial.pveVmid);
-        const initialNode = (initial.nodeId && nodeById(initial.nodeId)) || selfNode() || null;
+        const initialNode = resolveNode(initial.nodeId);
         if (hasInitial) {
             const type = initial.type || 'host';
             const target = (type === 'host' || type === 'pve') ? '' : (initial.name || initial.target || '');
