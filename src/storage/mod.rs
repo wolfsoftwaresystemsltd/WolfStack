@@ -1372,6 +1372,37 @@ fn read_wolfdisk_info() -> Option<WolfDiskInfo> {
     })
 }
 
+/// Read the WolfDisk daemon's live cluster status (`<data_dir>/cluster_status.json`,
+/// rewritten every second by the daemon). Carries this node's role/state,
+/// `index_version` (the replication sync marker — peers with the same version are
+/// in sync), file_count/total_size, and each peer's `last_seen_secs_ago`. None if
+/// WolfDisk isn't installed/configured or hasn't written a status file yet.
+/// klasSponsor 2026-06: "a healthcheck that lets you know how in-sync the
+/// different nodes are."
+pub fn wolfdisk_cluster_status() -> Option<serde_json::Value> {
+    // Resolve the data dir from config (defaults to /var/lib/wolfdisk), then read
+    // the status file the daemon maintains there for wolfdiskctl.
+    let data_dir = read_wolfdisk_info()
+        .map(|i| i.data_dir)
+        .unwrap_or_else(|| "/var/lib/wolfdisk".to_string());
+    let status_path = Path::new(&data_dir).join("cluster_status.json");
+    let content = std::fs::read_to_string(&status_path).ok()?;
+    let mut status: serde_json::Value = serde_json::from_str(&content).ok()?;
+    // Stamp staleness so the UI can tell "daemon stopped" from "all healthy":
+    // the file is rewritten every 1s, so an updated_at more than a few seconds
+    // old means the daemon isn't running even though the file exists.
+    if let Some(updated) = status.get("updated_at").and_then(|v| v.as_u64()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(updated);
+        if let Some(obj) = status.as_object_mut() {
+            obj.insert("status_age_secs".into(), serde_json::json!(now.saturating_sub(updated)));
+        }
+    }
+    Some(status)
+}
+
 fn install_s3fs() -> Result<(), String> {
 
     let distro = crate::installer::detect_distro();

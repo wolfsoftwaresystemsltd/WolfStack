@@ -19084,6 +19084,21 @@ pub async fn storage_sync_s3(
 // ─── Disk Partition Info ───
 
 /// GET /api/storage/disk-info — list all block devices, partitions, filesystems & free space
+/// GET /api/storage/wolfdisk/status — live WolfDisk cluster/sync health for THIS
+/// node, read from the daemon's cluster_status.json. The WolfDisk tab fans this
+/// out across cluster members (via the node proxy) and compares index_version to
+/// flag out-of-sync nodes. klasSponsor 2026-06 sync healthcheck.
+pub async fn storage_wolfdisk_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match crate::storage::wolfdisk_cluster_status() {
+        Some(status) => HttpResponse::Ok().json(status),
+        None => HttpResponse::Ok().json(serde_json::json!({
+            "running": false,
+            "error": "WolfDisk is not running on this node, or hasn't written a status file yet"
+        })),
+    }
+}
+
 pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
 
@@ -37259,6 +37274,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/cluster/semantic/search", web::post().to(cluster_semantic_search))
         // Disk partition info
         .route("/api/storage/disk-info", web::get().to(storage_disk_info))
+        .route("/api/storage/wolfdisk/status", web::get().to(storage_wolfdisk_status))
         // Disk Partitioning & Formatting
         .route("/api/storage/disk/partition-table", web::post().to(disk_create_partition_table))
         .route("/api/storage/disk/partition", web::post().to(disk_create_partition))

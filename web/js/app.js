@@ -46716,6 +46716,86 @@ function showWolfDiskPage(clusterName) {
     loadWolfDiskCluster();
 }
 
+// Cluster sync healthcheck (klasSponsor 2026-06): fan /api/storage/wolfdisk/status
+// out across the cluster's online nodes and report how in-sync they are. WolfDisk
+// rewrites cluster_status.json every second with its index_version (the
+// replication marker — nodes sharing a version are in sync), file_count and peer
+// last-seen. We compare index_version across running nodes: all-equal = in sync;
+// any difference = a node is catching up (lag). A stale status file (the daemon
+// stopped) is flagged distinctly from a genuine out-of-sync.
+async function loadWolfDiskSyncHealth() {
+    const el = document.getElementById('wd-sync-health');
+    if (!el) return;
+    const nodes = (typeof getClusterNodes === 'function' ? getClusterNodes(wdCurrentCluster) : []).filter(n => n.online);
+    if (nodes.length === 0) { el.innerHTML = ''; return; }
+
+    const rows = await Promise.all(nodes.map(async (node) => {
+        try {
+            const resp = await fetch(nodeApiUrl(node.id, '/api/storage/wolfdisk/status'));
+            const s = resp.ok ? await resp.json() : { running: false };
+            return { node, status: s };
+        } catch (_) {
+            return { node, status: { running: false } };
+        }
+    }));
+
+    // Only nodes actually running WolfDisk with a fresh status file count toward sync.
+    const live = rows.filter(r => r.status && r.status.node_id && (r.status.status_age_secs == null || r.status.status_age_secs <= 10));
+    if (live.length === 0) { el.innerHTML = ''; return; } // no WolfDisk here — hide the card
+
+    const versions = [...new Set(live.map(r => Number(r.status.index_version || 0)))];
+    const stale = rows.filter(r => r.status && r.status.node_id && r.status.status_age_secs != null && r.status.status_age_secs > 10);
+    const inSync = versions.length <= 1 && stale.length === 0;
+    const maxVer = Math.max(...live.map(r => Number(r.status.index_version || 0)), 0);
+
+    const banner = inSync
+        ? `<span style="color:#10b981; font-weight:700;">✓ In sync</span> <span style="color:var(--text-muted); font-size:12px;">— all ${live.length} node(s) at index version ${maxVer}</span>`
+        : stale.length > 0
+            ? `<span style="color:#f59e0b; font-weight:700;">⚠ ${stale.length} node(s) not reporting</span> <span style="color:var(--text-muted); font-size:12px;">— WolfDisk may be stopped there</span>`
+            : `<span style="color:#f59e0b; font-weight:700;">⟳ Syncing</span> <span style="color:var(--text-muted); font-size:12px;">— index versions differ (a node is catching up)</span>`;
+
+    const fmtBytes = (b) => (typeof formatStorageBytes === 'function') ? formatStorageBytes(b) : (b + ' B');
+    const rowHtml = rows.map(r => {
+        const s = r.status || {};
+        const name = escapeHtml(r.node.hostname || r.node.name || r.node.id);
+        if (!s.node_id) {
+            return `<tr><td style="padding:6px 10px;">${name}</td><td colspan="5" style="padding:6px 10px; color:var(--text-muted);">WolfDisk not running</td></tr>`;
+        }
+        const ver = Number(s.index_version || 0);
+        const isStale = s.status_age_secs != null && s.status_age_secs > 10;
+        const behind = !isStale && ver < maxVer;
+        const verCell = isStale
+            ? `<span style="color:#f59e0b;">stale (${s.status_age_secs}s)</span>`
+            : behind
+                ? `<span style="color:#f59e0b;">v${ver} — ${maxVer - ver} behind</span>`
+                : `<span style="color:#10b981;">v${ver}</span>`;
+        return `<tr>
+            <td style="padding:6px 10px;">${name}</td>
+            <td style="padding:6px 10px;">${escapeHtml(s.role || '—')}</td>
+            <td style="padding:6px 10px;">${verCell}</td>
+            <td style="padding:6px 10px;">${Number(s.file_count || 0).toLocaleString()}</td>
+            <td style="padding:6px 10px;">${escapeHtml(fmtBytes(Number(s.total_size || 0)))}</td>
+            <td style="padding:6px 10px;">${Array.isArray(s.peers) ? s.peers.filter(p => Number(p.last_seen_secs_ago) < 5).length + '/' + s.peers.length : '—'}</td>
+        </tr>`;
+    }).join('');
+
+    el.innerHTML = `
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:14px 16px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <div style="font-weight:600; font-size:14px;">WolfDisk Cluster Health</div>
+                <div>${banner}</div>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead><tr style="color:var(--text-muted); font-size:11px; text-align:left;">
+                    <th style="padding:4px 10px;">Node</th><th style="padding:4px 10px;">Role</th>
+                    <th style="padding:4px 10px;">Index Version</th><th style="padding:4px 10px;">Files</th>
+                    <th style="padding:4px 10px;">Size</th><th style="padding:4px 10px;">Peers up</th>
+                </tr></thead>
+                <tbody>${rowHtml}</tbody>
+            </table>
+        </div>`;
+}
+
 async function loadWolfDiskCluster() {
     const loading = document.getElementById('wd-loading');
     const container = document.getElementById('wd-clusters-container');
@@ -46723,6 +46803,14 @@ async function loadWolfDiskCluster() {
     if (loading) loading.style.display = 'block';
     if (container) container.innerHTML = '';
     if (statsEl) statsEl.innerHTML = '';
+    // Refresh the node list FIRST. On first navigation to this tab, allNodes can
+    // still be stale/partial (or a node's online flag not yet set), so the scan
+    // below missed nodes — that's why the tab "didn't show all nodes until you
+    // clicked refresh" (klasSponsor 2026-06). Awaiting a fresh fetchNodes() makes
+    // getClusterNodes() see the current, complete fleet before we filter on it.
+    try { await fetchNodes(); } catch (_) {}
+    // Live sync-health card (independent of the heavier node scan below).
+    loadWolfDiskSyncHealth();
 
     // Fetch latest WolfDisk version from GitHub (in parallel with node scans)
     if (!wdLatestVersion) {
