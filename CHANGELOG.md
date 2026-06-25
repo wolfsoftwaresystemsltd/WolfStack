@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.16: all Wolf component installers use setup.sh (prebuilt binary)** _(2026-06-25 — [`8d517a4d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d517a4df797bcac6057c7003f2afa1eb2a1d5f3))_
 - **v24.57.15: configurator UI for wolfdisk bucket→folder mappings** _(2026-06-24 — [`300a6079`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/300a6079765912d1a3d7916c216f4870a83e9836))_
 - **v24.57.14: component-install target picker scrolls on mobile** _(2026-06-24 — [`3294ad80`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3294ad805e38432df883a761e1f6a38c57512152))_
 - **v24.57.13: WolfStack restart/upgrade no longer kills running VMs/containers** _(2026-06-24 — [`ff9a56cd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff9a56cdffad380cf38d2b3ae4b420f33a197f28))_
