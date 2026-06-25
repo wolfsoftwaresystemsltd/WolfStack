@@ -1689,6 +1689,8 @@
                         <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Web')"><span class="ws-icon-clean-wrap" data-icon="globe"></span> Web</button>
                         <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Database')"><span class="ws-icon-clean-wrap" data-icon="database"></span>
                             Database</button>
+                        <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Storage')"><span class="ws-icon-clean-wrap" data-icon="hdd"></span>
+                            Storage</button>
                         <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Monitoring')"><span class="ws-icon-clean-wrap" data-icon="chart"></span>
                             Monitoring</button>
                         <button class="appstore-cat-btn" onclick="filterAppStoreCategory('Media')"><span class="ws-icon-clean-wrap" data-icon="movie"></span> Media</button>
@@ -9511,6 +9513,7 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                 <option value="nfs"><span class="ws-icon-clean-wrap" data-icon="database"></span> NFS Share</option>
                                 <option value="smb"><span class="ws-icon-clean-wrap" data-icon="database"></span> SMB / CIFS Share</option>
                                 <option value="directory"><span class="ws-icon-clean-wrap" data-icon="folder"></span> Directory (bind mount)</option>
+                                <option value="disk"><span class="ws-icon-clean-wrap" data-icon="hdd"></span> Local Disk / HDD</option>
                                 <option value="wolfdisk">WolfDisk</option>
                                 <option value="sshfs"><span class="ws-icon-clean-wrap" data-icon="key"></span> SSHFS (SSH Filesystem)</option>
                             </select>
@@ -9649,6 +9652,28 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                         placeholder="/root/.ssh/id_rsa">
                                     <small style="color:var(--text-muted); font-size:11px;">Leave blank for default key
                                         or password auth</small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Local Disk / HDD Fields -->
+                        <div id="disk-fields" style="grid-column: 1 / -1; display:none;">
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>Disk / Partition</label>
+                                    <select class="form-control" id="disk-device">
+                                        <option value="">Loading available disks…</option>
+                                    </select>
+                                    <small style="color:var(--text-muted); font-size:11px;">Pick a partition with a
+                                        filesystem. It's mounted by stable <code>UUID=</code> so it survives device
+                                        renaming across reboots. Only unmounted devices are listed.</small>
+                                </div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label>Mount Options (optional)</label>
+                                    <input type="text" class="form-control" id="disk-options"
+                                        placeholder="noatime,nodiratime">
+                                    <small style="color:var(--text-muted); font-size:11px;">Comma-separated
+                                        <code>mount -o</code> options. Leave blank for sensible defaults.</small>
                                 </div>
                             </div>
                         </div>

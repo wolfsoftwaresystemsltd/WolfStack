@@ -36,6 +36,12 @@ pub enum MountType {
     Directory,
     Wolfdisk,
     Sshfs,
+    /// A local block device (whole disk or partition) mounted at a directory —
+    /// klasSponsor 2026-06 QoL: "mount HDDs to directories". `source` is the
+    /// device (a /dev path or, preferred, `UUID=…` so it survives device
+    /// renaming across reboots). Persistence is via WolfStack's own auto_mount
+    /// on boot, the same as every other mount type — no hand-edited /etc/fstab.
+    Disk,
 }
 
 /// Per-mount SMB/CIFS credentials + options. Kept separate from S3Config so
@@ -333,6 +339,7 @@ pub fn mount_storage(id: &str) -> Result<String, String> {
         MountType::Directory => mount_directory(&config.mounts[idx]),
         MountType::Wolfdisk => mount_wolfdisk(&config.mounts[idx]),
         MountType::Sshfs => mount_sshfs(&config.mounts[idx]),
+        MountType::Disk => mount_disk(&config.mounts[idx]),
     };
     
     match result {
@@ -1150,6 +1157,67 @@ fn mount_directory(mount: &StorageMount) -> Result<String, String> {
         Ok("Directory bind-mounted".to_string())
     } else {
         Err(format!("Bind mount failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Mount a local block device (whole disk or partition) at a directory.
+/// `source` is either a `/dev/…` path or a `UUID=…` / `LABEL=…` spec — UUID is
+/// preferred because /dev names can shuffle across reboots while WolfStack's
+/// auto_mount re-runs this on boot. The kernel auto-detects the filesystem, so
+/// ext4/xfs/btrfs/etc. all work without specifying a type.
+fn mount_disk(mount: &StorageMount) -> Result<String, String> {
+    let src = mount.source.trim();
+    if src.is_empty() {
+        return Err("No disk device specified".to_string());
+    }
+
+    // Validate the source resolves to a real block device before mounting, so a
+    // typo can't hand the kernel something unexpected.
+    let resolved = if let Some(uuid) = src.strip_prefix("UUID=") {
+        Command::new("blkid").args(["-U", uuid]).output()
+            .map(|o| o.status.success() && !o.stdout.is_empty()).unwrap_or(false)
+    } else if let Some(label) = src.strip_prefix("LABEL=") {
+        Command::new("blkid").args(["-L", label]).output()
+            .map(|o| o.status.success() && !o.stdout.is_empty()).unwrap_or(false)
+    } else if src.starts_with("/dev/") {
+        // Require an actual filesystem on the device (FSTYPE non-empty), not just
+        // that the node exists — otherwise mounting an unformatted disk fails with
+        // an opaque kernel error. -d = the device itself, not its children.
+        Command::new("lsblk").args(["-dno", "FSTYPE", src]).output()
+            .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false)
+    } else {
+        return Err(format!(
+            "Disk source must be a /dev path or UUID=…/LABEL=… (got '{}')", src));
+    };
+    if !resolved {
+        return Err(format!(
+            "'{}' is not a block device with a filesystem (format it first)", src));
+    }
+
+    // Optional mount options (e.g. "noatime,ro") travel in nfs_options — it's the
+    // existing free-form options field on the struct; reusing it avoids a schema
+    // change and it's only ever read per mount-type. Reject bind/move semantics:
+    // is_unsafe_mount_target guards the TARGET, but a bind/move option would change
+    // what gets attached there, side-stepping the intent of "mount a block device".
+    let mut args: Vec<String> = Vec::new();
+    if let Some(opts) = mount.nfs_options.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let lc = opts.to_lowercase();
+        if lc.split(|c| c == ',' || c == ' ').any(|o| matches!(o, "bind" | "rbind" | "move")) {
+            return Err("bind/rbind/move are not valid options for a disk mount".to_string());
+        }
+        args.push("-o".to_string());
+        args.push(opts.to_string());
+    }
+    args.push(src.to_string());
+    args.push(mount.mount_point.clone());
+
+    let output = Command::new("mount").args(&args).output()
+        .map_err(|e| format!("Failed to run mount: {}", e))?;
+    if output.status.success() {
+        Ok(format!("Disk {} mounted at {}", src, mount.mount_point))
+    } else {
+        Err(format!("Mount failed: {}", String::from_utf8_lossy(&output.stderr).trim()))
     }
 }
 

@@ -7468,6 +7468,40 @@ function onMountTypeChange() {
     document.getElementById('dir-fields').style.display = type === 'directory' ? 'block' : 'none';
     document.getElementById('wolfdisk-fields').style.display = type === 'wolfdisk' ? 'block' : 'none';
     document.getElementById('sshfs-fields').style.display = type === 'sshfs' ? 'block' : 'none';
+    const diskFields = document.getElementById('disk-fields');
+    if (diskFields) diskFields.style.display = type === 'disk' ? 'block' : 'none';
+    if (type === 'disk') populateDiskDevices();
+}
+
+// Populate the Local Disk picker from /api/storage/disk-info. Only offers
+// partitions/disks that have a filesystem AND aren't already mounted, so the
+// operator can't accidentally pick the running root disk or a blank device.
+// Mounted by UUID= where available (stable across reboots).
+async function populateDiskDevices() {
+    const sel = document.getElementById('disk-device');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Loading available disks…</option>';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/disk-info'));
+        const data = await resp.json();
+        const disks = Array.isArray(data) ? data : (data.disks || data.devices || []);
+        const usable = disks.filter(d =>
+            d && d.fstype &&                                   // has a filesystem
+            (!Array.isArray(d.mountpoints) || d.mountpoints.length === 0) && // not already mounted
+            !String(d.device || '').startsWith('/dev/loop') && // skip loop devices
+            d.type !== 'rom');                                 // skip optical/rom
+        if (usable.length === 0) {
+            sel.innerHTML = '<option value="">No unmounted filesystems found</option>';
+            return;
+        }
+        sel.innerHTML = usable.map(d => {
+            const val = d.uuid ? ('UUID=' + d.uuid) : d.device;
+            const label = `${d.device} — ${d.size || ''} ${d.fstype}${d.label ? ' "' + d.label + '"' : ''}`;
+            return `<option value="${escapeAttr(val)}">${escapeHtml(label)}</option>`;
+        }).join('');
+    } catch (e) {
+        sel.innerHTML = '<option value="">Could not load disks</option>';
+    }
 }
 
 // ─── CRUD Operations ───
@@ -7526,6 +7560,10 @@ async function createStorageMount() {
         const sshKey = document.getElementById('sshfs-key').value.trim();
         if (!source) return showModal('SSHFS source is required (e.g. user@host:/path)');
         if (sshKey) nfs_options = sshKey; // reuse nfs_options field for SSH key path
+    } else if (type === 'disk') {
+        source = document.getElementById('disk-device').value.trim();
+        if (!source) return showModal('Pick a disk/partition to mount');
+        nfs_options = document.getElementById('disk-options').value.trim() || null;
     }
 
     const payload = { name, type, source, mount_point, global, auto_mount, s3_config, nfs_options, smb_config, smb_options, do_mount: true };

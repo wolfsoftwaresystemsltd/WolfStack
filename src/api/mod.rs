@@ -24287,6 +24287,7 @@ pub async fn k8s_storage_overview(req: HttpRequest, state: web::Data<AppState>, 
                 crate::storage::MountType::Directory => "Directory",
                 crate::storage::MountType::S3 => "S3",
                 crate::storage::MountType::Wolfdisk => "WolfDisk",
+                crate::storage::MountType::Disk => "Disk",
             };
             serde_json::json!({
                 "id": m.id,
