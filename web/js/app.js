@@ -15463,6 +15463,12 @@ function getTomlSchema(component) {
                 { key: 'secret_key', label: 'Secret Key', type: 'string', default: '', placeholder: 'auto-generated', help: 'The S3 secret access key. Shown so you can copy it into your client; treat it like a password. A strong default is generated so the gateway is never left unauthenticated' },
                 { key: 'buckets', label: 'Bucket → Folder Mappings', type: 'map', keyLabel: 'bucket', keyPlaceholder: 'photos', valuePlaceholder: '/data/photos', help: 'Optionally map an S3 bucket name to a specific folder inside WolfDisk instead of a top-level directory of the same name — e.g. bucket "photos" → "/data/photos". Buckets not listed here keep the default behaviour (a top-level directory matching the bucket name). Paths are from the WolfDisk root; leading/trailing slashes are ignored. Removing a row here removes the mapping.' },
             ]},
+            { key: 'cache', label: 'SSD Cache Tier', description: 'Optionally put a faster disk (SSD/NVMe) in front of the bulk data directory. Hot chunks and, by default, the index/WAL metadata live on the fast disk. Leave the directory blank to disable (default).', fields: [
+                { key: 'dir', label: 'Cache Disk Directory', type: 'string', default: '', placeholder: '/mnt/ssd-cache', help: 'A directory on your fast disk (e.g. a mounted SSD). Blank = no cache. WolfDisk creates chunks/ (and, if enabled below, index/ + wal/) under here.' },
+                { key: 'mode', label: 'Cache Mode', type: 'select', default: 'writethrough', options: ['off', 'writethrough', 'writeback'], help: 'writethrough (recommended): writes go to the HDD AND the SSD; reads hit the SSD first — zero data-loss risk, the HDD is always authoritative. writeback: uploads land on the SSD first and flush to the HDD in the background (faster writes, but a chunk can be SSD-only until flushed — covered by peer replicas in a replicated cluster). off: disable without clearing the path.' },
+                { key: 'max_bytes', label: 'Max Cache Size (bytes)', type: 'number', default: 0, help: 'Soft ceiling on cached chunk data on the SSD; cold, already-flushed chunks are evicted above it (the HDD copy stays). 0 = unbounded. Example: 50000000000 ≈ 50 GB.' },
+                { key: 'metadata_on_cache', label: 'Metadata on Cache Disk', type: 'boolean', default: true, help: 'Also place the index/ and WAL metadata on the cache disk for fast lookups. Recommended when a cache disk is set.' },
+            ]},
         ];
     }
     if (component === 'wolfscale') {
