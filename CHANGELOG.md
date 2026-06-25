@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.20: collapsing a sidebar cluster sticks across reload (wabil)** _(2026-06-25 — [`b82a89f3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b82a89f3083f7b7f69768f6c7b2dc37f1f4326c8))_
 - **v24.57.19: terminal tabs route to the right node (2nd tab no longer hijacks the 1st's host)** _(2026-06-25 — [`6fa68420`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6fa68420583689bb585f6a6ef2b467dc4a56c8d7))_
 - **v24.57.18: sidebar can no longer get stuck on 'Loading…' on load** _(2026-06-25 — [`efb83a31`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/efb83a31f4eb3d7a3398da25050a9f7d6fdbee06))_
 - **v24.57.17: Proxmox LXC terminal uses pct enter; help drawer clears the menubar** _(2026-06-25 — [`47b3c04e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/47b3c04e94f26cfb706cee3ff137ea489f44fd4a))_
