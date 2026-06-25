@@ -3583,7 +3583,16 @@ function buildServerTree(nodes) {
     wsKeys.forEach(clusterName => {
         const clusterNodes = wsClusters[clusterName];
         const clusterId = 'cluster-' + clusterName.replace(/[^a-z0-9]/gi, '-');
-        const shouldExpandCluster = isFirstBuild ? true : (expandedNodes.has(clusterId) || clusterNodes.some(n => n.id === currentNodeId || expandedNodes.has(n.id)));
+        // A cluster is expanded iff the operator left it expanded (its own id is
+        // in the saved/expanded set) or it holds the node they're actively
+        // viewing. We deliberately do NOT auto-expand it just because a child
+        // node is in the expanded set: collapsing a cluster only clears the
+        // cluster's own 'expanded' class, so an expanded child stays flagged
+        // (hidden) and would force the whole cluster back open on reload — the
+        // collapse never stuck (wabil 2026-06-25). The child's expanded state is
+        // still preserved (it reappears expanded when the cluster is reopened);
+        // it just no longer overrides an explicit cluster collapse.
+        const shouldExpandCluster = isFirstBuild ? true : (expandedNodes.has(clusterId) || clusterNodes.some(n => n.id === currentNodeId));
         const anyOnline = clusterNodes.some(n => n.online);
         const nodeIds = clusterNodes.map(n => `'${n.id}'`).join(',');
         const escapedName = clusterName.replace(/'/g, "\\'");
