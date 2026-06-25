@@ -240,7 +240,7 @@ async fn console_session(
             let install_script = match component {
                 "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
                 "wolfproxy" => "__inline_wolfproxy__",
-                "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh",
+                "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh",
                 "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh",
                 "wolfscale" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
                 "mariadb" => "__inline_mariadb__",

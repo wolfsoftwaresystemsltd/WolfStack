@@ -11210,8 +11210,14 @@ pub fn install_component_in_container(
     // Validate the component name
     let install_script = match component {
         "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
-        "wolfproxy" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfproxy/install.sh",
-        "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/master/wolfserve/install.sh",
+        // WolfProxy is a STANDALONE repo (not in the WolfScale monorepo), and it
+        // ships a PREBUILT binary — setup.sh downloads it. The old
+        // WolfScale/master/wolfproxy/install.sh URL 404'd (no such path in the
+        // monorepo) and, where reachable, compiled from source and failed with
+        // "could not find Cargo.toml" (klasSponsor 2026-06). Point at the
+        // standalone repo's binary installer.
+        "wolfproxy" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh",
+        "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh",
         // WolfScale/main/setup.sh installs WolfScale (DB replication), NOT
         // WolfDisk — using it here installed the wrong thing, so the wolfdisk
         // binary + wolfdisk.service never appeared ("Unit wolfdisk.service not
