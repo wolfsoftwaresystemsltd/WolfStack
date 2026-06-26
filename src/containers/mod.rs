@@ -3476,29 +3476,61 @@ fn decide_primary_nic_net_action(
     }
 }
 
-/// On a settings edit, push the primary NIC's (eth0, index 0) static IP — or a
-/// revert to DHCP — into the container's own network config. Returns true when
-/// it wrote a config (so the caller can surface a "restart to apply" hint).
+/// Resolve the in-container action for the primary NIC (eth0) on a settings
+/// edit, or `None` when nothing should be written. Shared by the native and
+/// Proxmox edit paths (which differ only in HOW they write — direct rootfs vs
+/// `pct mount`). Returns `None` when WolfNet manages eth0, when there's no
+/// index-0 NIC, or when the decision is `Skip`.
+fn primary_nic_edit_action(
+    new_nics: &[LxcNetInterface],
+    current_nics: &[LxcNetInterface],
+    wolfnet_active: bool,
+) -> Option<PrimaryNicNetAction> {
+    if wolfnet_active {
+        return None;
+    }
+    let new0 = new_nics.iter().find(|n| n.index == 0)?;
+    let cur0 = current_nics.iter().find(|n| n.index == 0);
+    // Only act when the primary NIC's bridge/IP actually changed — otherwise an
+    // unrelated save (memory, cores, notes…) would needlessly rewrite the
+    // in-container config and could clobber a manual tweak the operator made.
+    let changed = match cur0 {
+        Some(b) => new0.link != b.link || new0.ipv4 != b.ipv4 || new0.ipv4_gw != b.ipv4_gw,
+        None => true,
+    };
+    if !changed {
+        return None;
+    }
+    let previously_static = cur0.map(|b| !b.ipv4.trim().is_empty()).unwrap_or(false);
+    match decide_primary_nic_net_action(&new0.link, &new0.ipv4, &new0.ipv4_gw, previously_static) {
+        PrimaryNicNetAction::Skip => None,
+        action => Some(action),
+    }
+}
+
+/// Native edit path: push the primary NIC's static IP (or a revert to DHCP)
+/// into the container's own network config by writing its rootfs directly.
+/// Returns true when it wrote a config (so the caller surfaces a restart hint).
 fn apply_primary_nic_in_container_config(
     container: &str,
-    nics: &[LxcNetInterface],
-    previously_static: bool,
+    new_nics: &[LxcNetInterface],
+    current_nics: &[LxcNetInterface],
+    wolfnet_active: bool,
 ) -> bool {
-    let Some(nic0) = nics.iter().find(|n| n.index == 0) else { return false };
-    match decide_primary_nic_net_action(&nic0.link, &nic0.ipv4, &nic0.ipv4_gw, previously_static) {
-        PrimaryNicNetAction::Static { cidr, gateway } => {
+    match primary_nic_edit_action(new_nics, current_nics, wolfnet_active) {
+        Some(PrimaryNicNetAction::Static { cidr, gateway }) => {
             if let Err(e) = write_lxc_bridge_static_config(container, &cidr, gateway.as_deref()) {
                 warn!("{}: static IP in-container config not fully written: {}", container, e);
             }
             true
         }
-        PrimaryNicNetAction::Dhcp => {
+        Some(PrimaryNicNetAction::Dhcp) => {
             if let Err(e) = write_lxc_bridge_dhcp_config(container) {
                 warn!("{}: DHCP in-container config not fully written: {}", container, e);
             }
             true
         }
-        PrimaryNicNetAction::Skip => false,
+        _ => false,
     }
 }
 
@@ -7159,6 +7191,31 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
         return Err(format!("pct set failed: {}", stderr));
     }
 
+    // Mirror the primary NIC's static IP (or a revert to DHCP) into the
+    // container's OWN network config via pct mount — `pct set --net0 ip=` only
+    // sets the veth address; many distros then DHCP over it (wabil 2026-06-26,
+    // Proxmox edit). Same rules as the native edit path; skipped when WolfNet
+    // manages eth0, and the helper further scopes to a real user bridge.
+    let wolfnet_active = settings.wolfnet_ip.as_deref()
+        .map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || lxc_get_wolfnet_ip(container).is_some();
+    let mut net_applied = false;
+    if let Some(action) = primary_nic_edit_action(&nics, &current.network_interfaces, wolfnet_active) {
+        net_applied = true;
+        // `action` is only ever Static/Dhcp here — primary_nic_edit_action maps
+        // Skip to None — but the match stays exhaustive over the enum.
+        let res = match action {
+            PrimaryNicNetAction::Static { cidr, gateway } =>
+                pct_write_bridge_netconfig(container, Some(&cidr), gateway.as_deref()),
+            PrimaryNicNetAction::Dhcp =>
+                pct_write_bridge_netconfig(container, None, None),
+            PrimaryNicNetAction::Skip => Ok(()),
+        };
+        if let Err(e) = res {
+            warn!("{}: in-container network config not written: {}", container, e);
+        }
+    }
+
     // Handle raw LXC directives (TUN, NFS) that pct set doesn't manage.
     // These are lxc.mount.entry / lxc.cgroup2.devices.allow lines in the PVE config.
     {
@@ -7267,7 +7324,11 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
     // and the operator would think the save silently reverted.
     invalidate_list_caches();
 
-    Ok(format!("Settings updated for '{}' via pct", container))
+    Ok(if net_applied {
+        format!("Settings updated for '{}' via pct. Restart the container to apply the network changes (and ensure it was stopped for the IP to be written inside).", container)
+    } else {
+        format!("Settings updated for '{}' via pct", container)
+    })
 }
 
 /// Parse memory string (e.g. "512M", "1G", "1024") to MB
@@ -7617,13 +7678,8 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     let wolfnet_active = settings.wolfnet_ip.as_deref()
         .map(|s| !s.trim().is_empty()).unwrap_or(false)
         || lxc_get_wolfnet_ip(container).is_some();
-    let mut net_applied = false;
-    if !wolfnet_active {
-        let previously_static = current.network_interfaces.iter()
-            .find(|n| n.index == 0)
-            .map(|n| !n.ipv4.trim().is_empty()).unwrap_or(false);
-        net_applied = apply_primary_nic_in_container_config(container, &nics, previously_static);
-    }
+    let net_applied = apply_primary_nic_in_container_config(
+        container, &nics, &current.network_interfaces, wolfnet_active);
 
     // Handle WolfNet IP separately (stored in .wolfnet/ip file)
     if let Some(ref wip) = settings.wolfnet_ip {
@@ -8853,6 +8909,32 @@ fn pct_fix_nm_networking(
     let _ = Command::new("pct").args(["unmount", vmid]).output();
 }
 
+/// Write the in-container static (or DHCP) network config for a PROXMOX LXC,
+/// for EVERY distro — not just the NetworkManager families `pct_fix_nm_networking`
+/// covered. `pct set --net0 ip=...` only assigns the address at the veth level;
+/// many templates' own init then DHCPs over it (wabil 2026-06-26). `pct mount`
+/// exposes the CT rootfs at `/var/lib/lxc/<vmid>/rootfs` — exactly where
+/// `lxc_base_dir` resolves it — so we reuse the proven native writers, then
+/// `pct unmount`. The CT should be STOPPED (pct refuses to mount a running CT);
+/// callers treat a mount failure as warn-and-skip rather than a hard error.
+/// `cidr` Some = static, None = DHCP.
+fn pct_write_bridge_netconfig(vmid: &str, cidr: Option<&str>, gateway: Option<&str>) -> Result<(), String> {
+    let mount = Command::new("pct").args(["mount", vmid]).output()
+        .map_err(|e| format!("pct mount failed: {}", e))?;
+    if !mount.status.success() {
+        return Err(format!(
+            "pct mount {} failed (stop the container to change its IP): {}",
+            vmid, String::from_utf8_lossy(&mount.stderr).trim()
+        ));
+    }
+    let result = match cidr {
+        Some(c) => write_lxc_bridge_static_config(vmid, c, gateway),
+        None => write_lxc_bridge_dhcp_config(vmid),
+    };
+    let _ = Command::new("pct").args(["unmount", vmid]).output();
+    result
+}
+
 /// Create an LXC container via Proxmox's pct command (public API entry point)
 #[allow(clippy::too_many_arguments)]
 /// Best available Proxmox storage for container rootfs (content=rootdir) when
@@ -8989,16 +9071,20 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         // leaving them without working networking. Mount the rootfs, write a proper
         // eth0.nmconnection (static for a bridge-mode static IP, otherwise DHCP) and set
         // fallback DNS. Host mode has no network device, so skip the fixup entirely.
-        if net_mode != "host" {
-            let (nm_static, nm_gw) = if net_mode == "bridge" {
-                (
-                    norm_bridge_ip.as_deref(),
-                    bridge_gateway.map(str::trim).filter(|s| !s.is_empty()),
-                )
-            } else {
-                (None, None)
-            };
-            pct_fix_nm_networking(&vmid.to_string(), distribution, nm_static, nm_gw);
+        if net_mode == "bridge" {
+            // Bridge mode: write the FULL in-container config (all four backends)
+            // for EVERY distro, so the static IP isn't DHCP'd over — pct only does
+            // this reliably for some templates (wabil 2026-06-26). Supersedes the
+            // NM-only fixup for this case. static_cidr Some = static, None = DHCP.
+            let static_cidr = norm_bridge_ip.as_deref().filter(|s| is_ipv4_cidr(s));
+            let gw = bridge_gateway.map(str::trim).filter(|s| !s.is_empty());
+            if let Err(e) = pct_write_bridge_netconfig(&vmid.to_string(), static_cidr, gw) {
+                warn!("VMID {}: in-container network config not written: {}", vmid, e);
+            }
+        } else if net_mode != "host" {
+            // wolfnet / default: keep the NM-distro DHCP fixup (eth0 on vmbr0 via
+            // DHCP); WolfNet's own wn0 handling runs separately below.
+            pct_fix_nm_networking(&vmid.to_string(), distribution, None, None);
         }
 
         // Attach WolfNet: add wn0 on lxcbr0 with the WolfNet IP
@@ -12623,6 +12709,31 @@ mod pct_net0_tests {
         assert_eq!(decide("", "192.168.0.99/24", "", false), A::Skip);
         // Non-IP junk in the IP field → not static; not previously static → Skip.
         assert_eq!(decide("br0", "dhcp", "", false), A::Skip);
+    }
+
+    #[test]
+    fn primary_nic_edit_action_only_fires_on_real_change() {
+        use super::{primary_nic_edit_action as act, PrimaryNicNetAction as A, LxcNetInterface};
+        let nic = |link: &str, ipv4: &str, gw: &str| {
+            let mut n = LxcNetInterface { index: 0, ..Default::default() };
+            n.link = link.into(); n.ipv4 = ipv4.into(); n.ipv4_gw = gw.into();
+            n
+        };
+        let cur = vec![nic("br0", "192.168.0.99/24", "192.168.0.1")];
+        // Unchanged save (e.g. a memory-only edit re-sends the same NIC) → None,
+        // so we never rewrite/clobber the in-container config on unrelated saves.
+        assert_eq!(act(&cur.clone(), &cur, false), None);
+        // Changed to a new static IP → Static.
+        let newer = vec![nic("br0", "192.168.0.50/24", "192.168.0.1")];
+        assert_eq!(
+            act(&newer, &cur, false),
+            Some(A::Static { cidr: "192.168.0.50/24".into(), gateway: Some("192.168.0.1".into()) })
+        );
+        // Static cleared → DHCP revert (it was static before).
+        let dhcp = vec![nic("br0", "", "")];
+        assert_eq!(act(&dhcp, &cur, false), Some(A::Dhcp));
+        // WolfNet active → always None even on a change.
+        assert_eq!(act(&newer, &cur, true), None);
     }
 
     #[test]
