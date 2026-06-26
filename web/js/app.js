@@ -5864,13 +5864,16 @@ async function loadVms() {
     try {
         const resp = await fetch(apiUrl('/api/vms'));
         if (handleAuthError(resp)) return;
+        // A transient proxy failure must not blank a populated list — keep what's
+        // shown rather than render an empty/error body (wabil's Pangolin flicker).
+        if (!resp.ok) return;
         const vms = await resp.json();
+        if (!Array.isArray(vms)) return;
         renderVms(vms);
         renderVmCards(vms);
         applyContainerView('vms');
     } catch (e) {
         console.error('Failed to load VMs:', e);
-        showToast('Failed to load VMs', 'error');
     }
 }
 
@@ -22517,17 +22520,22 @@ async function loadDockerContainers() {
         // Discard response if user switched to a different server/page
         if (gen !== _dockerLoadGeneration || currentNodeId !== loadNodeId) return;
 
-        const containers = await containersResp.json();
-        const stats = await statsResp.json();
-
-        // Index stats by name
-        dockerStats = {};
-        stats.forEach(s => { dockerStats[s.name] = s; });
-
-        renderDockerContainers(containers);
-        renderDockerCards(containers);
-        applyContainerView('docker');
-        renderDockerStats(stats);
+        // Only render a genuinely OK array response — a transient proxy failure
+        // (Pangolin/Traefik) must not blank a populated list (keep what's shown
+        // and let the 15s poll retry). The timer is still armed below.
+        if (containersResp.ok) {
+            const containers = await containersResp.json();
+            if (Array.isArray(containers)) {
+                const stats = statsResp.ok ? await statsResp.json() : [];
+                const statsArr = Array.isArray(stats) ? stats : [];
+                dockerStats = {};
+                statsArr.forEach(s => { dockerStats[s.name] = s; });
+                renderDockerContainers(containers);
+                renderDockerCards(containers);
+                applyContainerView('docker');
+                renderDockerStats(statsArr);
+            }
+        }
         // Load images only on initial page load (not on every poll)
         try {
             const imagesResp = await fetch(apiUrl('/api/containers/docker/images'));
@@ -22563,15 +22571,22 @@ async function refreshDockerStats() {
             fetch(apiUrl('/api/containers/docker')),
             fetch(apiUrl('/api/containers/docker/stats')),
         ]);
+        // A flaky reverse proxy (Pangolin/Traefik) returns transient non-OK or
+        // non-array bodies; rendering one would blank the whole list until the
+        // next good poll — the flicker wabil saw behind Pangolin but never nginx.
+        // Skip this tick and keep the current list instead.
+        if (!containersResp.ok) return;
         const containers = await containersResp.json();
-        const stats = await statsResp.json();
+        if (!Array.isArray(containers)) return;
+        const stats = statsResp.ok ? await statsResp.json() : [];
+        const statsArr = Array.isArray(stats) ? stats : [];
         dockerStats = {};
-        stats.forEach(s => { dockerStats[s.name] = s; });
+        statsArr.forEach(s => { dockerStats[s.name] = s; });
         renderDockerContainers(containers);
         renderDockerCards(containers);
         applyContainerView('docker');
-        renderDockerStats(stats);
-    } catch (e) { /* silent */ }
+        renderDockerStats(statsArr);
+    } catch (e) { /* silent — keep the existing list on any transient error */ }
 }
 
 // ─── Card/Table View Toggle System ───
@@ -23687,29 +23702,37 @@ async function loadLxcContainers() {
         // Discard response if user switched to a different server/page
         if (gen !== _lxcLoadGeneration || currentNodeId !== loadNodeId) return;
 
-        const containersData = containersResp.ok ? await containersResp.json() : [];
-        const statsData = statsResp.ok ? await statsResp.json() : [];
-        const allContainers = Array.isArray(containersData) ? containersData : [];
-        // Hide ghost husks entirely (Paul 2026-06-24). Leftover PVE husks
-        // (numeric old-VMID hostname, stopped) were never meant to be here;
-        // listing them — even with a badge — led to an accidental destroy of
-        // the wrong-looking VMID. The backend flag is stopped-only, so a
-        // running container can never be hidden.
-        const containers = allContainers.filter(c => !c.possible_ghost);
-        const hiddenGhosts = allContainers.length - containers.length;
-        if (hiddenGhosts > 0) console.info(`Hid ${hiddenGhosts} ghost husk container(s) from the LXC list`);
-        const stats = Array.isArray(statsData) ? statsData : [];
+        // A transient proxy failure (Pangolin/Traefik) returns a non-OK / non-
+        // array body; rendering it (the old `: []` fallback did) would blank a
+        // populated list until the next good poll — the flicker wabil saw behind
+        // Pangolin but never nginx. Skip the render and keep what's shown; the
+        // 15s poll retries (the timer below is still armed).
+        if (containersResp.ok) {
+            const containersData = await containersResp.json();
+            if (Array.isArray(containersData)) {
+                const statsData = statsResp.ok ? await statsResp.json() : [];
+                // Hide ghost husks entirely (Paul 2026-06-24). Leftover PVE husks
+                // (numeric old-VMID hostname, stopped) were never meant to be here;
+                // listing them — even with a badge — led to an accidental destroy of
+                // the wrong-looking VMID. The backend flag is stopped-only, so a
+                // running container can never be hidden.
+                const containers = containersData.filter(c => !c.possible_ghost);
+                const hiddenGhosts = containersData.length - containers.length;
+                if (hiddenGhosts > 0) console.info(`Hid ${hiddenGhosts} ghost husk container(s) from the LXC list`);
+                const stats = Array.isArray(statsData) ? statsData : [];
 
-        // Index stats by name
-        const lxcStats = {};
-        stats.forEach(s => { lxcStats[s.name] = s; });
+                // Index stats by name
+                const lxcStats = {};
+                stats.forEach(s => { lxcStats[s.name] = s; });
 
-        renderLxcContainers(containers, lxcStats);
-        renderLxcCards(containers, lxcStats);
-        applyContainerView('lxc');
-        applyUpdateBadges();
-        // Fire update summary check in background — don't block page render
-        fetchContainerUpdateSummary();
+                renderLxcContainers(containers, lxcStats);
+                renderLxcCards(containers, lxcStats);
+                applyContainerView('lxc');
+                applyUpdateBadges();
+                // Fire update summary check in background — don't block page render
+                fetchContainerUpdateSummary();
+            }
+        }
     } catch (e) {
         console.error('Failed to load LXC containers:', e);
     }
