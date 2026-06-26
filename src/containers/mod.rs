@@ -3299,8 +3299,10 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
         }
     }
 
-    // Method 2: Netplan (Ubuntu 18.04+). Remove conflicting cloud-init configs
-    // first — safe here because a fresh single-NIC container only has eth0.
+    // Method 2: Netplan (Ubuntu 18.04+). Write a highest-priority (99-) file so
+    // our eth0 stanza wins netplan's per-key merge over the image's cloud-init
+    // default WITHOUT deleting other NICs' configs (multi-NIC safe). The DHCP
+    // revert reuses the SAME filename, so it cleanly overrides this one.
     let netplan_dir = format!("{}/etc/netplan", rootfs);
     if std::path::Path::new(&netplan_dir).exists() {
         let routes = gw
@@ -3310,10 +3312,7 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
             "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: false\n      addresses:\n        - {}\n{}      nameservers:\n        addresses: [1.1.1.1, 8.8.8.8]\n",
             cidr, routes
         );
-        if let Ok(entries) = std::fs::read_dir(&netplan_dir) {
-            for e in entries.flatten() { let _ = std::fs::remove_file(e.path()); }
-        }
-        match std::fs::write(format!("{}/01-netcfg.yaml", netplan_dir), &conf) {
+        match std::fs::write(format!("{}/99-wolfstack-eth0.yaml", netplan_dir), &conf) {
             Ok(()) => wrote_any = true,
             Err(e) => errors.push(format!("netplan: {}", e)),
         }
@@ -3372,6 +3371,134 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
              the container may still come up via DHCP".to_string())
     } else {
         Ok(())
+    }
+}
+
+/// Reset a NATIVE LXC's primary NIC (eth0) back to DHCP inside the container.
+/// Counterpart to [`write_lxc_bridge_static_config`]: when an operator edits a
+/// previously-static bridge NIC back to DHCP, the static config we wrote earlier
+/// would otherwise pin the old address forever. Mirrors the same backend
+/// coverage and returns an error rather than swallowing a failed write.
+fn write_lxc_bridge_dhcp_config(container: &str) -> Result<(), String> {
+    let rootfs = format!("{}/{}/rootfs", lxc_base_dir(container), container);
+    if !std::path::Path::new(&rootfs).exists() {
+        return Err(format!("container rootfs not found at {}", rootfs));
+    }
+    let mut errors: Vec<String> = Vec::new();
+    let mut wrote_any = false;
+
+    let networkd_dir = format!("{}/etc/systemd/network", rootfs);
+    if std::path::Path::new(&networkd_dir).exists() {
+        match std::fs::write(format!("{}/eth0.network", networkd_dir), "[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n") {
+            Ok(()) => wrote_any = true,
+            Err(e) => errors.push(format!("systemd-networkd: {}", e)),
+        }
+    }
+
+    // Highest-priority (99-) eth0 stanza wins netplan's merge over the image's
+    // default without deleting other NICs' configs; same filename the static
+    // writer uses, so this overrides our own earlier static stanza.
+    let netplan_dir = format!("{}/etc/netplan", rootfs);
+    if std::path::Path::new(&netplan_dir).exists() {
+        match std::fs::write(format!("{}/99-wolfstack-eth0.yaml", netplan_dir),
+            "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n") {
+            Ok(()) => wrote_any = true,
+            Err(e) => errors.push(format!("netplan: {}", e)),
+        }
+    }
+
+    let ifaces_path = format!("{}/etc/network/interfaces", rootfs);
+    if std::path::Path::new(&ifaces_path).exists() {
+        match std::fs::write(&ifaces_path,
+            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n") {
+            Ok(()) => wrote_any = true,
+            Err(e) => errors.push(format!("interfaces: {}", e)),
+        }
+    }
+
+    let nm_base = format!("{}/etc/NetworkManager", rootfs);
+    if std::path::Path::new(&nm_base).exists() {
+        let nm_dir = format!("{}/system-connections", nm_base);
+        let _ = std::fs::create_dir_all(&nm_dir);
+        let nm_file = format!("{}/eth0.nmconnection", nm_dir);
+        match std::fs::write(&nm_file,
+            "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n") {
+            Ok(()) => {
+                let _ = std::fs::set_permissions(&nm_file, std::fs::Permissions::from_mode(0o600));
+                wrote_any = true;
+            }
+            Err(e) => errors.push(format!("NetworkManager: {}", e)),
+        }
+    }
+
+    if !errors.is_empty() { Err(errors.join("; ")) }
+    else if !wrote_any { Err("no supported in-container network backend found".to_string()) }
+    else { Ok(()) }
+}
+
+/// What to do to the primary NIC's in-container config on a settings edit.
+#[derive(Debug, PartialEq)]
+enum PrimaryNicNetAction {
+    Static { cidr: String, gateway: Option<String> },
+    Dhcp,
+    Skip,
+}
+
+/// Pure decision behind [`apply_primary_nic_in_container_config`] — extracted so
+/// the static / DHCP-revert / skip branches are unit-testable without touching
+/// the filesystem. Scoped to a real user bridge: an unset link, or the private
+/// `lxcbr0` (WolfNet) bridge, is always `Skip`. `previously_static` gates the
+/// DHCP revert so we only undo OUR own static pin, never clobbering a
+/// DHCP container's custom config on an unrelated save.
+fn decide_primary_nic_net_action(
+    link: &str,
+    ipv4: &str,
+    ipv4_gw: &str,
+    previously_static: bool,
+) -> PrimaryNicNetAction {
+    let link = link.trim();
+    if link.is_empty() || link == "lxcbr0" {
+        return PrimaryNicNetAction::Skip;
+    }
+    let norm = normalize_bridge_cidr(ipv4);
+    if is_ipv4_cidr(&norm) {
+        let g = ipv4_gw.trim();
+        let gateway = if !g.is_empty() && g.parse::<std::net::Ipv4Addr>().is_ok() {
+            Some(g.to_string())
+        } else {
+            None
+        };
+        PrimaryNicNetAction::Static { cidr: norm, gateway }
+    } else if ipv4.trim().is_empty() && previously_static {
+        PrimaryNicNetAction::Dhcp
+    } else {
+        PrimaryNicNetAction::Skip
+    }
+}
+
+/// On a settings edit, push the primary NIC's (eth0, index 0) static IP — or a
+/// revert to DHCP — into the container's own network config. Returns true when
+/// it wrote a config (so the caller can surface a "restart to apply" hint).
+fn apply_primary_nic_in_container_config(
+    container: &str,
+    nics: &[LxcNetInterface],
+    previously_static: bool,
+) -> bool {
+    let Some(nic0) = nics.iter().find(|n| n.index == 0) else { return false };
+    match decide_primary_nic_net_action(&nic0.link, &nic0.ipv4, &nic0.ipv4_gw, previously_static) {
+        PrimaryNicNetAction::Static { cidr, gateway } => {
+            if let Err(e) = write_lxc_bridge_static_config(container, &cidr, gateway.as_deref()) {
+                warn!("{}: static IP in-container config not fully written: {}", container, e);
+            }
+            true
+        }
+        PrimaryNicNetAction::Dhcp => {
+            if let Err(e) = write_lxc_bridge_dhcp_config(container) {
+                warn!("{}: DHCP in-container config not fully written: {}", container, e);
+            }
+            true
+        }
+        PrimaryNicNetAction::Skip => false,
     }
 }
 
@@ -7479,6 +7606,25 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     std::fs::write(&path, &output)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
+    // Mirror the PRIMARY NIC's static IP (or a revert to DHCP) into the
+    // container's OWN network config, so its init honours the address instead
+    // of DHCP'ing over the liblxc-assigned one — the same gap the create path
+    // had (wabil 2026-06-26, edit path). Skipped when WolfNet manages eth0
+    // (handled just below) — detected from the payload OR an existing
+    // `.wolfnet/ip` marker, so a save that omits wolfnet_ip can't trip the
+    // DHCP revert on a WolfNet container; the helper further scopes to a real
+    // user bridge.
+    let wolfnet_active = settings.wolfnet_ip.as_deref()
+        .map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || lxc_get_wolfnet_ip(container).is_some();
+    let mut net_applied = false;
+    if !wolfnet_active {
+        let previously_static = current.network_interfaces.iter()
+            .find(|n| n.index == 0)
+            .map(|n| !n.ipv4.trim().is_empty()).unwrap_or(false);
+        net_applied = apply_primary_nic_in_container_config(container, &nics, previously_static);
+    }
+
     // Handle WolfNet IP separately (stored in .wolfnet/ip file)
     if let Some(ref wip) = settings.wolfnet_ip {
         let wolfnet_dir = format!("{}/{}/.wolfnet", base, container);
@@ -7536,7 +7682,11 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     // pct_update_settings for the full rationale).
     invalidate_list_caches();
 
-    Ok(format!("Settings updated for '{}'", container))
+    Ok(if net_applied {
+        format!("Settings updated for '{}'. Restart the container to apply the network changes.", container)
+    } else {
+        format!("Settings updated for '{}'", container)
+    })
 }
 
 /// Update LXC container autostart specifically
@@ -12445,6 +12595,34 @@ mod pct_net0_tests {
         assert!(!super::is_ipv4_cidr("fe80::1/64"));
         // Embedded-newline injection attempt is rejected (defense in depth).
         assert!(!super::is_ipv4_cidr("192.168.1.1/24\n[Match]\nName=eth1"));
+    }
+
+    #[test]
+    fn decide_primary_nic_net_action_branches() {
+        use super::{decide_primary_nic_net_action as decide, PrimaryNicNetAction as A};
+        // Static IP on a user bridge → write static (bare IP normalised to /24).
+        assert_eq!(
+            decide("br0", "192.168.0.99", "192.168.0.1", false),
+            A::Static { cidr: "192.168.0.99/24".into(), gateway: Some("192.168.0.1".into()) }
+        );
+        // Static with no/invalid gateway → static, gateway dropped.
+        assert_eq!(
+            decide("br0", "10.0.0.5/16", "", false),
+            A::Static { cidr: "10.0.0.5/16".into(), gateway: None }
+        );
+        assert_eq!(
+            decide("br0", "10.0.0.5/16", "not-an-ip", false),
+            A::Static { cidr: "10.0.0.5/16".into(), gateway: None }
+        );
+        // Cleared IP AND it was static before → DHCP revert (undo our pin).
+        assert_eq!(decide("br0", "", "", true), A::Dhcp);
+        // Cleared IP but it was ALREADY dhcp → Skip (don't clobber custom config).
+        assert_eq!(decide("br0", "", "", false), A::Skip);
+        // Private WolfNet bridge / unset link → never touched.
+        assert_eq!(decide("lxcbr0", "192.168.0.99/24", "", false), A::Skip);
+        assert_eq!(decide("", "192.168.0.99/24", "", false), A::Skip);
+        // Non-IP junk in the IP field → not static; not previously static → Skip.
+        assert_eq!(decide("br0", "dhcp", "", false), A::Skip);
     }
 
     #[test]
