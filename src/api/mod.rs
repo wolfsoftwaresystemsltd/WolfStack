@@ -31758,28 +31758,63 @@ async fn compose_logs(
     }
 }
 
-/// POST /api/compose/stacks/{name}/validate — validate docker-compose.yml
+#[derive(serde::Deserialize)]
+struct ComposeValidateBody {
+    /// The editor's current (possibly unsaved) compose YAML. When present we
+    /// validate THIS via a temp file rather than the on-disk file, so Validate
+    /// never mutates the saved stack (wabil: Validate used to save first).
+    content: Option<String>,
+}
+
+/// POST /api/compose/stacks/{name}/validate — validate docker-compose.yml.
+///
+/// If the editor posts its current content, validate that (via a throwaway file
+/// in the stack dir, so `.env` + relative paths still resolve) WITHOUT touching
+/// the saved compose file. With no body, validate the on-disk file (older UIs).
 async fn compose_validate(
     req: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
+    body: Option<web::Json<ComposeValidateBody>>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
 
     let name = path.into_inner();
     if let Err(e) = require_safe_compose_name(&name) { return e; }
     let dir = compose_project_dir(&name);
-    let compose_file = compose_file_in(&dir);
-    if !compose_file.exists() {
+    if !dir.exists() {
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Stack not found" }));
     }
 
-    let file_str = compose_file.to_string_lossy().into_owned();
+    let posted = body.and_then(|b| b.into_inner().content);
+    let temp_file = dir.join(".wolfstack-validate.yml");
+    let file_str = match &posted {
+        Some(content) => {
+            if let Err(e) = std::fs::write(&temp_file, content) {
+                return HttpResponse::InternalServerError()
+                    .json(serde_json::json!({ "error": format!("could not stage validation: {}", e) }));
+            }
+            temp_file.to_string_lossy().into_owned()
+        }
+        None => {
+            let compose_file = compose_file_in(&dir);
+            if !compose_file.exists() {
+                return HttpResponse::NotFound().json(serde_json::json!({ "error": "Stack not found" }));
+            }
+            compose_file.to_string_lossy().into_owned()
+        }
+    };
+
     let output = Command::new("docker")
         .args(["compose", "-f", &file_str, "config", "--quiet"])
         .envs(compose_secrets_env())
         .current_dir(&dir)
         .output();
+
+    // Remove the throwaway file regardless of the outcome — never leave it behind.
+    if posted.is_some() {
+        let _ = std::fs::remove_file(&temp_file);
+    }
 
     match output {
         Ok(out) => {
