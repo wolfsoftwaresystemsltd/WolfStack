@@ -56378,7 +56378,8 @@ async function loadComposeStacks() {
                         ${s.status === 'stopped'
                             ? `<button class="btn btn-sm btn-primary" onclick="composeAction('${escapeHtml(s.name)}', 'up')" style="font-size:11px; padding:2px 8px;">▶ Up</button>`
                             : `<button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'down')" style="font-size:11px; padding:2px 8px;">Down</button>
-                               <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'restart')" style="font-size:11px; padding:2px 8px;">Restart</button>`}
+                               <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'restart')" style="font-size:11px; padding:2px 8px;">Restart</button>
+                               <button class="btn btn-sm btn-primary" onclick="composeAction('${escapeHtml(s.name)}', 'up')" title="Up (docker compose up -d): recreate only the changed containers in place to apply a pulled image — no Down first, so a stack you're connected through (e.g. a reverse proxy) stays up. Restart reuses the old image." style="font-size:11px; padding:2px 8px;">▶ Up</button>`}
                         <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'pull')" style="font-size:11px; padding:2px 8px;">⬇ Pull</button>
                         <button class="btn btn-sm" onclick="openComposeEditor('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Edit</button>
                         <button class="btn btn-sm" onclick="showComposeLogs('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Logs</button>
@@ -56562,16 +56563,16 @@ async function validateComposeYaml() {
         return;
     }
 
-    // Save first, then validate
+    // Validate the editor's CURRENT (possibly unsaved) content WITHOUT saving it,
+    // so Validate is a pure check and Cancel still discards the edits (wabil:
+    // Validate used to save first, which Cancel then couldn't undo).
     const yaml = document.getElementById('compose-yaml-editor').value;
-    await fetch(apiUrl(`/api/compose/stacks/${encodeURIComponent(name)}/compose`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, content: yaml }),
-    });
-
     try {
-        const resp = await fetch(apiUrl(`/api/compose/stacks/${encodeURIComponent(name)}/validate`), { method: 'POST' });
+        const resp = await fetch(apiUrl(`/api/compose/stacks/${encodeURIComponent(name)}/validate`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: yaml }),
+        });
         const data = await resp.json();
         if (data.valid) {
             resultEl.innerHTML = '<span style="color:#22c55e;">Valid</span>';
