@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - 'Cargo.toml'
+      - 'Cargo.lock'   # a lock-only version sync must still trigger a build, or `cargo check --locked` fails on the next real change
       - 'src/**'
       - '.github/workflows/release.yml'
   workflow_dispatch:
