@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v24.57.34: LXC static IP works on EVERY path — Proxmox create + edit too (wabil)** _(2026-06-26 — [`521fbabe`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/521fbabec5033e2054485bc1fa02590dcc27b6a1))_
 - **v24.57.33: editing an existing LXC to a static IP now sticks too — wabil** _(2026-06-26 — [`da3cde57`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/da3cde577dd80d56a6764e132e7eb0316784f6e5))_
 - **v24.57.32: native LXC bridge + static IP now sticks (no longer DHCPs) — wabil** _(2026-06-26 — [`c91bc314`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c91bc314b02f821bc66caed4c90f261c8d948e1b))_
 - **v24.57.31: Node Ports UI actually takes effect + distinct VM action icons** _(2026-06-26 — [`bacbf2b7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bacbf2b73827f86c767248944e524661cc477d53))_
