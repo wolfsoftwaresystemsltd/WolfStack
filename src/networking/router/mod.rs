@@ -3187,6 +3187,11 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
             .map(|p| p.ip.split('/').next().unwrap_or(&p.ip).to_string())
             .filter(|s| !s.is_empty())
             .collect();
+    // Auto-created routes that can never install because the local kernel owns
+    // the CIDR (docker0/lxcbr0/etc.) — disabled after the loop so the watchdog
+    // stops retrying them and they clear from the failing list on upgraded
+    // nodes (AstroMando 2026-06-26: 8 such routes trapped, retried every tick).
+    let mut auto_disable_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for route in cfg.subnet_routes.iter()
         .filter(|r| r.enabled && node_handles_route(r, self_node_id))
     {
@@ -3208,6 +3213,29 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
             ));
             continue;
         }
+        // Back-off guard (AstroMando 2026-06-26): if the local kernel already
+        // owns this CIDR in an unmanageable form (a connected docker0/lxcbr0/
+        // virbr0 `dev` route), `ip route add <cidr> via <gw>` can never succeed
+        // — it fails "File exists" every tick forever. Only the consumer side
+        // installs a kernel route, so don't skip a gateway-role route (it only
+        // needs forwarding plumbing, which apply still sets up). For an
+        // auto-created route we KNOW is impossible, disable it so it stops being
+        // retried; an operator-created one is left enabled but skipped quietly
+        // (it auto-recovers if they remove the colliding local route later).
+        if !node_is_route_gateway(route) && kernel_owns_cidr_unmanageable(&route.subnet_cidr) {
+            if route.id.starts_with("auto-wolfnet-") {
+                auto_disable_ids.insert(route.id.clone());
+            } else {
+                warn_subnet_route_once(&route.subnet_cidr, format!(
+                    "WolfRouter watchdog: subnet route {} via {} skipped — the local \
+                     kernel already owns {} as a connected/dev route (e.g. docker0/lxcbr0); \
+                     WolfNet cannot route over a locally-owned subnet. Remove the local route \
+                     or renumber the subnet if you intended to reach it over WolfNet.",
+                    route.subnet_cidr, route.gateway, route.subnet_cidr
+                ));
+            }
+            continue;
+        }
         match apply_subnet_route(route, None) {
             Ok(()) => clear_subnet_route_warn(&route.subnet_cidr), // recovery logged once
             Err(e) => {
@@ -3218,6 +3246,40 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
             }
         }
     }
+
+    // Persist any auto-disables outside the read-snapshot loop. These are
+    // gossip-planted routes for CIDRs the local kernel owns — they never worked
+    // and (with the auto-apply guards above) won't be re-created. Disabling
+    // rather than deleting keeps them visible/auditable in the UI.
+    let routes_for_sync = if auto_disable_ids.is_empty() {
+        cfg.subnet_routes.clone()
+    } else {
+        let mut wcfg = state.config.write().unwrap();
+        for r in wcfg.subnet_routes.iter_mut() {
+            if r.enabled && auto_disable_ids.contains(&r.id) {
+                r.enabled = false;
+                if !r.description.contains("auto-disabled") {
+                    r.description = format!(
+                        "{} (auto-disabled: subnet owned by a local kernel route — \
+                         never installable over WolfNet)",
+                        r.description
+                    );
+                }
+                tracing::info!(
+                    "WolfRouter: auto-disabled impossible subnet route {} via {} \
+                     — CIDR is owned by a local connected/dev route (docker0/lxcbr0/etc.)",
+                    r.subnet_cidr, r.gateway
+                );
+                clear_subnet_route_warn(&r.subnet_cidr);
+            }
+        }
+        if let Err(e) = wcfg.save() {
+            tracing::warn!(
+                "WolfRouter: failed to persist auto-disabled impossible routes: {}", e
+            );
+        }
+        wcfg.subnet_routes.clone()
+    };
 
     // Self-heal wolfnetd's userspace CIDR map. The kernel route +
     // forwarding plumbing is only half the path on a TUN-based overlay
@@ -3234,8 +3296,9 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
     // it shows up on ip r and is showing all green in wolfrouter".
     // The internal sync function short-circuits on a content match so
     // a tick that finds the file already up-to-date is free (no write,
-    // no SIGHUP).
-    sync_subnet_routes_to_wolfnet(&cfg.subnet_routes);
+    // no SIGHUP). Uses the post-disable route set so a just-disabled
+    // impossible route is dropped from wolfnetd's CIDR map too.
+    sync_subnet_routes_to_wolfnet(&routes_for_sync);
 }
 
 /// Disable every subnet_route whose gateway equals `gateway_ip`, and
@@ -3286,6 +3349,46 @@ pub fn disable_subnet_routes_via_gateway(state: &RouterState, gateway_ip: &str) 
         }
     }
     disabled.len()
+}
+
+/// Subnets that EVERY Docker/LXC node owns locally by default, so a peer's
+/// copy is never a useful WolfNet route target — auto-routing one collides
+/// with the kernel's own `proto kernel scope link` route for the local bridge
+/// and can never install. docker0 = 172.17.0.0/16 (Docker default bridge),
+/// lxcbr0 = 10.0.3.0/24 (created by `containers::ensure_lxc_bridge`). Used only
+/// to gate AUTO-apply; an operator-configured route for these is still honoured
+/// (and backed off by the reconciler if it turns out to be locally owned).
+/// AstroMando 2026-06-26: a 30s-cache miss planted these on a 6-node Proxmox
+/// cluster and the watchdog retried the impossible `ip route add` every 60s.
+const DEFAULT_BRIDGE_CIDRS: &[&str] = &["172.17.0.0/16", "10.0.3.0/24"];
+
+fn is_default_bridge_cidr(cidr: &str) -> bool {
+    DEFAULT_BRIDGE_CIDRS.contains(&cidr)
+}
+
+/// True iff the local kernel already owns `cidr` in a form WolfStack cannot
+/// manage over WolfNet — a connected `dev` route (docker0/lxcbr0/virbr0,
+/// `proto kernel scope link`), a blackhole, or anything else without a
+/// parseable `via <gw>` next hop. Such a CIDR rejects `ip route add <cidr> via
+/// <gw>` ("File exists") permanently, so auto-apply must not plant it and the
+/// reconciler must not retry it. LIVE query (`ip route show <cidr>`),
+/// deliberately bypassing the 30s `collect_workload_subnets` cache whose
+/// staleness let a momentarily-down bridge defeat the self-collision guard.
+fn kernel_owns_cidr_unmanageable(cidr: &str) -> bool {
+    // IPv6 subnet routes are device routes (`dev wolfnet0`, no `via`) — the
+    // "no via" shape is NORMAL for them, so this v4-oriented check must not run
+    // (it would false-positive on our own correctly-installed v6 device route).
+    // v6 keeps its own apply/inspect path (apply_v6_device_route).
+    if is_ipv6_cidr(cidr) {
+        return false;
+    }
+    match read_kernel_route_raw(cidr) {
+        // A route exists for this exact CIDR but it has no `<dest> via <gw>`
+        // form we can replace — the kernel owns it (dev/blackhole/multipath).
+        Ok(raw) => !raw.trim().is_empty() && parse_route_gateway(&raw).is_none(),
+        // Couldn't query — fail open (old behaviour: let apply try and report).
+        Err(_) => false,
+    }
 }
 
 /// Auto-create missing subnet_route entries for remote-peer workload
@@ -3402,6 +3505,19 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
                 );
                 continue;
             }
+            // Never auto-route a universally-default container bridge — every
+            // node owns its own copy, so a peer's is always a local collision
+            // and could never install (see DEFAULT_BRIDGE_CIDRS). This is the
+            // cheap fast-path; the live kernel check on to_add below is the
+            // general guard against the 30s-cache race.
+            if is_default_bridge_cidr(sub) {
+                tracing::debug!(
+                    "WolfRouter auto-apply: skipping default-bridge subnet {} \
+                     from peer '{}' — locally owned on every node",
+                    sub, node.hostname,
+                );
+                continue;
+            }
             wanted.push((sub.clone(), gw.clone(), node.hostname.clone()));
         }
     }
@@ -3420,6 +3536,28 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
     };
     let to_add: Vec<(String, String, String)> = wanted.into_iter()
         .filter(|(cidr, gw, _)| !route_set_covers(cidr, gw, &existing))
+        .collect();
+    if to_add.is_empty() { return; }
+
+    // Final live guard against the 30s-cache race (AstroMando 2026-06-26): drop
+    // any candidate the local kernel already owns in an unmanageable form — a
+    // bridge that was momentarily down when collect_workload_subnets() last
+    // refreshed would otherwise slip past the cached local_subnets check above
+    // and get a permanently-failing route planted. Only the small to_add set is
+    // probed, so steady state (nothing to add) costs nothing.
+    let to_add: Vec<(String, String, String)> = to_add.into_iter()
+        .filter(|(cidr, _, peer)| {
+            if kernel_owns_cidr_unmanageable(cidr) {
+                tracing::debug!(
+                    "WolfRouter auto-apply: skipping {} from peer '{}' — \
+                     local kernel owns it as a connected/dev route",
+                    cidr, peer,
+                );
+                false
+            } else {
+                true
+            }
+        })
         .collect();
     if to_add.is_empty() { return; }
 
@@ -4302,6 +4440,49 @@ pub fn node_handles_route(route: &SubnetRoute, self_node_id: &str) -> bool {
 /// agree.
 pub fn route_targets_self(route: &SubnetRoute, self_node_id: &str) -> bool {
     route.node_id.is_none() || route.node_id.as_deref() == Some(self_node_id)
+}
+
+#[cfg(test)]
+mod default_bridge_route_tests {
+    use super::*;
+
+    #[test]
+    fn default_bridge_cidrs_match_exactly() {
+        // The two universally-default container bridges every node owns.
+        assert!(is_default_bridge_cidr("172.17.0.0/16")); // docker0
+        assert!(is_default_bridge_cidr("10.0.3.0/24"));   // lxcbr0
+        // A different prefix / a real workload subnet must NOT be suppressed.
+        assert!(!is_default_bridge_cidr("172.18.0.0/16")); // Docker user net
+        assert!(!is_default_bridge_cidr("10.0.3.0/25"));
+        assert!(!is_default_bridge_cidr("10.10.10.0/24"));
+        assert!(!is_default_bridge_cidr("172.17.0.0/24"));
+    }
+
+    #[test]
+    fn parse_route_gateway_discriminates_dev_from_via() {
+        // The load-bearing discriminator for kernel_owns_cidr_unmanageable:
+        // a connected `dev` route (docker0/lxcbr0) has NO `via`, so it parses
+        // to None → flagged unmanageable. A `via` route yields the gateway →
+        // not flagged (apply's normal/foreign-owner paths handle it).
+        let dev_route = "10.0.3.0/24 dev lxcbr0 proto kernel scope link src 10.0.3.1";
+        assert_eq!(parse_route_gateway(dev_route), None);
+        let docker = "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1";
+        assert_eq!(parse_route_gateway(docker), None);
+        let via = "10.10.10.0/24 via 10.100.10.30 dev wolfnet0";
+        assert_eq!(parse_route_gateway(via), Some("10.100.10.30".to_string()));
+        // Empty (no such route) → None, but the helper additionally requires
+        // non-empty raw before flagging, so "no route" is never "unmanageable".
+        assert_eq!(parse_route_gateway(""), None);
+    }
+
+    #[test]
+    fn kernel_owns_cidr_unmanageable_is_v4_only() {
+        // v6 device routes legitimately have no `via`; the helper must short
+        // -circuit on v6 (returning false) WITHOUT shelling out, so it can
+        // never false-positive on our own correctly-installed v6 device route.
+        assert!(!kernel_owns_cidr_unmanageable("fd00::/8"));
+        assert!(!kernel_owns_cidr_unmanageable("2001:db8::/32"));
+    }
 }
 
 #[cfg(test)]

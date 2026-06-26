@@ -30004,9 +30004,11 @@ let _backupExcludeMap = {};
 
 /// Toggle the inline mount-exclusion panel for a container, lazy-loading the
 /// mount inventory from the backend the first time it's opened.
-async function toggleMountExcludePanel(type, name) {
+async function toggleMountExcludePanel(type, name, prefix = '') {
     const key = `${type}:${name}`;
-    const panel = document.getElementById(`mount-excl-${key}`);
+    // prefix '' = the page target list; 'sched-' = the schedule modal's own picker
+    // (distinct id so the two panels never collide — see modal-id-collision rule).
+    const panel = document.getElementById(`${prefix}mount-excl-${key}`);
     if (!panel) return;
     if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
     panel.style.display = '';
@@ -30020,19 +30022,19 @@ async function toggleMountExcludePanel(type, name) {
             return;
         }
         const mounts = await res.json();
-        renderMountExcludePanel(panel, type, name, Array.isArray(mounts) ? mounts : []);
+        renderMountExcludePanel(panel, type, name, Array.isArray(mounts) ? mounts : [], prefix);
     } catch (e) {
         panel.innerHTML = `<span style="font-size:11px; color:var(--danger);" role="alert">Could not load mounts: ${escapeHtml(e.message)}</span>`;
     }
 }
 
-function renderMountExcludePanel(panel, type, name, mounts) {
+function renderMountExcludePanel(panel, type, name, mounts, prefix = '') {
     const key = `${type}:${name}`;
     if (!mounts.length) {
         panel.innerHTML = '<span style="font-size:11px; color:var(--text-muted);">No bind/volume mounts on this container.</span>';
         return;
     }
-    const excluded = new Set(_backupExcludeMap[key] || []);
+    const excluded = new Set(excludeMapFor(prefix)[key] || []);
     const rows = mounts.map((m, i) => {
         const src = m.source || '';
         const dest = m.destination || '';
@@ -30041,7 +30043,7 @@ function renderMountExcludePanel(panel, type, name, mounts) {
         const cbId = `mexcl-${key}-${i}`.replace(/[^a-zA-Z0-9_-]/g, '_');
         return `<label for="${cbId}" style="display:flex; align-items:center; gap:8px; padding:3px 0; font-size:11px; cursor:pointer;">
             <input type="checkbox" id="${cbId}" ${checked}
-                onchange="onMountIncludeToggle('${escapeHtml(key)}', this.checked, ${JSON.stringify(src).replace(/"/g, '&quot;')})">
+                onchange="onMountIncludeToggle('${escapeHtml(key)}', this.checked, ${JSON.stringify(src).replace(/"/g, '&quot;')}, '${prefix}')">
             <span style="flex:1; font-family:var(--font-mono);">
                 <span style="color:var(--text-secondary);">${escapeHtml(m.mount_type || '')}</span>
                 ${escapeHtml(src)} <span style="color:var(--text-muted);">→ ${escapeHtml(dest)}</span>
@@ -30055,11 +30057,14 @@ function renderMountExcludePanel(panel, type, name, mounts) {
 }
 
 /// Track an include/exclude toggle. checked = include (remove from exclude
-/// list); unchecked = exclude (add the source path).
-function onMountIncludeToggle(key, included, source) {
-    const list = new Set(_backupExcludeMap[key] || []);
+/// list); unchecked = exclude (add the source path). prefix selects which map:
+/// '' = page quick-backup, 'sched-' = schedule modal (kept separate so editing a
+/// schedule's exclusions never bleeds into the page's quick-backup selection).
+function onMountIncludeToggle(key, included, source, prefix = '') {
+    const map = excludeMapFor(prefix);
+    const list = new Set(map[key] || []);
     if (included) list.delete(source); else list.add(source);
-    _backupExcludeMap[key] = Array.from(list);
+    map[key] = Array.from(list);
 }
 
 function toggleAllBackupTargets(checked) {
@@ -30090,6 +30095,107 @@ function getSelectedTargets() {
         } catch (e) { }
     });
     return targets;
+}
+
+// ─── Schedule modal item picker ───
+// The schedule modal opens OVER the page target list, so it carries its own
+// editable copy of the picker. This is what lets an existing schedule's targets
+// and mount exclusions be edited in place (wabil 2026-06-25) rather than being
+// frozen at create time.
+
+// Per-target mount exclusions for the SCHEDULE modal only — kept separate from
+// the page's _backupExcludeMap so editing a schedule's exclusions can never bleed
+// into a subsequent page quick-backup of the same container.
+let _scheduleExcludeMap = {};
+function excludeMapFor(prefix) { return prefix === 'sched-' ? _scheduleExcludeMap : _backupExcludeMap; }
+
+// Render the editable item list inside the Schedule modal. selectedKeys is a Set
+// of "type:name" to pre-tick; backupAll ticks + disables everything (the schedule
+// will auto-include whatever is present at run time).
+function renderScheduleTargets(selectedKeys, backupAll) {
+    const container = document.getElementById('schedule-target-list');
+    if (!container) return;
+    const targets = Array.isArray(window._backupTargets) ? window._backupTargets : [];
+    if (!targets.length) {
+        container.innerHTML = renderEmptyState({ title: 'No containers, VMs, or configs found to backup.' });
+        return;
+    }
+    container.innerHTML = targets.map(t => {
+        const key = `${t.type}:${t.name}`;
+        const val = JSON.stringify(t).replace(/"/g, '&quot;');
+        const canExclude = (t.type === 'docker' || t.type === 'lxc');
+        const excludedCount = (_scheduleExcludeMap[key] || []).length;
+        let label = t.type === 'config' ? 'WolfStack Config' : (t.name || t.type);
+        if (t.hostname && t.hostname !== t.name) label = `${t.name} (${t.hostname})`;
+        const checked = (backupAll || selectedKeys.has(key)) ? 'checked' : '';
+        const mountsLink = canExclude
+            ? `<div style="margin-top:3px; padding-left:24px;">
+                 <a href="#" onclick="toggleMountExcludePanel('${escapeHtml(t.type)}','${escapeHtml(t.name)}','sched-'); return false;"
+                    style="font-size:11px; color:var(--accent);">Choose mounts${excludedCount ? ` (${excludedCount} excluded)` : ''}</a>
+                 <div id="sched-mount-excl-${escapeHtml(key)}" style="display:none; margin-top:6px;"></div>
+               </div>`
+            : '';
+        return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:6px 10px; font-size:12px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                <input type="checkbox" class="schedule-target-cb" value="${val}" data-target-key="${escapeHtml(key)}" ${checked} ${backupAll ? 'disabled' : ''}>
+                <span style="flex:1;"><span style="font-weight:500;">${escapeHtml(label)}</span>
+                <span style="color:var(--text-muted); font-size:10px; margin-left:6px;">${escapeHtml(t.type.toUpperCase())}</span></span>
+            </label>
+            ${mountsLink}
+        </div>`;
+    }).join('');
+}
+
+// Read the schedule modal's picker into a target array (with mount exclusions).
+function getScheduleTargets() {
+    const out = [];
+    document.querySelectorAll('#schedule-target-list .schedule-target-cb:checked').forEach(cb => {
+        try {
+            const t = JSON.parse(cb.value);
+            const key = `${t.type}:${t.name}`;
+            const excl = _scheduleExcludeMap[key];
+            if (Array.isArray(excl) && excl.length) t.exclude_mounts = excl;
+            out.push(t);
+        } catch (e) { console.warn('getScheduleTargets: bad checkbox value', e); }
+    });
+    return out;
+}
+
+// "Back up everything" ticks + freezes the per-item checkboxes (the schedule
+// stores backup_all=true and resolves the live set each run). Turning it back OFF
+// restores whatever the operator had individually selected beforehand.
+function onScheduleBackupAllToggle(checked) {
+    document.querySelectorAll('#schedule-target-list .schedule-target-cb').forEach(cb => {
+        if (checked) {
+            cb.dataset.prevChecked = cb.checked ? '1' : '0';
+            cb.checked = true;
+            cb.disabled = true;
+        } else {
+            cb.disabled = false;
+            if (cb.dataset.prevChecked !== undefined) cb.checked = cb.dataset.prevChecked === '1';
+        }
+    });
+}
+
+// Set the modal title + submit-button label for create vs edit.
+function setScheduleModalChrome(isEdit) {
+    const title = document.getElementById('schedule-modal-title');
+    const label = document.getElementById('schedule-modal-submit-label');
+    if (title) title.textContent = isEdit ? 'Edit Backup Schedule' : 'Schedule Backup';
+    if (label) label.textContent = isEdit ? 'Save Changes' : 'Create Schedule';
+}
+
+// Swap the modal between the item picker ('items') and a read-only note
+// ('note', used for system-folder schedules and when the item list is
+// unavailable — both preserve their targets as-is).
+function setScheduleModalMode(mode, noteText) {
+    const group = document.getElementById('schedule-target-group');
+    const note = document.getElementById('schedule-folder-summary');
+    if (group) group.style.display = (mode === 'items') ? '' : 'none';
+    if (note) {
+        note.style.display = (mode === 'items') ? 'none' : '';
+        if (mode !== 'items') note.textContent = noteText || '';
+    }
 }
 
 // Cached PBS config for use as storage target
@@ -30431,9 +30537,15 @@ async function toggleSchedule(id, enabled) {
 }
 
 let _editingSchedule = null;
+// True while editing a schedule whose targets can't be shown in the item picker
+// (system-folder schedules, or when the live item list failed to load) — the save
+// path then preserves the schedule's existing targets untouched.
+let _editScheduleTargetsLocked = false;
 
 // Edit a schedule (Gary 2026-06-25): open the create-schedule modal pre-filled
-// with the schedule's name/frequency/time/retention and its targets pre-selected.
+// with the schedule's name/frequency/time/retention, and its targets + mount
+// exclusions pre-loaded into the modal's own editable picker so they can be
+// changed in place (wabil 2026-06-25 — add a container, edit excluded mounts).
 // The storage DESTINATION is preserved as-is (so credentials never have to be
 // re-entered) — createSchedule sends the existing storage on the edit path.
 function editSchedule(id) {
@@ -30443,18 +30555,60 @@ function editSchedule(id) {
     if (!modal) { showToast('Schedule editor not available', 'error'); return; }
     _editingSchedule = s;
     _scheduleFolderTarget = null;
+    _editScheduleTargetsLocked = false;
     const setVal = (elId, v) => { const el = document.getElementById(elId); if (el && v != null) el.value = v; };
     setVal('schedule-name', s.name);
     setVal('schedule-frequency', s.frequency);
     setVal('schedule-time', s.time);
     setVal('schedule-retention', s.retention);
-    // We deliberately do NOT re-derive targets/storage from the form on save (the
-    // target list may not even be rendered yet, which would silently wipe the
-    // selection). The edit PRESERVES the schedule's existing targets + storage and
-    // only changes name/frequency/time/retention/enabled. (To change what's backed
-    // up or where, delete + recreate.)
+
+    const schedTargets = Array.isArray(s.targets) ? s.targets : [];
+    // Pre-load this schedule's per-target mount exclusions into the modal-only map
+    // (reset first so a previous edit's exclusions don't carry over).
+    _scheduleExcludeMap = {};
+    schedTargets.forEach(t => {
+        if (t && Array.isArray(t.exclude_mounts) && t.exclude_mounts.length) {
+            _scheduleExcludeMap[`${t.type}:${t.name}`] = t.exclude_mounts.slice();
+        }
+    });
+
+    const isFolder = schedTargets.length > 0 && schedTargets.every(t => t && t.type === 'systempath');
+    const noItems = !Array.isArray(window._backupTargets) || window._backupTargets.length === 0;
+    const allCb = document.getElementById('schedule-backup-all');
+    if (isFolder || noItems) {
+        // System-folder schedules back up paths (not containers) and so can't be
+        // shown in the item picker; the same applies if the live item list hasn't
+        // loaded. Keep the existing targets and just show what's covered — never
+        // wipe a schedule's targets because the picker couldn't represent them.
+        _editScheduleTargetsLocked = true;
+        const note = isFolder
+            ? 'Backing up folders: ' + schedTargets.map(t => t.system_path || t.name).join(', ') + ' (kept — edit name/frequency/time/retention here)'
+            : 'Items kept as-is — the live item list is still loading; reopen Edit once it appears to change what is backed up.';
+        setScheduleModalMode('note', note);
+        if (allCb) { allCb.checked = false; allCb.disabled = true; }
+    } else {
+        setScheduleModalMode('items');
+        const wantKeys = new Set(schedTargets.map(t => `${t.type}:${t.name}`));
+        renderScheduleTargets(wantKeys, !!s.backup_all);
+        if (allCb) { allCb.disabled = false; allCb.checked = !!s.backup_all; }
+        // Any scheduled item not present in the current list (container offline /
+        // on another node / deleted) has no checkbox — warn that it's KEPT as-is
+        // so the operator isn't surprised, and so createSchedule preserves it
+        // rather than silently dropping it.
+        if (!s.backup_all) {
+            const rendered = new Set(Array.from(document.querySelectorAll('#schedule-target-list .schedule-target-cb'))
+                .map(cb => cb.getAttribute('data-target-key')));
+            const orphans = schedTargets.filter(t => t && !rendered.has(`${t.type}:${t.name}`));
+            if (orphans.length) {
+                showToast(`${orphans.length} scheduled item(s) aren't in the current list (offline or on another node) and will be kept as-is: ${orphans.map(t => t.name || t.type).join(', ')}`, 'info', 8000);
+            }
+        }
+    }
+    const sumEl = document.getElementById('schedule-selected-summary');
+    if (sumEl) sumEl.textContent = '';
+    setScheduleModalChrome(true);
     modal.classList.add('active');
-    showToast('Editing schedule — change name, frequency, time or retention. Its targets and storage destination are kept.', 'info', 5000);
+    showToast('Editing schedule — adjust the items, mount exclusions, name, frequency, time or retention. The storage destination is kept.', 'info', 6000);
 }
 
 function formatStorageLabel(storage) {
@@ -30639,12 +30793,20 @@ async function scheduleSystemFolder() {
     if (!targets) return;
     _scheduleFolderTarget = targets;       // now an array — one target per folder
     _editingSchedule = null;               // new folder schedule, not an edit
+    _editScheduleTargetsLocked = false;
+    _scheduleExcludeMap = {};              // folders have no per-container mounts
+    const allCb = document.getElementById('schedule-backup-all');
+    if (allCb) { allCb.checked = false; allCb.disabled = false; }
 
     const storage = await getSelectedStorage();
     if (!(await ensureBackupStorageReady(storage))) { _scheduleFolderTarget = null; return; }
     const pathLabel = targets.map(t => t.system_path).join(', ');
+    // A folder schedule isn't an item-picker schedule — hide the picker and show
+    // which folders will be covered.
+    setScheduleModalMode('note', `Backing up folder${targets.length > 1 ? 's' : ''}: ${pathLabel}`);
     const summary = document.getElementById('schedule-selected-summary');
     if (summary) summary.textContent = `Will schedule backup of ${targets.length > 1 ? targets.length + ' folders' : 'folder ' + pathLabel} → ${storage.path || storage.type || 'destination'}`;
+    setScheduleModalChrome(false);
     document.getElementById('schedule-name').value = (targets.length === 1 ? targets[0].name : 'Folders') + ' folder';
     document.getElementById('create-schedule-modal').classList.add('active');
 }
@@ -31026,26 +31188,33 @@ async function _runRestoreStream(id, overwrite, storage, name, progressEl, resul
 
 async function showScheduleSelectedModal() {
     _scheduleFolderTarget = null; // table-selection path — clear any folder target
+    _editScheduleTargetsLocked = false;
+    // Carry any mount exclusions the operator set on the page into the modal's own
+    // map (a shallow copy — later edits reassign keys, so the page map is untouched).
+    _scheduleExcludeMap = Object.assign({}, _backupExcludeMap);
     const targets = getSelectedTargets();
     if (targets.length === 0) {
         showToast('Please select at least one item to schedule', 'error');
         return;
     }
 
-    const summary = document.getElementById('schedule-selected-summary');
+    // Seed the modal's own picker from the page selection — the operator can then
+    // fine-tune it (add/remove items, exclude mounts) before saving the schedule.
     const allSelected = targets.length === document.querySelectorAll('.backup-target-cb').length;
+    setScheduleModalMode('items');
+    const wantKeys = new Set(targets.map(t => `${t.type}:${t.name}`));
+    renderScheduleTargets(wantKeys, allSelected);
+    const allCb = document.getElementById('schedule-backup-all');
+    if (allCb) { allCb.disabled = false; allCb.checked = allSelected; }
+
+    const summary = document.getElementById('schedule-selected-summary');
     if (summary) {
         const storage = await getSelectedStorage();
-        const storageLabel = storage.path || 'local';
-        if (allSelected) {
-            summary.textContent = `Will schedule backup of all ${targets.length} items to ${storageLabel}`;
-        } else {
-            const names = targets.map(t => t.name || t.type).join(', ');
-            summary.textContent = `Will schedule: ${names} → ${storageLabel}`;
-        }
+        summary.textContent = `Destination: ${storage.path || 'local'}`;
     }
 
     _editingSchedule = null; // opening for a NEW schedule, not an edit
+    setScheduleModalChrome(false);
     document.getElementById('schedule-name').value = '';
     document.getElementById('create-schedule-modal').classList.add('active');
 }
@@ -31059,25 +31228,44 @@ async function createSchedule() {
     const retention = parseInt(document.getElementById('schedule-retention').value) || 0;
     const editing = _editingSchedule;
     let backup_all, finalTargets, storage;
-    if (editing) {
-        // EDIT: preserve what's backed up and where (avoids the unrendered-target
-        // -list race wiping the selection, and never makes the operator re-enter
-        // storage credentials). Only name/frequency/time/retention change here.
+    const folderTargets = (_scheduleFolderTarget && _scheduleFolderTarget.length) ? _scheduleFolderTarget : null;
+    if (folderTargets) {
+        // A folder schedule (scheduleSystemFolder) — an ARRAY of system-path targets
+        // (one per folder). Use it directly; the item picker doesn't apply.
+        backup_all = false;
+        finalTargets = folderTargets;
+        storage = editing ? editing.storage : await getSelectedStorage();
+    } else if (editing && _editScheduleTargetsLocked) {
+        // Editing a schedule whose targets can't be shown in the item picker
+        // (existing folder schedule, or item list not yet loaded) — preserve them.
         backup_all = !!editing.backup_all;
         finalTargets = backup_all ? [] : (editing.targets || []);
         storage = editing.storage;
     } else {
-        // A folder schedule (scheduleSystemFolder) overrides the table selection —
-        // it's an ARRAY of targets (one per folder), so use it directly.
-        const folderTargets = (_scheduleFolderTarget && _scheduleFolderTarget.length) ? _scheduleFolderTarget : null;
-        const targets = folderTargets || getSelectedTargets();
-        backup_all = !folderTargets
-            && targets.length === document.querySelectorAll('.backup-target-cb').length;
-        finalTargets = backup_all ? [] : targets;
-        storage = await getSelectedStorage();
+        // Item picker (create or edit): the modal's own list is the source of truth.
+        const allCb = document.getElementById('schedule-backup-all');
+        backup_all = !!(allCb && allCb.checked);
+        finalTargets = backup_all ? [] : getScheduleTargets();
+        if (!backup_all && editing) {
+            // Preserve any scheduled targets the picker couldn't show (container
+            // offline / on another node / deleted) — the operator never saw a
+            // checkbox for them, so dropping them would be a silent data loss.
+            const rendered = new Set(Array.from(document.querySelectorAll('#schedule-target-list .schedule-target-cb'))
+                .map(cb => cb.getAttribute('data-target-key')));
+            const orphans = (editing.targets || []).filter(t => t && !rendered.has(`${t.type}:${t.name}`));
+            if (orphans.length) finalTargets = finalTargets.concat(orphans);
+        }
+        if (!backup_all && finalTargets.length === 0) {
+            showToast('Select at least one item to back up, or tick "back up everything"', 'error');
+            return;
+        }
+        // EDIT keeps the existing destination (never re-enter storage credentials);
+        // a new schedule reads the chosen storage from the page.
+        storage = editing ? editing.storage : await getSelectedStorage();
     }
     _scheduleFolderTarget = null; // consumed — don't leak into the next schedule
     _editingSchedule = null;
+    _editScheduleTargetsLocked = false;
 
     const body = {
         name,

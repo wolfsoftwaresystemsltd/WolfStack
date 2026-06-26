@@ -4344,7 +4344,7 @@
         <div id="create-schedule-modal" class="modal-overlay">
             <div class="modal" style="max-width:480px;">
                 <div class="modal-header">
-                    <h3>Schedule Backup</h3>
+                    <h3 id="schedule-modal-title">Schedule Backup</h3>
                     <button class="modal-close" onclick="closeModal()">&times;</button>
                 </div>
                 <div class="modal-body">
@@ -4368,11 +4368,20 @@
                         <label>Retention (keep N backups, 0 = unlimited)</label>
                         <input type="number" id="schedule-retention" class="form-control" value="7" min="0">
                     </div>
+                    <div class="form-group" id="schedule-target-group">
+                        <label>Items to back up</label>
+                        <div id="schedule-target-list" style="max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px;"></div>
+                        <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:12px; color:var(--text-secondary); cursor:pointer;">
+                            <input type="checkbox" id="schedule-backup-all" onchange="onScheduleBackupAllToggle(this.checked)">
+                            Back up everything currently present (auto-includes new containers/VMs)
+                        </label>
+                    </div>
+                    <p id="schedule-folder-summary" style="font-size:12px; color:var(--text-muted); display:none;"></p>
                     <p id="schedule-selected-summary" style="font-size:12px; color:var(--text-muted);"></p>
                 </div>
                 <div class="modal-footer">
                     <button class="btn" onclick="closeModal()">Cancel</button>
-                    <button class="btn btn-primary" onclick="createSchedule()"><span class="ws-icon-clean-wrap" data-icon="calendar"></span> Create Schedule</button>
+                    <button id="schedule-modal-submit" class="btn btn-primary" onclick="createSchedule()"><span class="ws-icon-clean-wrap" data-icon="calendar"></span> <span id="schedule-modal-submit-label">Create Schedule</span></button>
                 </div>
             </div>
         </div>
