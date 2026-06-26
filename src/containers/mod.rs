@@ -3232,6 +3232,149 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
     let _ = std::fs::write(&resolv_path, "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
 }
 
+/// Convert a CIDR prefix length to a dotted-quad netmask (24 -> 255.255.255.0).
+fn prefix_to_netmask(prefix: u8) -> String {
+    let p = prefix.min(32);
+    let mask: u32 = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+    format!("{}.{}.{}.{}", (mask >> 24) & 0xff, (mask >> 16) & 0xff, (mask >> 8) & 0xff, mask & 0xff)
+}
+
+/// True when `s` is a well-formed IPv4 CIDR ("A.B.C.D/NN", prefix 0-32). Used to
+/// reject non-address values (e.g. the literal "dhcp", which normalize_bridge_cidr
+/// passes through unchanged) and any string with embedded newlines/junk before it
+/// is written into a container's network config.
+pub fn is_ipv4_cidr(s: &str) -> bool {
+    match s.split_once('/') {
+        Some((ip, prefix)) => {
+            ip.parse::<std::net::Ipv4Addr>().is_ok()
+                && prefix.parse::<u8>().map(|p| p <= 32).unwrap_or(false)
+        }
+        None => false,
+    }
+}
+
+/// Write the in-container static network config for a NATIVE LXC attached to a
+/// user bridge with a static IP. Returns the list of in-container backends that
+/// were configured, or an error string the caller can surface.
+///
+/// liblxc's `lxc.net.0.ipv4.address` assigns the address to eth0 at start, but
+/// the container's own init then runs whatever its image ships — and most
+/// download templates default to DHCP, which promptly overrides the static
+/// address (wabil 2026-06-26: "set static, gets dhcp"). We mirror the user's
+/// CIDR + gateway into every in-container network backend that's present
+/// (systemd-networkd, netplan, /etc/network/interfaces, NetworkManager) and turn
+/// DHCP off, so the container comes up on the address the operator chose.
+///
+/// `cidr` must be a validated IPv4 CIDR (see [`is_ipv4_cidr`]); `gateway` an
+/// optional validated IPv4 default-route gateway. Unlike
+/// [`write_container_network_config`] this carries NO WolfNet assumptions (no
+/// hardcoded 10.0.3.1 gateway, no forced /24, no wn0 source-routes) — eth0 is
+/// the container's primary LAN NIC here. Errors are returned (not swallowed) so
+/// a failed write never reports a phantom "static" success.
+pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Option<&str>) -> Result<(), String> {
+    let rootfs = format!("{}/{}/rootfs", lxc_base_dir(container), container);
+    if !std::path::Path::new(&rootfs).exists() {
+        return Err(format!("container rootfs not found at {}", rootfs));
+    }
+    let cidr = cidr.trim();
+    let (ip, prefix) = match cidr.split_once('/') {
+        Some((a, p)) => (a.to_string(), p.parse::<u8>().unwrap_or(24)),
+        None => (cidr.to_string(), 24),
+    };
+    let netmask = prefix_to_netmask(prefix);
+    let gw = gateway.map(str::trim).filter(|g| !g.is_empty());
+    let mut errors: Vec<String> = Vec::new();
+    let mut wrote_any = false;
+
+    // Method 1: systemd-networkd (Debian Trixie, Arch, etc.). A Name=eth0 match
+    // is more specific than the image's wildcard DHCP .network, so it wins.
+    let networkd_dir = format!("{}/etc/systemd/network", rootfs);
+    if std::path::Path::new(&networkd_dir).exists() {
+        let mut conf = format!("[Match]\nName=eth0\n\n[Network]\nDHCP=no\nAddress={}\n", cidr);
+        if let Some(g) = gw { conf.push_str(&format!("Gateway={}\n", g)); }
+        conf.push_str("DNS=1.1.1.1\nDNS=8.8.8.8\n");
+        match std::fs::write(format!("{}/eth0.network", networkd_dir), &conf) {
+            Ok(()) => wrote_any = true,
+            Err(e) => errors.push(format!("systemd-networkd: {}", e)),
+        }
+    }
+
+    // Method 2: Netplan (Ubuntu 18.04+). Remove conflicting cloud-init configs
+    // first — safe here because a fresh single-NIC container only has eth0.
+    let netplan_dir = format!("{}/etc/netplan", rootfs);
+    if std::path::Path::new(&netplan_dir).exists() {
+        let routes = gw
+            .map(|g| format!("      routes:\n        - to: default\n          via: {}\n", g))
+            .unwrap_or_default();
+        let conf = format!(
+            "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: false\n      addresses:\n        - {}\n{}      nameservers:\n        addresses: [1.1.1.1, 8.8.8.8]\n",
+            cidr, routes
+        );
+        if let Ok(entries) = std::fs::read_dir(&netplan_dir) {
+            for e in entries.flatten() { let _ = std::fs::remove_file(e.path()); }
+        }
+        match std::fs::write(format!("{}/01-netcfg.yaml", netplan_dir), &conf) {
+            Ok(()) => wrote_any = true,
+            Err(e) => errors.push(format!("netplan: {}", e)),
+        }
+    }
+
+    // Method 3: /etc/network/interfaces (Debian Bookworm, Alpine)
+    let ifaces_path = format!("{}/etc/network/interfaces", rootfs);
+    if std::path::Path::new(&ifaces_path).exists() {
+        let mut conf = format!(
+            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address {}\n    netmask {}\n",
+            ip, netmask
+        );
+        if let Some(g) = gw { conf.push_str(&format!("    gateway {}\n", g)); }
+        conf.push_str("    dns-nameservers 1.1.1.1 8.8.8.8\n");
+        match std::fs::write(&ifaces_path, &conf) {
+            Ok(()) => wrote_any = true,
+            Err(e) => errors.push(format!("interfaces: {}", e)),
+        }
+    }
+
+    // Method 4: NetworkManager keyfile (RHEL family, Ubuntu Desktop, etc.)
+    let nm_base = format!("{}/etc/NetworkManager", rootfs);
+    if std::path::Path::new(&nm_base).exists() {
+        let nm_dir = format!("{}/system-connections", nm_base);
+        let _ = std::fs::create_dir_all(&nm_dir);
+        let addr_line = match gw {
+            Some(g) => format!("address1={},{}\n", cidr, g),
+            None => format!("address1={}\n", cidr),
+        };
+        let conf = format!(
+            "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
+             [ipv4]\nmethod=manual\n{}dns=1.1.1.1;8.8.8.8;\n\n[ipv6]\nmethod=auto\n",
+            addr_line
+        );
+        let nm_file = format!("{}/eth0.nmconnection", nm_dir);
+        match std::fs::write(&nm_file, &conf) {
+            Ok(()) => {
+                let _ = std::fs::set_permissions(&nm_file, std::fs::Permissions::from_mode(0o600));
+                let _ = std::fs::remove_file(format!("{}/etc/sysconfig/network-scripts/ifcfg-eth0", rootfs));
+                wrote_any = true;
+            }
+            Err(e) => errors.push(format!("NetworkManager: {}", e)),
+        }
+    }
+
+    // Fallback resolv.conf so DNS works regardless of which manager runs.
+    let resolv = format!("{}/etc/resolv.conf", rootfs);
+    let _ = std::fs::remove_file(&resolv); // might be a symlink
+    let _ = std::fs::write(&resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+
+    if !errors.is_empty() {
+        Err(errors.join("; "))
+    } else if !wrote_any {
+        Err("no supported in-container network backend found \
+             (systemd-networkd / netplan / /etc/network/interfaces / NetworkManager) — \
+             the container may still come up via DHCP".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 // ─── Common types ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12270,6 +12413,38 @@ mod pct_net0_tests {
         assert_eq!(normalize_bridge_cidr(""), "");
         assert_eq!(normalize_bridge_cidr("dhcp"), "dhcp");
         assert_eq!(normalize_bridge_cidr("fe80::1/64"), "fe80::1/64");
+    }
+
+    #[test]
+    fn prefix_to_netmask_covers_common_prefixes() {
+        // /etc/network/interfaces needs a dotted-quad netmask, not a CIDR prefix.
+        assert_eq!(super::prefix_to_netmask(24), "255.255.255.0");
+        assert_eq!(super::prefix_to_netmask(16), "255.255.0.0");
+        assert_eq!(super::prefix_to_netmask(8), "255.0.0.0");
+        assert_eq!(super::prefix_to_netmask(25), "255.255.255.128");
+        assert_eq!(super::prefix_to_netmask(32), "255.255.255.255");
+        assert_eq!(super::prefix_to_netmask(0), "0.0.0.0");
+        // Out-of-range prefix is clamped, never panics/overflows.
+        assert_eq!(super::prefix_to_netmask(40), "255.255.255.255");
+    }
+
+    #[test]
+    fn is_ipv4_cidr_rejects_non_addresses_and_injection() {
+        // Real static IPs (post-normalize) are accepted.
+        assert!(super::is_ipv4_cidr("192.168.0.99/24"));
+        assert!(super::is_ipv4_cidr("10.0.0.5/16"));
+        assert!(super::is_ipv4_cidr("0.0.0.0/0"));
+        // normalize_bridge_cidr passes "dhcp" through unchanged — must NOT be
+        // treated as a static address (the whole point of wabil's bug is DHCP).
+        assert!(!super::is_ipv4_cidr("dhcp"));
+        // Bare IP without a prefix is rejected (the writer wants a CIDR).
+        assert!(!super::is_ipv4_cidr("192.168.0.99"));
+        // Junk / out-of-range prefix / IPv6 rejected.
+        assert!(!super::is_ipv4_cidr(""));
+        assert!(!super::is_ipv4_cidr("192.168.0.99/33"));
+        assert!(!super::is_ipv4_cidr("fe80::1/64"));
+        // Embedded-newline injection attempt is rejected (defense in depth).
+        assert!(!super::is_ipv4_cidr("192.168.1.1/24\n[Match]\nName=eth1"));
     }
 
     #[test]

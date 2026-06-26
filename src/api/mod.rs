@@ -7575,26 +7575,41 @@ pub async fn lxc_create(
                     let mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
                         rand_byte(), rand_byte(), rand_byte());
                     lines.push(format!("lxc.net.0.hwaddr = {}", mac));
-                    if let Some(ref ip) = body.bridge_ip {
-                        // Normalise a bare IP to CIDR — LXC requires a prefix on
-                        // ipv4.address or the container comes up unreachable.
-                        let ip = containers::normalize_bridge_cidr(ip);
-                        if !ip.is_empty() {
-                            lines.push(format!("lxc.net.0.ipv4.address = {}", ip));
-                            if let Some(ref gw) = body.bridge_gateway {
-                                let gw = gw.trim();
-                                if !gw.is_empty() {
-                                    lines.push(format!("lxc.net.0.ipv4.gateway = {}", gw));
-                                }
-                            }
+                    // Static bridge IP: set the liblxc address AND write the
+                    // container's OWN network config so its init doesn't DHCP
+                    // over the static address (wabil 2026-06-26: the veth got
+                    // the static IP but the image's default DHCP overrode it).
+                    // Only a REAL IPv4 CIDR counts as static — a non-IP value
+                    // (e.g. "dhcp") or junk falls through to DHCP rather than
+                    // being written as a bogus address. Gateway must be a valid
+                    // IPv4 or it's dropped (never injected into rootfs files).
+                    let static_cidr = body.bridge_ip.as_deref()
+                        .map(containers::normalize_bridge_cidr)
+                        .filter(|s| containers::is_ipv4_cidr(s));
+                    let static_gw = body.bridge_gateway.as_deref()
+                        .map(str::trim)
+                        .filter(|g| g.parse::<std::net::Ipv4Addr>().is_ok());
+                    if let Some(ref cidr) = static_cidr {
+                        lines.push(format!("lxc.net.0.ipv4.address = {}", cidr));
+                        if let Some(gw) = static_gw {
+                            lines.push(format!("lxc.net.0.ipv4.gateway = {}", gw));
                         }
                     }
                     lines.push(String::new()); // trailing newline
+                    // Write the host LXC config first; only then the in-container
+                    // static config, so a host-config failure is reported before
+                    // we touch the rootfs and the messages stay accurate.
                     if let Err(e) = std::fs::write(&config_path, lines.join("\n")) {
                         messages.push(format!("Bridge config warning: {}", e));
                     } else {
                         messages.push(format!("Network: veth on {} ({})", bridge,
-                            if body.bridge_ip.as_deref().map(|s| s.trim()).unwrap_or("").is_empty() { "DHCP" } else { "static" }));
+                            if static_cidr.is_some() { "static" } else { "DHCP" }));
+                        if let Some(ref cidr) = static_cidr {
+                            if let Err(e) = containers::write_lxc_bridge_static_config(&body.name, cidr, static_gw) {
+                                messages.push(format!(
+                                    "Static IP warning: in-container network config not fully written ({}) — the container may still come up via DHCP", e));
+                            }
+                        }
                     }
                 }
                 "host" => {
