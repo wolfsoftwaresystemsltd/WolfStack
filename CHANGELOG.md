@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.0.0: container/VM lists no longer come up blank for 10-20s — offload blocking handlers to web::block** _(2026-06-26 — [`301b4321`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/301b43216af646f362f18b3ca893b9b4ebf470da))_
 - **v24.57.36: container list no longer flickers behind a flaky reverse proxy (wabil)** _(2026-06-26 — [`3b5885ef`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3b5885ef9a0220d4864a13e8d335cf1834e67bb5))_
 - **v24.57.35: self-heal LXC static IP on start — fixes containers created before the in-container writer existed (wabil)** _(2026-06-26 — [`2b5b5c96`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2b5b5c96a42106f86a265fcab837e11328923d6b))_
 - **v24.57.34: LXC static IP works on EVERY path — Proxmox create + edit too (wabil)** _(2026-06-26 — [`521fbabe`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/521fbabec5033e2054485bc1fa02590dcc27b6a1))_
