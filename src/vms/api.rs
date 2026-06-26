@@ -150,9 +150,15 @@ async fn host_devices(req: HttpRequest, state: web::Data<AppState>) -> HttpRespo
 
 async fn list_vms(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let manager = state.vms.lock().unwrap();
-    let vms = manager.list_vms();
-    HttpResponse::Ok().json(vms)
+    // list_vms() runs qm/virsh/pgrep subprocesses; doing it inline (while holding
+    // the std Mutex) blocked an actix request worker and serialised every VM
+    // request behind it — under the page-load burst the list came up blank for
+    // 10-20s. Offload to the blocking pool; the lock is taken inside it.
+    let state = state.clone(); // clone the Arc-backed web::Data, lock inside the block
+    match web::block(move || state.vms.lock().unwrap().list_vms()).await {
+        Ok(vms) => HttpResponse::Ok().json(vms),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "vm list unavailable"})),
+    }
 }
 
 /// GET /api/vms/wolfnet/health — per-VM WolfNet plumbing status.

@@ -7117,19 +7117,32 @@ fn get_unit_info(service: &str) -> serde_json::Value {
 /// GET /api/containers/status — get Docker and LXC runtime status
 pub async fn container_runtime_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let docker = containers::docker_status();
-    let lxc = containers::lxc_status();
-    HttpResponse::Ok().json(serde_json::json!({
-        "docker": docker,
-        "lxc": lxc,
-    }))
+    // docker_status()/lxc_status() probe the runtimes via subprocess — offload so
+    // they don't block an async request worker during the page-load burst.
+    match web::block(|| {
+        serde_json::json!({
+            "docker": containers::docker_status(),
+            "lxc": containers::lxc_status(),
+        })
+    }).await {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "runtime status unavailable"})),
+    }
 }
 
 /// GET /api/containers/docker — list all Docker containers
 pub async fn docker_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let containers = containers::docker_list_all_cached();
-    HttpResponse::Ok().json(containers)
+    // `docker_list_all_cached` runs `docker ps`/inspect subprocesses on a cache
+    // miss. Running that directly in the async handler blocked an actix request
+    // worker; under the page-load burst that starved the worker pool and the
+    // list came up blank for 10-20s (KO4BSR/wabil). Offload to the blocking pool.
+    match web::block(containers::docker_list_all_cached).await {
+        Ok(containers) => HttpResponse::Ok().json(containers),
+        // A non-OK (not an empty 200) so the frontend keeps the current list
+        // instead of blanking it on a rare blocking-pool error.
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "docker list unavailable"})),
+    }
 }
 
 /// GET /api/search?q=<term> — local resource search powering the top-bar global
@@ -10162,15 +10175,19 @@ pub async fn wolfnet_routes_debug(req: HttpRequest, state: web::Data<AppState>) 
 /// GET /api/containers/docker/stats — Docker container stats
 pub async fn docker_stats(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let stats = containers::docker_stats_cached();
-    HttpResponse::Ok().json(stats)
+    match web::block(containers::docker_stats_cached).await {
+        Ok(stats) => HttpResponse::Ok().json(stats),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "docker stats unavailable"})),
+    }
 }
 
 /// GET /api/containers/docker/images — list Docker images
 pub async fn docker_images(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let images = containers::docker_images_cached();
-    HttpResponse::Ok().json(images)
+    match web::block(containers::docker_images_cached).await {
+        Ok(images) => HttpResponse::Ok().json(images),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "docker images unavailable"})),
+    }
 }
 
 /// DELETE /api/containers/docker/images/{id} — remove a Docker image
@@ -10384,15 +10401,21 @@ pub async fn docker_migrate(
 /// GET /api/containers/lxc — list all LXC containers
 pub async fn lxc_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let containers = containers::lxc_list_all_cached();
-    HttpResponse::Ok().json(containers)
+    // Offload the blocking lxc-ls/lxc-info subprocesses (on a cache miss) to the
+    // blocking pool — see docker_list for why running it inline blanked the list.
+    match web::block(containers::lxc_list_all_cached).await {
+        Ok(containers) => HttpResponse::Ok().json(containers),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "lxc list unavailable"})),
+    }
 }
 
 /// GET /api/containers/lxc/stats — LXC container stats
 pub async fn lxc_stats(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let stats = containers::lxc_stats_cached();
-    HttpResponse::Ok().json(stats)
+    match web::block(containers::lxc_stats_cached).await {
+        Ok(stats) => HttpResponse::Ok().json(stats),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "lxc stats unavailable"})),
+    }
 }
 
 /// GET /api/containers/lxc/{name}/logs — get LXC container logs
