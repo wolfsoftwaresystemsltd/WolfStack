@@ -5970,14 +5970,14 @@ function renderVms(vms) {
                             ? `<button class="btn btn-sm" style="${disabledStyle}color:#3b82f6;" disabled title="${stopReason('migrating')}"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>`
                             : `<button class="btn btn-sm" style="${baseStyle}color:#3b82f6;" onclick="migrateVm('${vm.name}')" title="Migrate to another node"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>`;
                         const diskMigrateBtn = vm.running
-                            ? `<button class="btn btn-sm" style="${disabledStyle}color:#06b6d4;" disabled title="Stop the VM first — moving a live disk would corrupt it"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>`
-                            : `<button class="btn btn-sm" style="${baseStyle}color:#06b6d4;" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>`;
+                            ? `<button class="btn btn-sm" style="${disabledStyle}color:#06b6d4;" disabled title="Stop the VM first — moving a live disk would corrupt it"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span></button>`
+                            : `<button class="btn btn-sm" style="${baseStyle}color:#06b6d4;" onclick="migrateVmDiskStorage('${vm.name}')" title="Move disk to different storage (same node)"><span class="ws-icon-clean-wrap" data-icon="hard-drive"></span></button>`;
                         const deleteBtn = vm.running
                             ? `<button class="btn btn-sm" style="${disabledStyle}color:#ef4444;" disabled title="Stop the VM before deleting"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>`
                             : `<button class="btn btn-sm" style="${baseStyle}color:#ef4444;" onclick="deleteVm('${vm.name}')" title="Delete"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>`;
                         // Power controls — only one of start/stop is sensible at a time.
                         const powerBtn = vm.running
-                            ? `<button class="btn btn-sm" style="${baseStyle}color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
+                            ? `<button class="btn btn-sm" style="${baseStyle}color:#ef4444;" onclick="vmAction('${vm.name}', 'stop', this)" title="Stop (graceful ACPI shutdown)"><span class="ws-icon-clean-wrap" data-icon="power"></span></button>
                                <button class="btn btn-sm" style="${baseStyle}color:#b91c1c;" onclick="vmForceStopConfirm('${vm.name}', this)" title="Force Stop (power off immediately)"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>
                                <button class="btn btn-sm" style="${vm.paused ? disabledStyle : baseStyle}" ${vm.paused ? 'disabled' : `onclick="vmAction('${vm.name}', 'restart', this)"`} title="Restart (reboot the guest)"><span class="ws-icon-clean-wrap" data-icon="restart"></span></button>
                                ${vm.paused
@@ -5987,9 +5987,9 @@ function renderVms(vms) {
                         // Console / VNC — only meaningful when running.
                         const vncBtn = vm.running
                             ? (vm.vmid
-                                ? `<button class="btn btn-sm" style="${baseStyle}" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>`
+                                ? `<button class="btn btn-sm" style="${baseStyle}" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>`
                                 : ((vm.vnc_ws_port || vm.vnc_port)
-                                    ? `<button class="btn btn-sm" style="${baseStyle}" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>`
+                                    ? `<button class="btn btn-sm" style="${baseStyle}" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>`
                                     : ''))
                             : '';
                         const serialBtn = vm.running
@@ -38269,7 +38269,7 @@ async function loadFleetContainers() {
             h += '<button class="btn btn-sm" style="' + BS + 'color:#ef4444;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'stop\',this)" title="Stop"><span class="ws-icon-clean-wrap" data-icon="stop"></span></button>';
             var fleetVncPort = vm.vnc_ws_port || vm.vnc_port;
             if (fleetVncPort) {
-                h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + fleetVncPort + ')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>';
+                h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetOpenVnc(\'' + nid + '\',\'' + eName + '\',' + fleetVncPort + ')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>';
             }
         } else {
             h += '<button class="btn btn-sm" style="' + BS + 'color:#22c55e;" onclick="fleetAction(\'' + nid + '\',\'vm\',\'' + eName + '\',\'start\',this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>';

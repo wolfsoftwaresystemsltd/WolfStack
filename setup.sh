@@ -2155,6 +2155,22 @@ if [ ! -f "/etc/systemd/system/wolfstack.service" ]; then
     AGENT_FLAG=""
     [ "$AGENT_MODE" = true ] && AGENT_FLAG=" --agent"
 
+    # ports.json is the persistent source of truth for the api / inter_node /
+    # status ports (the Node Ports settings panel writes it). We no longer bake
+    # --port into the unit below: a baked --port silently overrode ports.json
+    # and pinned inter_node to api+1 (the 8554/go2rtc clash). On a fresh install
+    # seed ports.json from the chosen port so a non-default install port is kept
+    # without a baked --port. Only write it when absent, so we never clobber an
+    # operator's UI-set ports. (This block only runs on fresh installs — the
+    # whole systemd-service section is guarded by "unit does not exist yet";
+    # existing installs keep their unit and are reconciled at startup instead.)
+    if [ ! -f /etc/wolfstack/ports.json ]; then
+        mkdir -p /etc/wolfstack
+        printf '{\n  "api": %s,\n  "inter_node": %s,\n  "status": 8550\n}\n' \
+            "$WS_PORT" "$((WS_PORT + 1))" > /etc/wolfstack/ports.json
+        echo "  ✔ Wrote /etc/wolfstack/ports.json (api=$WS_PORT, inter_node=$((WS_PORT + 1)), status=8550) — change ports in the Node Ports panel"
+    fi
+
     cat > /etc/systemd/system/wolfstack.service <<EOF
 [Unit]
 Description=WolfStack - Server Management Platform
@@ -2163,7 +2179,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/wolfstack --port $WS_PORT --bind $WS_BIND${AGENT_FLAG}
+ExecStart=/usr/local/bin/wolfstack --bind $WS_BIND${AGENT_FLAG}
 WorkingDirectory=/opt/wolfstack
 Restart=on-failure
 RestartSec=5

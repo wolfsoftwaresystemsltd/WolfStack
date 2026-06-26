@@ -20,7 +20,7 @@
 ## Ports Configuration
 - Per-node ports persisted to /etc/wolfstack/ports.json as `{ api, inter_node, status }`
 - UI: sidebar → gear icon on a node → Node Ports panel (local node only)
-- CLI `--port N` still overrides the API port and pulls inter_node = N+1 with it
+- ports.json is the source of truth — the Node Ports panel writes it and it wins. CLI `--port N` only overrides the API port (pulling inter_node = N+1) for a genuine **manual** shell launch (`wolfstack --port N`). When WolfStack runs as the systemd service, a `--port` baked into the unit by an old setup.sh is reconciled into ports.json once (preserving any custom/UI value) and then ignored, so the UI takes effect. New installs no longer bake `--port` into the unit.
 - Status port auto-fallback: if the configured status port is taken on boot, WolfStack scans 8550-8599 for a free one, binds there, persists the new port to ports.json, warns in logs
 - API and inter_node ports hard-fail if taken (silent move would break peer polling)
 - Common status-port collision: WolfDisk also defaults to 8550; auto-fallback moves WolfStack's status page aside

@@ -413,22 +413,41 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // Load persistent port config; CLI --port still overrides the API port
-    // for one-off launches and pulls inter_node along with it (api+1) so the
-    // pair stays coherent — matches the previous behaviour where inter_node
-    // was always derived from --port. inter_node here is just the *preferred*
-    // value — the actual bind (only on self-signed installs in v23.12+) goes
-    // through ports::reserve_inter_node_port and may shift if 8554 is taken
-    // by Frigate/MediaMTX/etc.
+    // ports.json is the persistent source of truth (the Node Ports UI writes
+    // it). A CLI --port is a genuine one-off override ONLY for manual shell
+    // launches. setup.sh historically baked --port into the systemd unit, which
+    // silently overrode ports.json for BOTH the api port and inter_node (forced
+    // to api+1) — making the Node Ports panel a no-op and pinning inter_node to
+    // api+1 (the 8554/go2rtc clash). When we are the systemd service we detect
+    // that baked flag (INVOCATION_ID is set only for systemd units), reconcile
+    // it into ports.json once — preserving any custom/UI value, never moving the
+    // port the node currently runs on — and then ignore it so ports.json wins.
+    // inter_node here is just the *preferred* value — the actual bind (only on
+    // self-signed installs in v23.12+) goes through ports::reserve_inter_node_port
+    // and may shift if it's taken by Frigate/MediaMTX/etc.
+    // INVOCATION_ID is set by systemd for service processes only, so it tells
+    // a baked-unit launch apart from a manual `wolfstack --port N` shell run.
+    // (Caveat: `sudo -E` preserves the caller's environment — strip
+    // INVOCATION_ID before a manual test run if the shell inherited one.)
+    let running_as_systemd_service = std::env::var_os("INVOCATION_ID").is_some();
     let port_cfg = ports::PortConfig::load();
-    let api_port: u16 = cli.port.unwrap_or(port_cfg.api);
-    let inter_node_pref: u16 = match cli.port {
-        Some(p) => p + 1,
-        None => port_cfg.inter_node,
-    };
+    let status_preferred = port_cfg.status; // captured before port_cfg is moved below
+    let resolved = ports::resolve_api_ports(cli.port, running_as_systemd_service, port_cfg);
+    if let Some(cfg_to_save) = &resolved.persist {
+        match cfg_to_save.save() {
+            Ok(()) => info!(
+                "Reconciled systemd unit --port into ports.json (api={}, inter_node={}); \
+                 ports.json is now authoritative — change ports via the Node Ports panel",
+                resolved.api, resolved.inter_node_pref
+            ),
+            Err(e) => warn!("failed to persist reconciled ports.json: {}", e),
+        }
+    }
+    let api_port: u16 = resolved.api;
+    let inter_node_pref: u16 = resolved.inter_node_pref;
     // Status-port auto-fallback: try the configured port, scan upward if taken.
     // Persists the chosen port back to ports.json so restarts are stable.
-    let status_port: u16 = ports::reserve_status_port(&cli.bind, port_cfg.status, 8550..=8599);
+    let status_port: u16 = ports::reserve_status_port(&cli.bind, status_preferred, 8550..=8599);
 
     // Lock down /etc/wolfstack and known sensitive files. Pre-v18.7.27
     // installs left cluster-secret, nodes.json (containing PVE tokens),

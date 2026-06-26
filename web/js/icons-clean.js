@@ -120,6 +120,7 @@ const LUCIDE_NAME_MAP = {
     // Container action buttons (start / stop / restart / etc.)
     'play':         'play',
     'stop':         'square',
+    'power':        'power',
     'restart':      'rotate-ccw',
     'pause':        'pause',
     'snowflake':    'snowflake',
