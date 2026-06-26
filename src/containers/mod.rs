@@ -3508,6 +3508,82 @@ fn primary_nic_edit_action(
     }
 }
 
+/// Self-heal a native LXC's in-container network config from its LXC config,
+/// called just before `lxc-start`. A container created before WolfStack wrote
+/// any in-container config (≤ v24.57.31) has the static IP in
+/// `lxc.net.0.ipv4.address` but its image's default DHCP `eth0.network` /
+/// interfaces inside — so it boots DHCP forever (wabil 2026-06-26, fresh trixie
+/// LXC). Reconciling on every start fixes those existing containers without a
+/// re-create, and keeps new ones correct too. Scoped to a static IPv4 on eth0's
+/// real user bridge; DHCP, WolfNet (`lxcbr0` or a `.wolfnet/ip` marker), and
+/// host mode are left alone. Idempotent.
+fn reconcile_bridge_static_on_start(container: &str) {
+    let path = format!("{}/{}/config", lxc_base_dir(container), container);
+    let cfg = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let (mut link, mut ipv4, mut gw) = (String::new(), String::new(), String::new());
+    for line in cfg.lines() {
+        let Some((k, v)) = line.trim().split_once('=') else { continue };
+        match k.trim() {
+            "lxc.net.0.link" => link = v.trim().to_string(),
+            "lxc.net.0.ipv4.address" => ipv4 = v.trim().to_string(),
+            "lxc.net.0.ipv4.gateway" => gw = v.trim().to_string(),
+            _ => {}
+        }
+    }
+    // Only a static IPv4 on a real user bridge; never WolfNet / lxcbr0 / DHCP.
+    if link.is_empty() || link == "lxcbr0" || !is_ipv4_cidr(&ipv4) {
+        return;
+    }
+    if lxc_get_wolfnet_ip(container).is_some() {
+        return;
+    }
+    let gw_opt = if gw.is_empty() { None } else { Some(gw.as_str()) };
+    if let Err(e) = write_lxc_bridge_static_config(container, &ipv4, gw_opt) {
+        warn!("{}: bridge static in-container config not reconciled on start: {}", container, e);
+    }
+}
+
+/// Parse a Proxmox `net0:` value (e.g. `name=eth0,bridge=br0,ip=1.2.3.4/24,gw=1.2.3.1`)
+/// into `(bridge, ip, gw)`; missing fields come back empty.
+fn pct_net0_fields(net0: &str) -> (String, String, String) {
+    let (mut bridge, mut ip, mut gw) = (String::new(), String::new(), String::new());
+    for part in net0.split(',') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("bridge=") { bridge = v.to_string(); }
+        else if let Some(v) = part.strip_prefix("ip=") { ip = v.to_string(); }
+        else if let Some(v) = part.strip_prefix("gw=") { gw = v.to_string(); }
+    }
+    (bridge, ip, gw)
+}
+
+/// Proxmox counterpart of [`reconcile_bridge_static_on_start`]: parse the CT's
+/// `net0:` line in `/etc/pve/lxc/<vmid>.conf` and, for a static IP on a real
+/// user bridge, write the in-container config via `pct mount` before `pct start`
+/// (the CT is stopped here, so the mount succeeds). Self-heals Proxmox CTs
+/// created before WolfStack wrote in-container config.
+fn reconcile_pct_bridge_static_on_start(vmid: &str) {
+    let path = format!("/etc/pve/lxc/{}.conf", vmid);
+    let cfg = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let Some(net0) = cfg.lines().find_map(|l| l.trim().strip_prefix("net0:")) else { return };
+    let (bridge, ip, gw) = pct_net0_fields(net0);
+    if bridge.is_empty() || bridge == "lxcbr0" || !is_ipv4_cidr(&ip) {
+        return;
+    }
+    if lxc_get_wolfnet_ip(vmid).is_some() {
+        return;
+    }
+    let gw_opt = if gw.is_empty() { None } else { Some(gw.as_str()) };
+    if let Err(e) = pct_write_bridge_netconfig(vmid, Some(&ip), gw_opt) {
+        warn!("{}: pct bridge static config not reconciled on start: {}", vmid, e);
+    }
+}
+
 /// Native edit path: push the primary NIC's static IP (or a revert to DHCP)
 /// into the container's own network config by writing its rootfs directly.
 /// Returns true when it wrote a config (so the caller surfaces a restart hint).
@@ -5958,6 +6034,9 @@ pub fn lxc_start(container: &str) -> Result<String, String> {
     // can actually start.
     heal_lxc_apparmor_config(container);
     if is_proxmox() {
+        // Self-heal the in-container static config before boot (CT still stopped,
+        // so pct mount works) — same rationale as the native path below.
+        reconcile_pct_bridge_static_on_start(container);
         // pct start waits internally — its own exit code is authoritative.
         let msg = run_lxc_cmd(&["pct", "start", container])?;
         lxc_apply_wolfnet(container);
@@ -5973,6 +6052,12 @@ pub fn lxc_start(container: &str) -> Result<String, String> {
     } else {
         Vec::new()
     };
+
+    // Self-heal the in-container static-IP config from the LXC config BEFORE the
+    // container boots, so its init comes up on the configured address instead of
+    // DHCP'ing over it. Fixes containers created before WolfStack wrote any
+    // in-container config (wabil 2026-06-26). No-op for DHCP / WolfNet / host.
+    reconcile_bridge_static_on_start(container);
 
     // Kick off the start. lxc-start exits 0 once the daemon has forked.
     {
@@ -12734,6 +12819,26 @@ mod pct_net0_tests {
         assert_eq!(act(&dhcp, &cur, false), Some(A::Dhcp));
         // WolfNet active → always None even on a change.
         assert_eq!(act(&newer, &cur, true), None);
+    }
+
+    #[test]
+    fn pct_net0_fields_extracts_bridge_ip_gw() {
+        use super::pct_net0_fields as p;
+        // Full static net0 line.
+        assert_eq!(
+            p("name=eth0,bridge=br0,hwaddr=AA:BB:CC:DD:EE:FF,ip=192.168.0.99/24,gw=192.168.0.1,type=veth"),
+            ("br0".into(), "192.168.0.99/24".into(), "192.168.0.1".into())
+        );
+        // DHCP line → ip is the literal "dhcp" (caller's is_ipv4_cidr rejects it).
+        assert_eq!(
+            p("name=eth0,bridge=vmbr0,ip=dhcp"),
+            ("vmbr0".into(), "dhcp".into(), String::new())
+        );
+        // No gateway.
+        assert_eq!(
+            p("bridge=br0,ip=10.0.0.5/16"),
+            ("br0".into(), "10.0.0.5/16".into(), String::new())
+        );
     }
 
     #[test]
