@@ -3531,6 +3531,38 @@ pub fn detect_lan_ip() -> Option<String> {
     None
 }
 
+/// ALL non-loopback private IPv4 addresses on real interfaces (same interface
+/// exclusions as `detect_lan_ip`), sorted for a stable order. `detect_lan_ip`
+/// returns only the FIRST private IP, which on a Proxmox host with many bridges
+/// (vmbr*, fwbr*, tap*, …) is not reliably the cluster-LAN one and can vary
+/// between calls — that flapped the cluster-sync's chosen WolfNet endpoint
+/// between the LAN IP and the public IP. Callers that know which subnet they
+/// want should enumerate these and pick the match deterministically
+/// (wabil 2026-06-27).
+pub fn local_lan_ips() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for iface in &list_interfaces() {
+        if iface.name == "lo" || iface.name.starts_with("docker")
+            || iface.name.starts_with("br-") || iface.name.starts_with("veth")
+            || iface.name.starts_with("wn") || iface.name.starts_with("wolfnet")
+            || iface.name.starts_with("virbr")
+        {
+            continue;
+        }
+        for addr in &iface.addresses {
+            if addr.family == "inet"
+                && let Ok(ip) = addr.address.parse::<std::net::Ipv4Addr>()
+                && is_private_ip(ip) && !ip.is_loopback()
+                && !out.contains(&addr.address)
+            {
+                out.push(addr.address.clone());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Detect public (non-RFC1918) IPs on all interfaces
 pub fn detect_public_ips() -> Vec<String> {
     let mut public_ips = Vec::new();

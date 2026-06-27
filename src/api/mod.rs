@@ -5183,8 +5183,14 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                     let effective_addr = if addr_is_private_lan {
                         node.address.clone()
                     } else {
-                        networking::detect_lan_ip()
-                            .filter(|lan| lan_prefix(lan)
+                        // Pick the local IP whose /24 matches a cluster member,
+                        // chosen from ALL local private IPs (sorted) — NOT
+                        // detect_lan_ip()'s "first private", which on a Proxmox
+                        // host with many bridges lands on a non-cluster
+                        // interface and flapped this endpoint between the LAN IP
+                        // and the public IP run-to-run (wabil 2026-06-27).
+                        networking::local_lan_ips().into_iter()
+                            .find(|lan| lan_prefix(lan)
                                 .is_some_and(|p| cluster_lan_prefixes.contains(&p)))
                             .or_else(|| node.public_ip.clone())
                             .unwrap_or_else(|| node.address.clone())
