@@ -4138,27 +4138,20 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
             {
                 if resp.status().is_success() {
                     if let Ok(data) = resp.json::<serde_json::Value>().await {
-                        // NOTE: `wolfnet_ips` is read from the TOP level on
-                        // purpose — `/api/agent/status` actually returns an
-                        // externally-tagged AgentMessage ({"StatusReport": {…}}),
-                        // so this lookup has always returned None and the
-                        // wolfnet-IP conflict check below has been dormant since
-                        // it was written. We deliberately leave that as-is here:
-                        // activating it would run BEFORE the reimage
-                        // reconciliation and could reject a returning node whose
-                        // static WolfNet IP still matches its own stale entry's
-                        // cached route — breaking the exact rejoin workflow #3
-                        // supports. (Flagged separately; needs its own fix that
-                        // excludes the returning node's own IPs.)
-                        if let Some(ips) = data.get("wolfnet_ips").and_then(|v| v.as_array()) {
+                        // `/api/agent/status` returns an externally-tagged
+                        // AgentMessage — every field lives under "StatusReport"
+                        // ({"StatusReport": {…}}), NOT at the top level. Reach
+                        // into that envelope (raw-object fallback should the
+                        // format ever change). Reading the top level returned
+                        // None for everything, which also left the wolfnet-IP
+                        // conflict check below dormant (AstroMando #3,
+                        // 2026-06-27).
+                        let sr = data.get("StatusReport").unwrap_or(&data);
+                        if let Some(ips) = sr.get("wolfnet_ips").and_then(|v| v.as_array()) {
                             remote_wolfnet_ips = ips.iter()
                                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                                 .collect();
                         }
-                        // For identity reconciliation we DO need the real
-                        // values, so reach into the StatusReport envelope (with
-                        // a raw-object fallback should the format ever change).
-                        let sr = data.get("StatusReport").unwrap_or(&data);
                         if remote_self_id.is_empty()
                             && let Some(s) = sr.get("node_id").and_then(|v| v.as_str())
                         {
@@ -4178,21 +4171,31 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
     }
 
     if !remote_wolfnet_ips.is_empty() {
-        // Collect all WolfNet IPs known in this cluster
-        let local_ips = containers::wolfnet_used_ips();
-        let route_ips: Vec<String> = containers::WOLFNET_ROUTES.lock().unwrap()
-            .keys().cloned().collect();
-
-        let mut conflicts = Vec::new();
-        for ip in &remote_wolfnet_ips {
-            if local_ips.contains(ip) || route_ips.contains(ip) {
-                conflicts.push(ip.clone());
-            }
-        }
+        // WolfNet-IP conflict check. Reject only when an IP the joining node
+        // reports is already routed to a DIFFERENT node. The cluster-wide
+        // IP→owner route cache is the authoritative map; an IP it attributes
+        // to the joining node's own offline stale entries (a reimaged node
+        // reusing its static IP) is its own footprint, not a conflict, and an
+        // IP with no known owner is left alone (fail-open). This narrowness is
+        // deliberate: the check was dormant for ages (wrong JSON envelope), so
+        // anything short of a CONFIRMED foreign owner must not start rejecting
+        // joins — least of all the reimage rejoin that #3 exists to support.
+        let route_owner = containers::WOLFNET_ROUTES.lock().unwrap().clone();
+        let conflict_cluster = cluster_name.clone()
+            .unwrap_or_else(|| "WolfStack".to_string());
+        let own_stale_addrs: std::collections::HashSet<String> = state.cluster.get_all_nodes()
+            .into_iter()
+            .filter(|n| !n.is_self && !n.online
+                && node_is_returning_identity(n, &remote_self_id, &remote_hostname, &conflict_cluster))
+            .map(|n| n.address)
+            .collect();
+        let conflicts = wolfnet_ip_conflicts(
+            &remote_wolfnet_ips, &route_owner, &own_stale_addrs, &body.address,
+        );
         if !conflicts.is_empty() {
             return HttpResponse::Conflict().json(serde_json::json!({
                 "error": format!(
-                    "Cannot join node: WolfNet IP conflict — {} is already in use in this cluster. \
+                    "Cannot join node: WolfNet IP conflict — {} is already in use by another node in this cluster. \
                      Change the node's IP in /etc/wolfnet/config.toml and restart wolfnet before joining.",
                     conflicts.join(", ")
                 )
@@ -4966,6 +4969,34 @@ fn node_is_returning_identity(n: &crate::agent::Node, self_id: &str, hostname: &
     let sid_match = !self_id.is_empty() && n.self_id.as_deref() == Some(self_id);
     let host_match = !hostname.is_empty() && hostnames_same_node(&n.hostname, hostname);
     sid_match || host_match
+}
+
+/// Of the WolfNet IPs a joining node reports, return the ones that GENUINELY
+/// conflict — already routed to a DIFFERENT node. `route_owner` is the
+/// cluster-wide IP→owning-address map (WOLFNET_ROUTES). `own_stale_addrs` are
+/// the addresses of the joining node's own offline stale entries (a reimaged
+/// node reusing its static IP must not collide with its pre-reimage self), and
+/// `joining_addr` is the address being added. An IP with NO known owner is
+/// left alone — fail-open, because this check was historically dormant (it read
+/// the wrong JSON envelope) and must never start rejecting a legitimate join on
+/// ambiguity (AstroMando #3 follow-up, 2026-06-27).
+fn wolfnet_ip_conflicts(
+    remote_ips: &[String],
+    route_owner: &std::collections::HashMap<String, String>,
+    own_stale_addrs: &std::collections::HashSet<String>,
+    joining_addr: &str,
+) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    for ip in remote_ips {
+        let bare = ip.split('/').next().unwrap_or(ip);
+        if let Some(owner) = route_owner.get(bare)
+            && !own_stale_addrs.contains(owner)
+            && owner != joining_addr
+        {
+            conflicts.push(bare.to_string());
+        }
+    }
+    conflicts
 }
 
 pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetSyncRequest>) -> HttpResponse {
@@ -39319,6 +39350,40 @@ mod external_url_tests {
         // Empty inbound identity never matches (a failed status fetch must not
         // collapse anything).
         assert!(!node_is_returning_identity(&stale, "", "", "WolfStack"));
+    }
+
+    #[test]
+    fn wolfnet_ip_conflict_only_flags_confirmed_foreign_owners() {
+        use super::wolfnet_ip_conflicts;
+        use std::collections::{HashMap, HashSet};
+
+        let mut routes: HashMap<String, String> = HashMap::new();
+        routes.insert("10.10.10.5".into(), "10.0.0.7".into());   // owned by a peer
+        routes.insert("10.10.10.9".into(), "10.0.0.42".into());  // owned by the stale self
+        let stale: HashSet<String> = ["10.0.0.42".to_string()].into_iter().collect();
+
+        // IP owned by a DIFFERENT node → genuine conflict.
+        let c = wolfnet_ip_conflicts(&["10.10.10.5".into()], &routes, &stale, "10.0.0.99");
+        assert_eq!(c, vec!["10.10.10.5".to_string()]);
+
+        // IP owned by the joining node's OWN stale (reimaged) entry → not a
+        // conflict (this is the rejoin we must not reject).
+        let c = wolfnet_ip_conflicts(&["10.10.10.9".into()], &routes, &stale, "10.0.0.99");
+        assert!(c.is_empty());
+
+        // IP owned by the joining node's own (new) address → not a conflict.
+        let mut r2 = routes.clone();
+        r2.insert("10.10.10.1".into(), "10.0.0.99".into());
+        let c = wolfnet_ip_conflicts(&["10.10.10.1".into()], &r2, &stale, "10.0.0.99");
+        assert!(c.is_empty());
+
+        // Unknown owner (route cache has no entry) → fail open, never reject.
+        let c = wolfnet_ip_conflicts(&["10.10.10.250".into()], &routes, &stale, "10.0.0.99");
+        assert!(c.is_empty());
+
+        // CIDR suffix on the reported IP is stripped before lookup.
+        let c = wolfnet_ip_conflicts(&["10.10.10.5/24".into()], &routes, &stale, "10.0.0.99");
+        assert_eq!(c, vec!["10.10.10.5".to_string()]);
     }
 }
 
