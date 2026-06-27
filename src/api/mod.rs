@@ -6756,17 +6756,18 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
 
     // Fallback: first request before cache is populated (only happens once at startup)
     let st = state.clone().into_inner();
-    let (metrics, components, docker_count, lxc_count, vm_count, has_docker, has_lxc, has_kvm) =
+    let (metrics, components, docker_count, lxc_count, vm_count, compose_count, has_docker, has_lxc, has_kvm) =
         tokio::task::spawn_blocking(move || {
             let m = st.monitor.lock().unwrap().collect();
             let c = installer::get_all_status();
             let dc = containers::docker_list_all().len() as u32;
             let lc = containers::lxc_list_all().len() as u32;
             let vc = st.vms.lock().unwrap().list_vms().len() as u32;
+            let cmc = compose_stack_count();
             let hd = containers::docker_status().installed;
             let hl = containers::lxc_status().installed;
             let hk = containers::kvm_installed();
-            (m, c, dc, lc, vc, hd, hl, hk)
+            (m, c, dc, lc, vc, cmc, hd, hl, hk)
         }).await.unwrap();
     let hostname = metrics.hostname.clone();
     let public_ip = state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.public_ip);
@@ -6778,6 +6779,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         docker_count,
         lxc_count,
         vm_count,
+        compose_count,
         public_ip,
         known_nodes: state.cluster.get_all_nodes(),
         deleted_ids: state.cluster.get_deleted_ids(),
@@ -10755,6 +10757,7 @@ fn resolve_target_node(
         docker_count: 0,
         lxc_count: 0,
         vm_count: 0,
+        compose_count: 0,
         public_ip: None,
         pve_token: None,
         pve_fingerprint: None,
@@ -31511,6 +31514,113 @@ fn require_safe_compose_name(name: &str) -> Result<(), HttpResponse> {
     }
 }
 
+/// Count compose stacks (directories under the compose root that hold a compose
+/// file). Cheap dir scan; surfaced as a per-node count in the nav alongside
+/// Docker/LXC/VM so an operator sees at a glance how many stacks a node has
+/// (Gary/KO4BSR 2026-06-27).
+pub(crate) fn compose_stack_count() -> u32 {
+    let root = compose_root_dir();
+    let mut n = 0u32;
+    if let Ok(entries) = std::fs::read_dir(std::path::Path::new(&root)) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() && compose_file_in(&p).exists() { n += 1; }
+        }
+    }
+    n
+}
+
+/// The image references a stack resolves to (`docker compose config --images`).
+fn compose_config_images(dir: &std::path::Path, compose_file: &std::path::Path) -> Vec<String> {
+    match Command::new("docker")
+        .args(["compose", "-f", &compose_file.to_string_lossy(), "config", "--images"])
+        .envs(compose_secrets_env())
+        .current_dir(dir)
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The local image ID for a reference, or "" when the image isn't present
+/// locally. Used to deterministically tell which images a pull actually changed
+/// (parsing pull progress text can't distinguish "downloaded" from "up to date").
+fn docker_image_id(image: &str) -> String {
+    Command::new("docker")
+        .args(["image", "inspect", image, "-f", "{{.Id}}"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Snapshot of (image ref → local image ID) for every image a stack uses.
+fn compose_image_id_map(dir: &std::path::Path, compose_file: &std::path::Path)
+    -> Vec<(String, String)>
+{
+    compose_config_images(dir, compose_file)
+        .into_iter()
+        .map(|img| { let id = docker_image_id(&img); (img, id) })
+        .collect()
+}
+
+/// Extract the names of `${VAR}`s that `docker compose config` reports as
+/// undefined. Compose logs one warning per missing variable on stderr, e.g.
+///   level=warning msg="The \"FOO\" variable is not set. Defaulting to a blank string."
+/// We pull `FOO` out of each such line (quotes may be backslash-escaped by the
+/// logger, so we strip a trailing quote/backslash before reading the
+/// identifier). De-duplicated, order preserved (wabil 2026-06-26).
+fn parse_undefined_compose_vars(stderr: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in stderr.lines() {
+        let Some(idx) = line.find("variable is not set") else { continue };
+        let head = line[..idx].trim_end();
+        // Drop the closing quote (and any escaping backslash) after the name.
+        let head = head.trim_end_matches('"').trim_end_matches('\\');
+        let name: String = head.chars().rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect::<Vec<_>>().into_iter().rev().collect();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Per-container final action parsed from `docker compose up -d` output, keeping
+/// only the most significant state per container so the UI can report what
+/// actually changed: lines look like " Container app-web-1  Started ". Created /
+/// Recreated / Started mean the container came up fresh (e.g. a pulled image was
+/// applied); Running means it was left untouched. Transitional lines (Creating,
+/// Starting, …) are dropped (wabil 2026-06-26).
+fn parse_compose_container_actions(output: &str) -> Vec<(String, String)> {
+    fn rank(a: &str) -> u8 {
+        match a {
+            "Recreated" => 5,
+            "Created" => 4,
+            "Started" | "Restarted" => 3,
+            "Running" => 1,
+            _ => 0, // transitional / unknown — ignored
+        }
+    }
+    let mut best: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for line in output.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("Container ") else { continue };
+        let rest = rest.trim();
+        let Some(pos) = rest.rfind(char::is_whitespace) else { continue };
+        let name = rest[..pos].trim().to_string();
+        let action = rest[pos..].trim().to_string();
+        if rank(&action) == 0 || name.is_empty() { continue; }
+        let replace = best.get(&name).map(|cur| rank(&action) > rank(cur)).unwrap_or(true);
+        if replace { best.insert(name, action); }
+    }
+    best.into_iter().collect()
+}
+
 /// GET /api/compose/stacks — list all compose projects
 async fn compose_list_stacks(
     req: HttpRequest,
@@ -31750,8 +31860,37 @@ async fn compose_up(
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let combined = format!("{}{}", stdout, stderr);
             if out.status.success() {
-                HttpResponse::Ok().json(serde_json::json!({ "message": "Stack started", "output": format!("{}{}", stdout, stderr) }))
+                // Report which containers came up fresh (Created/Recreated/
+                // Started — i.e. a pulled image was applied) vs left running
+                // unchanged, so the operator sees what `up` actually did
+                // (wabil 2026-06-26).
+                let actions = parse_compose_container_actions(&combined);
+                let started: Vec<&str> = actions.iter()
+                    .filter(|(_, a)| a != "Running")
+                    .map(|(c, _)| c.as_str()).collect();
+                let unchanged = actions.iter().filter(|(_, a)| a == "Running").count();
+                let message = if actions.is_empty() {
+                    "Stack started".to_string()
+                } else if started.is_empty() {
+                    format!("Stack up to date — {} container{} already running",
+                        unchanged, if unchanged == 1 { "" } else { "s" })
+                } else {
+                    format!("Started {} container{} with the latest image{}",
+                        started.len(), if started.len() == 1 { "" } else { "s" },
+                        if unchanged > 0 { format!("; {} unchanged", unchanged) } else { String::new() })
+                };
+                let actions_json: Vec<serde_json::Value> = actions.iter()
+                    .map(|(c, a)| serde_json::json!({ "container": c, "action": a }))
+                    .collect();
+                HttpResponse::Ok().json(serde_json::json!({
+                    "message": message,
+                    "output": combined,
+                    "actions": actions_json,
+                    "started": started,
+                    "unchanged": unchanged,
+                }))
             } else {
                 HttpResponse::BadRequest().json(serde_json::json!({ "error": stderr, "output": stdout }))
             }
@@ -31811,6 +31950,12 @@ async fn compose_pull(
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Stack not found" }));
     }
 
+    // Snapshot image IDs before the pull so we can report which images actually
+    // changed — pull progress text can't reliably distinguish a fresh download
+    // from "already up to date" (wabil 2026-06-26).
+    let before: std::collections::HashMap<String, String> =
+        compose_image_id_map(&dir, &compose_file).into_iter().collect();
+
     let output = Command::new("docker")
         .args(["compose", "-f", &compose_file.to_string_lossy(), "pull"])
         .envs(compose_secrets_env())
@@ -31821,7 +31966,30 @@ async fn compose_pull(
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             if out.status.success() {
-                HttpResponse::Ok().json(serde_json::json!({ "message": "Images pulled", "output": stderr }))
+                // Diff image IDs: a changed (or newly-present) ID means that
+                // image was genuinely updated by this pull.
+                let after = compose_image_id_map(&dir, &compose_file);
+                let updated: Vec<serde_json::Value> = after.iter()
+                    .filter(|(img, new_id)| {
+                        !new_id.is_empty() && before.get(img).map(|b| b != new_id).unwrap_or(true)
+                    })
+                    .map(|(img, _)| serde_json::json!({ "image": img }))
+                    .collect();
+                let updated_count = updated.len();
+                let total = after.len();
+                let message = if updated_count == 0 {
+                    "All images already up to date".to_string()
+                } else {
+                    format!("Pulled {} updated image{}", updated_count,
+                        if updated_count == 1 { "" } else { "s" })
+                };
+                HttpResponse::Ok().json(serde_json::json!({
+                    "message": message,
+                    "output": stderr,
+                    "updated": updated,
+                    "updated_count": updated_count,
+                    "total_images": total,
+                }))
             } else {
                 HttpResponse::BadRequest().json(serde_json::json!({ "error": stderr }))
             }
@@ -31975,11 +32143,23 @@ async fn compose_validate(
 
     match output {
         Ok(out) => {
+            // `config` emits a warning per undefined ${VAR} on stderr even when
+            // the YAML itself is valid (exit 0). Surface those so Validate also
+            // catches "you referenced a variable that isn't set in .env / the
+            // environment" — not just YAML syntax (wabil 2026-06-26).
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let missing_vars = parse_undefined_compose_vars(&stderr);
             if out.status.success() {
-                HttpResponse::Ok().json(serde_json::json!({ "valid": true }))
+                HttpResponse::Ok().json(serde_json::json!({
+                    "valid": true,
+                    "missing_vars": missing_vars,
+                }))
             } else {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                HttpResponse::Ok().json(serde_json::json!({ "valid": false, "error": stderr }))
+                HttpResponse::Ok().json(serde_json::json!({
+                    "valid": false,
+                    "error": stderr,
+                    "missing_vars": missing_vars,
+                }))
             }
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
@@ -39155,6 +39335,56 @@ pub fn configure_statuspage_only(cfg: &mut web::ServiceConfig) {
         .route("/", web::get().to(statuspage_public_index))
         .route("/status", web::get().to(statuspage_public_index))
         .route("/status/{slug}", web::get().to(statuspage_public_page_dedicated));
+}
+
+#[cfg(test)]
+mod compose_parse_tests {
+    use super::{parse_undefined_compose_vars, parse_compose_container_actions};
+
+    #[test]
+    fn undefined_vars_extracted_from_compose_config_warnings() {
+        // The real logger escapes the inner quotes (msg="The \"FOO\" ...").
+        let stderr = r#"time="2026-06-27T08:20:18+01:00" level=warning msg="The \"MY_UNDEFINED_VAR\" variable is not set. Defaulting to a blank string."
+time="2026-06-27T08:20:18+01:00" level=warning msg="The \"DB_PASSWORD\" variable is not set. Defaulting to a blank string."
+some unrelated line
+time="..." level=warning msg="The \"MY_UNDEFINED_VAR\" variable is not set. Defaulting to a blank string.""#;
+        let vars = parse_undefined_compose_vars(stderr);
+        assert_eq!(vars, vec!["MY_UNDEFINED_VAR".to_string(), "DB_PASSWORD".to_string()],
+            "extracts each name once, order preserved, dedup");
+        // Unescaped variant (in case a logger doesn't escape) also works.
+        let plain = r#"The "FOO" variable is not set. Defaulting to a blank string."#;
+        assert_eq!(parse_undefined_compose_vars(plain), vec!["FOO".to_string()]);
+        // Nothing to report.
+        assert!(parse_undefined_compose_vars("all good\nno warnings here").is_empty());
+    }
+
+    #[test]
+    fn up_actions_keep_most_significant_state_per_container() {
+        // A recreated container emits Recreate→Recreated→Starting→Started; an
+        // unchanged one emits a single Running. We want one row per container,
+        // the meaningful one.
+        let out = "\
+ Network app_default Created
+ Container app-web-1  Recreate
+ Container app-web-1  Recreated
+ Container app-web-1  Starting
+ Container app-web-1  Started
+ Container app-cache-1  Running
+";
+        let actions = parse_compose_container_actions(out);
+        // BTreeMap → sorted by container name.
+        assert_eq!(actions, vec![
+            ("app-cache-1".to_string(), "Running".to_string()),
+            ("app-web-1".to_string(), "Recreated".to_string()),
+        ]);
+        // A purely up-to-date stack: every container just Running.
+        let same = " Container x-1  Running\n Container y-1  Running\n";
+        let a = parse_compose_container_actions(same);
+        assert!(a.iter().all(|(_, act)| act == "Running"));
+        // Network/Volume lines and transitional-only noise produce no rows.
+        assert!(parse_compose_container_actions(" Network app_default Created\n Container z-1  Starting\n")
+            .is_empty());
+    }
 }
 
 #[cfg(test)]

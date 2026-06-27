@@ -1151,6 +1151,7 @@ async fn vm_migrate(
                     docker_count: 0,
                     lxc_count: 0,
                     vm_count: 0,
+                    compose_count: 0,
                     public_ip: None,
                     pve_token: None,
                     pve_fingerprint: None,

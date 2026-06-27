@@ -3672,6 +3672,7 @@ function buildServerTree(nodes) {
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="compose" onclick="selectServerView('${node.id}', 'compose')">
                             <span class="icon ws-icon-clean-wrap" data-icon="folder"></span> Compose
+                            ${node.compose_count ? `<span class="badge" style="font-size:10px; padding:1px 6px;">${node.compose_count}</span>` : ''}
                         </a>
                         <a class="nav-item server-child-item" data-node="${node.id}" data-view="cron" onclick="selectServerView('${node.id}', 'cron')">
                             <span class="icon ws-icon-clean-wrap" data-icon="calendar"></span> Cron Jobs
@@ -56369,21 +56370,29 @@ async function loadComposeStacks() {
                 }).join('')
                 : '<span style="color:var(--text-muted); font-size:12px;">No services</span>';
 
+            // Consistent icon buttons (Gary/KO4BSR 2026-06-27) — each carries a
+            // title + aria-label so the icon-only control is still accessible.
+            const nm = escapeHtml(s.name);
+            const iconBtn = (onclick, icon, label, opts = {}) =>
+                `<button class="btn btn-sm${opts.primary ? ' btn-primary' : ''}" title="${escapeAttr(opts.tip || label)}" aria-label="${escapeAttr(label)} ${nm}" onclick="${onclick}" style="padding:4px 7px; line-height:1;${opts.danger ? ' color:var(--danger-color, #ef4444);' : ''}"><span class="ws-icon-clean-wrap" data-icon="${icon}"></span></button>`;
+            const upTip = "Up (docker compose up -d): recreate only the changed containers in place to apply a pulled image — no Down first, so a stack you're connected through (e.g. a reverse proxy) stays up. Restart reuses the old image.";
+            const lifecycle = s.status === 'stopped'
+                ? iconBtn(`composeAction('${nm}', 'up')`, 'play', 'Up', { primary: true, tip: upTip })
+                : iconBtn(`composeAction('${nm}', 'down')`, 'stop', 'Down') +
+                  iconBtn(`composeAction('${nm}', 'restart')`, 'restart', 'Restart') +
+                  iconBtn(`composeAction('${nm}', 'up')`, 'play', 'Up', { primary: true, tip: upTip });
+
             return `<tr>
                 <td><strong>${escapeHtml(s.name)}</strong></td>
                 <td>${statusBadge} <span style="color:var(--text-muted); font-size:11px; margin-left:4px;">${s.running}/${s.total}</span></td>
                 <td>${servicesList}</td>
                 <td>
                     <div style="display:flex; gap:4px; flex-wrap:wrap;">
-                        ${s.status === 'stopped'
-                            ? `<button class="btn btn-sm btn-primary" onclick="composeAction('${escapeHtml(s.name)}', 'up')" style="font-size:11px; padding:2px 8px;">▶ Up</button>`
-                            : `<button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'down')" style="font-size:11px; padding:2px 8px;">Down</button>
-                               <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'restart')" style="font-size:11px; padding:2px 8px;">Restart</button>
-                               <button class="btn btn-sm btn-primary" onclick="composeAction('${escapeHtml(s.name)}', 'up')" title="Up (docker compose up -d): recreate only the changed containers in place to apply a pulled image — no Down first, so a stack you're connected through (e.g. a reverse proxy) stays up. Restart reuses the old image." style="font-size:11px; padding:2px 8px;">▶ Up</button>`}
-                        <button class="btn btn-sm" onclick="composeAction('${escapeHtml(s.name)}', 'pull')" style="font-size:11px; padding:2px 8px;">⬇ Pull</button>
-                        <button class="btn btn-sm" onclick="openComposeEditor('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Edit</button>
-                        <button class="btn btn-sm" onclick="showComposeLogs('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px;">Logs</button>
-                        <button class="btn btn-sm" onclick="deleteComposeStack('${escapeHtml(s.name)}')" style="font-size:11px; padding:2px 8px; color:var(--danger-color, #ef4444);"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
+                        ${lifecycle}
+                        ${iconBtn(`composeAction('${nm}', 'pull')`, 'updates', 'Pull images', { tip: 'Pull the latest images (reports which were updated). Click Up afterwards to apply them.' })}
+                        ${iconBtn(`openComposeEditor('${nm}')`, 'edit', 'Edit')}
+                        ${iconBtn(`showComposeLogs('${nm}')`, 'logs', 'Logs')}
+                        ${iconBtn(`deleteComposeStack('${nm}')`, 'trash', 'Delete', { danger: true })}
                     </div>
                 </td>
             </tr>`;
@@ -56574,12 +56583,21 @@ async function validateComposeYaml() {
             body: JSON.stringify({ content: yaml }),
         });
         const data = await resp.json();
+        // Undefined ${VAR} references — reported by `docker compose config`
+        // even when the YAML is otherwise valid (wabil 2026-06-26). These would
+        // expand to empty strings at runtime, so surface them either way.
+        const missing = Array.isArray(data.missing_vars) ? data.missing_vars : [];
+        const missingHtml = missing.length
+            ? `<div style="color:var(--warning-color, #f59e0b); margin-top:4px;">⚠ Undefined variable${missing.length === 1 ? '' : 's'}: ${missing.map(v => escapeHtml(v)).join(', ')} — add ${missing.length === 1 ? 'it' : 'them'} to the Env tab / .env, or ${missing.length === 1 ? 'it' : 'they'} will expand to an empty string.</div>`
+            : '';
         if (data.valid) {
-            resultEl.innerHTML = '<span style="color:#22c55e;">Valid</span>';
+            resultEl.innerHTML = (missing.length
+                ? '<span style="color:#22c55e;">Valid YAML</span>'
+                : '<span style="color:#22c55e;">Valid</span>') + missingHtml;
             // Clear any previous error highlight on the gutter.
             attachLineNumberGutter('compose-yaml-editor');
         } else {
-            resultEl.innerHTML = `<span style="color:var(--danger-color, #ef4444);">${escapeHtml(data.error || 'Invalid')}</span>`;
+            resultEl.innerHTML = `<span style="color:var(--danger-color, #ef4444);">${escapeHtml(data.error || 'Invalid')}</span>` + missingHtml;
             // Pull out 1-indexed line number(s) the validator named so
             // we can colour those rows in the gutter — operators
             // shouldn't have to count down to find the line referenced
@@ -56627,13 +56645,23 @@ async function composeAction(name, action) {
         const resp = await fetch(apiUrl(`/api/compose/stacks/${encodeURIComponent(name)}/${action}`), { method: 'POST' });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(data.message || `${action} complete`, 'success');
+            // Surface what actually happened (wabil 2026-06-26): which images a
+            // pull updated, and which containers an up started with a new image.
+            let detail = '';
+            if (action === 'pull' && Array.isArray(data.updated) && data.updated.length) {
+                detail = 'Updated: ' + data.updated.map(u => u.image).join(', ');
+            } else if (action === 'up' && Array.isArray(data.started) && data.started.length) {
+                detail = 'New image applied to: ' + data.started.join(', ');
+            }
+            const msg = data.message || `${action} complete`;
+            // Keep the detailed result on screen longer so it can actually be read.
+            showToast(detail ? `${msg} — ${detail}` : msg, 'success', detail ? 8000 : 4000);
         } else {
-            showToast(data.error || `${action} failed`, 'error');
+            showToast(data.error || `${action} failed`, 'error', 0);
         }
         loadComposeStacks();
     } catch (e) {
-        showToast(`${action} failed: ${e.message}`, 'error');
+        showToast(`${action} failed: ${e.message}`, 'error', 0);
     }
 }
 
