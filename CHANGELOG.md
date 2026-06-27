@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.1.0 follow-up: keep compose_stack_count() inside spawn_blocking (code review)** _(2026-06-27 — [`5927c604`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5927c60443046a87ee42af962825897e4295c96c))_
+- **v25.1.0: Compose UX — pull/up feedback, env-var validation, nav count, icon actions (wabil + Gary)** _(2026-06-27 — [`09f84921`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/09f8492193c0e41f1e3f71a3086646442a4f0ca4))_
 - **v25.0.3: activate the dormant WolfNet-IP conflict check in add_node (completes AstroMando #3 batch)** _(2026-06-27 — [`4d0bf565`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4d0bf5659ab89e7db81b269ba348c3a6155535ae))_
 - **v25.0.2: AstroMando cluster-networking batch — WolfRun Docker VIP backend, bind-all LAN endpoint, reimage identity reconcile** _(2026-06-27 — [`665a2804`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/665a280406343550e1968bcc9414f8936de32d7f))_
 - **v25.0.1: two Compose UX fixes — running 'Up' button + Validate no longer saves (wabil)** _(2026-06-26 — [`94e34f13`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/94e34f1347c3385ec96b58ad1381aea7bd022c5f))_
