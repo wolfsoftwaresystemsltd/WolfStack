@@ -5157,33 +5157,37 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                         errors.push(format!("{}: WolfNet not configured", node.hostname));
                         continue;
                     }
-                    // If WolfStack is bound to 0.0.0.0 / 127.0.0.1 we must
-                    // resolve a real dialable address. On the common
-                    // single-NAT topology (every node behind one public IP)
-                    // the WAN address isn't reachable peer-to-peer, and
-                    // recording it here poisons effective_site() +
-                    // pick_wolfnet_endpoint() — the bind-all node's auto-site
-                    // stops matching its LAN peers' /24, so the mesh falls to
-                    // the (un-dialable) public path and the sync silently
-                    // breaks WolfNet to/from that node (AstroMando,
-                    // 2026-06-27). So prefer the detected LAN IP — but ONLY
-                    // when it shares a /24 with another cluster node, i.e.
-                    // this really is a single-LAN cluster. On a multi-DC
-                    // cluster the detected private IP would differ from the
-                    // node's public IP and trip the behind-NAT endpoint guard
-                    // on peers, wiping a working inter-site link — so there we
-                    // keep the public IP exactly as before. detect_lan_ip()
-                    // only ever returns a PRIVATE address, so a genuinely
-                    // public-only node yields None and falls back to
-                    // public_ip regardless.
-                    let effective_addr = if node.address == "0.0.0.0" || node.address == "127.0.0.1" {
+                    // The address WolfStack stored for THIS node (is_self) may
+                    // not be dialable on the LAN, which silently breaks WolfNet
+                    // for it. Three cases, all the same fix:
+                    //   * bind-all start  → 0.0.0.0 / 127.0.0.1
+                    //   * reached via a reverse proxy → a WAN HOSTNAME
+                    //     (wabil's pm1 self-identified as "mydomain.mywire.org")
+                    //   * added by its public IP → a WAN IP
+                    // In any of these, recording that value as the node's
+                    // lan_address poisons effective_site()/pick_wolfnet_endpoint
+                    // — the LAN peers get told to dial it at a WAN hostname/IP
+                    // behind NAT, its endpoint resolves to the WAN, and the mesh
+                    // to/from it goes dark (AstroMando #1 / wabil 2026-06-27).
+                    //
+                    // So when the stored address is NOT already a private LAN
+                    // IP, prefer the detected LAN IP — but ONLY when it shares a
+                    // /24 with another cluster member (genuine single-LAN). A
+                    // multi-DC / public-only node yields None or a non-matching
+                    // /24 and falls back to public_ip exactly as before, so an
+                    // inter-site link is never wiped. Crucially we leave a real
+                    // PRIVATE address untouched (any /24) — a different-site
+                    // private node keeps its address so its deliberate behind-
+                    // NAT roaming isn't turned into a public endpoint.
+                    let addr_is_private_lan = lan_prefix(&node.address).is_some();
+                    let effective_addr = if addr_is_private_lan {
+                        node.address.clone()
+                    } else {
                         networking::detect_lan_ip()
                             .filter(|lan| lan_prefix(lan)
                                 .is_some_and(|p| cluster_lan_prefixes.contains(&p)))
                             .or_else(|| node.public_ip.clone())
                             .unwrap_or_else(|| node.address.clone())
-                    } else {
-                        node.address.clone()
                     };
                     infos.push(NodeWnInfo {
                         hostname,
