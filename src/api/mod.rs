@@ -4123,6 +4123,11 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
     let cluster_secret = crate::auth::load_cluster_secret();
     let default_secret = crate::auth::default_cluster_secret();
     let mut remote_wolfnet_ips: Vec<String> = Vec::new();
+    // Also capture the joining node's own identity (its self_id `ws-…` and
+    // hostname) so we can reconcile a reimaged node against any stale
+    // pre-reimage registry entry once it's added (see reconciliation below).
+    let mut remote_self_id = String::new();
+    let mut remote_hostname = String::new();
     for url in &status_urls {
         // Try the active cluster secret first, then the default (new node may not have received custom secret yet)
         for secret in [&cluster_secret, &default_secret.to_string()] {
@@ -4133,10 +4138,36 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
             {
                 if resp.status().is_success() {
                     if let Ok(data) = resp.json::<serde_json::Value>().await {
+                        // NOTE: `wolfnet_ips` is read from the TOP level on
+                        // purpose — `/api/agent/status` actually returns an
+                        // externally-tagged AgentMessage ({"StatusReport": {…}}),
+                        // so this lookup has always returned None and the
+                        // wolfnet-IP conflict check below has been dormant since
+                        // it was written. We deliberately leave that as-is here:
+                        // activating it would run BEFORE the reimage
+                        // reconciliation and could reject a returning node whose
+                        // static WolfNet IP still matches its own stale entry's
+                        // cached route — breaking the exact rejoin workflow #3
+                        // supports. (Flagged separately; needs its own fix that
+                        // excludes the returning node's own IPs.)
                         if let Some(ips) = data.get("wolfnet_ips").and_then(|v| v.as_array()) {
                             remote_wolfnet_ips = ips.iter()
                                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                                 .collect();
+                        }
+                        // For identity reconciliation we DO need the real
+                        // values, so reach into the StatusReport envelope (with
+                        // a raw-object fallback should the format ever change).
+                        let sr = data.get("StatusReport").unwrap_or(&data);
+                        if remote_self_id.is_empty()
+                            && let Some(s) = sr.get("node_id").and_then(|v| v.as_str())
+                        {
+                            remote_self_id = s.to_string();
+                        }
+                        if remote_hostname.is_empty()
+                            && let Some(h) = sr.get("hostname").and_then(|v| v.as_str())
+                        {
+                            remote_hostname = h.to_string();
                         }
                     }
                     break;
@@ -4184,6 +4215,46 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
     }
 
     let id = state.cluster.add_server(body.address.clone(), port, cluster_name.clone());
+
+    // ── Join-time identity reconciliation (AstroMando #3, 2026-06-27) ──
+    // A reimaged node returns with a NEW self_id (ws-…). The duplicate-block
+    // above only rejects a SAME address:port re-add, so an operator re-adding
+    // the node at its new address leaves the pre-reimage entry orphaned:
+    // offline forever, yet still carrying this node's WolfRun instances.
+    // WolfRun would then report those workloads "running" on a node that no
+    // longer exists and schedule replacements against a dead id. Collapse any
+    // such stale entry into the one we just added.
+    //
+    // Conservative match — a candidate must be OFFLINE, in the SAME cluster,
+    // not the entry we just created, and the same physical node either by
+    // self_id (an unchanged identity that merely moved address) OR by hostname
+    // (the reimage case, where the self_id changed). A live entry is never
+    // touched, so two genuinely-distinct online nodes can't be merged here.
+    if !remote_hostname.is_empty() || !remote_self_id.is_empty() {
+        let new_cluster = cluster_name.clone()
+            .or_else(|| state.cluster.get_node(&id).and_then(|n| n.cluster_name))
+            .unwrap_or_else(|| "WolfStack".to_string());
+        let stale: Vec<crate::agent::Node> = state.cluster.get_all_nodes()
+            .into_iter()
+            .filter(|n| n.id != id && !n.is_self && !n.online)
+            .filter(|n| node_is_returning_identity(n, &remote_self_id, &remote_hostname, &new_cluster))
+            .collect();
+        if stale.len() > 1 {
+            // More than one stale match is a registry anomaly (e.g. two
+            // offline entries sharing this hostname) — collapse them all but
+            // make it visible so an operator can investigate a mis-set name.
+            tracing::warn!(target: "add_node",
+                "Returning node '{}' matched {} stale registry entries — collapsing all into {}",
+                remote_hostname, stale.len(), id);
+        }
+        for old in &stale {
+            let moved = state.wolfrun.remap_node_id(&old.id, &id);
+            state.cluster.remove_server(&old.id);
+            tracing::info!(target: "add_node",
+                "Reconciled returning node '{}' ({} → {}): migrated {} WolfRun instance(s), removed stale offline entry",
+                remote_hostname, old.id, id, moved);
+        }
+    }
 
     // Push our cluster secret to the new node — UNCONDITIONALLY, even
     // when we're still on the built-in default. The "always push"
@@ -4882,6 +4953,21 @@ fn hostnames_same_node(a: &str, b: &str) -> bool {
     a_short == b_short && (a.contains('.') || b.contains('.'))
 }
 
+/// Does registry entry `n` look like the same physical node as one that just
+/// (re)joined — for join-time identity reconciliation (AstroMando #3)? Matches
+/// within the same cluster on EITHER an unchanged self_id (the node merely
+/// moved address) OR the hostname (the reimage case, where the self_id is
+/// regenerated). This is purely the identity match; the caller still applies
+/// the offline / not-self / not-the-new-entry guards before collapsing.
+fn node_is_returning_identity(n: &crate::agent::Node, self_id: &str, hostname: &str, cluster: &str) -> bool {
+    let same_cluster = n.cluster_name.as_deref().unwrap_or("WolfStack")
+        .eq_ignore_ascii_case(cluster);
+    if !same_cluster { return false; }
+    let sid_match = !self_id.is_empty() && n.self_id.as_deref() == Some(self_id);
+    let host_match = !hostname.is_empty() && hostnames_same_node(&n.hostname, hostname);
+    sid_match || host_match
+}
+
 pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfNetSyncRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
 
@@ -4994,6 +5080,28 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
     let mut infos: Vec<NodeWnInfo> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
+    // Same-LAN guard for the bind-all (0.0.0.0) address resolution below.
+    // The RFC1918 /24 of every cluster node that already has a real address.
+    // A node bound to 0.0.0.0 only substitutes its detected LAN IP for its
+    // public IP when that LAN IP shares a /24 with another cluster node —
+    // i.e. this genuinely is a single-LAN cluster (AstroMando's topology).
+    // On a real multi-DC cluster no peer shares the bind-all node's private
+    // /24, so we leave the public-IP value untouched and never trip the
+    // behind-NAT endpoint guard for an inter-site link.
+    let lan_prefix = |addr: &str| -> Option<String> {
+        let ip: std::net::Ipv4Addr = addr.parse().ok()?;
+        let o = ip.octets();
+        let rfc1918 = o[0] == 10
+            || (o[0] == 172 && (16..=31).contains(&o[1]))
+            || (o[0] == 192 && o[1] == 168);
+        if !rfc1918 { return None; }
+        Some(format!("{}.{}.{}", o[0], o[1], o[2]))
+    };
+    let cluster_lan_prefixes: std::collections::HashSet<String> = node_ids.iter()
+        .filter_map(|nid| state.cluster.get_node(nid))
+        .filter_map(|n| lan_prefix(&n.address))
+        .collect();
+
     // Scoped strictly to the cluster passed in `node_ids` — other clusters
     // are never examined or touched.
     for nid in node_ids {
@@ -5018,12 +5126,30 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                         errors.push(format!("{}: WolfNet not configured", node.hostname));
                         continue;
                     }
-                    // If WolfStack is bound to 0.0.0.0 / 127.0.0.1, fall
-                    // back to public_ip then LAN-detected IP so the
-                    // address we record for this node is actually dialable.
+                    // If WolfStack is bound to 0.0.0.0 / 127.0.0.1 we must
+                    // resolve a real dialable address. On the common
+                    // single-NAT topology (every node behind one public IP)
+                    // the WAN address isn't reachable peer-to-peer, and
+                    // recording it here poisons effective_site() +
+                    // pick_wolfnet_endpoint() — the bind-all node's auto-site
+                    // stops matching its LAN peers' /24, so the mesh falls to
+                    // the (un-dialable) public path and the sync silently
+                    // breaks WolfNet to/from that node (AstroMando,
+                    // 2026-06-27). So prefer the detected LAN IP — but ONLY
+                    // when it shares a /24 with another cluster node, i.e.
+                    // this really is a single-LAN cluster. On a multi-DC
+                    // cluster the detected private IP would differ from the
+                    // node's public IP and trip the behind-NAT endpoint guard
+                    // on peers, wiping a working inter-site link — so there we
+                    // keep the public IP exactly as before. detect_lan_ip()
+                    // only ever returns a PRIVATE address, so a genuinely
+                    // public-only node yields None and falls back to
+                    // public_ip regardless.
                     let effective_addr = if node.address == "0.0.0.0" || node.address == "127.0.0.1" {
-                        node.public_ip.clone()
-                            .or_else(|| networking::detect_lan_ip())
+                        networking::detect_lan_ip()
+                            .filter(|lan| lan_prefix(lan)
+                                .is_some_and(|p| cluster_lan_prefixes.contains(&p)))
+                            .or_else(|| node.public_ip.clone())
                             .unwrap_or_else(|| node.address.clone())
                     } else {
                         node.address.clone()
@@ -39140,6 +39266,59 @@ mod external_url_tests {
         // Empty names are never a match.
         assert!(!hostnames_same_node("", "immich"));
         assert!(!hostnames_same_node("immich", ""));
+    }
+
+    #[test]
+    fn returning_identity_matches_reimage_and_address_move_but_not_distinct_nodes() {
+        use super::node_is_returning_identity;
+        // Build a registry Node from a small JSON object — most fields default.
+        fn node(over: serde_json::Value) -> crate::agent::Node {
+            let mut base = serde_json::json!({
+                "id": "node-old", "hostname": "ws-host", "address": "10.0.0.9",
+                "port": 8553, "last_seen": 0, "metrics": null,
+                "components": [], "online": false, "is_self": false
+            });
+            for (k, v) in over.as_object().unwrap() { base[k] = v.clone(); }
+            serde_json::from_value(base).unwrap()
+        }
+
+        // Reimage case: self_id regenerated (ws-new), hostname unchanged → match
+        // on hostname.
+        let stale = node(serde_json::json!({
+            "hostname": "ws-host", "self_id": "ws-old", "cluster_name": "WolfStack"
+        }));
+        assert!(node_is_returning_identity(&stale, "ws-new", "ws-host", "WolfStack"));
+
+        // Address-move case: same self_id, different hostname spelling → match
+        // on self_id.
+        let moved = node(serde_json::json!({
+            "hostname": "old-name", "self_id": "ws-keep", "cluster_name": "WolfStack"
+        }));
+        assert!(node_is_returning_identity(&moved, "ws-keep", "totally-different", "WolfStack"));
+
+        // Distinct node, different hostname AND different self_id → NO match,
+        // even in the same cluster (this is the merge we must never make).
+        let other = node(serde_json::json!({
+            "hostname": "ws-other", "self_id": "ws-other-id", "cluster_name": "WolfStack"
+        }));
+        assert!(!node_is_returning_identity(&other, "ws-new", "ws-host", "WolfStack"));
+
+        // Same hostname but a DIFFERENT cluster → never collapsed across clusters.
+        let cross = node(serde_json::json!({
+            "hostname": "ws-host", "self_id": "ws-x", "cluster_name": "OtherCluster"
+        }));
+        assert!(!node_is_returning_identity(&cross, "ws-new", "ws-host", "WolfStack"));
+
+        // Cluster comparison is case-insensitive (matches every other
+        // cluster-name comparison in the codebase).
+        let cased = node(serde_json::json!({
+            "hostname": "ws-host", "self_id": "ws-old", "cluster_name": "wolfstack"
+        }));
+        assert!(node_is_returning_identity(&cased, "ws-new", "ws-host", "WolfStack"));
+
+        // Empty inbound identity never matches (a failed status fetch must not
+        // collapse anything).
+        assert!(!node_is_returning_identity(&stale, "", "", "WolfStack"));
     }
 }
 
