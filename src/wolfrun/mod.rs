@@ -319,6 +319,32 @@ impl WolfRunState {
         }
     }
 
+    /// Re-point every service instance recorded against `old_node_id` onto
+    /// `new_node_id`, returning how many were moved. Used by join-time
+    /// identity reconciliation: when a reimaged node returns under a new
+    /// registry id, the instances it was running were recorded against its
+    /// pre-reimage id. Without remapping, WolfRun would keep reporting those
+    /// workloads "running" on a node that no longer exists and schedule
+    /// replacements against a dead id (AstroMando #3, 2026-06-27).
+    pub fn remap_node_id(&self, old_node_id: &str, new_node_id: &str) -> usize {
+        if old_node_id == new_node_id || old_node_id.is_empty() { return 0; }
+        let mut svcs = self.services.write().unwrap();
+        let mut moved = 0usize;
+        for svc in svcs.iter_mut() {
+            for inst in svc.instances.iter_mut() {
+                if inst.node_id == old_node_id {
+                    inst.node_id = new_node_id.to_string();
+                    moved += 1;
+                }
+            }
+        }
+        drop(svcs);
+        if moved > 0 {
+            self.save();
+        }
+        moved
+    }
+
     /// Rename all cluster references from old_name to new_name.
     pub fn rename_cluster(&self, old_name: &str, new_name: &str) -> usize {
         let mut svcs = self.services.write().unwrap();
@@ -1462,7 +1488,7 @@ async fn deploy_docker(
     wolfrun: &WolfRunState,
     node_id: &str,
 ) {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "name": container_name,
         "image": service.image,
         "ports": service.ports,
@@ -1491,6 +1517,20 @@ async fn deploy_docker(
             Err(e) => warn!("WolfRun: failed to deploy {} locally: {}", container_name, e),
         }
     } else {
+        // Allocate a WolfNet IP for the remote container, mirroring the
+        // node.is_self branch above and the LXC cross-node path. The
+        // orchestrator has the global view (services.json + local state via
+        // wolfnet_used_ip_set), and add_instance persists each allocation to
+        // services.json before the next replica's deploy_docker runs, so
+        // sequential replicas never collide. Without this the VIP
+        // load-balancer's backend list (built from instance.wolfnet_ip) stays
+        // empty for any service scheduled off the orchestrator and the VIP
+        // routes to nothing (AstroMando, 2026-06-27).
+        let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
+        if let Some(ref ip) = wolfnet_ip {
+            payload["wolfnet_ip"] = serde_json::json!(ip);
+        }
+
         // Pull image on remote node
         let pull_urls = crate::api::build_node_urls(&node.address, node.port, "/api/containers/docker/pull");
         let pull_payload = serde_json::json!({ "image": service.image });
@@ -1548,7 +1588,7 @@ async fn deploy_docker(
         wolfrun.add_instance(&service.id, ServiceInstance {
             node_id: node_id.to_string(),
             container_name: container_name.to_string(),
-            wolfnet_ip: None,
+            wolfnet_ip,
             status: "running".to_string(),
             last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
             standby: false,
