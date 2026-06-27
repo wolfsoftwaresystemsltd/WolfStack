@@ -11893,6 +11893,34 @@ function openWsClusterSettings(clusterName) {
     modal._nodeIds = clusterNodes.map(n => n.id);
     modal._originalName = clusterName;
     document.body.appendChild(modal);
+    wsClusterWolfnetPreflight(modal._nodeIds.length);
+}
+
+// Preflight nudge for the silent "never ran the sync" failure (wabil/Paul
+// 2026-06-27): if this cluster has 2+ nodes but WolfNet has NO peers configured
+// on this node, the operator almost certainly hasn't pressed "Update WolfNet
+// Connections" yet — so node-to-node wolfnet0 and every container/VM WolfNet IP
+// is silently dead. Surface it right above the button. Best-effort + passive:
+// only fires on a confirmed empty peer list (never a false alarm when the mesh
+// is up), and a fetch failure just skips the nudge.
+async function wsClusterWolfnetPreflight(nodeCount) {
+    if (!nodeCount || nodeCount < 2) return;
+    try {
+        const resp = await fetch('/api/networking/wolfnet/local-info');
+        if (!resp.ok) return;
+        const info = await resp.json();
+        if (info.error) return;       // WolfNet daemon down — a different problem, not "run the sync"
+        const peers = Array.isArray(info.peers) ? info.peers : [];
+        if (peers.length > 0) return; // mesh already has peers — nothing to nudge
+        const btn = document.getElementById('ws-wolfnet-sync-btn');
+        if (!btn || document.getElementById('ws-wolfnet-preflight')) return;
+        const warn = document.createElement('div');
+        warn.id = 'ws-wolfnet-preflight';
+        warn.setAttribute('role', 'status');
+        warn.style.cssText = 'margin:0 0 12px;padding:10px 12px;border-radius:6px;border:1px solid var(--warning-color,#f59e0b);background:rgba(245,158,11,0.12);color:var(--warning-color,#f59e0b);font-size:12px;line-height:1.5;';
+        warn.innerHTML = '⚠ <strong>WolfNet has no peers configured on this node.</strong> Node-to-node <code>wolfnet0</code> and all container/VM WolfNet IPs stay unreachable across hosts until you run <strong>Update WolfNet Connections</strong> below.';
+        btn.parentNode.insertBefore(warn, btn);
+    } catch (_) { /* best-effort — skip the nudge on any error */ }
 }
 
 async function saveWsClusterSettings() {
@@ -56386,7 +56414,7 @@ async function loadComposeStacks() {
                 <td><strong>${escapeHtml(s.name)}</strong></td>
                 <td>${statusBadge} <span style="color:var(--text-muted); font-size:11px; margin-left:4px;">${s.running}/${s.total}</span></td>
                 <td>${servicesList}</td>
-                <td>
+                <td class="ws-actions-cell">
                     <div class="unit-actions" style="gap:3px;">
                         ${lifecycle}
                         ${iconBtn(`composeAction('${nm}', 'pull')`, 'updates', 'Pull images', { tip: 'Pull the latest images (reports which were updated). Click Up afterwards to apply them.' })}
