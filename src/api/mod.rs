@@ -6756,17 +6756,18 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
 
     // Fallback: first request before cache is populated (only happens once at startup)
     let st = state.clone().into_inner();
-    let (metrics, components, docker_count, lxc_count, vm_count, has_docker, has_lxc, has_kvm) =
+    let (metrics, components, docker_count, lxc_count, vm_count, compose_count, has_docker, has_lxc, has_kvm) =
         tokio::task::spawn_blocking(move || {
             let m = st.monitor.lock().unwrap().collect();
             let c = installer::get_all_status();
             let dc = containers::docker_list_all().len() as u32;
             let lc = containers::lxc_list_all().len() as u32;
             let vc = st.vms.lock().unwrap().list_vms().len() as u32;
+            let cmc = compose_stack_count();
             let hd = containers::docker_status().installed;
             let hl = containers::lxc_status().installed;
             let hk = containers::kvm_installed();
-            (m, c, dc, lc, vc, hd, hl, hk)
+            (m, c, dc, lc, vc, cmc, hd, hl, hk)
         }).await.unwrap();
     let hostname = metrics.hostname.clone();
     let public_ip = state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.public_ip);
@@ -6778,7 +6779,7 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         docker_count,
         lxc_count,
         vm_count,
-        compose_count: compose_stack_count(),
+        compose_count,
         public_ip,
         known_nodes: state.cluster.get_all_nodes(),
         deleted_ids: state.cluster.get_deleted_ids(),

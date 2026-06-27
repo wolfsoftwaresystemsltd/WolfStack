@@ -494,7 +494,7 @@ impl ClusterState {
     }
 
     /// Update this node's own status
-    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, public_ip: Option<String>, has_docker: bool, has_lxc: bool, has_kvm: bool, tls_enabled: bool) {
+    pub fn update_self(&self, metrics: SystemMetrics, components: Vec<ComponentStatus>, docker_count: u32, lxc_count: u32, vm_count: u32, compose_count: u32, public_ip: Option<String>, has_docker: bool, has_lxc: bool, has_kvm: bool, tls_enabled: bool) {
         let mut nodes = self.nodes.write().unwrap();
         // Fetch existing cluster_name: in-memory first, then persisted file, then default
         let cluster_name = nodes.get(&self.self_id)
@@ -531,9 +531,9 @@ impl ClusterState {
             docker_count,
             lxc_count,
             vm_count,
-            // Cheap dir scan; keeps the self node's nav compose count current
-            // (Gary/KO4BSR 2026-06-27).
-            compose_count: crate::api::compose_stack_count(),
+            // Computed in the caller's spawn_blocking with the other counts
+            // (Gary/KO4BSR 2026-06-27) — keeps blocking I/O off the async task.
+            compose_count,
             public_ip,
             node_type: "wolfstack".to_string(),
             pve_token: None,

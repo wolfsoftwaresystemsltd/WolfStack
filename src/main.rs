@@ -675,7 +675,7 @@ async fn main() -> std::io::Result<()> {
                     (vec![], false, false, false)
                 })
         };
-        cluster.update_self(metrics, components, 0, 0, 0, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
+        cluster.update_self(metrics, components, 0, 0, 0, 0, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
 
         // Initialize AI agent
         let ai_agent = Arc::new(ai::AiAgent::new());
@@ -1889,7 +1889,7 @@ async fn main() -> std::io::Result<()> {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 // Run all blocking sysinfo/subprocess work off the async runtime
                 let sc = state_clone.clone();
-                let (metrics, components, docker_count, lxc_count, vm_count, has_docker, has_lxc, has_kvm) =
+                let (metrics, components, docker_count, lxc_count, vm_count, compose_count, has_docker, has_lxc, has_kvm) =
                     tokio::task::spawn_blocking(move || {
                         let mut monitor = sc.monitor.lock().unwrap();
                         let m = monitor.collect();
@@ -1898,10 +1898,14 @@ async fn main() -> std::io::Result<()> {
                         let dc = containers::docker_count();
                         let lc = containers::lxc_count();
                         let vc = sc.vms.lock().unwrap().list_vms().len() as u32;
+                        // Compose count is a cheap dir scan, but it's still
+                        // blocking I/O — keep it inside spawn_blocking with the
+                        // other counts (v25.0.0 offloaded exactly this).
+                        let cmc = crate::api::compose_stack_count();
                         let hd = containers::has_docker_cached();
                         let hl = containers::has_lxc_cached();
                         let hk = containers::has_kvm_cached();
-                        (m, c, dc, lc, vc, hd, hl, hk)
+                        (m, c, dc, lc, vc, cmc, hd, hl, hk)
                     }).await.unwrap();
                 // Record historical snapshot
                 {
@@ -1922,7 +1926,7 @@ async fn main() -> std::io::Result<()> {
                     docker_count,
                     lxc_count,
                     vm_count,
-                    compose_count: crate::api::compose_stack_count(),
+                    compose_count,
                     public_ip: public_ip.clone(),
                     known_nodes,
                     deleted_ids,
@@ -1948,7 +1952,7 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
+                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
             }
         });
 
