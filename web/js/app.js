@@ -56414,7 +56414,7 @@ async function loadComposeStacks() {
                 <td><strong>${escapeHtml(s.name)}</strong></td>
                 <td>${statusBadge} <span style="color:var(--text-muted); font-size:11px; margin-left:4px;">${s.running}/${s.total}</span></td>
                 <td>${servicesList}</td>
-                <td>
+                <td class="ws-actions-cell">
                     <div class="unit-actions" style="gap:3px;">
                         ${lifecycle}
                         ${iconBtn(`composeAction('${nm}', 'pull')`, 'updates', 'Pull images', { tip: 'Pull the latest images (reports which were updated). Click Up afterwards to apply them.' })}

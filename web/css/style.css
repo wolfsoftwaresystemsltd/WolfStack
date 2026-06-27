@@ -2973,6 +2973,16 @@ body.sidebar-collapsed #task-log-footer {
     flex: 0 0 auto;   /* size to the icon; pack horizontally and wrap as a group */
 }
 
+/* An "Actions" table column gets crushed to a thin strip on phones/narrow
+   windows, so its icon buttons wrap one-per-line into a tall vertical stack
+   (wabil's Compose list). Give the cell a floor width on small screens so the
+   icons wrap into horizontal ROWS (e.g. 4 + 3) instead — wabil 2026-06-27.
+   table-layout:auto honours min-width, so the column simply widens to fit. */
+@media (max-width: 720px) {
+    .ws-actions-cell { min-width: 132px; }
+    .ws-actions-cell .unit-actions { justify-content: flex-end; }
+}
+
 /* ─── Grid Layouts ─── */
 .grid-2 {
     display: grid;
