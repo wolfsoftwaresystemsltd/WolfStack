@@ -243,6 +243,19 @@ pub struct WolfRunState {
     failover_events: RwLock<Vec<FailoverEvent>>,
 }
 
+/// True if registry node `n` is the node referenced by `id`, matching EITHER its
+/// locally-assigned key (`node-…`, used for remote nodes) OR its global self_id
+/// (`ws-…`, which is the registry key for the SELF node). WolfRun records an
+/// instance's `node_id` as whichever form the registry used at schedule time, so
+/// a later lookup MUST accept both — otherwise an instance whose recorded form no
+/// longer matches the entry's current key is false-orphaned (reported on a "dead"
+/// id, or wrongly rescheduled) even though the node is online. This is the online
+/// `node-…`/`ws-…` mismatch AstroMando hit (2026-06-28); it mirrors how
+/// ClusterState::get_node already resolves either form.
+fn node_matches_id(n: &crate::agent::Node, id: &str) -> bool {
+    n.id == id || n.self_id.as_deref() == Some(id)
+}
+
 impl WolfRunState {
     pub fn new() -> Self {
         let state = Self {
@@ -795,13 +808,13 @@ pub fn schedule(
             return false;
         }
         // Must be in the allowed nodes list (if specified)
-        if !service.allowed_nodes.is_empty() && !service.allowed_nodes.contains(&n.id) {
+        if !service.allowed_nodes.is_empty() && !service.allowed_nodes.iter().any(|a| node_matches_id(n, a)) {
 
             return false;
         }
         // Check placement constraints
         match &service.placement {
-            Placement::RequireNode(nid) => n.id == *nid,
+            Placement::RequireNode(nid) => node_matches_id(n, nid),
             _ => true,
         }
     }).collect();
@@ -825,7 +838,7 @@ pub fn schedule(
 
     // Prefer preferred node if specified
     if let Placement::PreferNode(preferred) = &service.placement {
-        if let Some(n) = eligible.iter().find(|n| n.id == *preferred) {
+        if let Some(n) = eligible.iter().find(|n| node_matches_id(n, preferred)) {
             if n.online {
                 return Some(n.id.clone());
             }
@@ -918,7 +931,7 @@ pub async fn reconcile(
         let all_nodes = cluster.get_all_nodes();
 
         for inst in &service.instances {
-            let node = all_nodes.iter().find(|n| n.id == inst.node_id);
+            let node = all_nodes.iter().find(|n| node_matches_id(n, &inst.node_id));
             match node {
                 Some(n) if n.online && n.is_self => {
                     // Check if the required runtime is actually installed on this node
@@ -1185,7 +1198,14 @@ pub async fn reconcile(
 
 
                         let source_node = cluster.get_node(&source_node_id);
-                        let same_node = source_node_id == target_node_id_final;
+                        // Compare the RESOLVED source node's registry key to the
+                        // target — not the raw stored ids, which may be different
+                        // forms (node-… vs ws-…) for the same physical node and
+                        // would wrongly take the cross-node migration path
+                        // (review, 2026-06-28).
+                        let same_node = source_node.as_ref()
+                            .map(|sn| sn.id == target_node_id_final)
+                            .unwrap_or(false);
 
                         let cloned = if same_node {
                             // Same node: simple local or remote clone
@@ -1431,7 +1451,7 @@ pub async fn reconcile(
                 .collect();
             for inst in &orphaned_standby {
                 // Stop and destroy the standby container
-                let node = all_nodes.iter().find(|n| n.id == inst.node_id);
+                let node = all_nodes.iter().find(|n| node_matches_id(n, &inst.node_id));
                 if let Some(n) = node {
                     if n.is_self {
                         match service.runtime {
@@ -1788,7 +1808,7 @@ pub async fn manage_standby(
             if !n.online { return false; }
             let nc = n.cluster_name.as_deref().unwrap_or("WolfStack");
             if nc != service.cluster_name { return false; }
-            if !service.allowed_nodes.is_empty() && !service.allowed_nodes.contains(&n.id) { return false; }
+            if !service.allowed_nodes.is_empty() && !service.allowed_nodes.iter().any(|a| node_matches_id(n, a)) { return false; }
             // Must have the required runtime
             let has_runtime = match service.runtime {
                 Runtime::Docker => n.has_docker || (n.is_self && std::path::Path::new("/usr/bin/docker").exists()),
@@ -1884,7 +1904,7 @@ pub async fn manage_standby(
                 }
                 Runtime::Lxc => {
                     // For LXC: clone from source (stopped) — cross-node or same-node
-                    let source_node = all_nodes.iter().find(|n| n.id == source.node_id);
+                    let source_node = all_nodes.iter().find(|n| node_matches_id(n, &source.node_id));
                     let source_node = match source_node {
                         Some(n) => n,
                         None => {
@@ -1969,7 +1989,7 @@ pub async fn check_failover(
             .filter(|i| !i.standby && (i.status == "offline" || i.status == "lost"))
             .filter(|i| {
                 // Verify the node is actually offline
-                all_nodes.iter().find(|n| n.id == i.node_id)
+                all_nodes.iter().find(|n| node_matches_id(n, &i.node_id))
                     .map(|n| !n.online)
                     .unwrap_or(true) // Unknown node = offline
             })
@@ -1986,7 +2006,7 @@ pub async fn check_failover(
         for failed in &failed_instances {
             // Pick a standby to promote (prefer one on an online node), removing it from candidates
             let standby_idx = standby_instances.iter().position(|s| {
-                all_nodes.iter().find(|n| n.id == s.node_id)
+                all_nodes.iter().find(|n| node_matches_id(n, &s.node_id))
                     .map(|n| n.online)
                     .unwrap_or(false)
             });
@@ -2000,7 +2020,7 @@ pub async fn check_failover(
                 }
             };
 
-            let standby_node = match all_nodes.iter().find(|n| n.id == standby.node_id) {
+            let standby_node = match all_nodes.iter().find(|n| node_matches_id(n, &standby.node_id)) {
                 Some(n) => n,
                 None => continue,
             };
@@ -2056,7 +2076,7 @@ pub async fn check_failover(
 
                 // Record failover event
                 let failed_hostname = all_nodes.iter()
-                    .find(|n| n.id == failed.node_id)
+                    .find(|n| node_matches_id(n, &failed.node_id))
                     .map(|n| n.hostname.clone())
                     .unwrap_or_else(|| failed.node_id.clone());
 
@@ -2324,4 +2344,34 @@ pub fn remove_lb_rules_for_vip(vip: &str) {
     let _ = std::process::Command::new("ip")
         .args(["addr", "del", &cidr, "dev", "wolfnet0"])
         .output();
+}
+
+#[cfg(test)]
+mod node_id_match_tests {
+    use super::node_matches_id;
+
+    fn node(id: &str, self_id: Option<&str>) -> crate::agent::Node {
+        let mut base = serde_json::json!({
+            "id": id, "hostname": "h", "address": "10.0.0.9", "port": 8553,
+            "last_seen": 0, "metrics": null, "components": [], "online": true, "is_self": false
+        });
+        if let Some(s) = self_id { base["self_id"] = serde_json::json!(s); }
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn matches_either_local_key_or_self_id() {
+        // Online entry keyed by node-… with a ws-… self_id (AstroMando's case):
+        // an instance recorded under EITHER form must resolve to it.
+        let n = node("node-abc", Some("ws-xyz"));
+        assert!(node_matches_id(&n, "node-abc"));   // local key form
+        assert!(node_matches_id(&n, "ws-xyz"));     // self_id form — the fix
+        assert!(!node_matches_id(&n, "ws-OLD"));    // a genuinely-gone id never matches
+        assert!(!node_matches_id(&n, "node-other"));
+
+        // Self node: registry key IS the ws-… self_id, self_id field empty.
+        let s = node("ws-self", None);
+        assert!(node_matches_id(&s, "ws-self"));
+        assert!(!node_matches_id(&s, "node-self"));
+    }
 }
