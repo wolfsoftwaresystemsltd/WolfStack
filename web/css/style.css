@@ -2981,6 +2981,16 @@ body.sidebar-collapsed #task-log-footer {
 @media (max-width: 720px) {
     .ws-actions-cell { min-width: 132px; }
     .ws-actions-cell .unit-actions { justify-content: flex-end; }
+    /* The docker/lxc/vm TABLE action icons carry an inline font-size:20px (much
+       bigger than Compose's icons), so far fewer fit per row in the same cell —
+       leaving 2 tall rows instead of a compact 4-per-row (wabil 2026-06-28).
+       Shrink ONLY those on mobile: target the plain action <div> (Compose uses
+       .unit-actions, which is deliberately left untouched). !important is needed
+       to override the inline font-size. */
+    .ws-actions-cell > div:not(.unit-actions) .btn {
+        font-size: 16px !important;
+        padding: 3px 5px !important;
+    }
 }
 
 /* ─── Grid Layouts ─── */
