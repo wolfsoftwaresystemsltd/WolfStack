@@ -3181,6 +3181,16 @@ pub struct JoinHandshakeRequest {
     /// no-op join into the cluster the node already belongs to.
     #[serde(default)]
     pub cluster_name: Option<String>,
+    /// The MASTER's own API port + self_id, so the joining node can seed the
+    /// master into its OWN registry (keyed by the master's source IP = its LAN
+    /// address as the joiner sees it). Without this the joiner only knows
+    /// itself, never polls the master, and the membership permanently splits —
+    /// the master sees everyone, the added nodes only see each other (wabil
+    /// 2026-06-27). Optional for backward-compat with older masters.
+    #[serde(default)]
+    pub master_port: Option<u16>,
+    #[serde(default)]
+    pub master_self_id: Option<String>,
 }
 
 /// POST /api/cluster/join-handshake — the hardened, admin-credentialled
@@ -3359,6 +3369,37 @@ pub async fn cluster_join_handshake(
     // resources then never appear to the cluster). Best-effort: if minting
     // fails (CSPRNG), the master falls back to the legacy secret/default auth.
     let bootstrap_grant = state.bootstrap_grants.mint().ok();
+
+    // Seed the MASTER into THIS node's registry, keyed by its source IP — the
+    // master's LAN address as we (the joiner) see it. This is the only thing
+    // that makes membership converge: without it the added node knows only
+    // itself, never polls the master, and the cluster splits (the master sees
+    // everyone; the added nodes see only each other — wabil 2026-06-27).
+    // Using peer_ip also sidesteps the master self-identifying by a reverse-
+    // proxy/WAN hostname: we learn it by the dialable LAN IP, which the gossip
+    // is_private guard then accepts (and a WAN-hostname duplicate is skipped).
+    // Marked join_verified (the master proved the join token + this node's
+    // admin creds). self_id is learned on the first poll; address+port dedup
+    // prevents a duplicate in the meantime.
+    if !peer_ip.is_empty()
+        && peer_ip.parse::<std::net::IpAddr>().map(|ip| !ip.is_loopback()).unwrap_or(false)
+    {
+        let master_port = body.master_port.unwrap_or(8553);
+        let already = state.cluster.get_all_nodes().into_iter().any(|n| {
+            (body.master_self_id.as_deref().filter(|s| !s.is_empty()).is_some()
+                && n.self_id.as_deref() == body.master_self_id.as_deref())
+                || (n.address == peer_ip && n.port == master_port)
+        });
+        if !already {
+            let id = state.cluster.add_server(
+                peer_ip.clone(),
+                master_port,
+                body.cluster_name.clone(),
+            );
+            tracing::info!(target: "cluster-join",
+                "Seeded master {}:{} into local registry as {} on join", peer_ip, master_port, id);
+        }
+    }
 
     let mut resp_body = serde_json::json!({
         "valid": true,
@@ -4051,6 +4092,10 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         "admin_username": target_admin_username,
         "admin_password": target_admin_password,
         "cluster_name": cluster_name,
+        // So the joining node can seed US (the master) into its own registry by
+        // our source IP — the fix for the membership split (wabil 2026-06-27).
+        "master_port": state.cluster.port,
+        "master_self_id": state.cluster.self_id,
     });
 
     let mut last_error = String::new();
@@ -5359,28 +5404,32 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
         }
     }
 
-    // Prune: remove from every synced node any peer that is NOT a member of
-    // this cluster. A config peer counts as a member if it matches a cluster
-    // node by wolfnet IP OR by hostname. Hostnames come from cluster state —
-    // available even for a node that was unreachable during this sync — so a
-    // transiently-down cluster node is never pruned off its peers. IPs come
-    // from the reachable nodes. Only positively-foreign entries are removed.
-    let cluster_ips: std::collections::HashSet<String> = infos.iter()
-        .map(|n| n.wolfnet_ip.split('/').next().unwrap_or(&n.wolfnet_ip).to_string())
-        .collect();
-    let cluster_hosts: Vec<String> = node_ids.iter()
-        .filter_map(|nid| state.cluster.get_node(nid).map(|n| n.hostname))
+    // Prune: remove from every synced node ONLY a peer that is POSITIVELY
+    // FOREIGN — one that matches a node we know to be in a DIFFERENT cluster
+    // (the v24.3.6 cross-cluster-merge cleanup; those foreign nodes are in the
+    // registry under another cluster_name). A peer that matches a member, or
+    // that we can't identify at all, is KEPT.
+    //
+    // The old logic pruned every peer NOT in this sync's member list — so
+    // running Update WolfNet Connections from a node with an incomplete view
+    // deleted valid peers and tore down a working mesh (wabil 2026-06-27: that
+    // is what dropped pm2↔pm3 when the sync ran from a node that didn't know
+    // pm1). A None cluster_name is treated as "not positively foreign" (keep).
+    let sync_cluster = node_ids.iter()
+        .filter_map(|nid| state.cluster.get_node(nid).and_then(|n| n.cluster_name))
+        .next()
+        .unwrap_or_else(|| "WolfStack".to_string());
+    let foreign_hosts: Vec<String> = state.cluster.get_all_nodes().into_iter()
+        .filter(|n| n.cluster_name.as_deref()
+            .is_some_and(|c| !crate::agent::cluster_eq(Some(c), Some(&sync_cluster))))
+        .map(|n| n.hostname)
         .filter(|h| !h.is_empty())
         .collect();
     for target in &infos {
-        for (peer_name, peer_ip) in &target.current_peers {
-            let ip = peer_ip.split('/').next().unwrap_or(peer_ip);
-            // Keep anything we can't positively call foreign.
-            if ip.is_empty() || cluster_ips.contains(ip) {
-                continue;
-            }
-            let name_is_member = cluster_hosts.iter().any(|h| hostnames_same_node(peer_name, h));
-            if name_is_member {
+        for (peer_name, _peer_ip) in &target.current_peers {
+            // Keep members AND anything we can't positively call foreign.
+            let is_foreign = foreign_hosts.iter().any(|h| hostnames_same_node(peer_name, h));
+            if !is_foreign {
                 continue;
             }
             if target.is_self {
