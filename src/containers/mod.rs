@@ -6272,8 +6272,47 @@ pub fn lxc_stop(container: &str) -> Result<String, String> {
     }
 }
 
-/// Restart an LXC container
+/// True if `container` (a Proxmox VMID) is a Proxmox HA-managed resource.
+///
+/// HA resources are listed by `ha-manager config`; a container resource's
+/// section id is `ct:<vmid>` (PVE prints it as either `ct:105` or `ct: 105`
+/// depending on version, so we tolerate both). Absent/erroring `ha-manager`
+/// (single-node PVE, or HA not configured) → not HA-managed.
+fn lxc_is_ha_managed(container: &str) -> bool {
+    let out = match Command::new("ha-manager").arg("config").output() {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("ct:") {
+            let id: String = rest.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !id.is_empty() && id == container {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Restart an LXC container.
+///
+/// For an HA-managed Proxmox container a hard `pct stop` makes the HA manager
+/// record the resource's *desired* state as stopped; our subsequent `pct start`
+/// then races the HA manager (which re-asserts stopped) and the container
+/// stays down (wabil 2026-06-28). `pct reboot` restarts it in place WITHOUT
+/// changing the HA desired state, so HA never tears it back down. Non-HA and
+/// native-LXC containers keep the exact stop+start path they always used.
 pub fn lxc_restart(container: &str) -> Result<String, String> {
+    if is_proxmox() && lxc_is_ha_managed(container) {
+        // `pct reboot` only works on a running container (it errors on a
+        // stopped one); if it isn't running, just start it — that's the
+        // HA-safe equivalent of "restart" and never leaves the resource down.
+        if lxc_is_running(container) {
+            return run_lxc_cmd(&["pct", "reboot", container]);
+        }
+        return lxc_start(container);
+    }
     lxc_stop(container)?;
     lxc_start(container)
 }
