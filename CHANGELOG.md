@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.1.19: PBS restore no longer dead-locks on 'EEXIST: File exists' after a failed attempt** _(2026-06-29 — [`ea559c89`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ea559c89b527777788a85a30e1d933df506620fd))_
 - **v25.1.18: enforce required app-store params + 'Ask the AI' course prompts** _(2026-06-29 — [`663ddc9b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/663ddc9bb799622c6a13b9277245166b14271962))_
 - **v25.1.17: keeping a container/VM's own WolfNet IP no longer falsely reports 'in use'** _(2026-06-29 — [`a1a30673`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a1a3067349d62cc77bc89c3e5ec3884587767f6f))_
 - **v25.1.16: open-in-browser icon for containers with a web UI** _(2026-06-29 — [`98b27844`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/98b2784458c9c2e27f2cedb8b9a5ec8426dbaa9e))_
