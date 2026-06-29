@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.1.14: IP-mapping FORWARD rules stop accumulating — purge matches the nft backend (PapaSchlumpf)** _(2026-06-29 — [`3af85994`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3af85994be70b38dd95b02559acae06794ff41a9))_
 - **v25.1.13: dashboard serves the operator's real cert, not the first-boot self-signed (RutgerDiehard)** _(2026-06-29 — [`398bada1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/398bada1bd6bb5dd02dcc7f937f2c60514885623))_
 - **v25.1.12: Getting Started course — printable handout + two new lessons** _(2026-06-29 — [`3ae49f5e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3ae49f5e971bcfdc7a44a17c7c9e657d736260fd))_
 - **v25.1.11: cluster nodes recognise their own LAN IP — fixes red self-phantoms + others not seeing a reverse-proxied main (wabil)** _(2026-06-28 — [`6d168298`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6d1682982524641c9f5270032a5ebe791804fe69))_
