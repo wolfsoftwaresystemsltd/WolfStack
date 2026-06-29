@@ -448,6 +448,9 @@
         <div class="ws-spinner" style="width:42px; height:42px; border:3px solid rgba(168,85,247,0.25); border-top-color:#a855f7; border-radius:50%; animation: ws-spin 0.9s linear infinite;"></div>
         <div style="font-size:15px; font-weight:600;">Starting WolfStack on <code id="ws-host" style="background:rgba(168,85,247,0.12); padding:2px 8px; border-radius:6px; color:#c4b5fd;"></code>…</div>
         <div id="ws-starting-detail" style="font-size:12px; color:rgba(226,232,240,0.55); max-width:420px; text-align:center;">Waiting for the API to come up. Auto-retrying every second.</div>
+        <div id="ws-starting-cert-hint" role="note" aria-live="polite" style="display:none; font-size:12px; color:#fcd34d; max-width:460px; text-align:center; line-height:1.5; border:1px solid rgba(252,211,77,0.35); background:rgba(252,211,77,0.08); padding:10px 14px; border-radius:8px;">
+            You're reaching WolfStack by <strong>IP address over HTTPS</strong>. If you installed a domain certificate, your browser won't trust it for a bare IP — so the dashboard can't talk to the API. Open WolfStack by its <strong>domain name</strong> instead (the hostname your certificate was issued for, e.g. <code style="background:rgba(252,211,77,0.15); padding:1px 5px; border-radius:4px;">https://host.example.com:8553</code>).
+        </div>
     </div>
     <style>@keyframes ws-spin { to { transform: rotate(360deg); } }</style>
 
@@ -516,6 +519,22 @@
                                 } else if (attempts > 10) {
                                     detail.textContent = 'Connecting… (' + attempts + ' attempts) — service is taking longer than usual. Will keep retrying.';
                                 }
+                            }
+                            // A bare IP over HTTPS that keeps failing is almost
+                            // always a TLS hostname mismatch: a domain cert
+                            // isn't trusted for an IP, so this same-origin probe
+                            // can never succeed. Surface the real cause after a
+                            // few attempts (so a normal brief restart doesn't
+                            // flash it). We keep retrying regardless, in case the
+                            // backend is genuinely still starting. Self-signed
+                            // installs accessed by IP don't hit this — their cert
+                            // covers the IP, so the probe succeeds and the
+                            // overlay never shows.
+                            const wsHost = window.location.hostname || '';
+                            const wsIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(wsHost) || wsHost.indexOf(':') !== -1;
+                            if (attempts >= 3 && window.location.protocol === 'https:' && wsIpLiteral) {
+                                const certHint = document.getElementById('ws-starting-cert-hint');
+                                if (certHint) certHint.style.display = 'block';
                             }
                             setTimeout(probe, 1000);
                         });
