@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.1.16: open-in-browser icon for containers with a web UI** _(2026-06-29 — [`98b27844`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/98b2784458c9c2e27f2cedb8b9a5ec8426dbaa9e))_
 - **v25.1.15: login overlay hints when you're reaching the dashboard by IP over HTTPS** _(2026-06-29 — [`a9310f82`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a9310f8244fea09a11146b60219ed6211791180d))_
 - **v25.1.14: IP-mapping FORWARD rules stop accumulating — purge matches the nft backend (PapaSchlumpf)** _(2026-06-29 — [`3af85994`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3af85994be70b38dd95b02559acae06794ff41a9))_
 - **v25.1.13: dashboard serves the operator's real cert, not the first-boot self-signed (RutgerDiehard)** _(2026-06-29 — [`398bada1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/398bada1bd6bb5dd02dcc7f937f2c60514885623))_
