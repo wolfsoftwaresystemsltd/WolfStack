@@ -57764,6 +57764,9 @@ async function wolfAgentsLoadMemory(id) {
 // it can also be mirrored onto the public website unchanged.
 // ===================================================================
 const LEARN_COURSE = [
+    { title: 'Before you start', lessons: [
+        { id: '0-1', title: 'What even is a server?', mins: 5, file: '0-1-what-is-a-server.md' },
+    ] },
     { title: 'Find your feet', lessons: [
         { id: '1-1', title: 'What WolfStack is', mins: 3, file: '1-1-what-is-wolfstack.md' },
         { id: '1-2', title: 'A 2-minute tour of the screen', mins: 2, file: '1-2-screen-tour.md' },
@@ -57806,6 +57809,9 @@ const LEARN_COURSE = [
     { title: 'When you are ready for more', lessons: [
         { id: '8-1', title: 'The map of everything else', mins: 4, file: '8-1-the-map.md' },
         { id: '8-2', title: 'How to get unstuck', mins: 3, file: '8-2-getting-unstuck.md' },
+    ] },
+    { title: 'You did it', lessons: [
+        { id: 'done-1', title: 'Your starter checklist', mins: 3, file: 'done-1-checklist.md' },
     ] },
 ];
 
@@ -58122,6 +58128,115 @@ async function learnResetProgress() {
     learnRenderToc();
     learnUpdateNavButtons();
     if (typeof showToast === 'function') showToast('Course progress reset.', 'info');
+}
+
+// ── Print the course ────────────────────────────────────────────────
+// A clean, ink-friendly handout: opens a dedicated print window with its
+// own light stylesheet (so the dark dashboard theme never bleeds onto
+// paper and wastes toner), renders the lessons through the very same
+// learnMd() pipeline the screen uses, and triggers the browser print
+// dialog. scope 'course' prints every lesson as a booklet; scope 'lesson'
+// prints just the one being read. Built so a work-experience learner can
+// walk away with the whole course on paper.
+const LEARN_PRINT_CSS = `
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1a1a1a; background: #fff; font-size: 11.5pt; line-height: 1.5; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+@page { margin: 18mm 16mm; }
+.cover { text-align: center; padding: 70px 0 50px; page-break-after: always; }
+.cover h1 { font-size: 40pt; margin: 0 0 6px; letter-spacing: -0.5px; }
+.cover .cover-sub { font-size: 17pt; color: #333; margin-bottom: 18px; }
+.cover .cover-meta { font-size: 11pt; color: #777; }
+.lesson { page-break-before: always; }
+.cover + .lesson { page-break-before: avoid; }
+.kicker { text-transform: uppercase; letter-spacing: 1px; font-size: 8.5pt; color: #888; font-weight: 600; margin-bottom: 2px; }
+.learn-h1 { font-size: 21pt; font-weight: 700; margin: 0 0 12px; line-height: 1.2; }
+.learn-h2 { font-size: 15pt; font-weight: 700; margin: 22px 0 8px; }
+.learn-h3 { font-size: 12.5pt; font-weight: 700; margin: 16px 0 6px; }
+p.learn-p { margin: 0 0 10px; }
+.learn-code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.9em; background: #f0f1f3; padding: 1px 5px; border-radius: 3px; }
+.learn-pre { background: #f6f7f9; border: 1px solid #e2e5ea; border-radius: 5px; padding: 12px 14px; overflow: auto; page-break-inside: avoid; }
+.learn-pre code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 9.5pt; white-space: pre-wrap; word-wrap: break-word; }
+.learn-table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10.5pt; page-break-inside: avoid; }
+.learn-table th, .learn-table td { border: 1px solid #cfd4dc; padding: 6px 9px; text-align: left; vertical-align: top; }
+.learn-table th { background: #f2f4f7; }
+.learn-callout { margin: 12px 0; padding: 10px 14px; border-left: 3px solid #9aa3af; background: #f7f8fa; border-radius: 0 4px 4px 0; }
+ul, ol { margin: 0 0 10px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #1a1a1a; text-decoration: underline; }
+strong { font-weight: 700; }
+em { font-style: italic; }
+`;
+
+async function learnPrint(scope) {
+    const flat = learnFlatLessons();
+    let lessons;
+    if (scope === 'lesson') {
+        const cur = flat.find(l => l.id === _learnCurrentId);
+        lessons = cur ? [cur] : [];
+    } else {
+        lessons = flat;
+    }
+    if (!lessons.length) {
+        if (typeof showToast === 'function') showToast('Open a lesson first, then print.', 'info');
+        return;
+    }
+    // Open the window synchronously inside the click handler so pop-up
+    // blockers let it through; fill it once the markdown is ready.
+    const win = window.open('', 'wolfstack_learn_print', 'width=900,height=1000,scrollbars=yes,resizable=yes');
+    if (!win) {
+        // Visible, non-dismissing failure — never a silent console-only error.
+        if (typeof showToast === 'function') showToast('Your browser blocked the print window. Allow pop-ups for this site, then try again.', 'warning', 0);
+        return;
+    }
+    win.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Preparing&hellip;</title></head>'
+        + '<body style="font-family:system-ui,sans-serif;padding:40px;color:#444;">Preparing lessons to print&hellip;</body></html>');
+    win.document.close();
+    // Fetch any lessons not already cached, in parallel.
+    try {
+        await Promise.all(lessons.map(async l => {
+            if (_learnCache[l.file] === undefined) {
+                const r = await fetch('/learn/' + l.file, { cache: 'no-store' });
+                if (!r.ok) throw new Error(l.file + ': HTTP ' + r.status);
+                _learnCache[l.file] = await r.text();
+            }
+        }));
+    } catch (e) {
+        try { win.close(); } catch (_) {}
+        if (typeof showToast === 'function') showToast('Couldn’t load every lesson to print: ' + String((e && e.message) || e), 'warning', 0);
+        return;
+    }
+    // Build the printable body, walking the course in order so a booklet
+    // reads top to bottom. Each lesson carries its module name as a kicker.
+    let body = '';
+    if (scope !== 'lesson') {
+        body += '<header class="cover">'
+            + '<h1>WolfStack</h1>'
+            + '<div class="cover-sub">Getting Started &mdash; the complete course</div>'
+            + '<div class="cover-meta">' + flat.length + ' lessons &middot; printed from your dashboard</div>'
+            + '</header>';
+    }
+    LEARN_COURSE.forEach(mod => {
+        mod.lessons.forEach(l => {
+            if (!lessons.some(x => x.id === l.id)) return;
+            const md = _learnCache[l.file] || '';
+            body += '<article class="lesson">'
+                + '<div class="kicker">' + escapeHtml(mod.title) + '</div>'
+                + learnMd(md)
+                + '</article>';
+        });
+    });
+    const title = scope === 'lesson'
+        ? ((lessons[0] && lessons[0].title) || 'WolfStack lesson')
+        : 'WolfStack — Getting Started';
+    const doc = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
+        + escapeHtml(title) + '</title><style>' + LEARN_PRINT_CSS + '</style></head><body>'
+        + body
+        + '<script>window.onload=function(){try{window.focus();}catch(e){}window.print();};<\/script>'
+        + '</body></html>';
+    win.document.open();
+    win.document.write(doc);
+    win.document.close();
 }
 
 // Dashboard banner: shown until the operator dismisses it or completes a

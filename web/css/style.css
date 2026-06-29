@@ -4314,6 +4314,10 @@ body.sidebar-collapsed #task-log-footer {
     cursor: pointer; transition: var(--transition);
 }
 .learn-reset:hover { background: var(--bg-card-hover); color: var(--text-secondary); }
+.learn-sidebar-actions { display: flex; flex-direction: column; gap: 2px; }
+.learn-sidebar-actions .learn-reset { margin: 4px 8px; }
+.learn-sidebar-actions .learn-reset:first-child { margin-top: 8px; }
+.learn-sidebar-actions .learn-reset:last-child { margin-bottom: 8px; }
 
 /* Reading pane */
 .learn-main {

@@ -580,7 +580,10 @@
                         <div id="learn-progress-label" class="learn-progress-label">0 of 0 complete</div>
                     </div>
                     <nav id="learn-toc" class="learn-toc" aria-label="Course lessons"></nav>
-                    <button type="button" class="learn-reset" onclick="learnResetProgress()">Reset progress</button>
+                    <div class="learn-sidebar-actions">
+                        <button type="button" class="learn-reset" onclick="learnPrint('course')" title="Print every lesson as a handout">&#128424; Print course</button>
+                        <button type="button" class="learn-reset" onclick="learnResetProgress()">Reset progress</button>
+                    </div>
                 </aside>
                 <main class="learn-main">
                     <article id="learn-content" class="learn-content" tabindex="-1"></article>
@@ -10491,6 +10494,7 @@ region = us-east-1"></textarea>
         <button type="button" class="learn-d-iconbtn" onclick="learnAskAi()" title="Ask the AI about this lesson" aria-label="Ask the AI about this lesson">
             <span class="ws-icon-clean-wrap" data-icon="robot"></span>
         </button>
+        <button type="button" class="learn-d-iconbtn" onclick="learnPrint('lesson')" title="Print this lesson" aria-label="Print this lesson">&#128424;</button>
         <button type="button" class="learn-d-iconbtn" onclick="learnExpandToPage()" title="Open full screen" aria-label="Open full screen">&#10530;</button>
         <button type="button" class="learn-d-iconbtn" onclick="learnPopOut()" title="Pop out to its own window" aria-label="Pop out to its own window">&#8599;</button>
         <button type="button" class="learn-d-iconbtn" onclick="closeLearnDrawer()" title="Close (Esc)" aria-label="Close course">&times;</button>
