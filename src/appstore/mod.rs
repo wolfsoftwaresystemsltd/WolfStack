@@ -293,6 +293,26 @@ pub fn web_container_port_for(container_name: &str) -> Option<u16> {
     docker_web_container_port(&rec.app_id)
 }
 
+/// Reject an install/prepare that's missing any parameter the app declares as
+/// `required` (e.g. a database server password). Defends the API even when the
+/// UI's own required-field check is bypassed. Whitespace-only counts as missing.
+pub fn validate_required_inputs(
+    app_id: &str,
+    user_inputs: &HashMap<String, String>,
+) -> Result<(), String> {
+    let app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
+    let missing: Vec<String> = app.user_inputs.iter()
+        .filter(|inp| inp.required
+            && user_inputs.get(&inp.id).map(|v| v.trim()).unwrap_or("").is_empty())
+        .map(|inp| inp.label.clone())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Missing required parameter(s): {}", missing.join(", ")))
+    }
+}
+
 /// Install an app
 pub fn install_app(
     app_id: &str,
@@ -302,6 +322,8 @@ pub fn install_app(
     custom_ports: Option<&[String]>,
     deployment_type: Option<&str>,
 ) -> Result<String, String> {
+    // Never install without the parameters the app requires (e.g. a DB password).
+    validate_required_inputs(app_id, user_inputs)?;
     let mut app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
 
     // Override manifest ports with custom ports if provided
@@ -2186,6 +2208,8 @@ pub fn prepare_install(
     memory_limit: Option<&str>,
     cpu_limit: Option<&str>,
 ) -> Result<(String, String), String> {
+    // Never prepare an install without the parameters the app requires.
+    validate_required_inputs(app_id, user_inputs)?;
     let mut app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
 
     // Override manifest ports with custom ports if provided

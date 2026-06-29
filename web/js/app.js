@@ -38843,9 +38843,10 @@ function openAppStoreInstallModal(appId) {
             const extraAttrs = inp.input_type === 'number' ? 'min="1" step="1"' : '';
             return `
             <div style="margin-bottom:12px;">
-                <label style="font-size:13px; font-weight:500; display:block; margin-bottom:4px; color:var(--text-secondary);">${escapeHtml(inp.label)}</label>
+                <label style="font-size:13px; font-weight:500; display:block; margin-bottom:4px; color:var(--text-secondary);">${escapeHtml(inp.label)}${inp.required ? ' <span style="color:var(--danger);" title="Required">*</span>' : ''}</label>
                 <input type="${htmlType}" ${extraAttrs} class="form-control appstore-user-input"
-                    data-key="${escapeHtml(inp.id)}" placeholder="${escapeHtml(inp.placeholder || inp.default || '')}" value="${escapeHtml(inp.default || '')}">
+                    data-key="${escapeHtml(inp.id)}" data-label="${escapeHtml(inp.label)}" ${inp.required ? 'data-required="1" aria-required="true"' : ''}
+                    placeholder="${escapeHtml(inp.placeholder || inp.default || '')}" value="${escapeHtml(inp.default || '')}">
             </div>
             `;
         }).join('');
@@ -39130,6 +39131,29 @@ async function executeAppStoreInstall() {
     document.querySelectorAll('.appstore-user-input').forEach(el => {
         userInputs[el.dataset.key] = el.value;
     });
+
+    // Required-parameter validation: don't install without the parameters the
+    // app needs (e.g. a database password). Highlight the empty required
+    // fields, name them, and abort before any install request goes out.
+    const missingRequired = [];
+    document.querySelectorAll('.appstore-user-input').forEach(el => {
+        const isReq = el.dataset.required === '1';
+        const filled = (el.value || '').trim().length > 0;
+        if (isReq && !filled) {
+            missingRequired.push(el.dataset.label || el.dataset.key);
+            el.style.borderColor = 'var(--danger)';
+            el.setAttribute('aria-invalid', 'true');
+        } else if (isReq) {
+            el.style.borderColor = '';
+            el.removeAttribute('aria-invalid');
+        }
+    });
+    if (missingRequired.length > 0) {
+        showToast(`${missingRequired.length === 1 ? 'Required field' : 'Required fields'}: ${missingRequired.join(', ')} — fill ${missingRequired.length === 1 ? 'it' : 'them'} in before installing.`, 'error');
+        const firstBad = document.querySelector('.appstore-user-input[aria-invalid="true"]');
+        if (firstBad) { try { firstBad.focus(); } catch (_) {} }
+        return;
+    }
 
     // Get storage selection
     const storagePath = document.getElementById('appstore-install-storage').value || null;
@@ -58125,6 +58149,36 @@ function learnContextHelp() {
 // /api/ai/chat call, and the agent answers from its built-in WolfStack
 // knowledge base (which now includes a course index). If the agent isn't set
 // up, the chat widget isn't mounted — guide the user to enable it.
+// Is the AI agent configured? Mirror the floating AI bubble's own gate — the
+// bubble is revealed (display:flex) only when /api/ai/config reports a provider
+// key + a model + the agent enabled. We read that resolved state rather than
+// re-fetching, so the course prompt matches exactly what the operator sees.
+function learnAiConfigured() {
+    const b = document.getElementById('ai-chat-bubble');
+    return !!(b && b.style.display === 'flex');
+}
+
+// Append a "Still unsure? Ask the AI" prompt to a rendered lesson, but ONLY when
+// AI is configured (otherwise the offer would dead-end on a setup toast).
+// Clicking it seeds the AI chat with this lesson's context via learnAskAi().
+function learnAppendAiPrompt(contentEl) {
+    if (!contentEl || !learnAiConfigured()) return;
+    const box = document.createElement('div');
+    box.className = 'learn-ai-prompt';
+    box.style.cssText = 'margin-top:24px; padding:14px 16px; border:1px solid rgba(96,165,250,0.3); background:rgba(96,165,250,0.08); border-radius:10px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;';
+    const txt = document.createElement('span');
+    txt.style.cssText = 'flex:1; min-width:160px; font-size:13px; color:var(--text-secondary);';
+    txt.textContent = 'Still unsure about this step?';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Ask the AI ↗';
+    btn.style.cssText = 'flex-shrink:0; background:linear-gradient(135deg,#dc2626,#f87171); color:#fff; border:none; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer;';
+    btn.onclick = function () { learnAskAi(); };
+    box.appendChild(txt);
+    box.appendChild(btn);
+    contentEl.appendChild(box);
+}
+
 function learnAskAi() {
     const panel = document.getElementById('ai-chat-panel');
     if (!panel) {
@@ -58206,6 +58260,8 @@ async function learnOpenLesson(id) {
         }
     }
     content.innerHTML = learnMd(md);
+    // "Still unsure? Ask the AI" — only when the AI agent is configured.
+    learnAppendAiPrompt(content);
     learnUpdateNavButtons();
     // Scroll the lesson to the top and move focus for keyboard/SR users.
     // The drawer's content article scrolls itself; the page view scrolls
