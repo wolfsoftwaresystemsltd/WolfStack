@@ -856,53 +856,199 @@ fn wolfstack_local_cert_paths() -> &'static [(&'static str, &'static str, &'stat
     ]
 }
 
+/// One discoverable TLS keypair plus the two facts we rank candidates on:
+/// the DNS names it asserts (SAN, falling back to CN) and whether it is
+/// self-signed. Built so a real CA cert that covers the host always beats
+/// the install-time self-signed placeholder that used to shadow it.
+#[derive(Debug)]
+struct TlsCandidate {
+    cert_path: String,
+    key_path: String,
+    domains: Vec<String>,
+    self_signed: bool,
+}
+
+impl TlsCandidate {
+    fn load(cert_path: String, key_path: String) -> Self {
+        let domains = cert_dns_names(&cert_path);
+        let self_signed = cert_is_self_signed(&cert_path);
+        TlsCandidate { cert_path, key_path, domains, self_signed }
+    }
+
+    /// Does this cert's SAN/CN cover `host`, wildcard-aware?
+    fn covers(&self, host: &str) -> bool {
+        self.domains.iter().any(|pat| host_matches_cert_name(pat, host))
+    }
+}
+
+/// RFC 6125 host matching: exact, or a single-label `*.` wildcard.
+/// `*.example.com` matches `a.example.com` but not `example.com` nor
+/// `a.b.example.com`. Case- and trailing-dot-insensitive.
+fn host_matches_cert_name(pattern: &str, host: &str) -> bool {
+    let pattern = pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if pattern.is_empty() || host.is_empty() {
+        return false;
+    }
+    if pattern == host {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        // Wildcard covers exactly one left-most label.
+        if let Some((_label, rest)) = host.split_once('.') {
+            return !suffix.is_empty() && rest == suffix;
+        }
+    }
+    false
+}
+
+/// Read the DNS names a cert asserts: subjectAltName DNS entries, or the
+/// CommonName when there's no SAN. Best-effort — an unreadable or
+/// unparseable cert yields an empty list (it simply won't match a host).
+fn cert_dns_names(cert_path: &str) -> Vec<String> {
+    use openssl::x509::X509;
+    let mut names = Vec::new();
+    let Ok(bytes) = std::fs::read(cert_path) else { return names; };
+    // from_pem parses the leaf (first cert) of a fullchain — exactly the
+    // cert whose names a client validates.
+    let Ok(cert) = X509::from_pem(&bytes) else { return names; };
+    if let Some(san) = cert.subject_alt_names() {
+        for gn in san.iter() {
+            if let Some(dns) = gn.dnsname() {
+                names.push(dns.to_string());
+            }
+        }
+    }
+    if names.is_empty() {
+        for e in cert.subject_name().entries_by_nid(openssl::nid::Nid::COMMONNAME) {
+            if let Ok(s) = e.data().as_utf8() {
+                names.push(s.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// True if the leaf cert is self-signed — proven by the cert verifying
+/// under its own public key. This is how we tell WolfStack's first-boot
+/// placeholder from an operator's real CA-issued cert.
+fn cert_is_self_signed(cert_path: &str) -> bool {
+    use openssl::x509::X509;
+    // Unknown (unreadable / unparseable / no public key) biases to
+    // self-signed: a cert we can't vet must never out-rank a readable
+    // CA-signed cert in selection. It can still be served if it's the only
+    // candidate — exactly the old behaviour.
+    let Ok(bytes) = std::fs::read(cert_path) else { return true; };
+    let Ok(cert) = X509::from_pem(&bytes) else { return true; };
+    match cert.public_key() {
+        Ok(pk) => cert.verify(&pk).unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+/// Rank candidates and return the index of the best, or None if empty.
+/// Tuple precedence, most significant first:
+///   covers-host AND CA-signed → ideal: trusted and the right name
+///   covers-host               → right name (even if self-signed)
+///   CA-signed                 → trusted (even if the name won't match)
+/// `Reverse(idx)` makes the earliest source win ties — preserving the
+/// historical source-order preference, deterministically (idx is unique).
+fn rank_best_candidate(candidates: &[TlsCandidate], domain: Option<&str>) -> Option<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .max_by_key(|(idx, c)| {
+            let covers = domain.is_some_and(|d| c.covers(d));
+            (
+                covers && !c.self_signed,
+                covers,
+                !c.self_signed,
+                std::cmp::Reverse(*idx),
+            )
+        })
+        .map(|(idx, _)| idx)
+}
+
+/// `certbot certificates` shells out to a subprocess that can be slow (or,
+/// misconfigured, hang). `find_tls_certificate` runs several times at boot,
+/// so cache the result for the life of the process — the cert set doesn't
+/// change between those calls. The runtime cert-list API deliberately uses
+/// `parse_certbot_certificates()` directly (uncached) so it always reflects
+/// a freshly issued cert.
+fn certbot_certificates_cached() -> &'static [(String, String, String, String)] {
+    static CACHE: std::sync::OnceLock<Vec<(String, String, String, String)>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(parse_certbot_certificates)
+}
+
 /// Find TLS certificate files for a domain (Let's Encrypt or /etc/wolfstack/)
-/// Returns (cert_path, key_path) if both exist
+/// Returns (cert_path, key_path).
+///
+/// Rather than taking the first hit, discovery gathers candidates from the
+/// historical sources (WolfStack-local paths, certbot, /etc/letsencrypt/live,
+/// Proxmox VE) and *ranks* them. Two rules a plain first-match got wrong,
+/// both of which silently ignored an operator's real cert:
+///   1. A CA-signed cert beats the self-signed placeholder WolfStack writes
+///      to /etc/wolfstack/tls/ at first boot — which sat earlier in the
+///      search order and permanently shadowed a Let's Encrypt cert
+///      (RutgerDiehard's "wildcard installed but :8553 still self-signed").
+///   2. Wildcard SANs are matched against the host: a `*.example.com` cert
+///      now covers `host.example.com`, where the old exact-string compare
+///      never matched.
+///
+/// Ties fall back to the original source order, so existing single-cert
+/// installs resolve exactly as before. Explicit --tls-cert/--tls-key still
+/// win — they're handled by the caller before this is consulted.
 pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
-    // Check the WolfStack-local cert locations first (cert.pem, tls/, ssl/, etc.)
+    use std::path::Path;
+
+    // Local candidates first — cheap filesystem checks.
+    let mut candidates: Vec<TlsCandidate> = Vec::new();
     for (_label, cert, key) in wolfstack_local_cert_paths() {
-        if std::path::Path::new(cert).exists() && std::path::Path::new(key).exists() {
-            return Some((cert.to_string(), key.to_string()));
+        if Path::new(cert).exists() && Path::new(key).exists() {
+            candidates.push(TlsCandidate::load(cert.to_string(), key.to_string()));
         }
     }
 
-    // Try certbot CLI first
-    let certs = parse_certbot_certificates();
-
-    // If a specific domain was requested, look for it
-    if let Some(d) = domain {
-        if let Some((_domains, cert, key, _expiry)) = certs.iter().find(|(domains, _, _, _)| {
-            domains.split_whitespace().any(|dom| dom == d)
-        }) {
-            return Some((cert.clone(), key.clone()));
+    // Fast path: a local CA-signed cert that already covers the host (or any
+    // local CA cert when no host was requested) can't be out-ranked by a
+    // remote source — remote certs tie at best and lose the earliest-source
+    // tiebreak. Return it without shelling out to certbot, keeping a
+    // slow/hung certbot off the boot path for operators who brought their
+    // own cert (the pre-ranking behaviour for that case).
+    if let Some(best) = rank_best_candidate(&candidates, domain) {
+        let c = &candidates[best];
+        if !c.self_signed && domain.is_none_or(|d| c.covers(d)) {
+            tracing::debug!("TLS: selected local CA cert {}", c.cert_path);
+            return Some((c.cert_path.clone(), c.key_path.clone()));
         }
     }
 
-    // Return first certbot result if any
-    if let Some((_domains, cert, key, _expiry)) = certs.first() {
-        return Some((cert.clone(), key.clone()));
-    }
-
-    // Fallback: directly scan /etc/letsencrypt/live/
-    let live_certs = scan_letsencrypt_live();
-    if let Some(d) = domain {
-        if let Some((_dom, cert, key)) = live_certs.iter().find(|(dom, _, _)| dom == d) {
-            return Some((cert.clone(), key.clone()));
+    // Otherwise gather the remote sources and rank everything together,
+    // deduping by cert path so a cert found by both certbot and the
+    // /etc/letsencrypt/live scan isn't read and parsed twice.
+    let mut seen: std::collections::HashSet<String> =
+        candidates.iter().map(|c| c.cert_path.clone()).collect();
+    let remote = certbot_certificates_cached()
+        .iter()
+        .map(|(_d, cert, key, _e)| (cert.clone(), key.clone()))
+        .chain(scan_letsencrypt_live().into_iter().map(|(_d, cert, key)| (cert, key)))
+        .chain(scan_pve_certificates().into_iter().map(|(_l, cert, key)| (cert, key)));
+    for (cert, key) in remote {
+        if Path::new(&cert).exists() && Path::new(&key).exists() && seen.insert(cert.clone()) {
+            candidates.push(TlsCandidate::load(cert, key));
         }
     }
-    if let Some((_dom, cert, key)) = live_certs.first() {
 
-        return Some((cert.clone(), key.clone()));
-    }
-
-    // Fallback: Proxmox VE certs
-    let pve_certs = scan_pve_certificates();
-    if let Some((_label, cert, key)) = pve_certs.first() {
-
-        return Some((cert.clone(), key.clone()));
-    }
-
-    None
+    let best = rank_best_candidate(&candidates, domain)?;
+    let c = &candidates[best];
+    tracing::debug!(
+        "TLS: selected cert {} (self_signed={}, covers_host={})",
+        c.cert_path,
+        c.self_signed,
+        domain.is_some_and(|d| c.covers(d))
+    );
+    Some((c.cert_path.clone(), c.key_path.clone()))
 }
 
 /// List ALL TLS certificates on this server
@@ -1791,5 +1937,28 @@ mod cert_tests {
         // input validation, not the thread side-effect).
         assert!(restart_cert_service("wolfstack").is_ok());
         assert!(restart_cert_service("pveproxy").is_ok());
+    }
+
+    #[test]
+    fn host_matches_exact_and_case_and_trailing_dot() {
+        assert!(host_matches_cert_name("host.example.com", "host.example.com"));
+        assert!(host_matches_cert_name("Host.Example.COM", "host.example.com"));
+        assert!(host_matches_cert_name("host.example.com.", "host.example.com"));
+        assert!(!host_matches_cert_name("host.example.com", "other.example.com"));
+        assert!(!host_matches_cert_name("", "host.example.com"));
+    }
+
+    #[test]
+    fn host_matches_wildcard_single_label_only() {
+        // Covers exactly one left-most label (RutgerDiehard's case).
+        assert!(host_matches_cert_name("*.example.com", "host.example.com"));
+        assert!(host_matches_cert_name("*.example.com", "anything.example.com"));
+        // Must NOT match the bare apex or a deeper subdomain.
+        assert!(!host_matches_cert_name("*.example.com", "example.com"));
+        assert!(!host_matches_cert_name("*.example.com", "a.b.example.com"));
+        // Wrong parent zone.
+        assert!(!host_matches_cert_name("*.example.com", "host.example.org"));
+        // A bare "*." pattern matches nothing.
+        assert!(!host_matches_cert_name("*.", "host.example.com"));
     }
 }
