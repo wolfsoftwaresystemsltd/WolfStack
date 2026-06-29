@@ -242,6 +242,57 @@ pub fn list_installed_apps() -> Vec<InstalledApp> {
     load_installed()
 }
 
+/// Container-side ports we treat as "likely a web UI", most-preferred first.
+/// Used to pick which of an app's published ports the browser-open icon
+/// should target when an app exposes several. Not exhaustive — the actual
+/// confirmation is an HTTP probe; this only orders the candidates.
+const WEB_LIKELY_PORTS: &[u16] = &[
+    80, 443, 8080, 8000, 3000, 8443, 8096, 9000, 5000, 8123, 3001, 2283, 8081, 9090,
+];
+
+/// Parse the CONTAINER side of a manifest port string ("host:container",
+/// "host:container/proto", or bare "container"/"container/proto").
+fn manifest_container_port(spec: &str) -> Option<u16> {
+    let spec = spec.split('/').next().unwrap_or(spec); // drop /tcp etc.
+    let container = spec.rsplit(':').next().unwrap_or(spec); // right of last ':'
+    container.trim().parse::<u16>().ok()
+}
+
+/// Infer the container-side web-UI port for an app's Docker target from its
+/// declared `ports`: prefer a recognisably-web port, else the first port.
+/// Returns None when the app declares no ports. This is the "App Store first"
+/// source — it tells the open-in-browser feature which port to try before
+/// falling back to a live port scan.
+pub fn docker_web_container_port(app_id: &str) -> Option<u16> {
+    let app = get_app(app_id)?;
+    let d = app.docker.as_ref()?;
+    let ports: Vec<u16> = d.ports.iter().filter_map(|p| manifest_container_port(p)).collect();
+    if ports.is_empty() {
+        return None;
+    }
+    WEB_LIKELY_PORTS
+        .iter()
+        .find(|w| ports.contains(w))
+        .copied()
+        .or_else(|| ports.first().copied())
+}
+
+/// Resolve the App-Store-known web port for a running container, by matching
+/// it to its install record. Returns the container-side web port (the caller
+/// maps it to the live host port for Docker, or hits it directly on the
+/// container IP for LXC). None when the container wasn't installed from the
+/// store or the app declares no web port.
+pub fn web_container_port_for(container_name: &str) -> Option<u16> {
+    let installed = load_installed();
+    let rec = installed
+        .iter()
+        .find(|a| a.container_name.as_deref() == Some(container_name))?;
+    // Today we can infer the web port for Docker apps from their declared
+    // ports. LXC apps declare no ports, so they fall through to the live
+    // probe (common web ports on the container IP).
+    docker_web_container_port(&rec.app_id)
+}
+
 /// Install an app
 pub fn install_app(
     app_id: &str,

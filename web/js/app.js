@@ -22938,6 +22938,126 @@ function vmCardHtml(vm) {
     </div>`;
 }
 
+// ─── "Open in browser" icon for containers with a web UI ──────────────
+// The backend resolves a container's web endpoint (App Store port first,
+// then a live HTTP scan of the published/likely ports) and only returns one
+// when something actually answers HTTP — so a database container shows no
+// icon. We render the globe button hidden, then probe per container and
+// reveal+wire it. Results are cached per (node, runtime, name) so re-renders
+// (Docker stats poll every few seconds) never re-probe.
+const _wsOpenUrlCache = {};
+
+function wsContainerOpenBtn(runtime, name) {
+    return `<button type="button" class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;display:none;" data-wsopen-runtime="${runtime}" data-wsopen-name="${escapeAttr(name)}" title="Open in browser"><span class="ws-icon-clean-wrap" data-icon="globe"></span></button>`;
+}
+
+// The host the BROWSER should hit for a Docker host-published port: the node
+// you're viewing (its address for a remote node, else the current hostname).
+function wsNodeOpenHost() {
+    let host = window.location.hostname;
+    if (currentNodeId) {
+        const node = allNodes.find(n => n.id === currentNodeId);
+        if (node && !node.is_self && node.address) host = node.address;
+    }
+    return host;
+}
+
+function wsResolveOpenButtons(rootEl) {
+    if (!rootEl) return;
+    const nodeHost = wsNodeOpenHost();
+    const nodeKey = currentNodeId || 'self';
+    rootEl.querySelectorAll('[data-wsopen-runtime]').forEach(async (btn) => {
+        const runtime = btn.getAttribute('data-wsopen-runtime');
+        const name = btn.getAttribute('data-wsopen-name');
+        const key = `${nodeKey}|${runtime}|${name}`;
+        let url = _wsOpenUrlCache[key];
+        if (url === undefined) {
+            try {
+                const r = await fetch(apiUrl(`/api/containers/${runtime}/${encodeURIComponent(name)}/web-url`), { cache: 'no-store' });
+                const d = await r.json();
+                // open_host null => Docker host-published, use the node host;
+                // else (LXC) hit the container IP the backend returned.
+                url = (d && d.open_port) ? `http://${d.open_host || nodeHost}:${d.open_port}` : null;
+            } catch (_) { url = null; }
+            _wsOpenUrlCache[key] = url;
+        }
+        if (url) {
+            btn.style.display = '';
+            btn.title = 'Open ' + url;
+            btn.onclick = () => window.open(url, '_blank', 'noopener');
+        } else {
+            btn.style.display = 'none';
+        }
+    });
+}
+
+// A toast carrying a single action button (e.g. "Open"). Kept separate from
+// showToast(), which deliberately renders its message as a text node for XSS
+// safety across 1000+ call sites — we don't weaken that.
+function showActionToast(message, actionLabel, actionFn, type = 'success', duration = 15000) {
+    let container = document.getElementById('toast-container');
+    if (!container || container.parentElement !== document.body) {
+        if (container) container.remove();
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        container.setAttribute('role', 'status');
+        container.setAttribute('aria-live', 'polite');
+        Object.assign(container.style, { position: 'fixed', top: '20px', right: '20px', zIndex: '99999', display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none' });
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    Object.assign(toast.style, {
+        padding: '14px 20px', background: type === 'info' ? 'linear-gradient(135deg, #1a2a3f, #141f30)' : 'linear-gradient(135deg, #1a3a2a, #162b22)',
+        borderLeft: '4px solid ' + (type === 'info' ? '#60a5fa' : '#34d399'), borderRadius: '8px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        display: 'flex', alignItems: 'center', gap: '12px', fontSize: '14px', fontWeight: '500', color: '#fff',
+        minWidth: '280px', maxWidth: '460px', pointerEvents: 'auto', transform: 'translateX(120%)', opacity: '0',
+        transition: 'opacity 0.35s ease, transform 0.35s cubic-bezier(0.21,1.02,0.73,1)'
+    });
+    const msg = document.createElement('span');
+    msg.style.cssText = 'flex:1;';
+    msg.textContent = String(message ?? '');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = actionLabel;
+    btn.style.cssText = 'flex-shrink:0; background:rgba(255,255,255,0.16); border:1px solid rgba(255,255,255,0.35); color:#fff; border-radius:6px; padding:6px 12px; font-size:13px; font-weight:600; cursor:pointer;';
+    btn.onclick = () => { try { actionFn(); } catch (_) {} toast.remove(); };
+    const dismiss = document.createElement('span');
+    dismiss.style.cssText = 'cursor:pointer; opacity:0.7; font-size:18px; flex-shrink:0; line-height:1;';
+    dismiss.title = 'Dismiss';
+    dismiss.textContent = '×';
+    dismiss.onclick = () => toast.remove();
+    toast.replaceChildren(msg, btn, dismiss);
+    container.appendChild(toast);
+    requestAnimationFrame(() => requestAnimationFrame(() => { toast.style.transform = 'translateX(0)'; toast.style.opacity = '1'; }));
+    if (duration > 0) {
+        setTimeout(() => { toast.style.transform = 'translateX(120%)'; toast.style.opacity = '0'; setTimeout(() => toast.remove(), 400); }, duration);
+    }
+}
+
+// After an install, poll for the new app's web UI (the container needs a few
+// seconds to start and bind its port) and, when it answers HTTP, pop a toast
+// with a one-click Open. Silent if the app has no web UI. The container-row
+// globe icon is the always-on fallback; this is the immediate convenience.
+async function offerOpenAfterInstall(runtime, containerName, appName, nodeId, isSelf, nodeAddr) {
+    if (!runtime || !containerName || (runtime !== 'docker' && runtime !== 'lxc')) return;
+    const base = isSelf ? '' : `/api/nodes/${nodeId}/proxy`;
+    const fetchUrl = `${base}/api/containers/${runtime}/${encodeURIComponent(containerName)}/web-url`;
+    const defaultHost = isSelf ? window.location.hostname : (nodeAddr || window.location.hostname);
+    for (let i = 0; i < 12; i++) {              // ~60s of grace for image pull + start
+        await new Promise(r => setTimeout(r, i === 0 ? 2500 : 5000));
+        let d = null;
+        try { d = await (await fetch(fetchUrl, { cache: 'no-store' })).json(); } catch (_) {}
+        if (d && d.open_port) {
+            const url = `http://${d.open_host || defaultHost}:${d.open_port}`;
+            _wsOpenUrlCache[`${nodeId || 'self'}|${runtime}|${containerName}`] = url; // prime the row icon
+            showActionToast(`${appName || containerName} is ready`, 'Open ↗',
+                () => window.open(url, '_blank', 'noopener'), 'success', 18000);
+            return;
+        }
+    }
+}
+
 function renderDockerContainers(containers) {
     const table = document.getElementById('docker-containers-table');
     const empty = document.getElementById('docker-empty');
@@ -23022,6 +23142,7 @@ function renderDockerContainers(containers) {
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'pause', this)" title="Pause"><span class="ws-icon-clean-wrap" data-icon="pause"></span></button>
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="openConsole('docker', '${c.name}')" title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                     ${_containerVncBtnHtml('docker', c.name, c.name, 'margin:2px;font-size:20px;line-height:1;padding:4px 6px;', true)}
+                    ${wsContainerOpenBtn('docker', c.name)}
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;opacity:0.4;cursor:not-allowed;pointer-events:none;" disabled title="Remove"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 ` : isPaused ? `
                     <button class="btn btn-sm" style="margin:2px;font-size:20px;line-height:1;padding:4px 6px;" onclick="dockerAction('${c.name}', 'unpause', this)" title="Unpause"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>
@@ -23046,6 +23167,9 @@ function renderDockerContainers(containers) {
             </div></td>
         </tr>${statsSubRow}`;
     }).join('');
+
+    // Reveal the "open in browser" icon for any container with a live web UI.
+    wsResolveOpenButtons(table);
 
     // Surface freshness — Docker stats poll every few seconds; show
     // "Updated Xs ago" so operators can tell live from stale data.
@@ -23841,6 +23965,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="lxcAction('${c.name}', 'freeze', this)"` : ''} title="Freeze"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>
                 <button class="btn btn-sm" style="${!isRunning ? disStyle : btnStyle}" ${!isRunning ? 'disabled' : ''} ${isRunning ? `onclick="openLxcConsole('${c.name}', '${c.hostname || c.name}')"` : ''} title="Console"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
                 ${_containerVncBtnHtml('lxc', c.name, c.hostname || c.name, btnStyle, isRunning)}
+                ${isRunning ? wsContainerOpenBtn('lxc', c.name) : ''}
                 ${isRunning ? `<button class="btn btn-sm" style="${btnStyle}" onclick="reclaimLxcCache('${c.name}', this)" title="Reclaim cache — free this container's clean page cache. Safe: never touches its working memory, so the running app is not disrupted."><span class="ws-icon-clean-wrap" data-icon="memory"></span></button>` : ''}
                 <button class="btn btn-sm" style="${isRunning ? disStyle : btnStyle}" ${isRunning ? 'disabled' : ''} ${!isRunning ? `onclick="lxcAction('${c.name}', 'destroy', this)"` : ''} title="Destroy"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="viewContainerLogs('lxc', '${c.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
@@ -23857,6 +23982,9 @@ function renderLxcContainers(containers, stats) {
             </div></td>
         </tr>${statsSubRow}`;
     }).join('');
+
+    // Reveal the "open in browser" icon for any LXC container with a live web UI.
+    wsResolveOpenButtons(table);
 }
 
 // Reclaim a running LXC container's clean page cache (cgroup v2
@@ -39153,6 +39281,7 @@ async function executeAppStoreInstall() {
             showToast(data.message || `${appName} deployed via Docker Compose`, 'success', 8000);
             taskLog('App install (Compose): ' + appName);
             if (typeof loadInstalledApps === 'function') loadInstalledApps();
+            offerOpenAfterInstall('docker', name, appName, selectedNodeId, !selectedNode || selectedNode.is_self, selectedNode && selectedNode.address);
         } catch (e) {
             showToast('Compose install failed: ' + e.message, 'error');
             taskLog('App install (Compose): ' + appName, 'failed');
@@ -39238,6 +39367,8 @@ async function executeAppStoreInstall() {
 
         showToast(`Installation terminal opened for ${appName}`, 'success');
         taskLog('App install: ' + appName);
+        // Once the install finishes and the app's web UI comes up, offer Open.
+        offerOpenAfterInstall(appStoreInstallTarget, name, appName, selectedNodeId, !selectedNode || selectedNode.is_self, selectedNode && selectedNode.address);
     } catch (e) {
         showToast('Installation failed: ' + e.message, 'error');
         taskLog('App install: ' + appName, 'failed');

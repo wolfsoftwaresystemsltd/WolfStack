@@ -7342,6 +7342,117 @@ fn get_unit_info(service: &str) -> serde_json::Value {
 // ─── Containers API ───
 
 /// GET /api/containers/status — get Docker and LXC runtime status
+/// Common web ports to probe on an LXC container's own IP, most-likely first.
+/// LXC has no published-port table to read, so we scan these directly.
+const LXC_WEB_PROBE_PORTS: &[u16] = &[80, 8080, 443, 3000, 8000, 8096, 9000, 5000, 8443, 8123];
+
+/// One open-in-browser candidate: where the backend probes it, and where the
+/// browser should open it. `open_host = None` means "use the node host the
+/// dashboard is already on" (Docker host-published ports); `Some(ip)` means
+/// open that address directly (an LXC container's IP).
+struct WebCandidate {
+    probe_host: String,
+    probe_port: u16,
+    open_host: Option<String>,
+    open_port: u16,
+}
+
+/// Build the ordered list of open-in-browser candidates for a container.
+/// App Store first: an app's declared/inferred web port is moved to the front
+/// so it's probed before anything else. Sync (reads the cached container list)
+/// — run under web::block.
+fn build_web_candidates(runtime: &str, name: &str) -> Vec<WebCandidate> {
+    let mut out: Vec<WebCandidate> = Vec::new();
+    let loopback = |ip: &str| ip == "127.0.0.1" || ip == "::1" || ip == "localhost";
+    let wildcard = |ip: &str| ip == "0.0.0.0" || ip == "::" || ip.is_empty();
+    match runtime {
+        "docker" => {
+            let Some(c) = containers::docker_list_all_cached().into_iter().find(|c| c.name == name) else {
+                return out;
+            };
+            // Published TCP ports reachable from a browser (wildcard or a host
+            // IP — not loopback-only).
+            for m in c.port_mappings.iter().filter(|m| {
+                m.published && m.proto.eq_ignore_ascii_case("tcp") && !loopback(&m.host_ip)
+            }) {
+                let (probe_host, open_host) = if wildcard(&m.host_ip) {
+                    ("127.0.0.1".to_string(), None)
+                } else {
+                    (m.host_ip.clone(), Some(m.host_ip.clone()))
+                };
+                out.push(WebCandidate { probe_host, probe_port: m.host_port, open_host, open_port: m.host_port });
+            }
+            // App Store first: float the app's known web port to the front.
+            if let Some(web_cport) = crate::appstore::web_container_port_for(name)
+                && let Some(hp) = c.port_mappings.iter()
+                    .find(|m| m.container_port == web_cport && m.published)
+                    .map(|m| m.host_port)
+                && let Some(pos) = out.iter().position(|w| w.open_port == hp)
+            {
+                let pick = out.remove(pos);
+                out.insert(0, pick);
+            }
+        }
+        "lxc" => {
+            let Some(c) = containers::lxc_list_all_cached().into_iter().find(|c| c.name == name) else {
+                return out;
+            };
+            let ip = c.ip_address.trim();
+            if ip.is_empty() || ip == "-" {
+                return out;
+            }
+            for &p in LXC_WEB_PROBE_PORTS {
+                out.push(WebCandidate { probe_host: ip.to_string(), probe_port: p, open_host: Some(ip.to_string()), open_port: p });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// True if `host:port` answers HTTP at all (any status). A bare TCP service
+/// with no HTTP (a database, etc.) makes reqwest error, so it returns false —
+/// that's how "no web UI ⇒ no icon" is enforced.
+async fn web_candidate_responds(host: &str, port: u16) -> bool {
+    let url = format!("http://{}:{}/", host, port);
+    API_HTTP_CLIENT
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(700))
+        .send()
+        .await
+        .is_ok()
+}
+
+/// GET /api/containers/{runtime}/{id}/web-url — resolve an "open in browser"
+/// target for a container, or null if it has no web UI. App Store port first,
+/// then an HTTP probe of the live candidates; only a port that actually answers
+/// HTTP is returned. Runs on the node hosting the container (remote nodes via
+/// the existing proxy route), so probes are node-local.
+pub async fn container_web_url(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (runtime, name) = path.into_inner();
+    if runtime != "docker" && runtime != "lxc" {
+        return HttpResponse::Ok().json(serde_json::json!({ "open_host": null, "open_port": null }));
+    }
+
+    let (r, n) = (runtime.clone(), name.clone());
+    let candidates = web::block(move || build_web_candidates(&r, &n)).await.unwrap_or_default();
+
+    for cand in candidates {
+        if web_candidate_responds(&cand.probe_host, cand.probe_port).await {
+            return HttpResponse::Ok().json(serde_json::json!({
+                "open_host": cand.open_host,
+                "open_port": cand.open_port,
+            }));
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "open_host": null, "open_port": null }))
+}
+
 pub async fn container_runtime_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     // docker_status()/lxc_status() probe the runtimes via subprocess — offload so
@@ -37608,6 +37719,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/local-publish", web::post().to(local_publish))
         // Containers
         .route("/api/containers/status", web::get().to(container_runtime_status))
+        .route("/api/containers/{runtime}/{id}/web-url", web::get().to(container_web_url))
         .route("/api/containers/install", web::post().to(install_container_runtime))
         .route("/api/containers/install-component", web::post().to(install_component_in_container))
         .route("/api/containers/running", web::get().to(list_running_containers))
