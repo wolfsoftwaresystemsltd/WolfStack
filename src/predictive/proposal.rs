@@ -172,6 +172,15 @@ pub struct Proposal {
     pub status: ProposalStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Last tick an analyzer actually EVALUATED this (finding, scope) — i.e. the
+    /// scope was in the orchestrator's `covered` set this run, whether or not the
+    /// condition re-fired. Lets the operator (and us) tell "still actively
+    /// detected" (advancing, with updated_at) from "no longer being checked"
+    /// (stale → the analyzer's data source is unavailable, which is precisely why
+    /// it can't auto-resolve). Defaults to None for proposals persisted before
+    /// this field existed (KO4BSR/Gary 2026-06-29).
+    #[serde(default)]
+    pub last_checked_at: Option<DateTime<Utc>>,
 }
 
 impl Proposal {
@@ -201,6 +210,7 @@ impl Proposal {
             status: ProposalStatus::Pending,
             created_at: now,
             updated_at: now,
+            last_checked_at: Some(now),
         }
     }
 
@@ -318,6 +328,27 @@ impl ProposalStore {
             let id = incoming.id.clone();
             self.proposals.push(incoming);
             id
+        }
+    }
+
+    /// Stamp `last_checked_at = now` on every PENDING proposal whose
+    /// (finding_type, scope) the analyzers actually evaluated this tick
+    /// (`covered`). Drives the inbox's "last checked" indicator so a finding
+    /// that won't auto-resolve is visibly either still-being-detected (stamp
+    /// advances) or no-longer-evaluated (stamp goes stale — the analyzer's data
+    /// source is unavailable, the real reason it can't clear).
+    pub fn touch_checked(&mut self, covered: &[(String, ProposalScope)]) {
+        let now = Utc::now();
+        for p in &mut self.proposals {
+            if !matches!(p.status, ProposalStatus::Pending) {
+                continue;
+            }
+            // Compare by reference — never clone `p.finding_type`/`p.scope` into a
+            // throwaway tuple just to scan `covered` (this runs every tick over
+            // every pending proposal).
+            if covered.iter().any(|(ft, sc)| ft == &p.finding_type && sc == &p.scope) {
+                p.last_checked_at = Some(now);
+            }
         }
     }
 

@@ -386,6 +386,19 @@ pub async fn tick(
         }
         s.upsert(p);
     }
+    // Stamp "last checked" on every finding the analyzers actually evaluated
+    // this tick (covered) — so the inbox can show whether a non-resolving
+    // finding is still being detected or no longer being looked at.
+    //
+    // INVARIANT for the save gate below: a pending proposal in `covered` is
+    // always also either re-emitted (condition still fires → counts toward
+    // `upserted`) or auto-resolved (condition cleared → counts toward
+    // `resolved`). So any tick that advances a `last_checked_at` also bumps one
+    // of those counters and gets persisted. If a future change adds entries to
+    // `covered` that are NEITHER re-emitted nor resolvable, fold a "touched"
+    // flag from `touch_checked` into the save gate or these stamps won't survive
+    // a restart.
+    s.touch_checked(&covered);
     let resolved = s.auto_resolve_cleared(&covered, &emitted);
     // A standing condition re-emits the same proposals every tick — that's
     // a refresh, not news, and logging it 12x/hour is journal spam. INFO
