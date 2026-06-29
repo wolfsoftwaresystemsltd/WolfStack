@@ -10095,6 +10095,9 @@ async function loadVmWolfnetStatus(prefix, currentIp) {
             ipInput.placeholder = status.next_available_ip || 'auto';
             if (!ipInput.value && currentIp) ipInput.value = currentIp;
             else if (!ipInput.value) ipInput.value = status.next_available_ip || '';
+            // Record the workload's own current IP so checkWolfnetIpReuse doesn't
+            // flag this VM against itself when the operator keeps its existing IP.
+            if (currentIp) ipInput.dataset.originalIp = currentIp;
         }
         updateVmNetPreview(prefix);
     } else {
@@ -10118,7 +10121,10 @@ async function wireVmNetSection(prefix, existing) {
     // Pre-fill scalar fields BEFORE flipping the preset so the preview
     // line and visibility match the persisted state.
     const ipInput = document.getElementById(`${prefix}-wolfnet-ip`);
-    if (ipInput && existing.wolfnet_ip) ipInput.value = existing.wolfnet_ip;
+    if (ipInput && existing.wolfnet_ip) {
+        ipInput.value = existing.wolfnet_ip;
+        ipInput.dataset.originalIp = existing.wolfnet_ip; // own IP — never self-flag
+    }
     const bIpMode = document.getElementById(`${prefix}-bridge-ip-mode`);
     if (bIpMode && existing.bridge_ip_mode) bIpMode.value = existing.bridge_ip_mode;
     const bIp = document.getElementById(`${prefix}-bridge-ip`);
@@ -23545,7 +23551,7 @@ async function openDockerSettings(name) {
                     <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;">
                         <div class="form-group" style="margin:0;">
                             <label>WolfNet IP</label>
-                            <input type="text" id="docker-wolfnet-ip" class="form-control" value="${escapeHtml(wolfnetIp)}" onchange="checkWolfnetIpReuse(this)"
+                            <input type="text" id="docker-wolfnet-ip" class="form-control" value="${escapeHtml(wolfnetIp)}" data-original-ip="${escapeHtml(wolfnetIp)}" onchange="checkWolfnetIpReuse(this)"
                                 placeholder="e.g. 10.10.10.50 (leave blank for none)">
                         </div>
                         <div style="display:flex;gap:4px;padding-bottom:2px;">
@@ -24675,6 +24681,13 @@ async function checkWolfnetIpReuse(el) {
     if (existing) existing.remove();
     const ip = (el.value || '').trim();
     if (!ip || ip.toLowerCase().startsWith('auto')) return;
+    // Editing a container and KEEPING its own current WolfNet IP is never a
+    // conflict — the IP is "in use" precisely because this container holds it.
+    // The /ip-status check has no container identity, so without this it would
+    // flag the container against itself ("in use on this node"). Edit forms set
+    // data-original-ip to the workload's current IP; skip when unchanged.
+    const originalIp = (el.dataset.originalIp || '').trim();
+    if (originalIp && ip === originalIp) return;
     try {
         const r = await fetch(apiUrl('/api/wolfnet/ip-status?ip=' + encodeURIComponent(ip)));
         if (!r.ok) return;
@@ -24945,7 +24958,7 @@ async function openLxcSettings(name) {
                     <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;">
                         <div class="form-group" style="margin:0;">
                             <label>WolfNet IP</label>
-                            <input type="text" id="lxc-wolfnet-ip" class="form-control" value="${escapeHtml(cfg.wolfnet_ip || '')}" onchange="checkWolfnetIpReuse(this)"
+                            <input type="text" id="lxc-wolfnet-ip" class="form-control" value="${escapeHtml(cfg.wolfnet_ip || '')}" data-original-ip="${escapeHtml(cfg.wolfnet_ip || '')}" onchange="checkWolfnetIpReuse(this)"
                                 placeholder="e.g. 10.10.10.50 (leave blank for none)">
                         </div>
                         <div style="display:flex;gap:4px;padding-bottom:2px;">
