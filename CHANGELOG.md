@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.1.21: Predictive Inbox shows 'checked Xm ago' on every collapsed row (KO4BSR)** _(2026-06-29 — [`0a73fe30`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0a73fe30ee423cbbf09139813ef3a3739e885593))_
 - **v25.1.20: Predictive Inbox shows first-seen / last-seen / last-checked timestamps (KO4BSR)** _(2026-06-29 — [`8dd15631`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8dd15631f6ef8fdb45199877073d8a8ec4a0158c))_
 - **v25.1.19: PBS restore no longer dead-locks on 'EEXIST: File exists' after a failed attempt** _(2026-06-29 — [`ea559c89`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ea559c89b527777788a85a30e1d933df506620fd))_
 - **v25.1.18: enforce required app-store params + 'Ask the AI' course prompts** _(2026-06-29 — [`663ddc9b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/663ddc9bb799622c6a13b9277245166b14271962))_
