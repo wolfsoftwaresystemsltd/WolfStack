@@ -2782,37 +2782,59 @@ fn build_port_args(ports: &str) -> Vec<String> {
 /// on text rather than exact rule spec so it catches rules whose DNAT target
 /// or SNAT source differs from the current mapping (i.e. stale rules left
 /// from a previous WolfNet IP or a different translated destination port).
+/// True when an `iptables -S` rule line belongs to `chain` (via its
+/// `-A <chain> ` prefix) and contains every marker substring. Pulled out
+/// so the matching logic is unit-testable without shelling out to iptables.
+fn rule_spec_matches(line: &str, add_prefix: &str, markers: &[&str]) -> bool {
+    line.starts_with(add_prefix) && markers.iter().all(|m| line.contains(m))
+}
+
 fn purge_matching_lines(table: &str, chain: &str, markers: &[&str]) -> usize {
-    let mut removed = 0;
-    loop {
-        let text = match Command::new("iptables")
-            .args(["-t", table, "-L", chain, "--line-numbers", "-n"])
-            .output()
-        {
-            Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-            _ => break,
-        };
-        let mut found = None;
-        // Walk bottom-up: deleting by line number shifts everything below
-        // the deleted line. Picking the highest-numbered match keeps the
-        // numbers we haven't touched valid.
-        for line in text.lines().rev() {
-            if markers.iter().all(|m| line.contains(m)) {
-                if let Some(num) = line.split_whitespace().next().and_then(|n| n.parse::<u32>().ok()) {
-                    found = Some(num);
-                    break;
+    // Read rules in canonical spec form (`iptables -S`), which is identical
+    // across the legacy and nft backends — unlike `iptables -L -n`, whose
+    // nft-side rendering of `-m conntrack --ctstate DNAT` and ports does NOT
+    // contain the substrings the old `-L` scrape searched for. On an
+    // nft-backend host that silently defeated the FORWARD purge, so the 30s
+    // reconcile re-appended the conntrack-ACCEPT rule every cycle and it
+    // piled up into the thousands (PapaSchlumpf: 9988 FORWARD rules, vs the
+    // PREROUTING DNAT rule which `-L` happened to render matchably — hence
+    // only the FORWARD chain ran away). `-S` matches deterministically.
+    let add_prefix = format!("-A {} ", chain);
+    let text = match Command::new("iptables").args(["-t", table, "-S", chain]).output() {
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return 0,
+    };
+    // Distinct matching specs (the text after "-A <chain> ").
+    let mut specs: Vec<String> = text
+        .lines()
+        .filter(|l| rule_spec_matches(l, &add_prefix, markers))
+        .map(|l| l[add_prefix.len()..].to_string())
+        .collect();
+    specs.sort();
+    specs.dedup();
+
+    // Drain every copy of each matching rule by issuing its exact inverse
+    // (`-D <chain> <spec>`) until iptables reports no match left. Deleting
+    // by spec rather than by line number is immune to concurrent FORWARD
+    // edits (Docker) shifting positions mid-purge, and `-S`'s canonical
+    // form is always a valid `-D` argument regardless of whether the rule
+    // was originally added with `-A` or `-I`. No per-call cap — a healthy
+    // chain has one rule per spec; a runaway one must drain fully.
+    let mut removed = 0usize;
+    for spec in &specs {
+        let spec_tokens: Vec<&str> = spec.split_whitespace().collect();
+        loop {
+            let mut argv: Vec<&str> = vec!["-t", table, "-D", chain];
+            argv.extend_from_slice(&spec_tokens);
+            match Command::new("iptables").args(&argv).output() {
+                Ok(ref o) if o.status.success() => {
+                    removed += 1;
+                    // Runaway guard — far above any legitimate count, but
+                    // bounded so a pathological state can't spin forever.
+                    if removed >= 200_000 { return removed; }
                 }
+                _ => break,
             }
-        }
-        match found {
-            Some(num) => {
-                let _ = Command::new("iptables")
-                    .args(["-t", table, "-D", chain, &num.to_string()])
-                    .output();
-                removed += 1;
-                if removed >= 1024 { break; }
-            }
-            None => break,
         }
     }
     removed
@@ -2827,41 +2849,54 @@ fn purge_matching_lines(table: &str, chain: &str, markers: &[&str]) -> usize {
 /// append always produces exactly one rule per chain, regardless of
 /// how many stale copies were there before.
 fn purge_mapping_rules(m: &IpMapping) {
-    let src_ports: Vec<u16> = m.ports.as_deref()
-        .and_then(|s| parse_port_list(s).ok())
-        .unwrap_or_default();
-    let dest_ports: Vec<u16> = m.dest_ports.as_deref()
-        .or(m.ports.as_deref())
-        .and_then(|s| parse_port_list(s).ok())
-        .unwrap_or_default();
+    // Build the port-match token exactly as build_port_args() emits it into
+    // the rule spec, so the purge marker lines up with what apply wrote.
+    // None when the rule carries no port match (no ports, or protocol "all",
+    // which suppresses the -p/port match in apply too). Keying off the same
+    // source as apply is what guarantees the purge actually matches —
+    // previously the FORWARD marker searched for a `dpt:N` token that the
+    // nft backend never rendered.
+    let src_marker = port_purge_marker(m.ports.as_deref(), &m.protocol);
+    let dest_marker = port_purge_marker(
+        m.dest_ports.as_deref().or(m.ports.as_deref()), &m.protocol);
 
     // Source side (PREROUTING + OUTPUT): match any DNAT rule for this
-    // public_ip + src_port. Catches duplicates AND stale rules whose
+    // public_ip (+ src port). Catches duplicates AND stale rules whose
     // --to-destination points at an old WolfNet IP.
-    if src_ports.is_empty() {
-        purge_matching_lines("nat", "PREROUTING", &[&m.public_ip, "DNAT"]);
-        purge_matching_lines("nat", "OUTPUT", &[&m.public_ip, "DNAT"]);
-    } else {
-        for p in &src_ports {
-            let port_marker = format!("dpt:{}", p);
-            purge_matching_lines("nat", "PREROUTING", &[&m.public_ip, "DNAT", &port_marker]);
-            purge_matching_lines("nat", "OUTPUT", &[&m.public_ip, "DNAT", &port_marker]);
-        }
-    }
+    let mut src = vec![m.public_ip.as_str(), "DNAT"];
+    if let Some(ref pm) = src_marker { src.push(pm.as_str()); }
+    purge_matching_lines("nat", "PREROUTING", &src);
+    purge_matching_lines("nat", "OUTPUT", &src);
 
     // Dest side (POSTROUTING SNAT + FORWARD conntrack-DNAT ACCEPT): match
-    // on the current wolfnet_ip + dest_port. Won't catch rules from a
+    // on the current wolfnet_ip (+ dest port). Won't catch rules from a
     // previous WolfNet IP, but those are benign (wrong-target SNAT/ACCEPT
     // just dead-routes traffic to a defunct IP, it doesn't mis-route).
-    if dest_ports.is_empty() {
-        purge_matching_lines("nat", "POSTROUTING", &[&m.wolfnet_ip, "SNAT"]);
-        purge_matching_lines("filter", "FORWARD", &[&m.wolfnet_ip, "ctstate DNAT"]);
+    let mut snat = vec![m.wolfnet_ip.as_str(), "SNAT"];
+    if let Some(ref pm) = dest_marker { snat.push(pm.as_str()); }
+    purge_matching_lines("nat", "POSTROUTING", &snat);
+
+    let mut fwd = vec![m.wolfnet_ip.as_str(), "ctstate DNAT"];
+    if let Some(ref pm) = dest_marker { fwd.push(pm.as_str()); }
+    purge_matching_lines("filter", "FORWARD", &fwd);
+}
+
+/// The port-match substring that `build_port_args()` produces in a rule
+/// spec (`iptables -S` form), or None when apply emits no port match.
+/// Mirrors build_port_args()/the apply gating so purge markers line up with
+/// the rules apply actually wrote:
+///   - protocol "all" or empty ports → None (apply emits no -p/port match)
+///   - "8000"      → "--dport 8000"
+///   - "8000,8001" → "--dports 8000,8001"
+fn port_purge_marker(ports: Option<&str>, protocol: &str) -> Option<String> {
+    let ports = ports?;
+    if ports.is_empty() || protocol == "all" {
+        return None;
+    }
+    if ports.contains(',') {
+        Some(format!("--dports {}", ports))
     } else {
-        for p in &dest_ports {
-            let port_marker = format!("dpt:{}", p);
-            purge_matching_lines("nat", "POSTROUTING", &[&m.wolfnet_ip, "SNAT", &port_marker]);
-            purge_matching_lines("filter", "FORWARD", &[&m.wolfnet_ip, "ctstate DNAT", &port_marker]);
-        }
+        Some(format!("--dport {}", ports))
     }
 }
 
@@ -4665,6 +4700,56 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn ip(s: &str) -> Ipv4Addr { s.parse().unwrap() }
+
+    // ── IP-mapping purge marker regression (PapaSchlumpf throughput) ──
+    // The FORWARD conntrack-ACCEPT rule accumulated to ~10k because the
+    // purge searched `iptables -L -n` output for a `dpt:N` token the nft
+    // backend never rendered. The fix matches `iptables -S` (canonical)
+    // spec form instead. These tests pin the spec form the purge relies on.
+
+    #[test]
+    fn port_purge_marker_mirrors_build_port_args() {
+        // Single port → `--dport N`, and that token IS in build_port_args.
+        let single = build_port_args("8000").join(" ");
+        assert_eq!(port_purge_marker(Some("8000"), "tcp").as_deref(), Some("--dport 8000"));
+        assert!(single.contains(port_purge_marker(Some("8000"), "tcp").unwrap().as_str()));
+
+        // Multiport → `--dports a,b`, also a substring of build_port_args.
+        let multi = build_port_args("8000,8001").join(" ");
+        assert_eq!(port_purge_marker(Some("8000,8001"), "tcp").as_deref(), Some("--dports 8000,8001"));
+        assert!(multi.contains(port_purge_marker(Some("8000,8001"), "tcp").unwrap().as_str()));
+
+        // protocol "all" and empty/None suppress the marker (apply emits no
+        // port match in those cases, so the purge must not require one).
+        assert_eq!(port_purge_marker(Some("8000"), "all"), None);
+        assert_eq!(port_purge_marker(Some(""), "tcp"), None);
+        assert_eq!(port_purge_marker(None, "tcp"), None);
+    }
+
+    #[test]
+    fn forward_conntrack_rule_matches_in_spec_form() {
+        // Exactly the FORWARD rule WolfStack writes, as `iptables -S`
+        // renders it (identical on legacy and nft backends).
+        let line = "-A FORWARD -d 10.10.10.8/32 -p tcp -m tcp --dport 8000 -m conntrack --ctstate DNAT -j ACCEPT";
+        let port = port_purge_marker(Some("8000"), "tcp").unwrap();
+        let markers = ["10.10.10.8", "ctstate DNAT", port.as_str()];
+        assert!(rule_spec_matches(line, "-A FORWARD ", &markers));
+
+        // Root cause: the OLD purge searched for `dpt:8000`, which the
+        // canonical spec form does NOT contain — so it never matched.
+        assert!(!line.contains("dpt:8000"));
+
+        // Wrong chain prefix must not match.
+        assert!(!rule_spec_matches(line, "-A PREROUTING ", &markers));
+    }
+
+    #[test]
+    fn prerouting_dnat_rule_matches_in_spec_form() {
+        let line = "-A PREROUTING -d 192.168.17.4/32 -p tcp -m tcp --dport 8000 -j DNAT --to-destination 10.10.10.8:8000";
+        let port = port_purge_marker(Some("8000"), "tcp").unwrap();
+        let markers = ["192.168.17.4", "DNAT", port.as_str()];
+        assert!(rule_spec_matches(line, "-A PREROUTING ", &markers));
+    }
 
     #[test]
     fn iptables_check_base_builds_the_check_form() {
