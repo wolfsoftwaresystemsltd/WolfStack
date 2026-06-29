@@ -65894,6 +65894,30 @@ function predictiveExpandedBody(p) {
         snoozeNotice = `<div style="background:rgba(96,165,250,0.1);padding:8px 12px;border-radius:6px;font-size:12px;color:#60a5fa;margin-bottom:12px;">Snoozed until ${escapeHtml(untilStr)} — will re-fire after.</div>`;
     }
 
+    // Diagnostic timeline (Gary KO4BSR's request): show first-seen,
+    // last-seen, and last-checked so the operator can tell a genuinely
+    // persisting finding from a stale one whose analyzer stopped running.
+    // `last_checked_at` advances every tick the analyzer evaluates this
+    // finding's scope — even when the condition is unchanged — so a
+    // recent "checked" with an old "last seen" means the analyzer IS
+    // running and the issue is still being re-detected. A stale
+    // "checked" means the scope is no longer being evaluated (data
+    // source down, node offline) and the finding can't auto-resolve.
+    // `last_checked_at` is null on findings created before this field
+    // existed (older configs / AI-sourced proposals) — fall back to
+    // updated_at's wording so the line never shows a bare blank.
+    const ts = (iso, title) => iso
+        ? `<span title="${escapeAttr(new Date(iso).toLocaleString())}">${escapeHtml(title)} <span style="color:var(--text-secondary);">${escapeHtml(formatRelativeTime(iso))}</span></span>`
+        : '';
+    const checkedPart = p.last_checked_at
+        ? ts(p.last_checked_at, 'Last checked')
+        : '<span style="color:var(--text-muted);">Last checked <span style="color:var(--text-secondary);">not yet</span></span>';
+    const timeline = `<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--text-muted);margin-bottom:12px;align-items:center;">
+            ${ts(p.created_at, 'First seen')}
+            ${ts(p.updated_at, 'Last seen')}
+            ${checkedPart}
+        </div>`;
+
     return `
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
             <span style="background:${runtime.color};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px;display:inline-flex;align-items:center;gap:4px;">${runtime.icon} ${runtime.label}</span>
@@ -65902,6 +65926,7 @@ function predictiveExpandedBody(p) {
         </div>
         ${snoozeNotice}
         <div style="font-size:13px;color:var(--text-secondary);line-height:1.55;margin-bottom:12px;">${escapeHtml(p.why)}</div>
+        ${timeline}
         ${predictiveHistorySlot(p)}
         ${evidence ? `<div style="margin-bottom:12px;">${evidence}</div>` : ''}
         ${remediation}
