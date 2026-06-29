@@ -65777,11 +65777,27 @@ function predictiveRowHtml(p) {
         ? '<span style="background:rgba(96,165,250,0.18);color:#60a5fa;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px;">SNOOZED</span>'
         : '';
 
+    // Compact "checked Xm ago" stamp shown on every collapsed row (Gary
+    // KO4BSR's request) so the operator can verify the analyzer is still
+    // evaluating a finding without expanding it. The full First/Last/Checked
+    // timeline lives in the expanded body. The tooltip carries all three
+    // absolute timestamps for hover. `last_checked_at` is null on findings
+    // created before the field existed → "not checked yet" until the next tick.
+    const checkedTip = [
+        p.created_at ? 'First seen: ' + new Date(p.created_at).toLocaleString() : '',
+        p.updated_at ? 'Last seen: ' + new Date(p.updated_at).toLocaleString() : '',
+        p.last_checked_at ? 'Last checked: ' + new Date(p.last_checked_at).toLocaleString() : 'Last checked: not yet',
+    ].filter(Boolean).join('\n');
+    const checkedLabel = p.last_checked_at
+        ? 'checked ' + formatRelativeTime(p.last_checked_at)
+        : 'not checked yet';
+    const checkedChip = `<span class="pred-row-checked" title="${escapeAttr(checkedTip)}" style="flex-shrink:0;font-size:10px;color:var(--text-muted);white-space:nowrap;text-align:right;">${escapeHtml(checkedLabel)}</span>`;
+
     return `
         <div class="pred-row${expanded ? ' expanded' : ''}" data-pid="${escapeAttr(p.id)}"
              style="background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-left:4px solid ${c};border-radius:8px;margin-bottom:6px;overflow:hidden;">
             <div class="pred-row-head" onclick="predictiveToggleExpand('${escapeAttr(p.id)}', event)"
-                 style="display:grid;grid-template-columns:auto auto 1fr auto;gap:10px;align-items:center;padding:10px 12px;cursor:pointer;">
+                 style="display:grid;grid-template-columns:auto auto 1fr auto auto;gap:10px;align-items:center;padding:10px 12px;cursor:pointer;">
                 <input type="checkbox" class="pred-row-check"
                        onclick="event.stopPropagation();predictiveToggleSelect('${escapeAttr(p.id)}', this.checked)"
                        ${selected ? 'checked' : ''}
@@ -65795,6 +65811,7 @@ function predictiveRowHtml(p) {
                     </div>
                     <div style="font-size:13px;color:var(--text-primary);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.title)}${snoozedBadge}</div>
                 </div>
+                ${checkedChip}
                 <span class="pred-row-chev" style="color:var(--text-muted);font-size:12px;transform:rotate(${expanded ? '90deg' : '0deg'});transition:transform 0.15s;flex-shrink:0;">▶</span>
             </div>
             ${expanded ? `<div class="pred-row-body" style="border-top:1px solid var(--border-color,#2d2f3a);padding:14px 16px;">${predictiveExpandedBody(p)}</div>` : ''}
