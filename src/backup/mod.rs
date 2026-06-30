@@ -5458,24 +5458,106 @@ fn restore_vm_to_proxmox(
 //     LVM-thin and ZFS — replaced by `pve_import_and_attach_disk`
 
 /// Restore WolfStack configuration from backup
-pub fn restore_config_backup(entry: &BackupEntry) -> Result<String, String> {
+/// Config files that pin a backup to ONE physical machine — node identity,
+/// cluster membership, TLS material and network position. On a "new machine"
+/// restore these are dropped so the fresh host generates its own (and doesn't
+/// collide with the machine the backup came from); everything else (app/service
+/// config — storage, AI, workflows, status pages, users, alerting, the cluster
+/// secret so it can rejoin) is restored. Paths are archive-relative (rooted at
+/// `etc/…`, matching how `backup_config` stored them).
+const MACHINE_SPECIFIC_CONFIG: &[&str] = &[
+    "etc/wolfstack/node_id",
+    "etc/wolfstack/nodes.json",
+    "etc/wolfstack/deleted_nodes.json",
+    "etc/wolfstack/pending_identity.json",
+    "etc/wolfstack/self_cluster.json",
+    "etc/wolfstack/self_site.json",
+    "etc/wolfstack/self_display_name.json",
+    "etc/wolfstack/cert.pem",
+    "etc/wolfstack/key.pem",
+    "etc/wolfstack/ip-mappings.json",
+    "etc/wolfstack/router.json",
+    "etc/wolfstack/router",
+    "etc/wolfstack/vlan-attachments.json",
+    "etc/wolfstack/vlan-learner",
+    "etc/wolfstack/docker-wolfnet.json",
+    "etc/wolfstack/wolfnet-tombstones.json",
+    "etc/wolfstack/join-token",
+    // Host-layout / port config — wrong on a box with different mounts, pools
+    // or NICs (restoring paths.json/lxc-paths.json onto a different storage
+    // layout makes backups/LXC ops fail with ENOENT; ports.json could silently
+    // move the listen port).
+    "etc/wolfstack/paths.json",
+    "etc/wolfstack/lxc-paths.json",
+    "etc/wolfstack/ports.json",
+    "etc/wolfnet",
+];
 
+/// Restore a WolfStack config backup. `new_machine = false` does a full restore
+/// (same host); `true` drops the machine-specific identity/TLS/networking files
+/// (`MACHINE_SPECIFIC_CONFIG`) so the config can be carried onto a different box
+/// without clashing identities or wrong-NIC networking (wabil's request).
+pub fn restore_config_backup(entry: &BackupEntry, new_machine: bool) -> Result<String, String> {
     let local_path = retrieve_backup(entry)?;
 
-    // Extract to root (files are stored with their relative paths)
+    if !new_machine {
+        // Same-machine: extract straight to / (files carry their relative paths).
+        let output = Command::new("tar")
+            .args(["xzf", &local_path.to_string_lossy(), "-C", "/"])
+            .output()
+            .map_err(|e| format!("Failed to extract config backup: {}", e))?;
+        let _ = fs::remove_file(&local_path);
+        if !output.status.success() {
+            return Err(format!("Config extract failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+        return Ok("WolfStack configuration restored. Restart services to apply changes.".to_string());
+    }
+
+    // New-machine: extract to a staging dir, drop the machine-specific paths,
+    // then merge the remainder into place. Staging avoids tar --exclude glob
+    // ambiguity (e.g. wolfnet vs wolfnet-tombstones) and lets us delete dirs
+    // and files uniformly.
+    let staging = ensure_staging_dir()?.join("config-restore");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|e| format!("Failed to create restore staging: {}", e))?;
+    // Restrict to root: the default staging base is under /tmp and this dir
+    // briefly holds TLS key material + /etc/wolfstack before the cp into place,
+    // so don't let any other local user read or plant files in it.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&staging, fs::Permissions::from_mode(0o700));
+    }
+
     let output = Command::new("tar")
-        .args(["xzf", &local_path.to_string_lossy(), "-C", "/"])
+        .args(["xzf", &local_path.to_string_lossy(), "-C", &staging.to_string_lossy()])
         .output()
         .map_err(|e| format!("Failed to extract config backup: {}", e))?;
-
     let _ = fs::remove_file(&local_path);
-
     if !output.status.success() {
+        let _ = fs::remove_dir_all(&staging);
         return Err(format!("Config extract failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
+    for rel in MACHINE_SPECIFIC_CONFIG {
+        let p = staging.join(rel);
+        // It may be a file or a directory; try both, ignore "not present".
+        let _ = fs::remove_file(&p);
+        let _ = fs::remove_dir_all(&p);
+    }
 
-    Ok("WolfStack configuration restored. Restart services to apply changes.".to_string())
+    // Merge staging into / (cp -a preserves perms/ownership; `staging/.` copies
+    // the contents, so `staging/etc/...` lands at `/etc/...`).
+    let cp = Command::new("cp")
+        .args(["-a", &format!("{}/.", staging.to_string_lossy()), "/"])
+        .output()
+        .map_err(|e| format!("Failed to copy restored config into place: {}", e))?;
+    let _ = fs::remove_dir_all(&staging);
+    if !cp.status.success() {
+        return Err(format!("Config restore copy failed: {}", String::from_utf8_lossy(&cp.stderr)));
+    }
+
+    Ok("WolfStack configuration restored (new-machine mode: node identity, TLS \
+        and networking left untouched). Restart services to apply changes.".to_string())
 }
 
 /// Restore from a backup entry (auto-detects type). Non-streaming path:
@@ -5492,7 +5574,8 @@ pub fn restore_backup(entry: &BackupEntry, overwrite: bool) -> Result<String, St
         BackupTargetType::Docker => restore_docker(entry, overwrite),
         BackupTargetType::Lxc => restore_lxc(entry, "", overwrite, ""),
         BackupTargetType::Vm => restore_vm(entry),
-        BackupTargetType::Config => restore_config_backup(entry),
+        // Non-streaming path has no restore-mode UI → full (same-machine) restore.
+        BackupTargetType::Config => restore_config_backup(entry, false),
         // System-folder restore defaults to IN PLACE — restore_system_path
         // inspects the archive and picks the parent (leaf-style) or the folder
         // itself (contents-only). The streaming/targeted path
@@ -5910,17 +5993,18 @@ pub fn restore_by_id(id: &str, overwrite: bool) -> Result<String, String> {
 }
 
 /// Restore from a backup by ID with streaming log output
-pub fn restore_by_id_with_log(id: &str, overwrite: bool, storage: &str, new_name: &str, log: std::sync::mpsc::Sender<String>) -> Result<String, String> {
+#[allow(clippy::too_many_arguments)]
+pub fn restore_by_id_with_log(id: &str, overwrite: bool, storage: &str, new_name: &str, new_machine: bool, log: std::sync::mpsc::Sender<String>) -> Result<String, String> {
     let config = load_config();
     let entry = config.entries.iter().find(|e| e.id == id)
         .ok_or_else(|| format!("Backup not found: {}", id))?;
-    restore_entry_with_log(entry, overwrite, storage, new_name, log)
+    restore_entry_with_log(entry, overwrite, storage, new_name, new_machine, log)
 }
 
 /// Restore one backup entry — shared by id-based restore and the folder /
 /// disaster-recovery restore (which builds an ephemeral entry, see
 /// `restore_from_path`). Everything below operates purely on `entry`.
-fn restore_entry_with_log(entry: &BackupEntry, overwrite: bool, storage: &str, new_name: &str, log: std::sync::mpsc::Sender<String>) -> Result<String, String> {
+fn restore_entry_with_log(entry: &BackupEntry, overwrite: bool, storage: &str, new_name: &str, new_machine: bool, log: std::sync::mpsc::Sender<String>) -> Result<String, String> {
     let type_name = entry.target.target_type.to_string().to_uppercase();
     let display_name = entry.target.hostname.as_deref()
         .map(|h| format!("{} ({})", entry.target.name, h))
@@ -5987,8 +6071,12 @@ fn restore_entry_with_log(entry: &BackupEntry, overwrite: bool, storage: &str, n
             result
         }
         BackupTargetType::Config => {
-            let _ = log.send("Restoring WolfStack configuration...".to_string());
-            let result = restore_config_backup(entry);
+            let _ = log.send(if new_machine {
+                "Restoring WolfStack configuration (new-machine mode: keeping this host's identity, TLS & networking)...".to_string()
+            } else {
+                "Restoring WolfStack configuration...".to_string()
+            });
+            let result = restore_config_backup(entry, new_machine);
             match &result {
                 Ok(msg) => { let _ = log.send(format!("✅ {}", msg)); }
                 Err(e) => { let _ = log.send(format!("❌ {}", e)); }
@@ -6067,7 +6155,9 @@ pub fn restore_from_path(
         docker_config: String::new(),
         mounts: Vec::new(),
     };
-    restore_entry_with_log(&entry, overwrite, storage, new_name, log)
+    // Folder/DR restore is workloads-only (Config is rejected above), so the
+    // new-machine config filter never applies here.
+    restore_entry_with_log(&entry, overwrite, storage, new_name, false, log)
 }
 
 /// A backup file discovered by scanning a folder (no backups.json needed).

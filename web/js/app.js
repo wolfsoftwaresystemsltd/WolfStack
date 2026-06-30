@@ -31232,6 +31232,23 @@ async function openRestoreDialog(id, type, name) {
         </div>`;
     }
 
+    // Config backup: offer a same-machine vs different-machine restore mode.
+    // "Different machine" tells the backend to skip this host's identity, TLS
+    // cert and networking so the config doesn't clash with the box it came from.
+    const isConfig = type === 'config';
+    const configModeRow = isConfig ? `
+        <div style="margin-bottom:14px;">
+            <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:6px;">Restore mode</label>
+            <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:8px;cursor:pointer;">
+                <input type="radio" name="restore-config-mode" value="same" checked style="margin-top:2px;">
+                <span>Same machine — full restore<br><span style="color:var(--text-muted);font-size:11px;">Restores everything, including this node's identity, TLS certificate and networking. Use when reinstalling the same box.</span></span>
+            </label>
+            <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
+                <input type="radio" name="restore-config-mode" value="new" style="margin-top:2px;">
+                <span>Different machine — skip identity &amp; networking<br><span style="color:var(--text-muted);font-size:11px;">Restores your apps, storage, workflows, users and alerts, but leaves this host's node ID, TLS cert and network config alone so it doesn't clash with the original.</span></span>
+            </label>
+        </div>` : '';
+
     const stale = document.getElementById('restore-dialog-backdrop');
     if (stale) {
         if (_restoreKeyHandler) document.removeEventListener('keydown', _restoreKeyHandler);
@@ -31248,10 +31265,11 @@ async function openRestoreDialog(id, type, name) {
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">${escapeHtml(String(name || id))} — ${escapeHtml(String(type || 'backup').toUpperCase())}</div>
             ${nameRow}
             ${storageRow}
-            <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:14px;cursor:pointer;">
+            ${configModeRow}
+            ${isConfig ? '' : `<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:14px;cursor:pointer;">
                 <input type="checkbox" id="restore-overwrite" style="margin-top:2px;">
                 <span>Replace the target if it already exists<br><span style="color:var(--text-muted);font-size:11px;">Any existing copy is stopped and replaced.</span></span>
-            </label>
+            </label>`}
             <pre id="restore-progress" role="status" aria-live="polite"
                  style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11px;line-height:1.5;max-height:220px;overflow:auto;white-space:pre-wrap;margin:0 0 12px;"></pre>
             <div id="restore-result" role="alert" style="display:none;font-size:12px;font-weight:600;margin-bottom:12px;"></div>
@@ -31290,7 +31308,8 @@ async function openRestoreDialog(id, type, name) {
         progressEl.textContent = '';
         progressEl.style.display = 'none';
         resultEl.style.display = 'none';
-        const overwrite = backdrop.querySelector('#restore-overwrite').checked;
+        // The overwrite checkbox is omitted for config restores (it's a no-op there).
+        const overwrite = !!(backdrop.querySelector('#restore-overwrite') || {}).checked;
         const storageSel = backdrop.querySelector('#restore-storage');
         const nameEl = backdrop.querySelector('#restore-name');
         const ok = await _runRestoreStream(id, overwrite, storageSel ? storageSel.value : '',
@@ -31323,6 +31342,9 @@ async function _runRestoreStream(id, overwrite, storage, name, progressEl, resul
     if (overwrite) params.set('overwrite', 'true');
     if (storage) params.set('storage', storage);
     if (name) params.set('name', name);
+    // Config restore mode (only present for config backups).
+    const cfgMode = document.querySelector('input[name="restore-config-mode"]:checked');
+    if (cfgMode && cfgMode.value === 'new') params.set('new_machine', 'true');
     const qs = params.toString();
     const append = (line) => {
         progressEl.style.display = 'block';
