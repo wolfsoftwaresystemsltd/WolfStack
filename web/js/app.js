@@ -34264,19 +34264,18 @@ async function sendAiMessage() {
             throw new Error('AI request failed (HTTP ' + resp.status + ')');
         }
 
-        // The chat endpoint streams Server-Sent Events: heartbeat comments
-        // (": ...") keep the connection alive while a slow local model
-        // generates, then the final answer arrives as one "data:" event.
-        // Streaming the keep-alive is what stops a reverse-proxy / browser
-        // idle-timeout from killing a long generation (the old "NetworkError
-        // when attempting to fetch resource" bug). Older nodes still reply
-        // with a plain JSON body, so fall back to resp.json() by content-type.
+        // The chat agent can run for minutes on a slow local model. Rather than
+        // hold one long request open (which a buffering reverse proxy stalls or
+        // resets — "NetworkError" / "Error in input stream"), POST starts the
+        // work and returns a job id immediately; we then poll for the result
+        // with short requests no proxy interferes with. Older nodes still return
+        // the full {response, actions} (or {error}) inline — handle both.
+        var start = await resp.json();
         var data;
-        var ct = (resp.headers.get('content-type') || '').toLowerCase();
-        if (ct.indexOf('text/event-stream') !== -1 && resp.body && resp.body.getReader) {
-            data = await readAiChatSse(resp);
+        if (start && start.job_id) {
+            data = await pollAiChatResult(start.job_id);
         } else {
-            data = await resp.json();
+            data = start;
         }
 
         // Remove typing indicator
@@ -34315,55 +34314,62 @@ async function sendAiMessage() {
     messages.scrollTop = messages.scrollHeight;
 }
 
-// Read the AI chat SSE stream and resolve to the final payload object.
-// The server emits ": ..." comment frames as heartbeats (ignored here) and
-// exactly one "data: {json}" frame with the answer (or {error}). Heartbeats
-// keep the socket's byte flow alive so a slow local model can't trip a
-// reverse-proxy / browser idle-timeout (the "NetworkError when attempting to
-// fetch resource" bug). Returns the parsed object, or throws if none arrived.
-async function readAiChatSse(resp) {
-    // Parse one SSE frame: collect its "data:" lines (ignoring ":" comment
-    // heartbeats and any other fields) and JSON-parse them. The server sends a
-    // single-line data frame, but joining defensively supports multi-line data.
-    function parseAiSseFrame(frame) {
-        var payloadLines = frame.split('\n')
-            .filter(function (line) { return line.indexOf('data:') === 0; })
-            .map(function (line) {
-                var v = line.slice(5);
-                return v.charAt(0) === ' ' ? v.slice(1) : v;
-            });
-        if (!payloadLines.length) return null;
-        try { return JSON.parse(payloadLines.join('\n')); }
-        catch (e) { return null; }
-    }
-
-    var reader = resp.body.getReader();
-    var decoder = new TextDecoder();
-    var buffer = '';
-    var data = null;
-    while (true) {
-        var chunk = await reader.read();
-        if (chunk.done) break;
-        buffer += decoder.decode(chunk.value, { stream: true });
-        // SSE frames are separated by a blank line (\n\n).
-        var sep;
-        while ((sep = buffer.indexOf('\n\n')) !== -1) {
-            var parsed = parseAiSseFrame(buffer.slice(0, sep));
-            buffer = buffer.slice(sep + 2);
-            if (parsed !== null) data = parsed;
+// Poll GET /api/ai/chat/result for an async chat job until it finishes.
+// Each poll is a short request, so a buffering/idle-timeout reverse proxy
+// (which broke the earlier single-long-request and SSE approaches) has nothing
+// to stall. Returns the final {response, actions} or {error} object; throws if
+// the job vanishes (expired) or we exceed the overall wait budget.
+async function pollAiChatResult(jobId) {
+    var base = aiNodeUrl('/api/ai/chat/result');
+    var url = base + (base.indexOf('?') === -1 ? '?' : '&') + 'id=' + encodeURIComponent(jobId);
+    // Budget: 16 min, comfortably past the server's worst-case task lifetime
+    // (3 agent rounds x 300s = 900s) so we don't give up while it's still
+    // working. The agent's multi-turn loop on a slow local model is the long
+    // pole here. Server-side job retention (20 min) outlasts this budget.
+    var startedAt = Date.now();
+    var deadline = startedAt + 16 * 60 * 1000;
+    var statusEl = document.getElementById('ai-chat-status');
+    while (Date.now() < deadline) {
+        await new Promise(function (r) { setTimeout(r, 2000); });
+        // Live elapsed-time feedback so a multi-minute local-model run doesn't
+        // look hung. Updated every poll; cleared by the caller on completion.
+        if (statusEl) {
+            var secs = Math.round((Date.now() - startedAt) / 1000);
+            var mins = Math.floor(secs / 60);
+            statusEl.textContent = mins > 0
+                ? ('Thinking… ' + mins + 'm ' + (secs % 60) + 's')
+                : ('Thinking… ' + secs + 's');
         }
+        var resp;
+        try {
+            resp = await fetch(url, { credentials: 'include', cache: 'no-store' });
+        } catch (e) {
+            // Transient network blip between polls — keep trying until the
+            // deadline rather than failing the whole chat on one dropped poll.
+            continue;
+        }
+        if (!resp.ok) continue;
+        var body;
+        try {
+            body = await resp.json();
+        } catch (e) {
+            // A 200 with a non-JSON body (proxy/WAF interstitial, HTML error
+            // page) — treat as a transient hiccup and keep polling rather than
+            // surfacing a raw "Unexpected token <" to the user.
+            continue;
+        }
+        if (body.status === 'done') {
+            return { response: body.response, actions: body.actions || [] };
+        }
+        if (body.status === 'error') {
+            return { error: body.error || 'AI request failed' };
+        }
+        if (body.status === 'unknown') {
+            throw new Error('AI request expired before it finished');
+        }
+        // status === 'running' → keep polling
     }
-    // Flush any trailing bytes left without a final blank line — e.g. a proxy
-    // that severs the TCP connection the instant the JSON body is delivered.
-    buffer += decoder.decode();
-    if (buffer.length) {
-        var tail = parseAiSseFrame(buffer);
-        if (tail !== null) data = tail;
-    }
-    if (data === null) {
-        throw new Error('AI stream ended without a response');
-    }
-    return data;
+    throw new Error('AI request timed out after 16 minutes');
 }
 
 // Basic markdown formatting for AI responses

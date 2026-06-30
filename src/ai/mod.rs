@@ -2804,6 +2804,15 @@ async fn call_local_inner(
 
     let mut req = client.post(&url)
         .header("content-type", "application/json")
+        // Per-request override of the client's 120s default. A local model
+        // generating up to 4096 tokens with the full tools schema can take
+        // longer than 120s for a single round (a tester measured ~110s/round,
+        // right at the edge), and the multi-turn loop calls this several times.
+        // 300s gives a slow CPU-bound local model real headroom without letting
+        // a genuinely dead endpoint hang forever. Remote providers (OpenAI,
+        // OpenRouter, Cloudflare) also flow through here — a higher ceiling is
+        // harmless for them since it's a cap, not a wait.
+        .timeout(std::time::Duration::from_secs(300))
         .json(&body);
 
     // Add API key if provided (some local servers need it, most don't)

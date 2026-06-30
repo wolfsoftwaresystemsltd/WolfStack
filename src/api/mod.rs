@@ -12977,7 +12977,10 @@ pub async fn ai_chat(
     req: HttpRequest, state: web::Data<AppState>,
     body: web::Json<AiChatRequest>,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let username = match require_auth(&req, &state) {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
 
     // Build server context for the AI
     let server_context = {
@@ -13147,82 +13150,150 @@ pub async fn ai_chat(
 
     // The agent's chat() call is the slow path: on a local model (LM Studio,
     // Ollama, llama.cpp) it sends the full tools schema + cluster context and
-    // can generate up to 4096 tokens over several round-trips — tens of
-    // seconds to minutes. A single silent POST that long gets reset by any
-    // idle-timeout between the browser and us (reverse proxy `proxy_read_timeout`,
-    // nginx/Cloudflare 60s default, even some browsers), surfacing in the UI as
-    // "NetworkError when attempting to fetch resource" *even though the model
-    // finished* — the socket died while the model was still generating.
+    // can generate up to 4096 tokens over several round-trips — *minutes* in
+    // the wild. Holding one HTTP request open that long is fragile: a reverse
+    // proxy that buffers the response (Cloudflare, and any nginx/Caddy/Traefik
+    // not explicitly told to stream) sits on every byte until the handler
+    // finishes, then either delivers it all at once or — as a tester hit — resets
+    // the connection with "Error in input stream". An earlier SSE-heartbeat
+    // attempt (v25.1.22) failed for exactly this reason: a buffering proxy
+    // swallows the heartbeats, so they never reach the browser (observed TTFB
+    // of 5.5 min while the model generated).
     //
-    // Fix: stream the response as Server-Sent Events. We emit a heartbeat
-    // comment every 5s while chat() runs so the byte flow never goes idle, then
-    // send the final answer as a single `data:` event. Continuous bytes keep
-    // the connection (and every proxy hop) alive regardless of how slow the
-    // model is. The headers mirror the backup/restore SSE streams: identity
-    // encoding (so Compress middleware doesn't buffer it) and X-Accel-Buffering
-    // off (so nginx doesn't buffer it either).
-    let message = body.message.clone();
+    // Robust fix that needs NO cooperation from the proxy: don't hold a long
+    // request at all. POST starts the work in a background task and returns a
+    // job id immediately (sub-second — nothing buffers a tiny response). The
+    // browser then polls GET /api/ai/chat/result with sub-second requests until
+    // the job is done. Short requests sail through any proxy untouched.
+    prune_ai_chat_jobs();
+
+    let job_id = format!("aichat-{}", uuid::Uuid::new_v4().simple());
+    {
+        let mut jobs = AI_CHAT_JOBS.lock().unwrap();
+        jobs.insert(job_id.clone(), AiChatJob {
+            created_at: chrono::Utc::now().timestamp(),
+            owner: username.clone(),
+            status: AiChatJobStatus::Running,
+            response: None,
+            actions: None,
+            error: None,
+        });
+    }
+
+    let agent = state.ai_agent.clone();
     let cluster_secret = state.cluster_secret.clone();
-    let state_for_stream = state.clone();
-
-    let stream = async_stream::stream! {
-        // Immediate first byte — satisfies any time-to-first-byte / header-read
-        // timeout in a proxy the instant the request lands.
-        yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from_static(b": wolfstack-ai thinking\n\n"));
-
-        let chat_fut = state_for_stream.ai_agent.chat(
-            &message, &server_context, &cluster_nodes, &cluster_secret,
-        );
-        tokio::pin!(chat_fut);
-
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
-        ticker.reset(); // skip the interval's immediate first tick (no suspend)
-
-        let result = loop {
-            tokio::select! {
-                r = &mut chat_fut => break r,
-                _ = ticker.tick() => {
-                    // SSE comment heartbeat — pure keep-alive, ignored by the
-                    // client's event parser. Keeps the byte stream flowing so
-                    // no idle-timeout resets the socket mid-generation.
-                    yield Ok(actix_web::web::Bytes::from_static(b": heartbeat\n\n"));
+    let message = body.message.clone();
+    let job_id_task = job_id.clone();
+    tokio::spawn(async move {
+        let result = agent.chat(&message, &server_context, &cluster_nodes, &cluster_secret).await;
+        let mut jobs = AI_CHAT_JOBS.lock().unwrap();
+        // The job may have been pruned (>10 min) or evicted; only update if it's
+        // still present. Never holds the lock across an await — chat() already
+        // finished above.
+        if let Some(job) = jobs.get_mut(&job_id_task) {
+            match result {
+                Ok((response, actions)) => {
+                    let actions_json: Vec<serde_json::Value> = actions.iter().map(|a| {
+                        serde_json::json!({
+                            "id": a.id,
+                            "title": a.title,
+                            "command": a.command,
+                            "risk": a.risk,
+                            "explanation": a.explanation,
+                            "target": a.node_target,
+                        })
+                    }).collect();
+                    job.response = Some(response);
+                    job.actions = Some(actions_json);
+                    job.status = AiChatJobStatus::Done;
+                }
+                Err(e) => {
+                    job.error = Some(e);
+                    job.status = AiChatJobStatus::Error;
                 }
             }
-        };
+        }
+    });
 
-        let payload = match result {
-            Ok((response, actions)) => {
-                let actions_json: Vec<serde_json::Value> = actions.iter().map(|a| {
-                    serde_json::json!({
-                        "id": a.id,
-                        "title": a.title,
-                        "command": a.command,
-                        "risk": a.risk,
-                        "explanation": a.explanation,
-                        "target": a.node_target,
-                    })
-                }).collect();
-                serde_json::json!({ "response": response, "actions": actions_json })
-            }
-            Err(e) => serde_json::json!({ "error": e }),
-        };
+    HttpResponse::Ok().json(serde_json::json!({ "job_id": job_id }))
+}
 
-        // serde_json::to_string emits single-line JSON (any newlines inside the
-        // response text are escaped as \n), so this is always one SSE frame.
-        let data = serde_json::to_string(&payload)
-            .unwrap_or_else(|_| "{\"error\":\"AI response serialization failed\"}".to_string());
-        yield Ok(actix_web::web::Bytes::from(format!("data: {}\n\n", data)));
+/// In-memory store for async AI chat jobs. The chat agentic loop can run for
+/// minutes on a slow local model, so POST /api/ai/chat kicks the work onto a
+/// background task and the browser polls GET /api/ai/chat/result for the
+/// outcome — see `ai_chat` for why a single long request is unreliable behind a
+/// buffering proxy. Ephemeral runtime state (never serialised), so a static map
+/// is the right home; entries are pruned after 20 minutes (see
+/// `prune_ai_chat_jobs` for why that outlasts the worst-case run).
+#[derive(Clone, Copy)]
+enum AiChatJobStatus { Running, Done, Error }
+
+struct AiChatJob {
+    created_at: i64,
+    /// The authenticated identity that created the job (the `require_auth`
+    /// username, or "cluster-node" for proxied inter-node requests). The result
+    /// poll checks this so one operator can't read another's chat by guessing /
+    /// lifting a job id from logs — OWASP A01. UUID v4 ids already make ids
+    /// unguessable; this is defence in depth.
+    owner: String,
+    status: AiChatJobStatus,
+    response: Option<String>,
+    actions: Option<Vec<serde_json::Value>>,
+    error: Option<String>,
+}
+
+static AI_CHAT_JOBS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, AiChatJob>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Drop chat jobs older than 20 minutes so the map can't grow unbounded. The
+/// retention window must outlast the worst-case task lifetime — the agentic
+/// loop runs up to 3 rounds (src/ai/mod.rs chat()), each capped at the 300s
+/// per-request timeout = 900s — plus the frontend's 16-minute poll budget, so a
+/// genuinely slow run still has its result waiting when the browser collects
+/// it. 1200s clears that with margin.
+fn prune_ai_chat_jobs() {
+    let cutoff = chrono::Utc::now().timestamp() - 1200;
+    let mut jobs = AI_CHAT_JOBS.lock().unwrap();
+    jobs.retain(|_, j| j.created_at >= cutoff);
+}
+
+/// GET /api/ai/chat/result?id=<job_id> — poll for an async chat result.
+/// Returns `{status:"running"}` while the agent works, `{status:"done",
+/// response, actions}` on success, `{status:"error", error}` on failure, or
+/// `{status:"unknown"}` if the job id isn't found (expired/never existed).
+pub async fn ai_chat_result(
+    req: HttpRequest, state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let username = match require_auth(&req, &state) {
+        Ok(u) => u,
+        Err(resp) => return resp,
     };
 
-    HttpResponse::Ok()
-        .insert_header(("Content-Type", "text/event-stream"))
-        // identity encoding so the Compress middleware leaves this stream alone —
-        // gzip-ing an SSE stream buffers it and defeats the heartbeat keep-alive.
-        .insert_header(("Content-Encoding", "identity"))
-        .insert_header(("Cache-Control", "no-cache"))
-        .insert_header(("Connection", "keep-alive"))
-        .insert_header(("X-Accel-Buffering", "no"))
-        .streaming(stream)
+    let job_id = match query.get("id") {
+        Some(id) => id.clone(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing id parameter" })),
+    };
+
+    let jobs = AI_CHAT_JOBS.lock().unwrap();
+    // Scope to the creator: a job belonging to someone else is reported exactly
+    // like a non-existent one ("unknown"), never distinguished — so a lifted id
+    // leaks neither the response nor the job's existence.
+    match jobs.get(&job_id).filter(|job| job.owner == username) {
+        Some(job) => match job.status {
+            AiChatJobStatus::Running => HttpResponse::Ok().json(serde_json::json!({ "status": "running" })),
+            AiChatJobStatus::Done => HttpResponse::Ok().json(serde_json::json!({
+                "status": "done",
+                "response": job.response.clone().unwrap_or_default(),
+                "actions": job.actions.clone().unwrap_or_default(),
+            })),
+            AiChatJobStatus::Error => HttpResponse::Ok().json(serde_json::json!({
+                "status": "error",
+                "error": job.error.clone().unwrap_or_else(|| "AI request failed".to_string()),
+            })),
+        },
+        None => HttpResponse::Ok().json(serde_json::json!({ "status": "unknown" })),
+    }
 }
 
 /// POST /api/ai/action — approve or reject a proposed action.
@@ -37846,6 +37917,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/config", web::get().to(ai_get_config))
         .route("/api/ai/config", web::post().to(ai_save_config))
         .route("/api/ai/chat", web::post().to(ai_chat))
+        .route("/api/ai/chat/result", web::get().to(ai_chat_result))
         .route("/api/ai/status", web::get().to(ai_status))
         .route("/api/ai/alerts", web::get().to(ai_alerts))
         .route("/api/ai/models", web::get().to(ai_models))
