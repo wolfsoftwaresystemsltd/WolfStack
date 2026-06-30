@@ -34257,9 +34257,27 @@ async function sendAiMessage() {
         var resp = await fetch(aiNodeUrl('/api/ai/chat'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify(chatPayload)
         });
-        var data = await resp.json();
+        if (!resp.ok) {
+            throw new Error('AI request failed (HTTP ' + resp.status + ')');
+        }
+
+        // The chat endpoint streams Server-Sent Events: heartbeat comments
+        // (": ...") keep the connection alive while a slow local model
+        // generates, then the final answer arrives as one "data:" event.
+        // Streaming the keep-alive is what stops a reverse-proxy / browser
+        // idle-timeout from killing a long generation (the old "NetworkError
+        // when attempting to fetch resource" bug). Older nodes still reply
+        // with a plain JSON body, so fall back to resp.json() by content-type.
+        var data;
+        var ct = (resp.headers.get('content-type') || '').toLowerCase();
+        if (ct.indexOf('text/event-stream') !== -1 && resp.body && resp.body.getReader) {
+            data = await readAiChatSse(resp);
+        } else {
+            data = await resp.json();
+        }
 
         // Remove typing indicator
         var t = document.getElementById('ai-typing');
@@ -34295,6 +34313,57 @@ async function sendAiMessage() {
     }
 
     messages.scrollTop = messages.scrollHeight;
+}
+
+// Read the AI chat SSE stream and resolve to the final payload object.
+// The server emits ": ..." comment frames as heartbeats (ignored here) and
+// exactly one "data: {json}" frame with the answer (or {error}). Heartbeats
+// keep the socket's byte flow alive so a slow local model can't trip a
+// reverse-proxy / browser idle-timeout (the "NetworkError when attempting to
+// fetch resource" bug). Returns the parsed object, or throws if none arrived.
+async function readAiChatSse(resp) {
+    // Parse one SSE frame: collect its "data:" lines (ignoring ":" comment
+    // heartbeats and any other fields) and JSON-parse them. The server sends a
+    // single-line data frame, but joining defensively supports multi-line data.
+    function parseAiSseFrame(frame) {
+        var payloadLines = frame.split('\n')
+            .filter(function (line) { return line.indexOf('data:') === 0; })
+            .map(function (line) {
+                var v = line.slice(5);
+                return v.charAt(0) === ' ' ? v.slice(1) : v;
+            });
+        if (!payloadLines.length) return null;
+        try { return JSON.parse(payloadLines.join('\n')); }
+        catch (e) { return null; }
+    }
+
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = '';
+    var data = null;
+    while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        // SSE frames are separated by a blank line (\n\n).
+        var sep;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+            var parsed = parseAiSseFrame(buffer.slice(0, sep));
+            buffer = buffer.slice(sep + 2);
+            if (parsed !== null) data = parsed;
+        }
+    }
+    // Flush any trailing bytes left without a final blank line — e.g. a proxy
+    // that severs the TCP connection the instant the JSON body is delivered.
+    buffer += decoder.decode();
+    if (buffer.length) {
+        var tail = parseAiSseFrame(buffer);
+        if (tail !== null) data = tail;
+    }
+    if (data === null) {
+        throw new Error('AI stream ended without a response');
+    }
+    return data;
 }
 
 // Basic markdown formatting for AI responses

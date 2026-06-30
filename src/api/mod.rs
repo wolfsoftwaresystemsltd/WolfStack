@@ -13145,27 +13145,84 @@ pub async fn ai_chat(
             .collect()
     };
 
-    match state.ai_agent.chat(&body.message, &server_context, &cluster_nodes, &state.cluster_secret).await {
-        Ok((response, actions)) => {
-            let actions_json: Vec<serde_json::Value> = actions.iter().map(|a| {
-                serde_json::json!({
-                    "id": a.id,
-                    "title": a.title,
-                    "command": a.command,
-                    "risk": a.risk,
-                    "explanation": a.explanation,
-                    "target": a.node_target,
-                })
-            }).collect();
-            HttpResponse::Ok().json(serde_json::json!({
-                "response": response,
-                "actions": actions_json,
-            }))
-        }
-        Err(e) => HttpResponse::Ok().json(serde_json::json!({
-            "error": e,
-        })),
-    }
+    // The agent's chat() call is the slow path: on a local model (LM Studio,
+    // Ollama, llama.cpp) it sends the full tools schema + cluster context and
+    // can generate up to 4096 tokens over several round-trips — tens of
+    // seconds to minutes. A single silent POST that long gets reset by any
+    // idle-timeout between the browser and us (reverse proxy `proxy_read_timeout`,
+    // nginx/Cloudflare 60s default, even some browsers), surfacing in the UI as
+    // "NetworkError when attempting to fetch resource" *even though the model
+    // finished* — the socket died while the model was still generating.
+    //
+    // Fix: stream the response as Server-Sent Events. We emit a heartbeat
+    // comment every 5s while chat() runs so the byte flow never goes idle, then
+    // send the final answer as a single `data:` event. Continuous bytes keep
+    // the connection (and every proxy hop) alive regardless of how slow the
+    // model is. The headers mirror the backup/restore SSE streams: identity
+    // encoding (so Compress middleware doesn't buffer it) and X-Accel-Buffering
+    // off (so nginx doesn't buffer it either).
+    let message = body.message.clone();
+    let cluster_secret = state.cluster_secret.clone();
+    let state_for_stream = state.clone();
+
+    let stream = async_stream::stream! {
+        // Immediate first byte — satisfies any time-to-first-byte / header-read
+        // timeout in a proxy the instant the request lands.
+        yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from_static(b": wolfstack-ai thinking\n\n"));
+
+        let chat_fut = state_for_stream.ai_agent.chat(
+            &message, &server_context, &cluster_nodes, &cluster_secret,
+        );
+        tokio::pin!(chat_fut);
+
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        ticker.reset(); // skip the interval's immediate first tick (no suspend)
+
+        let result = loop {
+            tokio::select! {
+                r = &mut chat_fut => break r,
+                _ = ticker.tick() => {
+                    // SSE comment heartbeat — pure keep-alive, ignored by the
+                    // client's event parser. Keeps the byte stream flowing so
+                    // no idle-timeout resets the socket mid-generation.
+                    yield Ok(actix_web::web::Bytes::from_static(b": heartbeat\n\n"));
+                }
+            }
+        };
+
+        let payload = match result {
+            Ok((response, actions)) => {
+                let actions_json: Vec<serde_json::Value> = actions.iter().map(|a| {
+                    serde_json::json!({
+                        "id": a.id,
+                        "title": a.title,
+                        "command": a.command,
+                        "risk": a.risk,
+                        "explanation": a.explanation,
+                        "target": a.node_target,
+                    })
+                }).collect();
+                serde_json::json!({ "response": response, "actions": actions_json })
+            }
+            Err(e) => serde_json::json!({ "error": e }),
+        };
+
+        // serde_json::to_string emits single-line JSON (any newlines inside the
+        // response text are escaped as \n), so this is always one SSE frame.
+        let data = serde_json::to_string(&payload)
+            .unwrap_or_else(|_| "{\"error\":\"AI response serialization failed\"}".to_string());
+        yield Ok(actix_web::web::Bytes::from(format!("data: {}\n\n", data)));
+    };
+
+    HttpResponse::Ok()
+        .insert_header(("Content-Type", "text/event-stream"))
+        // identity encoding so the Compress middleware leaves this stream alone —
+        // gzip-ing an SSE stream buffers it and defeats the heartbeat keep-alive.
+        .insert_header(("Content-Encoding", "identity"))
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("Connection", "keep-alive"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(stream)
 }
 
 /// POST /api/ai/action — approve or reject a proposed action.
