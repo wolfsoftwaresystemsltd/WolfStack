@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.1.26: add Level 2 "Going Further" course (follow-on to Getting Started)** _(2026-06-30 — [`4ebe6bc4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4ebe6bc4666407930eafb88f353e6b5e9aebe60b))_
 - **v25.1.25: separate SMTP "From" address + support unauthenticated relays** _(2026-06-30 — [`d12fbf82`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d12fbf8229606dab856b8fd2f4d31db0ff687f76))_
 - **v25.1.24: prune stale Docker-bridge MASQUERADE rules; setup offers to start a stopped service** _(2026-06-30 — [`6cb74d5b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6cb74d5b65d2c8673f0ee0580faca2b54d066a0d))_
 - **v25.1.23: AI chatbot uses async job + polling so a buffering proxy can't break it** _(2026-06-30 — [`600c2f32`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/600c2f32d5fcc604ea66052a8845d07f250d3e2d))_
