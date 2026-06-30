@@ -2879,6 +2879,17 @@ fn purge_mapping_rules(m: &IpMapping) {
     let mut fwd = vec![m.wolfnet_ip.as_str(), "ctstate DNAT"];
     if let Some(ref pm) = dest_marker { fwd.push(pm.as_str()); }
     purge_matching_lines("filter", "FORWARD", &fwd);
+
+    // VIP mappings (apply_vip_mapping_rules) write their POSTROUTING SNAT and
+    // FORWARD ACCEPT rules keyed on the *backend* IP (`-d <backend>`), not on
+    // m.wolfnet_ip — so the IP-based markers above never match them, and one
+    // full set was appended on every reconcile. That accumulated into thousands
+    // of identical SNAT/ACCEPT rules in the packet hot path and collapsed
+    // forwarding throughput (PapaSchlumpf: 3589 duplicates each). Every VIP rule
+    // carries the unique `wolfstack-vip-map-<id>` comment, so a comment-based
+    // purge removes them all regardless of which IP they key on — making the VIP
+    // path idempotent and self-healing any existing backlog on the next apply.
+    remove_rules_by_comment(&format!("wolfstack-vip-map-{}", m.id));
 }
 
 /// The port-match substring that `build_port_args()` produces in a rule
