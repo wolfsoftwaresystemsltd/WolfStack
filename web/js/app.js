@@ -2089,7 +2089,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Getting Started', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync' };
+    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -58008,85 +58008,133 @@ async function wolfAgentsLoadMemory(id) {
 // dashboard banner. Content is the single source of truth (markdown) so
 // it can also be mirrored onto the public website unchanged.
 // ===================================================================
-const LEARN_COURSE = [
-    { title: 'Before you start', lessons: [
-        { id: '0-1', title: 'What even is a server?', mins: 5, file: '0-1-what-is-a-server.md' },
-    ] },
-    { title: 'Find your feet', lessons: [
-        { id: '1-1', title: 'What WolfStack is', mins: 3, file: '1-1-what-is-wolfstack.md' },
-        { id: '1-2', title: 'A 2-minute tour of the screen', mins: 2, file: '1-2-screen-tour.md' },
-        { id: '1-3', title: 'The only six things you need', mins: 3, file: '1-3-six-things.md' },
-    ] },
-    { title: 'Your servers', lessons: [
-        { id: '2-1', title: 'You already have a server', mins: 2, file: '2-1-you-have-a-server.md' },
-        { id: '2-2', title: 'Adding another server', mins: 4, file: '2-2-add-a-server.md' },
-    ] },
-    { title: 'Your first app', lessons: [
-        { id: '3-1', title: 'Install from the App Store', mins: 5, file: '3-1-install-from-app-store.md' },
-        { id: '3-2', title: 'Find it and open it', mins: 3, file: '3-2-find-and-open-it.md' },
-    ] },
-    { title: 'Build a container yourself', lessons: [
-        { id: '4-1', title: 'Docker, LXC or VM?', mins: 4, file: '4-1-docker-lxc-vm.md' },
-        { id: '4-2', title: 'Make a Docker container', mins: 5, file: '4-2-make-docker.md' },
-        { id: '4-3', title: 'Make an LXC container', mins: 5, file: '4-3-make-lxc.md' },
-    ] },
-    { title: 'Get a terminal', lessons: [
-        { id: '5-1', title: 'Open a shell on a server', mins: 3, file: '5-1-server-shell.md' },
-        { id: '5-2', title: 'Open a shell in a container', mins: 3, file: '5-2-container-shell.md' },
-    ] },
-    { title: 'Keep your data safe', lessons: [
-        { id: '6-1', title: 'Back something up now', mins: 4, file: '6-1-backup-now.md' },
-        { id: '6-2', title: 'Automatic backups', mins: 3, file: '6-2-schedule-backups.md' },
-        { id: '6-3', title: 'Restore from a backup', mins: 4, file: '6-3-restore.md' },
-    ] },
-    { title: 'Lock it down (security)', lessons: [
-        { id: 'sec-1', title: 'Lock down your login', mins: 4, file: 'sec-1-secure-your-login.md' },
-        { id: 'sec-2', title: 'Harden the server', mins: 5, file: 'sec-2-harden-the-server.md' },
-    ] },
-    { title: 'Stay ahead of problems', lessons: [
-        { id: '7-1', title: 'The Issues page', mins: 3, file: '7-1-issues-page.md' },
-        { id: '7-2', title: 'Get alerts on your phone', mins: 4, file: '7-2-alerts.md' },
-        { id: '7-3', title: 'Put up a status page', mins: 5, file: '7-3-status-page.md' },
-    ] },
-    { title: 'Go further', lessons: [
-        { id: 'adv-1', title: 'Put your app on a real domain (HTTPS)', mins: 6, file: 'adv-1-domain-https.md' },
-    ] },
-    { title: 'When you are ready for more', lessons: [
-        { id: '8-1', title: 'The map of everything else', mins: 4, file: '8-1-the-map.md' },
-        { id: '8-2', title: 'How to get unstuck', mins: 3, file: '8-2-getting-unstuck.md' },
-    ] },
-    { title: 'You did it', lessons: [
-        { id: 'done-1', title: 'Your starter checklist', mins: 3, file: 'done-1-checklist.md' },
-    ] },
-    // ── Level 2: Going Further ──────────────────────────────────────────
-    // The follow-on course for operators who've completed Getting Started.
-    // One door per lesson; same calm, one-task-at-a-time method.
-    { title: 'Level 2 · Going further', lessons: [
-        { id: 'l2-1', title: 'Welcome to Level 2', mins: 3, file: 'l2-1-going-further.md' },
-    ] },
-    { title: 'Connect your servers', lessons: [
-        { id: 'l2-2', title: 'Link servers with WolfNet', mins: 5, file: 'l2-2-wolfnet.md' },
-    ] },
-    { title: 'Beyond containers', lessons: [
-        { id: 'l2-3', title: 'Run a full virtual machine', mins: 5, file: 'l2-3-run-a-vm.md' },
-    ] },
-    { title: 'Storage that scales', lessons: [
-        { id: 'l2-4', title: 'Storage that outgrows one disk', mins: 5, file: 'l2-4-storage.md' },
-    ] },
-    { title: 'Work less, know more', lessons: [
-        { id: 'l2-5', title: 'Automate with WolfFlow', mins: 4, file: 'l2-5-wolfflow.md' },
-        { id: 'l2-6', title: 'Your AI co-pilot (WolfAgents)', mins: 4, file: 'l2-6-wolfagents.md' },
-    ] },
-    { title: 'You made it', lessons: [
-        { id: 'l2-7', title: "You're an operator now", mins: 3, file: 'l2-7-operator.md' },
-    ] },
+// Multiple selectable courses. Entering "Learn" shows a picker so operators
+// can choose where to start — a confident user can skip straight to Level 2/3
+// instead of being forced through the beginner course. Each course is the same
+// {title, lessons:[{id,title,mins,file}]} module shape used before; the picker
+// and the per-course scoping are layered on top.
+const LEARN_COURSES = [
+    {
+        id: 'getting-started',
+        title: 'Getting Started',
+        subtitle: 'New here? A calm, one-step-at-a-time walk from "what is a server?" to a running, backed-up, monitored setup.',
+        modules: [
+            { title: 'Before you start', lessons: [
+                { id: '0-1', title: 'What even is a server?', mins: 5, file: '0-1-what-is-a-server.md' },
+            ] },
+            { title: 'Find your feet', lessons: [
+                { id: '1-1', title: 'What WolfStack is', mins: 3, file: '1-1-what-is-wolfstack.md' },
+                { id: '1-2', title: 'A 2-minute tour of the screen', mins: 2, file: '1-2-screen-tour.md' },
+                { id: '1-3', title: 'The only six things you need', mins: 3, file: '1-3-six-things.md' },
+            ] },
+            { title: 'Your servers', lessons: [
+                { id: '2-1', title: 'You already have a server', mins: 2, file: '2-1-you-have-a-server.md' },
+                { id: '2-2', title: 'Adding another server', mins: 4, file: '2-2-add-a-server.md' },
+            ] },
+            { title: 'Your first app', lessons: [
+                { id: '3-1', title: 'Install from the App Store', mins: 5, file: '3-1-install-from-app-store.md' },
+                { id: '3-2', title: 'Find it and open it', mins: 3, file: '3-2-find-and-open-it.md' },
+            ] },
+            { title: 'Build a container yourself', lessons: [
+                { id: '4-1', title: 'Docker, LXC or VM?', mins: 4, file: '4-1-docker-lxc-vm.md' },
+                { id: '4-2', title: 'Make a Docker container', mins: 5, file: '4-2-make-docker.md' },
+                { id: '4-3', title: 'Make an LXC container', mins: 5, file: '4-3-make-lxc.md' },
+            ] },
+            { title: 'Get a terminal', lessons: [
+                { id: '5-1', title: 'Open a shell on a server', mins: 3, file: '5-1-server-shell.md' },
+                { id: '5-2', title: 'Open a shell in a container', mins: 3, file: '5-2-container-shell.md' },
+            ] },
+            { title: 'Keep your data safe', lessons: [
+                { id: '6-1', title: 'Back something up now', mins: 4, file: '6-1-backup-now.md' },
+                { id: '6-2', title: 'Automatic backups', mins: 3, file: '6-2-schedule-backups.md' },
+                { id: '6-3', title: 'Restore from a backup', mins: 4, file: '6-3-restore.md' },
+            ] },
+            { title: 'Lock it down (security)', lessons: [
+                { id: 'sec-1', title: 'Lock down your login', mins: 4, file: 'sec-1-secure-your-login.md' },
+                { id: 'sec-2', title: 'Harden the server', mins: 5, file: 'sec-2-harden-the-server.md' },
+            ] },
+            { title: 'Stay ahead of problems', lessons: [
+                { id: '7-1', title: 'The Issues page', mins: 3, file: '7-1-issues-page.md' },
+                { id: '7-2', title: 'Get alerts on your phone', mins: 4, file: '7-2-alerts.md' },
+                { id: '7-3', title: 'Put up a status page', mins: 5, file: '7-3-status-page.md' },
+            ] },
+            { title: 'Go further', lessons: [
+                { id: 'adv-1', title: 'Put your app on a real domain (HTTPS)', mins: 6, file: 'adv-1-domain-https.md' },
+            ] },
+            { title: 'When you are ready for more', lessons: [
+                { id: '8-1', title: 'The map of everything else', mins: 4, file: '8-1-the-map.md' },
+                { id: '8-2', title: 'How to get unstuck', mins: 3, file: '8-2-getting-unstuck.md' },
+            ] },
+            { title: 'You did it', lessons: [
+                { id: 'done-1', title: 'Your starter checklist', mins: 3, file: 'done-1-checklist.md' },
+            ] },
+        ],
+    },
+    {
+        id: 'level-2',
+        title: 'Level 2 · Going Further',
+        subtitle: 'Comfortable with the basics? Open the bigger doors — linking servers, virtual machines, storage, automation, and AI.',
+        modules: [
+            { title: 'Level 2 · Going further', lessons: [
+                { id: 'l2-1', title: 'Welcome to Level 2', mins: 3, file: 'l2-1-going-further.md' },
+            ] },
+            { title: 'Connect your servers', lessons: [
+                { id: 'l2-2', title: 'Link servers with WolfNet', mins: 5, file: 'l2-2-wolfnet.md' },
+            ] },
+            { title: 'Beyond containers', lessons: [
+                { id: 'l2-3', title: 'Run a full virtual machine', mins: 5, file: 'l2-3-run-a-vm.md' },
+            ] },
+            { title: 'Storage that scales', lessons: [
+                { id: 'l2-4', title: 'Storage that outgrows one disk', mins: 5, file: 'l2-4-storage.md' },
+            ] },
+            { title: 'Work less, know more', lessons: [
+                { id: 'l2-5', title: 'Automate with WolfFlow', mins: 4, file: 'l2-5-wolfflow.md' },
+                { id: 'l2-6', title: 'Your AI co-pilot (WolfAgents)', mins: 4, file: 'l2-6-wolfagents.md' },
+            ] },
+            { title: 'You made it', lessons: [
+                { id: 'l2-7', title: "You're an operator now", mins: 3, file: 'l2-7-operator.md' },
+            ] },
+        ],
+    },
+    {
+        id: 'level-3',
+        title: 'Level 3 · Defend Your Systems',
+        subtitle: 'Keep what you built. A defender’s course: firewalls, intrusion detection, secrets, early warning, and what to do when something gets in.',
+        modules: [
+            { title: 'The mindset', lessons: [
+                { id: 'l3-1', title: 'Think like a defender', mins: 4, file: 'l3-1-think-like-a-defender.md' },
+            ] },
+            { title: 'Reduce the surface', lessons: [
+                { id: 'l3-2', title: "Control what's reachable (firewall)", mins: 5, file: 'l3-2-firewall.md' },
+            ] },
+            { title: 'Catch what gets in', lessons: [
+                { id: 'l3-3', title: 'Catch malware and intruders', mins: 5, file: 'l3-3-detect-intruders.md' },
+            ] },
+            { title: "Don't hand over the keys", lessons: [
+                { id: 'l3-4', title: 'No default secrets, no stale software', mins: 5, file: 'l3-4-secrets-and-updates.md' },
+            ] },
+            { title: 'See it early', lessons: [
+                { id: 'l3-5', title: 'See attacks coming', mins: 4, file: 'l3-5-see-attacks-coming.md' },
+            ] },
+            { title: 'Recover cleanly', lessons: [
+                { id: 'l3-6', title: 'When something gets in', mins: 6, file: 'l3-6-when-something-gets-in.md' },
+            ] },
+            { title: 'You made it', lessons: [
+                { id: 'l3-7', title: "The defender's checklist", mins: 4, file: 'l3-7-defenders-checklist.md' },
+            ] },
+        ],
+    },
 ];
 
 const LEARN_PROGRESS_KEY = 'wolfstack_learn_progress';
 const LEARN_LAST_KEY = 'wolfstack_learn_last';
+const LEARN_COURSE_KEY = 'wolfstack_learn_course';
 const LEARN_BANNER_KEY = 'wolfstack_learn_banner_dismissed';
 let _learnCache = {};
 let _learnCurrentId = null;
+// The selected course id, and whether the picker (course chooser) is showing.
+let _learnCourseId = null;
+let _learnInPicker = true;
 // Which surface is currently showing lessons: the full-page view ('page')
 // or the follow-along slide-out ('drawer'). The render helpers target the
 // matching element set (learn-* vs learn-d-*) via learnEl().
@@ -58097,10 +58145,42 @@ function learnEl(name) {
     return document.getElementById(prefix + name);
 }
 
+// The course object currently selected (null while the picker is showing).
+function learnCurrentCourse() {
+    return LEARN_COURSES.find(c => c.id === _learnCourseId) || null;
+}
+
+// Modules of the current course (empty in picker mode).
+function learnModules() {
+    const c = learnCurrentCourse();
+    return c ? c.modules : [];
+}
+
+// Flatten the CURRENT course's lessons (scopes nav/progress/print to it).
 function learnFlatLessons() {
     const out = [];
-    LEARN_COURSE.forEach(m => m.lessons.forEach(l => out.push(l)));
+    learnModules().forEach(m => m.lessons.forEach(l => out.push(l)));
     return out;
+}
+
+// All lessons across every course (e.g. to locate which course owns a lesson).
+function learnAllLessons(course) {
+    const out = [];
+    course.modules.forEach(m => m.lessons.forEach(l => out.push(l)));
+    return out;
+}
+
+// Which course contains a given lesson id (for contextual "?" deep-links).
+function learnCourseOfLesson(id) {
+    return LEARN_COURSES.find(c => learnAllLessons(c).some(l => l.id === id)) || null;
+}
+
+// {done,total,pct} for a course, from the shared per-lesson-id progress map.
+function learnCourseProgress(course, prog) {
+    const flat = learnAllLessons(course);
+    const done = flat.filter(l => prog[l.id]).length;
+    const total = flat.length;
+    return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
 }
 
 function learnLoadProgress() {
@@ -58121,19 +58201,76 @@ function learnIsDone(id) {
 // Entry hook from selectView('learn'). Safe to call repeatedly.
 function learnInit() {
     _learnActive = 'page';
+    // Land on the course picker so the operator chooses where to start — a
+    // confident user can jump straight to Level 2/3 instead of being forced
+    // through the beginner course.
+    learnShowPicker();
+}
+
+// Render the course chooser. Lists every course with its progress so the
+// operator picks (or resumes) any of them. Targets the active surface (page
+// or drawer) via learnEl().
+function learnShowPicker() {
+    _learnInPicker = true;
     learnRenderToc();
     learnUpdateProgress();
-    // Resume at the last-viewed lesson; otherwise the first not-yet-done
-    // lesson; otherwise lesson one.
+    learnUpdateNavButtons();
+    const content = learnEl('content');
+    if (!content) return;
+    const prog = learnLoadProgress();
+    let html = '<div class="learn-picker" style="max-width:720px;margin:0 auto;">'
+        + '<h1 style="margin:0 0 6px;">Choose a course</h1>'
+        + '<p style="color:var(--text-muted);margin:0 0 20px;">Pick where you want to start. Already comfortable with the basics? Jump straight to a later course — you don\'t have to do them in order.</p>';
+    LEARN_COURSES.forEach(c => {
+        const p = learnCourseProgress(c, prog);
+        const cta = p.done === 0 ? 'Start' : (p.done >= p.total ? 'Review' : 'Continue');
+        const meta = (p.done >= p.total && p.total)
+            ? '<span style="color:var(--success,#22c55e);font-weight:700;font-size:12px;">&#10003; Complete</span>'
+            : `<span style="color:var(--text-muted);font-size:12px;">${p.done} / ${p.total} lessons</span>`;
+        html += `<div class="learn-course-card" style="border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:14px;background:var(--bg-tertiary,var(--bg-secondary));">`
+            + `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px;">`
+            + `<h2 style="margin:0;font-size:18px;">${escapeHtml(c.title)}</h2>${meta}</div>`
+            + `<p style="color:var(--text-muted);margin:0 0 12px;font-size:13px;line-height:1.5;">${escapeHtml(c.subtitle || '')}</p>`
+            + `<div style="height:6px;border-radius:6px;background:var(--bg-primary,var(--border));overflow:hidden;margin-bottom:12px;"><div style="height:100%;width:${p.pct}%;background:var(--accent,#6366f1);"></div></div>`
+            + `<button type="button" class="btn btn-primary" onclick="learnSelectCourse('${c.id}')">${cta} &rarr;</button>`
+            + `</div>`;
+    });
+    html += '</div>';
+    content.innerHTML = html;
+    const main = content.closest('.learn-main');
+    if (main) main.scrollTop = 0;
+    content.scrollTop = 0;
+}
+
+// Enter a course: render its lessons and resume where the operator left off.
+function learnSelectCourse(courseId) {
+    const c = LEARN_COURSES.find(x => x.id === courseId);
+    if (!c) return;
+    _learnCourseId = courseId;
+    _learnInPicker = false;
+    try { localStorage.setItem(LEARN_COURSE_KEY, courseId); } catch (_) {}
+    learnRenderToc();
+    learnUpdateProgress();
     const flat = learnFlatLessons();
+    if (!flat.length) return;
+    // Resume at this course's last-viewed lesson; else first incomplete; else first.
     let target = null;
-    try { target = localStorage.getItem(LEARN_LAST_KEY); } catch (_) {}
+    try { target = localStorage.getItem(LEARN_LAST_KEY + '_' + courseId); } catch (_) {}
     if (!target || !flat.some(l => l.id === target)) {
         const prog = learnLoadProgress();
         const firstIncomplete = flat.find(l => !prog[l.id]);
         target = firstIncomplete ? firstIncomplete.id : flat[0].id;
     }
     learnOpenLesson(target);
+}
+
+// Back to the course chooser from inside a course.
+function learnBackToPicker() {
+    learnShowPicker();
+    if (_learnActive === 'drawer') {
+        const toc = document.getElementById('learn-d-toc');
+        if (toc && !toc.hidden) learnDrawerHideToc();
+    }
 }
 
 // ── Follow-along slide-out ("Learn drawer") ──────────────────────────
@@ -58155,21 +58292,22 @@ function openLearnDrawer(lessonId) {
     drawer.setAttribute('aria-hidden', 'false');
     document.body.classList.add('learn-drawer-open');
     requestAnimationFrame(() => drawer.classList.add('open'));
-    learnRenderToc();
-    learnUpdateProgress();
-    const flat = learnFlatLessons();
-    // If a specific lesson was requested (contextual "?" help) jump straight
-    // there; otherwise resume where they left off.
-    let target = (lessonId && flat.some(l => l.id === lessonId)) ? lessonId : null;
-    if (!target) {
-        try { target = localStorage.getItem(LEARN_LAST_KEY); } catch (_) {}
+    // If a specific lesson was requested (contextual "?" help), jump straight
+    // into its course and open it. Otherwise show the course picker.
+    if (lessonId) {
+        const c = learnCourseOfLesson(lessonId);
+        if (c) {
+            _learnCourseId = c.id;
+            _learnInPicker = false;
+            try { localStorage.setItem(LEARN_COURSE_KEY, c.id); } catch (_) {}
+            learnRenderToc();
+            learnUpdateProgress();
+            learnOpenLesson(lessonId);
+            document.addEventListener('keydown', learnDrawerEscHandler);
+            return;
+        }
     }
-    if (!target || !flat.some(l => l.id === target)) {
-        const prog = learnLoadProgress();
-        const firstIncomplete = flat.find(l => !prog[l.id]);
-        target = firstIncomplete ? firstIncomplete.id : flat[0].id;
-    }
-    learnOpenLesson(target);
+    learnShowPicker();
     document.addEventListener('keydown', learnDrawerEscHandler);
 }
 
@@ -58290,10 +58428,12 @@ function learnAskAi() {
         toggleAiChat();
     }
     const lesson = learnFlatLessons().find(l => l.id === _learnCurrentId);
-    const title = lesson ? lesson.title : 'Getting Started';
+    const title = lesson ? lesson.title : 'a lesson';
+    const course = learnCurrentCourse();
+    const courseName = course ? course.title : 'WolfStack';
     const input = document.getElementById('ai-chat-input');
     if (input) {
-        input.value = `I'm on the Getting Started lesson "${title}". `;
+        input.value = `I'm on the "${courseName}" lesson "${title}". `;
         input.focus();
         try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
     }
@@ -58303,8 +58443,26 @@ function learnRenderToc() {
     const toc = learnEl('toc');
     if (!toc) return;
     const prog = learnLoadProgress();
-    let html = '';
-    LEARN_COURSE.forEach(mod => {
+    // Picker mode: the TOC doubles as a course switcher.
+    if (_learnInPicker) {
+        let html = '<div class="learn-toc-mod">Courses</div>';
+        LEARN_COURSES.forEach(c => {
+            const p = learnCourseProgress(c, prog);
+            const complete = p.total && p.done >= p.total;
+            html += `<button type="button" class="learn-toc-item${complete ? ' done' : ''}" onclick="learnSelectCourse('${c.id}')">`
+                + `<span class="learn-toc-check" aria-hidden="true">${complete ? '&#10003;' : ''}</span>`
+                + `<span class="learn-toc-label">${escapeHtml(c.title)}</span>`
+                + `<span class="learn-toc-mins">${p.done}/${p.total}</span>`
+                + `</button>`;
+        });
+        toc.innerHTML = html;
+        return;
+    }
+    // In a course: a back-to-picker link, then this course's modules.
+    let html = `<button type="button" class="learn-toc-item learn-toc-back" onclick="learnBackToPicker()">`
+        + `<span class="learn-toc-check" aria-hidden="true">&larr;</span>`
+        + `<span class="learn-toc-label">All courses</span></button>`;
+    learnModules().forEach(mod => {
         html += `<div class="learn-toc-mod">${escapeHtml(mod.title)}</div>`;
         mod.lessons.forEach(l => {
             const done = !!prog[l.id];
@@ -58320,13 +58478,18 @@ function learnRenderToc() {
 }
 
 function learnUpdateProgress() {
+    const fill = learnEl('progress-fill');
+    const label = learnEl('progress-label');
+    if (_learnInPicker) {
+        if (fill) fill.style.width = '0%';
+        if (label) label.textContent = 'Choose a course';
+        return;
+    }
     const flat = learnFlatLessons();
     const prog = learnLoadProgress();
     const done = flat.filter(l => prog[l.id]).length;
     const total = flat.length;
     const pct = total ? Math.round((done / total) * 100) : 0;
-    const fill = learnEl('progress-fill');
-    const label = learnEl('progress-label');
     if (fill) fill.style.width = pct + '%';
     if (label) label.textContent = `${done} of ${total} complete`;
 }
@@ -58335,8 +58498,10 @@ async function learnOpenLesson(id) {
     const flat = learnFlatLessons();
     const lesson = flat.find(l => l.id === id);
     if (!lesson) return;
+    _learnInPicker = false;
     _learnCurrentId = id;
-    try { localStorage.setItem(LEARN_LAST_KEY, id); } catch (_) {}
+    // Remember the last-viewed lesson per course so each resumes independently.
+    try { localStorage.setItem(LEARN_LAST_KEY + '_' + _learnCourseId, id); } catch (_) {}
     learnRenderToc();
     const content = learnEl('content');
     if (!content) return;
@@ -58373,10 +58538,19 @@ async function learnOpenLesson(id) {
 }
 
 function learnUpdateNavButtons() {
-    const flat = learnFlatLessons();
-    const idx = flat.findIndex(l => l.id === _learnCurrentId);
     const prevBtn = learnEl('prev');
     const compBtn = learnEl('complete');
+    // Picker mode has no lesson nav. Use display:none + disabled (not
+    // visibility:hidden) so a keyboard user can't tab to and activate the
+    // hidden "Mark complete" button while the course chooser is showing —
+    // which would tick off a stale lesson and fire a bogus completion toast.
+    if (_learnInPicker) {
+        [prevBtn, compBtn].forEach(b => { if (b) { b.style.display = 'none'; b.disabled = true; } });
+        return;
+    }
+    [prevBtn, compBtn].forEach(b => { if (b) { b.style.display = ''; b.disabled = false; b.style.visibility = 'visible'; } });
+    const flat = learnFlatLessons();
+    const idx = flat.findIndex(l => l.id === _learnCurrentId);
     if (prevBtn) prevBtn.style.visibility = idx > 0 ? 'visible' : 'hidden';
     if (compBtn) {
         const done = learnIsDone(_learnCurrentId);
@@ -58407,11 +58581,15 @@ function learnCompleteAndNext() {
     if (idx > -1 && idx < flat.length - 1) {
         learnOpenLesson(flat[idx + 1].id);
     } else {
-        // Finished the final lesson — celebrate and stay put.
+        // Finished the final lesson of this course — celebrate and stay put.
+        // The "← All courses" link in the TOC takes them to the picker to
+        // choose what's next.
+        const course = learnCurrentCourse();
         learnRenderToc();
         learnUpdateNavButtons();
         if (typeof showToast === 'function') {
-            showToast('\u{1F389} You finished the whole course — Getting Started and Level 2. You’re an operator now. \u{1F43A}', 'success');
+            const name = course ? course.title : 'the course';
+            showToast(`\u{1F389} You finished ${name}! Nicely done. \u{1F43A}`, 'success');
         }
     }
 }
@@ -58423,9 +58601,14 @@ async function learnResetProgress() {
     }
     if (!ok) return;
     try { localStorage.removeItem(LEARN_PROGRESS_KEY); } catch (_) {}
-    learnUpdateProgress();
-    learnRenderToc();
-    learnUpdateNavButtons();
+    if (_learnInPicker) {
+        // Refresh the picker so the course progress bars/counts reset too.
+        learnShowPicker();
+    } else {
+        learnUpdateProgress();
+        learnRenderToc();
+        learnUpdateNavButtons();
+    }
     if (typeof showToast === 'function') showToast('Course progress reset.', 'info');
 }
 
@@ -58468,6 +58651,10 @@ em { font-style: italic; }
 `;
 
 async function learnPrint(scope) {
+    if (_learnInPicker) {
+        if (typeof showToast === 'function') showToast('Open a course and a lesson first, then print.', 'info');
+        return;
+    }
     const flat = learnFlatLessons();
     let lessons;
     if (scope === 'lesson') {
@@ -58509,13 +58696,15 @@ async function learnPrint(scope) {
     // reads top to bottom. Each lesson carries its module name as a kicker.
     let body = '';
     if (scope !== 'lesson') {
+        const course = learnCurrentCourse();
+        const courseTitle = course ? course.title : 'WolfStack course';
         body += '<header class="cover">'
             + '<h1>WolfStack</h1>'
-            + '<div class="cover-sub">Getting Started &mdash; the complete course</div>'
+            + '<div class="cover-sub">' + escapeHtml(courseTitle) + ' &mdash; the complete course</div>'
             + '<div class="cover-meta">' + flat.length + ' lessons &middot; printed from your dashboard</div>'
             + '</header>';
     }
-    LEARN_COURSE.forEach(mod => {
+    learnModules().forEach(mod => {
         mod.lessons.forEach(l => {
             if (!lessons.some(x => x.id === l.id)) return;
             const md = _learnCache[l.file] || '';
@@ -58525,9 +58714,10 @@ async function learnPrint(scope) {
                 + '</article>';
         });
     });
+    const _printCourse = learnCurrentCourse();
     const title = scope === 'lesson'
         ? ((lessons[0] && lessons[0].title) || 'WolfStack lesson')
-        : 'WolfStack — Getting Started';
+        : ('WolfStack — ' + (_printCourse ? _printCourse.title : 'course'));
     const doc = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
         + escapeHtml(title) + '</title><style>' + LEARN_PRINT_CSS + '</style></head><body>'
         + body
@@ -68106,8 +68296,8 @@ window.predTermClose = predTermClose;
 
 const APP_DRAWER_TILES = [
     {
-        id: 'learn', icon: '', name: 'Getting Started',
-        desc: 'New here? A short, calm course — one step at a time. Install an app, take a backup, set up alerts, without the overwhelm.',
+        id: 'learn', icon: '', name: 'Courses',
+        desc: 'Calm, step-by-step courses — pick your level: Getting Started, Going Further, or Defend Your Systems. Start anywhere.',
     },
     {
         id: 'fleet-security', icon: '', name: 'Fleet Security',
