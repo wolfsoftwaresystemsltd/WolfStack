@@ -5423,7 +5423,7 @@ dependencies = [
 
 [[package]]
 name = "wolfstack"
-version = "25.1.23"
+version = "25.1.24"
 dependencies = [
  "actix-files",
  "actix-multipart",

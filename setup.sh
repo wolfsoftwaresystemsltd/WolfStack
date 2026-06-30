@@ -2283,6 +2283,33 @@ else
             systemctl restart wolfstack 2>/dev/null || true
         fi
     fi
+
+    # If the service isn't running at this point, offer to start it — matching
+    # the fresh-install path's "Start WolfStack now?" prompt. A service that was
+    # already running keeps running (RESTART_SERVICE handles the upgrade restart
+    # at the end); we only act here when it's down. Without this, re-running
+    # setup.sh on a host where the operator had stopped wolfstack left it
+    # silently stopped on completion, which was surprising (wabil 2026-06-30).
+    # Default is Yes (incl. unattended `curl | bash`, where prompt_read returns
+    # empty) so an install/repair run ends with the service up; an operator who
+    # wants it left down can answer 'n'.
+    if ! systemctl is-active --quiet wolfstack 2>/dev/null; then
+        echo ""
+        echo -n "WolfStack is installed but not running. Start it now? [Y/n]: "
+        prompt_read start_stopped
+        if [ "$start_stopped" != "n" ] && [ "$start_stopped" != "N" ]; then
+            systemctl enable wolfstack 2>/dev/null || true
+            systemctl start wolfstack 2>/dev/null || true
+            sleep 2
+            if systemctl is-active --quiet wolfstack; then
+                echo "✓ WolfStack is running!"
+            else
+                echo "⚠ WolfStack did not start. Check: journalctl -u wolfstack -n 20"
+            fi
+        else
+            echo "  Leaving WolfStack stopped. Start later with: sudo systemctl start wolfstack"
+        fi
+    fi
 fi
 
 # ─── Firewall ───────────────────────────────────────────────────────────────

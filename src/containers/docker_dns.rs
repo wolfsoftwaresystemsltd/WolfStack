@@ -187,6 +187,21 @@ pub fn ensure_docker_outbound() {
         .args(["-w", "net.ipv4.ip_forward=1"])
         .output();
 
+    // 1b. Prune rules left behind by a bridge that no longer exists. We (and
+    //     Docker) key the MASQUERADE rule on the bridge interface name:
+    //       -t nat -A POSTROUTING -s <subnet> ! -o <bridge> -j MASQUERADE
+    //     When `docker compose down` deletes <bridge> and `up` recreates the
+    //     network under a NEW bridge name on the SAME subnet, the old rule
+    //     survives. Because the old bridge is gone, its `! -o <old-bridge>`
+    //     exclusion now matches EVERY interface, so the stale rule masquerades
+    //     intra-bridge traffic on the new network too — which breaks
+    //     container-to-gateway/container-to-container connectivity (a real
+    //     sponsor incident: only the recreated network broke, a fresh network
+    //     *name* worked, stopping WolfStack didn't help, a Docker reinstall did).
+    //     Prune BEFORE re-adding below so the live bridge's correct rule is what
+    //     remains. This also fixes the unbounded accumulation of these rules.
+    prune_stale_docker_bridge_rules();
+
     // 2. Discover Docker bridge networks and their subnets.
     //    `docker network ls` + `docker network inspect` give us the
     //    subnet and bridge interface for each network.
@@ -259,6 +274,108 @@ pub fn ensure_docker_outbound() {
         let _ = Command::new("sysctl")
             .args(["-w", &format!("net.ipv4.conf.{}.forwarding=1", net.bridge)])
             .output();
+    }
+}
+
+/// Interface names currently present in the kernel. Empty only if the `ip`
+/// enumeration itself failed — used as a safety gate before pruning.
+fn live_interface_names() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    if let Ok(o) = Command::new("ip").args(["-o", "link", "show"]).output() {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                // "3: br-abc123def456@if7: <BROADCAST,...>" or "1: lo: <...>"
+                if let Some(field) = line.split_whitespace().nth(1) {
+                    let name = field.trim_end_matches(':');
+                    let name = name.split('@').next().unwrap_or(name);
+                    if !name.is_empty() {
+                        set.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    set
+}
+
+/// True for a Docker auto-managed bridge: the default `docker0`, or a
+/// per-network bridge named `br-` + exactly the first 12 hex chars of the
+/// network id (e.g. `br-83203c71429f`). This is deliberately NOT a blanket
+/// `br-*` prefix: an operator/libvirt/OVS bridge like `br-vpn0` or
+/// `br-management` must never have its rules pruned. A Docker network with a
+/// *custom* bridge name is excluded too, and correctly so — custom names are
+/// reused verbatim across down/up, so they never leave a stale rule; only the
+/// auto-named `br-<hex>` bridges get a fresh name on recreate, which is exactly
+/// the case this prune exists for.
+fn is_docker_bridge_iface(name: &str) -> bool {
+    name == "docker0"
+        || (name.len() == 15
+            && name.starts_with("br-")
+            && name[3..].bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Delete NAT/FORWARD rules that reference a Docker bridge interface no longer
+/// present in the kernel (the stale-bridge problem described at the call site in
+/// `ensure_docker_outbound`). Removing a rule that points at a non-existent
+/// bridge is always safe: it either matches nothing (`-i`/`-o <dead>`) or far
+/// too much (the stale `! -o <dead>` MASQUERADE).
+fn prune_stale_docker_bridge_rules() {
+    let live = live_interface_names();
+    // Safety gate: every Linux box has `lo`. If we can't even see it, the
+    // enumeration failed — pruning now would treat EVERY bridge as deleted and
+    // tear out all of Docker's NAT. Skip this cycle entirely instead.
+    if !live.contains("lo") {
+        warn!("docker_dns: skipping stale-bridge prune — could not enumerate interfaces");
+        return;
+    }
+
+    for (table, chain) in [("nat", "POSTROUTING"), ("filter", "FORWARD")] {
+        let save = match Command::new("iptables-save").args(["-t", table]).output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => continue,
+        };
+        let prefix = format!("-A {} ", chain);
+        for line in save.lines() {
+            if !line.starts_with(&prefix) {
+                continue;
+            }
+            // A `--comment "two words"` arg would break the whitespace
+            // tokenisation we use to rebuild the delete. Docker's and our own
+            // bridge rules carry no comment, so skip any commented line rather
+            // than risk issuing a malformed delete.
+            if line.contains("--comment") {
+                continue;
+            }
+
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            // Does an -i/-o arg name a docker bridge that's gone from the kernel?
+            let references_dead_bridge = tokens.iter().enumerate().any(|(i, t)| {
+                (*t == "-i" || *t == "-o")
+                    && tokens
+                        .get(i + 1)
+                        .map(|n| is_docker_bridge_iface(n) && !live.contains(*n))
+                        .unwrap_or(false)
+            });
+            if !references_dead_bridge {
+                continue;
+            }
+
+            // Rebuild as a delete: "-A <chain> <rest>" becomes
+            // `iptables -t <table> -D <chain> <rest>` (the `!` negation tokens
+            // survive verbatim and are accepted by iptables -D).
+            let mut args: Vec<String> = vec!["-t".into(), table.into(), "-D".into(), chain.into()];
+            args.extend(tokens[2..].iter().map(|&s| s.to_string()));
+            match Command::new("iptables").args(&args).output() {
+                Ok(o) if o.status.success() => {
+                    info!("docker_dns: pruned stale {} rule for removed bridge: {}", chain, line.trim());
+                }
+                Ok(o) => warn!(
+                    "docker_dns: failed to prune stale {} rule ({}): {}",
+                    chain, line.trim(), String::from_utf8_lossy(&o.stderr).trim()
+                ),
+                Err(e) => warn!("docker_dns: prune iptables error: {}", e),
+            }
+        }
     }
 }
 
