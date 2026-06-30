@@ -1975,6 +1975,49 @@ fn is_vm_running(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Recursively copy a config directory into the backup bundle, skipping any
+/// subdirectory whose name is in `exclude_dirs` (matched at ANY depth). A
+/// symlink to a regular file is backed up by copying its target's CONTENT — so
+/// certbot/Let's-Encrypt-style symlinked certs (`cert.pem` → `/etc/letsencrypt/…`)
+/// are captured rather than silently dropped. A symlinked directory is warned
+/// and skipped (never followed — avoids cycles and escaping the tree). A failure
+/// to copy a *real* config file aborts the whole backup rather than shipping a
+/// silent hole that a restore would later reveal as missing config.
+fn copy_config_tree(src: &Path, dest: &Path, exclude_dirs: &[&str]) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("create {}: {}", dest.display(), e))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("read {}: {}", src.display(), e))? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => { warn!("config backup: unreadable entry in {} ({})", src.display(), e); continue; }
+        };
+        let from = entry.path();
+        let name = entry.file_name();
+        let ft = match entry.file_type() {
+            Ok(t) => t,
+            Err(e) => { warn!("config backup: skipped {} (type unknown: {})", from.display(), e); continue; }
+        };
+        if ft.is_symlink() {
+            // Follow the link to classify the target: copy a linked regular
+            // file's content; never recurse into a linked directory.
+            match fs::metadata(&from) {
+                Ok(m) if m.is_file() => {
+                    fs::copy(&from, dest.join(&name))
+                        .map_err(|e| format!("copy {}: {}", from.display(), e))?;
+                }
+                Ok(_) => warn!("config backup: skipped symlinked directory {}", from.display()),
+                Err(e) => warn!("config backup: skipped broken symlink {} ({})", from.display(), e),
+            }
+        } else if ft.is_dir() {
+            if exclude_dirs.iter().any(|e| std::ffi::OsStr::new(e) == name) { continue; }
+            copy_config_tree(&from, &dest.join(&name), exclude_dirs)?;
+        } else if ft.is_file() {
+            fs::copy(&from, dest.join(&name))
+                .map_err(|e| format!("copy {}: {}", from.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Backup WolfStack configuration files
 pub fn backup_config() -> Result<(PathBuf, u64), String> {
 
@@ -1988,26 +2031,37 @@ pub fn backup_config() -> Result<(PathBuf, u64), String> {
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
-    // Copy all relevant config files
-    let config_files = [
-        "/etc/wolfstack/config.toml",
-        "/etc/wolfstack/ip-mappings.json",
-        "/etc/wolfstack/storage.json",
-        "/etc/wolfstack/backups.json",
-        "/etc/wolfnet/config.toml",
-    ];
+    // Back up the WHOLE /etc/wolfstack tree, not a hardcoded file list. The old
+    // list captured 4 files; WolfStack has since grown ~50 config files/dirs
+    // (router, dns-providers, wolfflow/workflows, statuspage, users, alerting,
+    // cluster-secret, certs, sql-connections, …) — a "config backup" silently
+    // omitted almost all of it, so a reinstall lost nearly everything (wabil,
+    // 2026-06-30). Walking the directory auto-includes anything added in future.
+    //
+    // Skip only what shouldn't be in a config backup:
+    //   • icon-packs    — large, re-downloadable from GitHub on demand.
+    //   • config-backups — the config backups themselves (avoid nesting them).
+    let etc_dir = Path::new("/etc/wolfstack");
+    if etc_dir.exists() {
+        let bundle_etc = temp_dir.join("etc/wolfstack");
+        copy_config_tree(etc_dir, &bundle_etc, &["icon-packs", "config-backups"])?;
 
-    for path in &config_files {
-        if Path::new(path).exists() {
-            let dest = temp_dir.join(
-                Path::new(path)
-                    .strip_prefix("/")
-                    .unwrap_or(Path::new(path))
-            );
-            if let Some(parent) = dest.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::copy(path, &dest);
+        // Drop operational *history* that isn't configuration — it can be many
+        // MB of per-step command output / event logs and is pointless in a
+        // config backup. The workflow/service *definitions* (workflows.json,
+        // services.json) are kept; only the run/event logs are dropped.
+        for noisy in &["wolfflow/runs.json", "wolfrun/failover-events.json"] {
+            let _ = fs::remove_file(bundle_etc.join(noisy));
+        }
+    }
+
+    // WolfNet's config lives outside /etc/wolfstack.
+    let wolfnet_cfg = Path::new("/etc/wolfnet/config.toml");
+    if wolfnet_cfg.exists() {
+        let dest = temp_dir.join("etc/wolfnet/config.toml");
+        if let Some(parent) = dest.parent() { let _ = fs::create_dir_all(parent); }
+        if let Err(e) = fs::copy(wolfnet_cfg, &dest) {
+            warn!("config backup: failed to copy WolfNet config ({})", e);
         }
     }
 
@@ -7394,5 +7448,48 @@ mod restore_warning_tests {
         let macs = read_hwaddrs(p.to_str().unwrap());
         let _ = std::fs::remove_file(&p);
         assert!(macs.is_empty(), "matched a non-numeric net index: {:?}", macs);
+    }
+
+    #[test]
+    fn copy_config_tree_recurses_and_excludes() {
+        let base = std::env::temp_dir().join(format!("wolfstack-cfgtree-{}", std::process::id()));
+        let src = base.join("src");
+        let dest = base.join("dest");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(src.join("router")).unwrap();
+        std::fs::create_dir_all(src.join("icon-packs/breeze")).unwrap();
+        std::fs::create_dir_all(src.join("config-backups")).unwrap();
+        std::fs::write(src.join("router.json"), "{}").unwrap();
+        std::fs::write(src.join("router/firewall.json"), "{}").unwrap();
+        std::fs::write(src.join("icon-packs/breeze/index.theme"), "x").unwrap();
+        std::fs::write(src.join("config-backups/old.tar.gz"), "x").unwrap();
+
+        super::copy_config_tree(&src, &dest, &["icon-packs", "config-backups"]).unwrap();
+
+        assert!(dest.join("router.json").exists(), "top-level file copied");
+        assert!(dest.join("router/firewall.json").exists(), "nested file copied recursively");
+        assert!(!dest.join("icon-packs").exists(), "icon-packs excluded");
+        assert!(!dest.join("config-backups").exists(), "config-backups excluded");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn copy_config_tree_follows_symlinked_file() {
+        // A certbot-style symlinked cert (cert.pem -> real file) must be backed
+        // up by its CONTENT, not silently skipped.
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("wolfstack-cfgsym-{}", std::process::id()));
+        let src = base.join("src");
+        let dest = base.join("dest");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(base.join("real-cert.pem"), "CERTDATA").unwrap();
+        symlink(base.join("real-cert.pem"), src.join("cert.pem")).unwrap();
+
+        super::copy_config_tree(&src, &dest, &[]).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dest.join("cert.pem")).unwrap(), "CERTDATA",
+            "symlinked cert must be backed up by content");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
