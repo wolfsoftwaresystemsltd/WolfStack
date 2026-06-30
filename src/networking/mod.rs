@@ -3280,40 +3280,20 @@ fn remove_mapping_rules(m: &IpMapping) {
 
 /// Remove all iptables rules matching a comment string (used for VIP cleanup)
 fn remove_rules_by_comment(comment: &str) -> usize {
+    // Delegate to the `-S` + delete-by-spec path (`purge_matching_lines`) using
+    // the comment as the match marker. That gets us, for free, the hardening the
+    // IP-based purge already has: deterministic on the nft backend (the old
+    // `-L --line-numbers` scrape mis-rendered some matches there), immune to the
+    // concurrent-edit (Docker) line-number TOCTOU that delete-by-number suffers,
+    // O(N) instead of O(N²) when draining a large backlog, and runaway-capped.
     let mut removed = 0;
-    for (table, chains) in &[
-        ("nat", vec!["PREROUTING", "OUTPUT", "POSTROUTING"]),
-        ("filter", vec!["FORWARD"]),
-    ] {
-        for chain in chains {
-            loop {
-                let output = Command::new("iptables")
-                    .args(["-t", table, "-L", chain, "--line-numbers", "-n"])
-                    .output();
-                let text = match output {
-                    Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-                    _ => break,
-                };
-                // Find first rule with our comment (search from bottom to avoid index shift)
-                let mut found = None;
-                for line in text.lines().rev() {
-                    if line.contains(comment) {
-                        if let Some(num) = line.split_whitespace().next().and_then(|n| n.parse::<u32>().ok()) {
-                            found = Some(num);
-                            break;
-                        }
-                    }
-                }
-                match found {
-                    Some(num) => {
-                        let _ = Command::new("iptables")
-                            .args(["-t", table, "-D", chain, &num.to_string()])
-                            .output();
-                        removed += 1;
-                    }
-                    None => break,
-                }
-            }
+    let targets: &[(&str, &[&str])] = &[
+        ("nat", &["PREROUTING", "OUTPUT", "POSTROUTING"]),
+        ("filter", &["FORWARD"]),
+    ];
+    for &(table, chains) in targets {
+        for &chain in chains {
+            removed += purge_matching_lines(table, chain, &[comment]);
         }
     }
     removed

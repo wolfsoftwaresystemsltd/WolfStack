@@ -36,22 +36,18 @@ const FILTER_CHAINS: &[&str] = &["WOLFROUTER_FWD", "WOLFROUTER_IN", "WOLFROUTER_
 pub fn build_ruleset(config: &RouterConfig, self_node_id: &str) -> String {
     let mut out = String::new();
     out.push_str("*filter\n");
-    // Ensure built-in chains exist with default policy ACCEPT (we rely
-    // on explicit drops at the end of our custom chains rather than
-    // default DROP — safer during apply).
-    out.push_str(":INPUT ACCEPT [0:0]\n");
-    out.push_str(":FORWARD ACCEPT [0:0]\n");
-    out.push_str(":OUTPUT ACCEPT [0:0]\n");
+    // Declare/refill ONLY our own chains — never the built-in INPUT/FORWARD/
+    // OUTPUT. Under the iptables-nft backend, `iptables-restore -n` (noflush)
+    // STILL flushes any chain *named* in the file, so declaring `:FORWARD …`
+    // here wiped the FORWARD chain on every apply — destroying Docker's and the
+    // operator's own FORWARD rules on nft hosts (legacy hosts were unaffected,
+    // which is why it looked node-specific). The built-in -> WOLFROUTER jumps
+    // are installed idempotently in `apply` (`-C` probe + `-I 1`), exactly like
+    // apply_v6_companion, so they never appear in the restore file and never
+    // flush a built-in. This is the v4 twin of the fix build_ruleset_v6 carries.
     for chain in FILTER_CHAINS {
         out.push_str(&format!(":{} - [0:0]\n", chain));
     }
-
-    // Built-in chains jump to our chains. `-I INPUT 1` semantics via
-    // prepend isn't available in iptables-restore flat format; we
-    // redeclare the chain body which iptables-restore replaces wholesale.
-    out.push_str("-A INPUT -j WOLFROUTER_IN\n");
-    out.push_str("-A FORWARD -j WOLFROUTER_FWD\n");
-    out.push_str("-A OUTPUT -j WOLFROUTER_OUT\n");
 
     // Blanket state rule — accept ESTABLISHED,RELATED. Users only ever
     // write NEW rules (unless they disable state_track for a specific
@@ -474,14 +470,64 @@ pub fn apply(ruleset: &str, test_only: bool) -> Result<String, String> {
         return Ok(current);
     }
 
+    // Flush ONLY our own chains before the restore. Under legacy iptables,
+    // `iptables-restore -n` does NOT flush a declared chain, so without this our
+    // chains' rules would duplicate on every apply; under nft it's a harmless
+    // double-flush. We never flush the built-in chains — the ruleset no longer
+    // declares them, so Docker's and the operator's own INPUT/FORWARD/OUTPUT
+    // rules survive every apply. (-F on a not-yet-created chain errors
+    // harmlessly on first run; the restore then creates them.)
+    for chain in FILTER_CHAINS.iter().copied().chain([crate::threat_intel::CHAIN_NAME]) {
+        let _ = Command::new("iptables").args(["-F", chain]).output();
+    }
+
     // Swap.
     if !run_restore(ruleset, false)? {
         return Err("iptables-restore failed to apply (ruleset reverted to previous)".into());
     }
 
+    // Hook our chains into the built-ins idempotently — one jump each, never via
+    // the restore file (which would flush the built-in on the nft backend).
+    ensure_builtin_jumps_v4();
+
     info!("WolfRouter firewall applied ({} bytes)", ruleset.len());
     apply_v6_companion();
     Ok(current)
+}
+
+/// Ensure exactly one jump from each built-in filter chain into the matching
+/// WOLFROUTER chain (`-C` probe + `-I 1`), the same idempotent pattern as
+/// apply_v6_companion. Done out-of-band rather than in the restore file because
+/// naming a built-in chain in an `iptables-restore -n` file flushes it on the
+/// nft backend — which would wipe Docker's and the operator's own rules.
+fn ensure_builtin_jumps_v4() {
+    for (builtin, ours) in [
+        ("INPUT", "WOLFROUTER_IN"),
+        ("FORWARD", "WOLFROUTER_FWD"),
+        ("OUTPUT", "WOLFROUTER_OUT"),
+    ] {
+        // Count existing jumps via `-S`. The PRE-fix v4 code appended this jump
+        // through the restore file with no `-C` guard, so on legacy hosts that
+        // ran it every reconcile there can be MANY duplicate jumps. Steady state
+        // is exactly one → leave it untouched (no churn, no apply-time window).
+        // Anything else (0, or N>1 legacy duplicates) → drain all and insert one.
+        let jump_line = format!("-A {} -j {}", builtin, ours);
+        let count = Command::new("iptables").args(["-S", builtin]).output().ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout)
+                .lines().filter(|l| l.trim() == jump_line).count())
+            .unwrap_or(0);
+        if count == 1 { continue; }
+
+        let mut guard = 0;
+        while Command::new("iptables").args(["-D", builtin, "-j", ours]).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+        {
+            guard += 1;
+            if guard > 100_000 { break; }
+        }
+        let _ = Command::new("iptables").args(["-I", builtin, "1", "-j", ours]).output();
+    }
 }
 
 /// Apply the v6 companion. Best-effort by design (see `apply`): a
@@ -651,6 +697,27 @@ mod preflight_tests {
 
     fn flag(rule: &str, ports: &[u16]) -> bool {
         rule_matches_any_port(rule, ports)
+    }
+
+    #[test]
+    fn v4_build_ruleset_never_declares_builtin_chains() {
+        // The v4 ruleset must NOT name a built-in chain either — under
+        // iptables-nft, `iptables-restore -n` flushes any chain named in the
+        // file, so declaring `:FORWARD` would wipe Docker's / the operator's
+        // FORWARD rules every apply (the bug this guards against). The built-in
+        // -> WOLFROUTER jumps are installed out-of-band in `apply` instead.
+        let rs = build_ruleset(&RouterConfig::default(), "test-node");
+        assert!(rs.starts_with("*filter\n"));
+        assert!(rs.ends_with("COMMIT\n"));
+        for builtin in [":INPUT", ":FORWARD", ":OUTPUT",
+                        "-A INPUT", "-A FORWARD", "-A OUTPUT"] {
+            assert!(!rs.contains(builtin),
+                "v4 build_ruleset must not name a built-in chain ({builtin}) — naming it flushes the chain on iptables-nft");
+        }
+        for chain in FILTER_CHAINS {
+            assert!(rs.contains(&format!(":{} - [0:0]", chain)),
+                "v4 build_ruleset must still declare its own chain {chain}");
+        }
     }
 
     #[test]
