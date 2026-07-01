@@ -3436,7 +3436,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y certbot".into(),
                 ],
@@ -3837,7 +3837,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
                     "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh | bash".into(),
@@ -4074,7 +4074,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y mariadb-server".into(),
                     "sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/' /etc/mysql/mariadb.conf.d/50-server.cnf".into(),
@@ -4278,7 +4278,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y default-mysql-server".into(),
                     "sed -i 's/bind-address.*=.*/bind-address = 0.0.0.0/' /etc/mysql/mariadb.conf.d/50-server.cnf || true".into(),
@@ -4977,7 +4977,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl fuse3".into(),
                     // setup.sh installs the binary, writes /etc/systemd/system/
@@ -5012,7 +5012,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
                     "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfscale".into(),
@@ -5042,7 +5042,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
                     "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh | bash".into(),
@@ -5120,7 +5120,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y apache2 php php-mysql php-gd php-xml php-mbstring mariadb-server curl".into(),
                     "systemctl start mariadb".into(),
@@ -5164,7 +5164,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git".into(),
                     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -".into(),
@@ -5199,7 +5199,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl wget libssl3 ca-certificates".into(),
                     "mkdir -p /opt/vaultwarden /var/lib/vaultwarden".into(),
@@ -5247,7 +5247,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y python3 python3-pip python3-venv redis-server imagemagick gnupg2 curl".into(),
                     "pip3 install paperless-ngx || echo 'Install via Docker recommended for production'".into(),
@@ -5282,7 +5282,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git nodejs npm python3 python3-pip".into(),
                     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs".into(),
@@ -5347,7 +5347,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git".into(),
                     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -".into(),
@@ -5383,7 +5383,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git docker.io docker-compose".into(),
                     "git clone --depth 1 https://github.com/supabase/supabase.git /opt/supabase".into(),
@@ -5414,7 +5414,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git openjdk-17-jre-headless libreoffice-core".into(),
                     "git clone https://github.com/Stirling-Tools/Stirling-PDF.git /opt/stirling-pdf".into(),
@@ -5443,7 +5443,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git python3 python3-pip python3-venv postgresql".into(),
                     "systemctl enable --now postgresql".into(),
@@ -5476,7 +5476,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git".into(),
                     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -".into(),
@@ -5509,7 +5509,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git".into(),
                     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -".into(),
@@ -5543,7 +5543,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y python3 python3-pip python3-venv git".into(),
                     "git clone https://github.com/searxng/searxng.git /opt/searxng".into(),
@@ -5574,7 +5574,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git".into(),
                     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -".into(),
@@ -5611,7 +5611,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git postgresql".into(),
                     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -".into(),
@@ -5650,7 +5650,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl wget".into(),
                     "wget -O /tmp/zitadel.tar.gz https://github.com/zitadel/zitadel/releases/latest/download/zitadel-linux-amd64.tar.gz".into(),
@@ -5683,7 +5683,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y python3 python3-pip python3-venv git".into(),
                     "git clone https://github.com/dgtlmoon/changedetection.io.git /opt/changedetection".into(),
@@ -5715,7 +5715,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git make gcc".into(),
                     "curl -fsSL https://go.dev/dl/go1.22.0.linux-amd64.tar.gz | tar -C /usr/local -xzf -".into(),
@@ -6110,7 +6110,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             lxc: Some(LxcTarget {
                 distribution: "debian".into(),
                 release: "bookworm".into(),
-                architecture: "amd64".into(),
+                architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     // Install dependencies
                     "apt-get update && apt-get install -y curl git wget mariadb-server libgdiplus screen".into(),
@@ -9839,7 +9839,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
         AppManifest { id: "seaweedfs".into(), name: "SeaweedFS".into(), icon: "🌊".into(), category: "Storage".into(), description: "Distributed file system for billions of files — S3 compatible".into(), website: Some("https://github.com/seaweedfs/seaweedfs".into()), docker: Some(DockerTarget { image: "chrislusf/seaweedfs:latest".into(), ports: vec!["9333:9333".into(), "8080:8080".into(), "8888:8888".into()], env: vec![], volumes: vec!["seaweedfs_data:/data".into()], sidecars: vec![], seed_files: vec![], cmd: vec![] }), lxc: None, bare_metal: None, vm: None, user_inputs: vec![] },
         AppManifest { id: "proxitok".into(), name: "ProxiTok".into(), icon: "🎵".into(), category: "Privacy".into(), description: "Privacy-friendly TikTok frontend — no tracking".into(), website: Some("https://github.com/pablouser1/ProxiTok".into()), docker: Some(DockerTarget { image: "ghcr.io/pablouser1/proxitok:latest".into(), ports: vec!["8080:80".into()], env: vec![], volumes: vec![], sidecars: vec![], seed_files: vec![], cmd: vec![] }), lxc: None, bare_metal: None, vm: None, user_inputs: vec![] },
         AppManifest { id: "bibliogram".into(), name: "Bibliogram".into(), icon: "📸".into(), category: "Privacy".into(), description: "Privacy-friendly Instagram frontend".into(), website: Some("https://git.sr.ht/~cadence/bibliogram".into()), docker: Some(DockerTarget { image: "quay.io/pussthecatorg/bibliogram:latest".into(), ports: vec!["10407:10407".into()], env: vec![], volumes: vec![], sidecars: vec![], seed_files: vec![], cmd: vec![] }), lxc: None, bare_metal: None, vm: None, user_inputs: vec![] },
-        AppManifest { id: "claude-code".into(), name: "Claude Code".into(), icon: "🤖".into(), category: "AI".into(), description: "Anthropic's agentic coding CLI — write, refactor, and debug code with Claude from the terminal".into(), website: Some("https://docs.anthropic.com/en/docs/claude-code".into()), docker: None, lxc: Some(LxcTarget { distribution: "debian".into(), release: "bookworm".into(), architecture: "amd64".into(), setup_commands: vec!["apt-get update && apt-get install -y curl".into(), "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -".into(), "apt-get install -y nodejs".into(), "npm install -g @anthropic-ai/claude-code".into()] }), bare_metal: Some(BareMetalTarget { packages_debian: vec!["nodejs".into(), "npm".into()], packages_redhat: vec!["nodejs".into(), "npm".into()], post_install: vec!["npm install -g @anthropic-ai/claude-code".into()], service: None }), vm: None, user_inputs: vec![] },
+        AppManifest { id: "claude-code".into(), name: "Claude Code".into(), icon: "🤖".into(), category: "AI".into(), description: "Anthropic's agentic coding CLI — write, refactor, and debug code with Claude from the terminal".into(), website: Some("https://docs.anthropic.com/en/docs/claude-code".into()), docker: None, lxc: Some(LxcTarget { distribution: "debian".into(), release: "bookworm".into(), architecture: crate::containers::host_container_arch().into(), setup_commands: vec!["apt-get update && apt-get install -y curl".into(), "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -".into(), "apt-get install -y nodejs".into(), "npm install -g @anthropic-ai/claude-code".into()] }), bare_metal: Some(BareMetalTarget { packages_debian: vec!["nodejs".into(), "npm".into()], packages_redhat: vec!["nodejs".into(), "npm".into()], post_install: vec!["npm install -g @anthropic-ai/claude-code".into()], service: None }), vm: None, user_inputs: vec![] },
         AppManifest { id: "openclaw".into(), name: "OpenClaw".into(), icon: "🐾".into(), category: "AI".into(), description: "Personal AI assistant with WhatsApp, Telegram, Discord, Slack integration and persistent memory".into(), website: Some("https://openclaw.ai".into()), docker: Some(DockerTarget { image: "ghcr.io/openclaw/openclaw:latest".into(), ports: vec!["18789:18789".into()], env: vec![], volumes: vec!["openclaw_config:/home/node/.openclaw".into()], sidecars: vec![], seed_files: vec![], cmd: vec![] }), lxc: None, bare_metal: None, vm: None, user_inputs: vec![] },
 
         // ── New additions — AI, Infrastructure, Business, Media, Security, Health ──

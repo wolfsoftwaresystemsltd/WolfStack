@@ -179,7 +179,9 @@ pub struct LxcConfig {
 }
 fn default_distro() -> String { "ubuntu".to_string() }
 fn default_release() -> String { "jammy".to_string() }
-fn default_arch() -> String { "amd64".to_string() }
+// Host arch (arm64 on RK3588/OrangePi), so a config predating the arch field
+// doesn't default an ARM node's LXC to an unbootable amd64 rootfs.
+fn default_arch() -> String { crate::containers::host_container_arch().to_string() }
 
 /// A WolfRun service definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -564,7 +566,9 @@ impl WolfRunState {
                     Some(LxcConfig {
                         distribution: parts.first().unwrap_or(&"ubuntu").to_string(),
                         release: parts.get(1).unwrap_or(&"24.04").to_string(),
-                        architecture: "amd64".to_string(),
+                        // Host arch (arm64 on RK3588/OrangePi), not a hardcoded
+                        // amd64 — else the LXC pulls a wrong-arch, unbootable rootfs.
+                        architecture: crate::containers::host_container_arch().to_string(),
                     })
                 }
                 _ => None,
