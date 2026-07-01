@@ -7,7 +7,7 @@
 
 use crate::integrations::{
     AuthMethod, ConfigField, Connector, ConnectorCapability, ConnectorInfo,
-    HealthStatus, IntegrationInstance, ServiceStatus,
+    ConnectorOperation, HealthStatus, IntegrationInstance, ServiceStatus,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -156,6 +156,33 @@ impl Connector for NetBirdConnector {
                 label: "Users".to_string(),
                 icon: "fa-users".to_string(),
             },
+        ]
+    }
+
+    fn operations(&self) -> Vec<ConnectorOperation> {
+        // execute reads params["peer_id"] for enable/disable; create_group posts
+        // params directly to /api/groups (NetBird group body: {name}). Verified.
+        let peer_id = || ConfigField {
+            name: "peer_id".to_string(),
+            label: "Peer ID".to_string(),
+            field_type: "text".to_string(),
+            required: true,
+            default_value: None,
+            placeholder: None,
+        };
+        vec![
+            ConnectorOperation { id: "disable_peer".to_string(), label: "Disable peer".to_string(),
+                icon: "fa-plug-circle-xmark".to_string(), params: vec![peer_id()], destructive: true },
+            ConnectorOperation { id: "enable_peer".to_string(), label: "Enable peer".to_string(),
+                icon: "fa-plug-circle-check".to_string(), params: vec![peer_id()], destructive: false },
+            ConnectorOperation { id: "create_group".to_string(), label: "Create group".to_string(),
+                icon: "fa-layer-group".to_string(),
+                params: vec![ConfigField {
+                    name: "name".to_string(), label: "Group name".to_string(),
+                    field_type: "text".to_string(), required: true,
+                    default_value: None, placeholder: None,
+                }],
+                destructive: false },
         ]
     }
 

@@ -46,6 +46,11 @@ pub trait Connector: Send + Sync {
     /// What dashboard panels / data views this connector can provide.
     fn capabilities(&self) -> Vec<ConnectorCapability>;
 
+    /// Named write/action operations to expose as UI buttons. Default empty
+    /// (read-only connectors). Each id must be one the connector's `execute`
+    /// handles, and each param name must match the key `execute` reads.
+    fn operations(&self) -> Vec<ConnectorOperation> { Vec::new() }
+
     /// Check whether the remote service is reachable and healthy.
     fn health_check<'a>(
         &'a self,
@@ -90,6 +95,22 @@ pub struct ConnectorCapability {
     pub id: String,
     pub label: String,
     pub icon: String,
+}
+
+/// A named write/action a connector exposes as a button in the UI. Distinct
+/// from `ConnectorCapability` (read-only dashboard panels). `params` describes
+/// the fields the operator supplies; the frontend renders them as a small form
+/// and posts `{operation, params}` to `POST /api/integrations/{id}/action`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorOperation {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    #[serde(default)]
+    pub params: Vec<ConfigField>,
+    /// Destructive (block / restart / disable) — the UI confirms before running.
+    #[serde(default)]
+    pub destructive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +268,12 @@ impl IntegrationState {
     }
 
     pub fn update_instance(&self, id: &str, mut updated: IntegrationInstance) -> Result<IntegrationInstance, String> {
+        // Reject an unknown connector_id up front (mirrors create_instance) —
+        // otherwise the update persists but every health/execute/dashboard call
+        // afterwards fails with "No connector for: …".
+        if !self.connectors.contains_key(&updated.connector_id) {
+            return Err(format!("Unknown connector: {}", updated.connector_id));
+        }
         let mut instances = self.instances.write().unwrap();
         let pos = instances.iter().position(|i| i.id == id)
             .ok_or_else(|| format!("Instance not found: {}", id))?;
@@ -395,6 +422,10 @@ impl IntegrationState {
     ) -> Result<serde_json::Value, String> {
         let instance = self.get_instance(instance_id)
             .ok_or_else(|| format!("Instance not found: {}", instance_id))?;
+
+        if !instance.enabled {
+            return Err("Integration instance is disabled".to_string());
+        }
 
         let connector = self.connectors.get(&instance.connector_id)
             .ok_or_else(|| format!("No connector for: {}", instance.connector_id))?;

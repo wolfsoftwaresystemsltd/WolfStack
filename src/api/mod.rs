@@ -33866,12 +33866,18 @@ pub async fn image_watcher_apply_many(
 // ─── Integration Framework Endpoints ───
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// GET /api/integrations/connectors — list available connector types
+/// GET /api/integrations/connectors — list available connector types, each with
+/// its dashboard capabilities and the write operations the UI renders as buttons.
 pub async fn integrations_connectors(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let infos: Vec<crate::integrations::ConnectorInfo> = state.integrations.connectors
-        .values().map(|c| c.info()).collect();
-    HttpResponse::Ok().json(infos)
+    let result: Vec<serde_json::Value> = state.integrations.connectors.values().map(|c| {
+        serde_json::json!({
+            "info": c.info(),
+            "capabilities": c.capabilities(),
+            "operations": c.operations(),
+        })
+    }).collect();
+    HttpResponse::Ok().json(result)
 }
 
 /// GET /api/integrations — list configured integration instances
@@ -33932,6 +33938,128 @@ pub async fn integrations_delete(
     match state.integrations.delete_instance(&id) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "message": "Integration deleted" })),
         Err(e) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// PUT /api/integrations/{id} — update an integration instance's config.
+pub async fn integrations_update(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<crate::integrations::IntegrationInstance>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    match state.integrations.update_instance(&id, body.into_inner()) {
+        Ok(inst) => HttpResponse::Ok().json(inst),
+        // "Instance not found" → 404; a validation error (e.g. unknown
+        // connector) → 400.
+        Err(e) if e.contains("not found") =>
+            HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct IntegrationCredentialRequest {
+    pub auth_method: crate::integrations::AuthMethod,
+    /// Plaintext credential payload (e.g. {"token":"…"} or {"username":…,"password":…}).
+    /// Encrypted at rest with AES-256-GCM by store_credential; never returned.
+    pub credential: serde_json::Value,
+}
+
+/// POST /api/integrations/{id}/credentials — store (encrypted) credentials for
+/// an instance. Write-only: credentials are never read back to the UI.
+pub async fn integrations_store_credential(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<IntegrationCredentialRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    // Guard against storing credentials for an unknown instance.
+    if state.integrations.get_instance(&id).is_none() {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Integration not found" }));
+    }
+    let body = body.into_inner();
+    match state.integrations.store_credential(&id, body.auth_method, &body.credential) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "message": "Credentials stored" })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// Enforce an integration instance's `allowed_roles` against the caller.
+/// Empty `allowed_roles` = any authenticated caller (the default). Non-empty =
+/// the caller must be an admin or hold a role named in the list. Inter-node
+/// (`cluster-node`) and API-key callers bypass — they're separately trusted /
+/// scoped, and there's no interactive user role to check.
+fn integration_role_ok(caller: &str, allowed_roles: &[String]) -> bool {
+    if allowed_roles.is_empty() { return true; }
+    if caller == "cluster-node" || caller.starts_with("apikey:") { return true; }
+    match crate::auth::users::UserStore::load().find(caller) {
+        Some(u) => u.role == "admin" || allowed_roles.iter().any(|r| r == &u.role),
+        None => false,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct IntegrationActionRequest {
+    pub operation: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// POST /api/integrations/{id}/action — run a connector operation (e.g.
+/// block_client, create_snapshot). Body: {operation, params}.
+pub async fn integrations_action(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<IntegrationActionRequest>,
+) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(c) => c, Err(resp) => return resp };
+    let id = path.into_inner();
+    let inst = match state.integrations.get_instance(&id) {
+        Some(i) => i,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Integration not found" })),
+    };
+    if !integration_role_ok(&caller, &inst.allowed_roles) {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Your role is not permitted to run this integration's operations"
+        }));
+    }
+    let body = body.into_inner();
+    // Normalise a missing/null params body to an empty object so connectors can
+    // uniformly `params.get(...)`.
+    let params = if body.params.is_null() { serde_json::json!({}) } else { body.params };
+    match state.integrations.execute_action(&id, &body.operation, &params).await {
+        Ok(data) => HttpResponse::Ok().json(serde_json::json!({ "data": data })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/integrations/{id}/dashboard/{capability} — fetch a capability
+/// panel's data (e.g. clients, pools) from the remote service.
+pub async fn integrations_dashboard(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(c) => c, Err(resp) => return resp };
+    let (id, capability) = path.into_inner();
+    let inst = match state.integrations.get_instance(&id) {
+        Some(i) => i,
+        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Integration not found" })),
+    };
+    if !integration_role_ok(&caller, &inst.allowed_roles) {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Your role is not permitted to view this integration"
+        }));
+    }
+    match state.integrations.get_dashboard_data(&id, &capability).await {
+        Ok(data) => HttpResponse::Ok().json(serde_json::json!({ "data": data })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     }
 }
 
@@ -38683,7 +38811,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/integrations", web::get().to(integrations_list))
         .route("/api/integrations", web::post().to(integrations_create))
         .route("/api/integrations/{id}", web::get().to(integrations_get))
+        .route("/api/integrations/{id}", web::put().to(integrations_update))
         .route("/api/integrations/{id}", web::delete().to(integrations_delete))
+        .route("/api/integrations/{id}/credentials", web::post().to(integrations_store_credential))
+        .route("/api/integrations/{id}/action", web::post().to(integrations_action))
+        .route("/api/integrations/{id}/dashboard/{capability}", web::get().to(integrations_dashboard))
         // WolfRun — container orchestration
         .route("/api/wolfrun/services", web::get().to(wolfrun_list))
         .route("/api/wolfrun/services", web::post().to(wolfrun_create))
