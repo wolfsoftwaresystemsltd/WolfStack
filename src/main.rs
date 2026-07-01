@@ -538,6 +538,13 @@ async fn main() -> std::io::Result<()> {
     // fallback path. Must run BEFORE any module that might encrypt.
     at_rest_crypto::init(&cluster_secret);
 
+    // Auto-migrate any legacy v1 (XOR) at-rest credentials to v2 AES-256-GCM now
+    // that the crypto module is initialised. Idempotent + backup-on-write, so
+    // it's safe on every boot and a no-op once migrated; this is what closes the
+    // High "legacy XOR" audit findings on upgraded installs without waiting for
+    // the manual operator migration. Must run AFTER at_rest_crypto::init.
+    secret_rotation::run_startup_at_rest_migration();
+
     // Stage 5 of the cluster-secret migration: log whether the
     // built-in default is currently accepted, so operators can see
     // their WOLFSTACK_REJECT_DEFAULT_SECRET env flag is being honoured.
@@ -1471,6 +1478,24 @@ async fn main() -> std::io::Result<()> {
             loop {
                 tick.tick().await;
                 containers::sync_wolfnet_peer_routes().await;
+            }
+        });
+
+        // Background: auto-poll registered tenants (SP → customer-cluster
+        // federation). Keeps the tenant health cache that `tenants_list` serves
+        // fresh without the operator pressing "Refresh all". 60s cadence; a
+        // no-op when no tenants are registered, and each tenant is probed
+        // lock-free so one slow/unreachable customer can't stall the rest. A
+        // short initial delay lets startup settle before the first sweep.
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            // If a sweep ever runs long (many unreachable tenants), skip the
+            // missed ticks rather than firing back-to-back sweeps on catch-up.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                crate::api::poll_all_tenants_once().await;
             }
         });
 

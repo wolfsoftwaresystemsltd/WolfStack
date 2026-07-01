@@ -10656,7 +10656,7 @@ pub async fn docker_action(
         "start" => containers::docker_start(&id),
         "stop" => containers::docker_stop(&id),
         "restart" => containers::docker_restart(&id),
-        "remove" => containers::docker_remove(&id),
+        "remove" => containers::docker_remove_permanent(&id),
         "pause" => containers::docker_pause(&id),
         "unpause" => containers::docker_unpause(&id),
         _ => Err(format!("Unknown action: {}", body.action)),
@@ -17881,9 +17881,14 @@ pub async fn backup_delete(
     path: web::Path<String>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    match backup::delete_backup(&path.into_inner()) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    // delete_backup now drives S3 object deletes (thread+join) and remote-peer
+    // deletes (curl, up to 60s) — sync blocking work that must not run on the
+    // actix worker. Offload like backup_delete_failed already does.
+    let id = path.into_inner();
+    match web::block(move || backup::delete_backup(&id)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("task failed: {}", e) })),
     }
 }
 
@@ -18087,6 +18092,27 @@ pub async fn backup_import(
     match backup::import_backup(&body, &filename) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// DELETE /api/backups/import?filename=X — remove a backup previously received
+/// via `backup_import`. The counterpart to import: called by a source node when
+/// the operator deletes a `Remote` backup, so the replicated copy on this node
+/// doesn't orphan. Auth is the same inter-node model as import (cluster secret
+/// via require_auth).
+pub async fn backup_import_delete(
+    req: HttpRequest, state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let filename = match query.get("filename") {
+        Some(f) if !f.trim().is_empty() => f.to_string(),
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "filename query parameter is required" })),
+    };
+    match web::block(move || backup::delete_imported_backup(&filename)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("task failed: {}", e) })),
     }
 }
 
@@ -30167,7 +30193,7 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
                     match svc.runtime {
                         crate::wolfrun::Runtime::Docker => {
                             let _ = crate::containers::docker_stop(&inst.container_name);
-                            let _ = crate::containers::docker_remove(&inst.container_name);
+                            let _ = crate::containers::docker_remove_permanent(&inst.container_name);
                         }
                         crate::wolfrun::Runtime::Lxc => {
                             let _ = crate::containers::lxc_stop(&inst.container_name);
@@ -36380,6 +36406,21 @@ pub async fn tenants_refresh(
         // accept that, return 404.
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "tenant removed during refresh"})),
     };
+    apply_probe_to_tenant(t, &probe);
+    let _ = save_tenants(&tenants);
+    match probe {
+        Ok(snap) => HttpResponse::Ok().json(snap),
+        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// Apply a federation-status probe result to a tenant's cached status fields.
+/// Shared by the manual `tenants_refresh` handler and the background auto-poll
+/// so the two can't drift. Does NOT save — the caller persists. Returns whether
+/// anything actually changed, so the auto-poll can skip a disk write when a
+/// steadily-unreachable tenant's row is unchanged since the last sweep. A
+/// successful probe always counts as changed (it refreshes `last_seen`).
+fn apply_probe_to_tenant(t: &mut Tenant, probe: &Result<FederationStatus, String>) -> bool {
     match probe {
         Ok(snap) => {
             t.last_status = "ok".into();
@@ -36390,14 +36431,55 @@ pub async fn tenants_refresh(
             t.mem_total_mb = snap.mem_total_mb;
             t.mem_used_mb = snap.mem_used_mb;
             t.cpu_pct = snap.cpu_pct;
-            let _ = save_tenants(&tenants);
-            HttpResponse::Ok().json(snap)
+            true
         }
         Err(e) => {
-            t.last_status = if e.contains("401") { "auth_failed".into() } else { "unreachable".into() };
-            let _ = save_tenants(&tenants);
-            HttpResponse::BadGateway().json(serde_json::json!({"error": e}))
+            let new_status = if e.contains("401") { "auth_failed" } else { "unreachable" };
+            if t.last_status != new_status {
+                t.last_status = new_status.into();
+                true
+            } else {
+                false
+            }
         }
+    }
+}
+
+/// Poll every registered tenant's federation status once and update the cached
+/// status fields that `tenants_list` serves. Drives the SP dashboard's tenant
+/// health without the operator pressing "Refresh all". Probes run WITHOUT
+/// holding TENANTS_LOCK across `.await` (a slow/unreachable tenant must not
+/// stall the others or block registration); the lock is taken only for the
+/// final load-apply-save. A no-op when no tenants are registered.
+pub async fn poll_all_tenants_once() {
+    let tenants = load_tenants();
+    if tenants.is_empty() { return; }
+    // Probe every tenant CONCURRENTLY and lock-free. Each probe has its own
+    // 15s timeout (probe_federation_status), so probing concurrently bounds the
+    // whole sweep to roughly one timeout regardless of tenant count — a handful
+    // of unreachable customers can't stretch a sweep past the poll cadence.
+    let probes = tenants.iter().map(|t| {
+        let id = t.id.clone();
+        let url = t.url.clone();
+        let token = crate::xo::deobfuscate_token(&t.token_enc);
+        async move { (id, probe_federation_status(&url, &token).await) }
+    });
+    let results: Vec<(String, Result<FederationStatus, String>)> =
+        futures::future::join_all(probes).await;
+    // Re-load under the lock (tenants may have been added/removed while we
+    // probed) and apply each result to the row that still exists. Persist only
+    // if a row actually changed, so a steady state doesn't rewrite the file
+    // every sweep.
+    let _guard = TENANTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut tenants = load_tenants();
+    let mut changed = false;
+    for (id, probe) in &results {
+        if let Some(t) = tenants.iter_mut().find(|t| t.id == *id) {
+            changed |= apply_probe_to_tenant(t, probe);
+        }
+    }
+    if changed {
+        let _ = save_tenants(&tenants);
     }
 }
 
@@ -38274,6 +38356,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/schedules/{id}/run", web::post().to(backup_schedule_run))
         .route("/api/backups/schedules/{id}/enabled", web::post().to(backup_schedule_toggle))
         .route("/api/backups/import", web::post().to(backup_import))
+        .route("/api/backups/import", web::delete().to(backup_import_delete))
         .route("/api/backups/scan-folder", web::get().to(backup_scan_folder))
         .route("/api/backups/restore-from-path/stream", web::post().to(backup_restore_from_path_stream))
         .route("/api/galera/clusters", web::get().to(galera_list))

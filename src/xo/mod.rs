@@ -351,9 +351,9 @@ impl XoClient {
         Ok(out)
     }
 
-    /// Drive a VM lifecycle action. P2 — wired but the frontend
-    /// won't expose buttons until the read-only inventory page
-    /// is shaken out.
+    /// Drive a VM lifecycle action. The frontend exposes per-power-state
+    /// buttons (start / reboot / shutdown / suspend / resume) on each VM row
+    /// in `renderXoPools`, routed through `POST /api/xo/pools/{id}/vms/{uuid}/action`.
     pub async fn vm_action(&self, vm_uuid: &str, action: &str) -> Result<(), String> {
         // XO accepts: start, clean_shutdown, hard_shutdown,
         // clean_reboot, hard_reboot, suspend, resume.

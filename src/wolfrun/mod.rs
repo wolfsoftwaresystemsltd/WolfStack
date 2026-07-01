@@ -1461,7 +1461,7 @@ pub async fn reconcile(
                         match service.runtime {
                             Runtime::Docker => {
                                 let _ = crate::containers::docker_stop(&inst.container_name);
-                                let _ = crate::containers::docker_remove(&inst.container_name);
+                                let _ = crate::containers::docker_remove_permanent(&inst.container_name);
                             }
                             Runtime::Lxc => {
                                 let _ = crate::containers::lxc_stop(&inst.container_name);
@@ -1717,7 +1717,9 @@ async fn stop_and_remove(
         match runtime {
             Runtime::Docker => {
                 let _ = crate::containers::docker_stop(container_name);
-                let _ = crate::containers::docker_remove(container_name);
+                // Permanent teardown — release any vSwitch allocation too, matching
+                // the live orphan-cleanup path (do NOT use plain docker_remove here).
+                let _ = crate::containers::docker_remove_permanent(container_name);
             }
             Runtime::Lxc => {
                 let _ = crate::containers::lxc_stop(container_name);

@@ -415,12 +415,12 @@ pub fn uninstall_app(install_id: &str) -> Result<String, String> {
         "docker" => {
             if let Some(ref name) = app.container_name {
                 let _ = crate::containers::docker_stop(name);
-                let _ = crate::containers::docker_remove(name);
+                let _ = crate::containers::docker_remove_permanent(name);
             }
             // Remove sidecars
             for sidecar in &app.sidecar_names {
                 let _ = crate::containers::docker_stop(sidecar);
-                let _ = crate::containers::docker_remove(sidecar);
+                let _ = crate::containers::docker_remove_permanent(sidecar);
             }
         }
         "lxc" => {

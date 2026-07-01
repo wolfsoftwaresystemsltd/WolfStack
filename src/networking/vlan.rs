@@ -1018,10 +1018,8 @@ impl VlanStore {
 
     /// Remove every allocation for the given target (used when the
     /// container/VM is deleted and we need to release its IP across
-    /// every VLAN it was on). Available for future container-delete
-    /// hooks; not yet wired from the API since explicit detach is
-    /// the safer default.
-    #[allow(dead_code)]
+    /// every VLAN it was on). Wired into the permanent-delete paths via
+    /// `release_target_allocations`.
     pub fn deallocate_target(&mut self, target_kind: TargetKind, target_id: &str) -> usize {
         let mut count = 0;
         for v in &mut self.vlans {
@@ -1031,6 +1029,37 @@ impl VlanStore {
         }
         count
     }
+}
+
+/// Release every vSwitch/VLAN IP allocation held by a target that is being
+/// permanently deleted, so a deleted container/VM doesn't leak its reserved
+/// IP(s) (which would otherwise sit in the store forever and be skipped by the
+/// auto-picker). Loads the store, drops matching allocations, and persists only
+/// if something actually changed. Idempotent and safe to call for a target that
+/// never had an allocation (returns 0, writes nothing).
+///
+/// `target_id` must be the SAME identifier used at attach time: native LXC and
+/// Docker use the container name, Proxmox guests use the VMID, libvirt VMs use
+/// the domain name. Only wire this into PERMANENT-delete boundaries — never the
+/// Docker image-update recreate path, which removes and re-creates the same
+/// container under the same name and must keep its allocation.
+///
+/// The load-modify-save is intentionally lock-free, matching how the
+/// `vlan_attach`/`vlan_detach` handlers already mutate the store; a concurrent
+/// attach racing a release is a pre-existing store-wide limitation, not specific
+/// to this path.
+pub fn release_target_allocations(target_kind: TargetKind, target_id: &str) -> usize {
+    let mut store = VlanStore::load();
+    let n = store.deallocate_target(target_kind, target_id);
+    if n > 0 {
+        match store.save() {
+            Ok(()) => tracing::info!(
+                "released {} vSwitch IP allocation(s) for deleted target {}", n, target_id),
+            Err(e) => tracing::warn!(
+                "failed to persist vSwitch IP release for {}: {}", target_id, e),
+        }
+    }
+    n
 }
 
 // ────────────────────────────────────────────────────────────────────
