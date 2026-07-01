@@ -8545,18 +8545,18 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
                 _ => {
                     // Return a curated list of common templates as fallback
                     return vec![
-                        LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "ubuntu".into(), release: "22.04".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "ubuntu".into(), release: "20.04".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "debian".into(), release: "bookworm".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "debian".into(), release: "bullseye".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "alpine".into(), release: "3.19".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "alpine".into(), release: "3.18".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "fedora".into(), release: "39".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "centos".into(), release: "9-Stream".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "archlinux".into(), release: "current".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "rockylinux".into(), release: "9".into(), architecture: "amd64".into(), variant: "default".into() },
-                        LxcTemplate { distribution: "opensuse".into(), release: "15.5".into(), architecture: "amd64".into(), variant: "default".into() },
+                        LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "ubuntu".into(), release: "22.04".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "ubuntu".into(), release: "20.04".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "debian".into(), release: "bookworm".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "debian".into(), release: "bullseye".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "alpine".into(), release: "3.19".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "alpine".into(), release: "3.18".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "fedora".into(), release: "39".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "centos".into(), release: "9-Stream".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "archlinux".into(), release: "current".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "rockylinux".into(), release: "9".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                        LxcTemplate { distribution: "opensuse".into(), release: "15.5".into(), architecture: host_container_arch().into(), variant: "default".into() },
                     ];
                 }
             }
@@ -8601,13 +8601,28 @@ pub fn lxc_list_templates() -> Vec<LxcTemplate> {
     if templates.is_empty() {
         // If parsing failed, return fallback
         return vec![
-            LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "default".into() },
-            LxcTemplate { distribution: "debian".into(), release: "bookworm".into(), architecture: "amd64".into(), variant: "default".into() },
-            LxcTemplate { distribution: "alpine".into(), release: "3.19".into(), architecture: "amd64".into(), variant: "default".into() },
+            LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: host_container_arch().into(), variant: "default".into() },
+            LxcTemplate { distribution: "debian".into(), release: "bookworm".into(), architecture: host_container_arch().into(), variant: "default".into() },
+            LxcTemplate { distribution: "alpine".into(), release: "3.19".into(), architecture: host_container_arch().into(), variant: "default".into() },
         ];
     }
 
     templates
+}
+
+/// The container-template architecture string for THIS host, in the
+/// Debian/LXC-image naming the template servers use (`amd64` / `arm64` /
+/// `armhf`) — NOT Rust's `x86_64`/`aarch64`. The template fallback lists and
+/// wolfrun-created LXCs use this so an ARM host (e.g. OrangePi 5 / RK3588)
+/// requests a rootfs matching the host, instead of the old hardcoded `amd64`
+/// which pulled a wrong-arch, unbootable image on ARM boards.
+pub fn host_container_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "arm" => "armhf",
+        other => other,
+    }
 }
 
 /// List available templates from Proxmox (pveam available --section system)
@@ -8625,13 +8640,13 @@ fn lxc_list_templates_proxmox() -> Vec<LxcTemplate> {
         _ => {
 
             return vec![
-                LxcTemplate { distribution: "debian".into(), release: "12".into(), architecture: "amd64".into(), variant: "standard".into() },
-                LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "standard".into() },
-                LxcTemplate { distribution: "ubuntu".into(), release: "22.04".into(), architecture: "amd64".into(), variant: "standard".into() },
-                LxcTemplate { distribution: "alpine".into(), release: "3.20".into(), architecture: "amd64".into(), variant: "default".into() },
-                LxcTemplate { distribution: "centos".into(), release: "9".into(), architecture: "amd64".into(), variant: "default".into() },
-                LxcTemplate { distribution: "fedora".into(), release: "40".into(), architecture: "amd64".into(), variant: "default".into() },
-                LxcTemplate { distribution: "rockylinux".into(), release: "9".into(), architecture: "amd64".into(), variant: "default".into() },
+                LxcTemplate { distribution: "debian".into(), release: "12".into(), architecture: host_container_arch().into(), variant: "standard".into() },
+                LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: host_container_arch().into(), variant: "standard".into() },
+                LxcTemplate { distribution: "ubuntu".into(), release: "22.04".into(), architecture: host_container_arch().into(), variant: "standard".into() },
+                LxcTemplate { distribution: "alpine".into(), release: "3.20".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                LxcTemplate { distribution: "centos".into(), release: "9".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                LxcTemplate { distribution: "fedora".into(), release: "40".into(), architecture: host_container_arch().into(), variant: "default".into() },
+                LxcTemplate { distribution: "rockylinux".into(), release: "9".into(), architecture: host_container_arch().into(), variant: "default".into() },
             ];
         }
     };
@@ -8663,7 +8678,7 @@ fn lxc_list_templates_proxmox() -> Vec<LxcTemplate> {
         let arch = if let Some(pos) = base.rfind('_') {
             &base[pos+1..]
         } else {
-            "amd64"
+            host_container_arch()
         };
 
         // Get the part before the architecture
@@ -8718,8 +8733,8 @@ fn lxc_list_templates_proxmox() -> Vec<LxcTemplate> {
 
     if templates.is_empty() {
         return vec![
-            LxcTemplate { distribution: "debian".into(), release: "12".into(), architecture: "amd64".into(), variant: "standard".into() },
-            LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: "amd64".into(), variant: "standard".into() },
+            LxcTemplate { distribution: "debian".into(), release: "12".into(), architecture: host_container_arch().into(), variant: "standard".into() },
+            LxcTemplate { distribution: "ubuntu".into(), release: "24.04".into(), architecture: host_container_arch().into(), variant: "standard".into() },
         ];
     }
 
@@ -9643,7 +9658,7 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
             name: container.to_string(),
             distribution: "unknown".to_string(),
             release: "unknown".to_string(),
-            architecture: "amd64".to_string(),
+            architecture: host_container_arch().to_string(),
             memory_mb: None,
             cpu_cores: None,
             source_type: "standalone".to_string(),
@@ -9724,7 +9739,7 @@ fn extract_pve_container_meta(vmid: &str) -> Result<ContainerExportMeta, String>
         name: hostname,
         distribution: "unknown".to_string(),
         release: "unknown".to_string(),
-        architecture: "amd64".to_string(),
+        architecture: host_container_arch().to_string(),
         memory_mb,
         cpu_cores,
         source_type: "proxmox".to_string(),
@@ -9932,9 +9947,11 @@ pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, car
     let systemd = rootfs_uses_systemd(&rootfs);
 
     let mut lines: Vec<String> = Vec::new();
-    // arch matches the WolfStack export default (amd64); the rootfs is
-    // host-arch in practice since a migrate stays within one cluster.
-    lines.push("lxc.arch = amd64".to_string());
+    // lxc.arch must match the rootfs personality. A migrate stays within one
+    // cluster, so the rootfs is this host's arch — set the personality to match
+    // (arm64 on RK3588/OrangePi) instead of a hardcoded amd64, which would make
+    // an ARM container refuse to exec.
+    lines.push(format!("lxc.arch = {}", host_container_arch()));
     lines.push("lxc.include = /usr/share/lxc/config/common.conf".to_string());
     if unprivileged {
         lines.push("lxc.include = /usr/share/lxc/config/userns.conf".to_string());
@@ -13155,6 +13172,20 @@ mod orphan_guard_tests {
         assert!(!pct_list_line_is_ghost("116   stopped   regions11"), "stopped human-named CT is not a ghost");
         // Lock column present between status and name — still parsed correctly.
         assert!(pct_list_line_is_ghost("109   stopped   backup   104"), "lock column doesn't fool the parser");
+    }
+
+    #[test]
+    fn host_container_arch_maps_rust_arch_to_lxc_naming() {
+        // Maps Rust's ARCH to the Debian/LXC-image naming; never returns the
+        // raw x86_64/aarch64 spelling for the two we care about.
+        let a = super::host_container_arch();
+        assert!(!a.is_empty());
+        match std::env::consts::ARCH {
+            "x86_64" => assert_eq!(a, "amd64"),
+            "aarch64" => assert_eq!(a, "arm64"),
+            "arm" => assert_eq!(a, "armhf"),
+            other => assert_eq!(a, other), // best-effort passthrough
+        }
     }
 
     #[test]
