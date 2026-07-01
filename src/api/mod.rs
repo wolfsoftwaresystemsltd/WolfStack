@@ -14842,22 +14842,13 @@ pub async fn security_rotate_fleet(
                 // with the cluster secret using the canonical HTTPS-first
                 // chain.
                 let urls = build_node_urls(&node.address, node.port, "/api/security/rotate-root-local");
-                let client = reqwest::Client::builder()
-                    .danger_accept_invalid_certs(true)
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build();
-                let client = match client {
-                    Ok(c) => c,
-                    Err(e) => return FleetRotateNodeResult {
-                        node_id: node.id, hostname: node.hostname, address: node.address,
-                        node_type: node.node_type, status: "failed".into(),
-                        new_password: None,
-                        error: Some(format!("client build: {}", e)),
-                    },
-                };
+                // Shared pooled inter-node client (identical TLS policy). A
+                // fresh per-call client leaked a connection pool per node.
+                let client = &*API_HTTP_CLIENT;
                 let mut last_err = String::new();
                 for url in &urls {
                     let resp = client.post(url)
+                        .timeout(std::time::Duration::from_secs(30))
                         .header("X-WolfStack-Secret", &secret_c)
                         .send().await;
                     match resp {
@@ -14872,7 +14863,7 @@ pub async fn security_rotate_fleet(
                             }
                             last_err = "remote returned 200 but no parseable JSON".into();
                         }
-                        Ok(r) => { last_err = format!("HTTP {}", r.status()); }
+                        Ok(r) => { let status = r.status(); drain_response(r).await; last_err = format!("HTTP {}", status); }
                         Err(e) => { last_err = format!("transport: {}", e); }
                     }
                 }
@@ -14960,24 +14951,15 @@ where
                 };
             }
             let urls = build_node_urls(&node.address, node.port, &path);
-            let client = match reqwest::Client::builder()
-                .danger_accept_invalid_certs(true)
-                .timeout(std::time::Duration::from_secs(8))
-                .build() {
-                Ok(c) => c,
-                Err(e) => return FleetNodeResult {
-                    node_id: node.id, hostname: node.hostname, address: node.address,
-                    status: "failed".into(), data: None,
-                    error: Some(format!("client build: {}", e)),
-                },
-            };
+            // Shared pooled inter-node client (identical TLS policy).
+            let client = &*API_HTTP_CLIENT;
             // Capture WHY each attempt failed. We collect EVERY url's
             // error rather than overwriting — otherwise the operator
             // only sees the last attempt's failure and the actual root
             // cause on the primary URL (HTTPS) stays hidden.
             let mut errors: Vec<String> = Vec::new();
             for url in &urls {
-                let resp = client.get(url).header("X-WolfStack-Secret", &secret_c).send().await;
+                let resp = client.get(url).timeout(std::time::Duration::from_secs(8)).header("X-WolfStack-Secret", &secret_c).send().await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         match r.json::<T>().await {
@@ -15236,25 +15218,23 @@ pub async fn fleet_security_push_lockout_policy(
     };
     let _ = self_id;
     let secret = state.cluster_secret.clone();
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .ok();
+    // Shared pooled inter-node client (identical TLS policy).
+    let client = &*API_HTTP_CLIENT;
     let mut node_results: Vec<serde_json::Value> = Vec::new();
-    if let Some(client) = client {
+    {
         for node in peers {
             let urls = build_node_urls(&node.address, node.port, "/api/security/auth-config");
             let mut ok = false;
             let mut err = String::new();
             for url in &urls {
                 let r = client.post(url)
+                    .timeout(std::time::Duration::from_secs(8))
                     .header("X-WolfStack-Secret", &secret)
                     .json(&cfg)
                     .send().await;
                 match r {
-                    Ok(resp) if resp.status().is_success() => { ok = true; break; }
-                    Ok(resp) => { err = format!("HTTP {}", resp.status()); }
+                    Ok(resp) if resp.status().is_success() => { drain_response(resp).await; ok = true; break; }
+                    Ok(resp) => { let status = resp.status(); drain_response(resp).await; err = format!("HTTP {}", status); }
                     Err(e) => { err = format!("transport: {}", e); }
                 }
             }
@@ -15296,23 +15276,23 @@ pub async fn fleet_security_force_logout_all(
     };
     let _ = self_id;
     let secret = state.cluster_secret.clone();
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .ok();
+    // Shared pooled inter-node client (identical TLS policy).
+    let client = &*API_HTTP_CLIENT;
     let mut succeeded = 1usize; // self
     let mut failed = 0usize;
-    if let Some(client) = client {
+    {
         for node in peers {
             let urls = build_node_urls(&node.address, node.port, "/api/security/sessions-destroy-all");
             let mut ok = false;
             for url in &urls {
                 let r = client.post(url)
+                    .timeout(std::time::Duration::from_secs(5))
                     .header("X-WolfStack-Secret", &secret)
                     .send().await;
-                if matches!(r, Ok(ref resp) if resp.status().is_success()) {
-                    ok = true; break;
+                if let Ok(resp) = r {
+                    let success = resp.status().is_success();
+                    drain_response(resp).await;
+                    if success { ok = true; break; }
                 }
             }
             if ok { succeeded += 1; } else { failed += 1; }
@@ -15458,16 +15438,8 @@ pub async fn fleet_security_rotate_cluster_secret(
     // hardcoded default. `state.cluster_secret` is the value loaded
     // at startup, which IS what each peer currently accepts.
     let old_secret = state.cluster_secret.clone();
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("client build: {}", e),
-        })),
-    };
+    // Shared pooled inter-node client (identical TLS policy).
+    let client = &*API_HTTP_CLIENT;
     let mut peer_results: Vec<serde_json::Value> = Vec::new();
     for node in peers {
         let urls = build_node_urls(&node.address, node.port, "/api/security/cluster-secret/receive");
@@ -15476,12 +15448,13 @@ pub async fn fleet_security_rotate_cluster_secret(
         let mut err = String::new();
         for url in &urls {
             let r = client.post(url)
+                .timeout(std::time::Duration::from_secs(8))
                 .header("X-WolfStack-Secret", &old_secret)
                 .json(&body)
                 .send().await;
             match r {
-                Ok(resp) if resp.status().is_success() => { ok = true; break; }
-                Ok(resp) => { err = format!("HTTP {}", resp.status()); }
+                Ok(resp) if resp.status().is_success() => { drain_response(resp).await; ok = true; break; }
+                Ok(resp) => { let status = resp.status(); drain_response(resp).await; err = format!("HTTP {}", status); }
                 Err(e) => { err = format!("transport: {}", e); }
             }
         }
@@ -15713,16 +15686,8 @@ pub async fn fleet_security_ssh_hardening(
     };
     let _ = self_id;
     let secret = state.cluster_secret.clone();
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("client build: {}", e),
-        })),
-    };
+    // Shared pooled inter-node client (identical TLS policy).
+    let client = &*API_HTTP_CLIENT;
 
     let mut peer_results: Vec<serde_json::Value> = Vec::new();
     for node in peers {
@@ -15731,11 +15696,12 @@ pub async fn fleet_security_ssh_hardening(
         let mut err = String::new();
         for url in &urls {
             let r = client.post(url)
+                .timeout(std::time::Duration::from_secs(15))
                 .header("X-WolfStack-Secret", &secret)
                 .json(&cfg)
                 .send().await;
             match r {
-                Ok(resp) if resp.status().is_success() => { ok = true; break; }
+                Ok(resp) if resp.status().is_success() => { drain_response(resp).await; ok = true; break; }
                 Ok(resp) => {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
@@ -15870,24 +15836,23 @@ pub async fn fleet_security_push_scan_detector(
     };
     let _ = self_id;
     let secret = state.cluster_secret.clone();
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(8))
-        .build().ok();
+    // Shared pooled inter-node client (identical TLS policy).
+    let client = &*API_HTTP_CLIENT;
     let mut peer_results = Vec::new();
-    if let Some(client) = client {
+    {
         for node in peers {
             let urls = build_node_urls(&node.address, node.port, "/api/security/scan-detector");
             let mut ok = false;
             let mut err = String::new();
             for url in &urls {
                 let r = client.post(url)
+                    .timeout(std::time::Duration::from_secs(8))
                     .header("X-WolfStack-Secret", &secret)
                     .json(&cfg)
                     .send().await;
                 match r {
-                    Ok(resp) if resp.status().is_success() => { ok = true; break; }
-                    Ok(resp) => { err = format!("HTTP {}", resp.status()); }
+                    Ok(resp) if resp.status().is_success() => { drain_response(resp).await; ok = true; break; }
+                    Ok(resp) => { let status = resp.status(); drain_response(resp).await; err = format!("HTTP {}", status); }
                     Err(e) => { err = format!("transport: {}", e); }
                 }
             }
@@ -15990,20 +15955,12 @@ where
             let urls = build_node_urls(&node.address, node.port, &path);
             // 5-minute timeout — `apt-get install` on a fresh mirror
             // refresh can legitimately take a couple of minutes.
-            let client = match reqwest::Client::builder()
-                .danger_accept_invalid_certs(true)
-                .timeout(std::time::Duration::from_secs(300))
-                .build() {
-                Ok(c) => c,
-                Err(e) => return FleetNodeResult {
-                    node_id: node.id, hostname: node.hostname, address: node.address,
-                    status: "failed".into(), data: None,
-                    error: Some(format!("client build: {}", e)),
-                },
-            };
+            // Shared pooled inter-node client (identical TLS policy).
+            let client = &*API_HTTP_CLIENT;
             let mut errors: Vec<String> = Vec::new();
             for url in &urls {
                 let resp = client.post(url)
+                    .timeout(std::time::Duration::from_secs(300))
                     .header("X-WolfStack-Secret", &secret_c)
                     .json(&body_c)
                     .send().await;
@@ -16461,24 +16418,23 @@ pub async fn fleet_antivirus_push_config(
     };
     let _ = self_id;
     let secret = state.cluster_secret.clone();
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(10))
-        .build().ok();
+    // Shared pooled inter-node client (identical TLS policy).
+    let client = &*API_HTTP_CLIENT;
     let mut peer_results = Vec::new();
-    if let Some(client) = client {
+    {
         for node in peers {
             let urls = build_node_urls(&node.address, node.port, "/api/antivirus/config");
             let mut ok = false;
             let mut err = String::new();
             for url in &urls {
                 let r = client.put(url)
+                    .timeout(std::time::Duration::from_secs(10))
                     .header("X-WolfStack-Secret", &secret)
                     .json(&cfg)
                     .send().await;
                 match r {
-                    Ok(resp) if resp.status().is_success() => { ok = true; break; }
-                    Ok(resp) => { err = format!("HTTP {}", resp.status()); }
+                    Ok(resp) if resp.status().is_success() => { drain_response(resp).await; ok = true; break; }
+                    Ok(resp) => { let status = resp.status(); drain_response(resp).await; err = format!("HTTP {}", status); }
                     Err(e) => { err = format!("transport: {}", e); }
                 }
             }
@@ -37848,14 +37804,8 @@ async fn logs_config_put(
         let payload = new_cfg.clone();
         // Spawn so the operator's PUT returns promptly; best-effort delivery.
         tokio::spawn(async move {
-            let client = match reqwest::Client::builder()
-                .danger_accept_invalid_certs(true)
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-            {
-                Ok(c) => c,
-                Err(_) => return,
-            };
+            // Shared pooled inter-node client (identical TLS policy).
+            let client = &*API_HTTP_CLIENT;
             for n in nodes {
                 if n.id == self_id || n.node_type != "wolfstack" {
                     continue;
@@ -37863,14 +37813,15 @@ async fn logs_config_put(
                 for url in build_node_urls(&n.address, n.port, "/api/logs/config?fleet=false") {
                     if let Ok(r) = client
                         .request(reqwest::Method::PUT, &url)
+                        .timeout(std::time::Duration::from_secs(15))
                         .header("X-WolfStack-Secret", &secret)
                         .json(&payload)
                         .send()
                         .await
                     {
-                        if r.status().is_success() {
-                            break;
-                        }
+                        let success = r.status().is_success();
+                        drain_response(r).await;
+                        if success { break; }
                     }
                 }
             }
