@@ -67,7 +67,6 @@ pub(crate) fn ipv4_only_client_builder() -> reqwest::ClientBuilder {
 /// Drain a response body before discarding so the socket returns to
 /// the keep-alive pool. Used by handlers that only care about
 /// `.status()` and would otherwise drop the Response unread.
-#[allow(dead_code)]
 async fn drain_response(resp: reqwest::Response) {
     let _ = resp.bytes().await;
 }
@@ -731,14 +730,13 @@ pub async fn propagate_kernel_block_to_peers(
         "lockout_seconds": lockout_seconds,
         "source_node": source_node,
     });
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => { tracing::error!("kernel-block fanout: client build: {}", e); return; }
-    };
+    // Shared pooled client (same inter-node TLS policy). This hook fires on
+    // every login-limiter lockout — under a brute-force storm that is
+    // continuous, and a fresh per-call Client::builder() opened (and leaked) a
+    // new connection pool to every peer per lockout event. The pooled client
+    // reuses keep-alive sockets and adds a 3s connect_timeout so a
+    // FD-exhausted peer can't pin the fanout for the full request budget.
+    let client = &*API_HTTP_CLIENT;
     for node in nodes {
         // v23.12: build_node_urls is the canonical HTTPS-first chain
         // (HTTPS → HTTP-over-WolfNet if known → legacy plaintext for
@@ -750,12 +748,15 @@ pub async fn propagate_kernel_block_to_peers(
         let mut acked = false;
         for url in &urls {
             let r = client.post(url)
+                .timeout(std::time::Duration::from_secs(8))
                 .header("X-WolfStack-Secret", &secret)
                 .json(&payload)
                 .send().await;
             match r {
                 Ok(resp) if resp.status().is_success() => {
                     tracing::info!("kernel-block fanout: {} ack'd block of {}", node.hostname, ip);
+                    // Drain so the keep-alive socket returns to the pool.
+                    drain_response(resp).await;
                     acked = true;
                     break;
                 }
@@ -1120,14 +1121,9 @@ pub async fn propagate_kernel_unblock_to_peers(
             .cloned()
             .collect()
     };
-    let client = match reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    // Shared pooled client (same inter-node TLS policy) — see the block-fanout
+    // twin above. A fresh per-call client leaked a pool per unblock event.
+    let client = &*API_HTTP_CLIENT;
     let payload = serde_json::json!({ "ip": ip, "propagate": false });
     for node in nodes {
         let urls = build_node_urls(&node.address, node.port, "/api/security/auth-unblock-peer");
@@ -1135,11 +1131,12 @@ pub async fn propagate_kernel_unblock_to_peers(
         let mut acked = false;
         for url in &urls {
             let r = client.post(url)
+                .timeout(std::time::Duration::from_secs(8))
                 .header("X-WolfStack-Secret", &secret)
                 .json(&payload)
                 .send().await;
             match r {
-                Ok(resp) if resp.status().is_success() => { acked = true; break; }
+                Ok(resp) if resp.status().is_success() => { drain_response(resp).await; acked = true; break; }
                 Ok(resp) => {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
@@ -37666,17 +37663,30 @@ fn logs_hub_route(state: &web::Data<AppState>) -> HubRoute {
 /// GET a JSON path from a remote node over the inter-node secret. Tries the
 /// HTTPS-first URL chain; `None` if every attempt fails.
 async fn proxy_get_json(node: &crate::agent::Node, secret: &str, path: &str) -> Option<serde_json::Value> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .ok()?;
+    // Use the shared pooled client (identical inter-node TLS policy:
+    // danger_accept_invalid_certs, ipv4-only, 3s connect_timeout). A fresh
+    // per-call Client::builder() here leaked a connection pool per invocation
+    // and, on a non-2xx peer response, dropped the Response unread — which
+    // stops reqwest returning the socket to the keep-alive pool, leaving it in
+    // CLOSE_WAIT. Drain the body on every branch so the connection is reused.
+    let client = &*API_HTTP_CLIENT;
     for url in build_node_urls(&node.address, node.port, path) {
-        if let Ok(r) = client.get(&url).header("X-WolfStack-Secret", secret).send().await {
+        if let Ok(r) = client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(30))
+            .header("X-WolfStack-Secret", secret)
+            .send()
+            .await
+        {
             if r.status().is_success() {
                 if let Ok(v) = r.json::<serde_json::Value>().await {
                     return Some(v);
                 }
+                // Success status but body wasn't valid JSON — nothing more to
+                // try on this URL; body was consumed by json().
+            } else {
+                // Drain the non-success body so the socket returns to the pool.
+                drain_response(r).await;
             }
         }
     }

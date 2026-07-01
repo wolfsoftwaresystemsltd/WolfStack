@@ -1452,6 +1452,29 @@ async fn main() -> std::io::Result<()> {
                 cluster_for_push.clone(),
                 auth::load_cluster_secret(),
             ).await;
+            // Minimum quiet period between announces. The loop is woken by
+            // WOLFNET_ROUTES_CHANGED on every local route-map change; with no
+            // floor, a sustained change source — e.g. a route set that never
+            // converges between two nodes (the active-only pull vs. used-set
+            // push disagree on a stopped container's IP), or the cross-node
+            // announce→flush→notify→announce ping-pong — drives back-to-back
+            // announces with zero delay. Each announce opens a fresh
+            // connection to every peer (and to the port+1 overlay URL that
+            // CA-signed peers no longer bind), so on a multi-node mesh this
+            // exhausts file descriptors (EMFILE) within minutes and pegs every
+            // node's CPU in the accept/reconnect path. AstroMandoSponsor
+            // 2026-07-01: 6-node cluster, ~100 leaked sockets/s → 65k FD
+            // ceiling in ~10 min → cluster-wide 1500%+ CPU storm.
+            //
+            // The floor is applied AFTER each announce, so the FIRST change
+            // after a quiet period still propagates immediately (route
+            // latency unchanged in the common case). notify_one() coalesces,
+            // so any changes arriving during the sleep collapse into a single
+            // pending permit that fires exactly one more announce when the
+            // sleep ends — a burst, or an unconverging ping-pong, can never
+            // spin faster than one announce per interval.
+            const ANNOUNCE_MIN_INTERVAL: std::time::Duration =
+                std::time::Duration::from_secs(10);
             loop {
                 tokio::select! {
                     _ = crate::containers::WOLFNET_ROUTES_CHANGED.notified() => {}
@@ -1461,6 +1484,7 @@ async fn main() -> std::io::Result<()> {
                     cluster_for_push.clone(),
                     auth::load_cluster_secret(),
                 ).await;
+                tokio::time::sleep(ANNOUNCE_MIN_INTERVAL).await;
             }
         });
 
