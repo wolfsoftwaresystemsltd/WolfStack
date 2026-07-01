@@ -1071,58 +1071,42 @@ async fn main() -> std::io::Result<()> {
                                     ));
                                 }
                             }
-                            if d.smart_status.eq_ignore_ascii_case("FAILED") {
-                                let key = format!("array_smart:{}", d.device);
-                                current.insert(key.clone());
-                                if !last_seen.contains(&key) {
-                                    new_alerts.push((
-                                        "critical".into(),
-                                        format!("SMART failure on {}", d.device),
-                                        format!("array=/dev/{} model={}", arr.name,
-                                            d.model.clone().unwrap_or_default()),
-                                    ));
-                                }
-                            }
+                            // NOTE: per-disk SMART health (overall-health AND the
+                            // Backblaze attribute set) is evaluated once for every
+                            // physical disk below — including array members, which
+                            // are physical disks — so it isn't repeated here.
                         }
                     }
 
-                    // Standalone (non-array) physical disks. A failing SSD/NVMe
-                    // on a plain host (e.g. a Docker box not in any mdadm array)
-                    // was only visible buried under Storage → disk layout; it
-                    // never reached the alert log / Issues (RutgerDiehard). Check
-                    // every physical disk's SMART health and raise the same
-                    // critical alert, skipping disks already covered as array
-                    // members above (compared by basename: array disks are bare
-                    // `sda`, lsblk yields `/dev/sda`).
-                    let array_basenames: std::collections::HashSet<String> = arrays.iter()
-                        .flat_map(|a| a.disks.iter()
-                            .map(|d| d.device.trim_start_matches("/dev/").to_string()))
-                        .collect();
+                    // Every physical disk's SMART health. A disk that only
+                    // showed a red "N realloc / N pending" indicator on the
+                    // Storage page — but whose vendor overall-health still says
+                    // PASSED — used to raise NOTHING in Issues (RutgerDiehard,
+                    // 2026-06-30). We now use the SAME evaluator the Storage page
+                    // renders (Backblaze SMART 5/187/197/198 raw>0, NVMe spare/
+                    // wear, plus overall-health FAILED), so the Issues alert
+                    // mirrors exactly what the operator sees under Storage. This
+                    // covers array members too (they ARE physical disks), so the
+                    // array loop above no longer needs its own SMART check.
+                    // respect_standby=true so the 60s poll never wakes a spun-
+                    // down disk. See array::DiskSmart::failing_reasons.
                     let phys = tokio::task::spawn_blocking(|| {
                         crate::array::list_physical_disks().into_iter()
-                            .filter_map(|dev| crate::array::disk_smart_status(&dev).map(|s| (dev, s)))
-                            .collect::<Vec<(String, String)>>()
+                            .filter_map(|dev| crate::array::disk_smart_health(&dev, true).map(|h| (dev, h)))
+                            .collect::<Vec<(String, crate::array::DiskSmart)>>()
                     }).await.unwrap_or_default();
-                    for (dev, status) in &phys {
-                        let base = dev.trim_start_matches("/dev/");
-                        // Skip disks already covered by the array loop. mdadm
-                        // members can be whole disks (`sda`) OR partitions
-                        // (`sda1`/`nvme0n1p1`), so a member partition of THIS
-                        // disk also counts as covered (else we'd double-alert).
-                        if array_basenames.contains(base)
-                            || array_basenames.iter().any(|ab| ab.starts_with(base)) {
-                            continue;
-                        }
-                        if status.eq_ignore_ascii_case("FAILED") {
-                            let key = format!("smart:{}", dev);
-                            current.insert(key.clone());
-                            if !last_seen.contains(&key) {
-                                new_alerts.push((
-                                    "critical".into(),
-                                    format!("SMART failure on {}", dev),
-                                    format!("disk {} reports SMART health FAILED — back up and replace it", dev),
-                                ));
-                            }
+                    for (dev, health) in &phys {
+                        let reasons = health.failing_reasons();
+                        if reasons.is_empty() { continue; }
+                        let key = format!("smart:{}", dev);
+                        current.insert(key.clone());
+                        if !last_seen.contains(&key) {
+                            new_alerts.push((
+                                "critical".into(),
+                                format!("Disk {} is failing (SMART)", dev),
+                                format!("{} — back up and plan replacement: {}",
+                                    dev, reasons.join("; ")),
+                            ));
                         }
                     }
 

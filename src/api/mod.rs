@@ -19814,55 +19814,18 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
             if entry.get("type").and_then(|v| v.as_str()) == Some("disk") {
                 if let Some(dev) = entry.get("device").and_then(|v| v.as_str()) {
                     if dev.starts_with("/dev/loop") { continue; }
-                    if let Ok(out) = std::process::Command::new("smartctl")
-                        .args(["--json=c", "-H", "-A", dev])
-                        .output()
-                    {
-                        let text = String::from_utf8_lossy(&out.stdout);
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                            let passed = json.pointer("/smart_status/passed");
-                            let temp = json.pointer("/temperature/current")
-                                .and_then(|v| v.as_i64());
-                            let power_on = json.pointer("/power_on_time/hours")
-                                .and_then(|v| v.as_u64());
-                            let attrs_table = json.get("ata_smart_attributes")
-                                .and_then(|a| a.get("table"))
-                                .and_then(|t| t.as_array());
-                            let find_attr = |id: u64| -> Option<u64> {
-                                attrs_table?.iter()
-                                    .find(|a| a.get("id").and_then(|v| v.as_u64()) == Some(id))
-                                    .and_then(|a| a.get("raw").and_then(|r| r.get("value")).and_then(|v| v.as_u64()))
-                            };
-                            let reallocated = find_attr(5);     // Reallocated Sector Count
-                            let pending = find_attr(197);       // Current Pending Sector Count
-                            let uncorrectable = find_attr(198); // Offline Uncorrectable
-                            let wear_level = find_attr(177)     // SSD Wear Leveling Count
-                                .or_else(|| find_attr(233));    // Media Wearout Indicator
-                            let total_written = json.pointer("/ata_device_statistics/pages")
-                                .and_then(|p| p.as_array())
-                                .and_then(|pages| pages.iter()
-                                    .flat_map(|page| page.get("table").and_then(|t| t.as_array()).into_iter().flatten())
-                                    .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("Logical Sectors Written"))
-                                )
-                                .and_then(|e| e.get("value").and_then(|v| v.as_u64()));
-                            // For NVMe, use different paths
-                            let nvme_spare = json.pointer("/nvme_smart_health_information_log/available_spare")
-                                .and_then(|v| v.as_u64());
-                            let nvme_pct_used = json.pointer("/nvme_smart_health_information_log/percentage_used")
-                                .and_then(|v| v.as_u64());
-                            smart_map.insert(dev.to_string(), serde_json::json!({
-                                "passed": passed,
-                                "temperature_c": temp,
-                                "power_on_hours": power_on,
-                                "reallocated_sectors": reallocated,
-                                "pending_sectors": pending,
-                                "uncorrectable_sectors": uncorrectable,
-                                "wear_level": wear_level,
-                                "total_written_sectors": total_written,
-                                "nvme_spare_pct": nvme_spare,
-                                "nvme_pct_used": nvme_pct_used,
-                            }));
+                    // Shared evaluator — same parse + failing verdict the Issues
+                    // watcher uses, so the Storage badge and the Issues alert can
+                    // never disagree. respect_standby=false: an interactive
+                    // Storage read may wake a spun-down disk (the watcher won't).
+                    if let Some(smart) = crate::array::disk_smart_health(dev, false) {
+                        let reasons = smart.failing_reasons();
+                        let mut sj = serde_json::to_value(&smart).unwrap_or_default();
+                        if let Some(obj) = sj.as_object_mut() {
+                            obj.insert("failing".to_string(), serde_json::json!(!reasons.is_empty()));
+                            obj.insert("reasons".to_string(), serde_json::json!(reasons));
                         }
+                        smart_map.insert(dev.to_string(), sj);
                     }
                 }
             }

@@ -1094,27 +1094,146 @@ pub fn list_physical_disks() -> Vec<String> {
         .collect()
 }
 
-/// SMART overall-health status for a single device (e.g. "PASSED", "FAILED").
-/// `None` when smartctl is unavailable, the device can't be read, or the disk
-/// is in standby. Uses `-H` only (health, no attribute scan) and `-n standby`
-/// so a spun-down disk is NOT woken just to be polled — important now that the
-/// health watcher checks every physical disk every minute, not only the
-/// (usually-active) array members.
-pub fn disk_smart_status(device: &str) -> Option<String> {
-    let out = Command::new("timeout")
-        .args(["5", "smartctl", "-H", "-n", "standby", device])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    for line in s.lines() {
-        if let Some(idx) = line.find("overall-health self-assessment test result:") {
-            let marker_len = "overall-health self-assessment test result:".len();
-            return Some(line[idx + marker_len..].trim().to_string());
+/// Full SMART health snapshot for one physical disk. Field names match the JSON
+/// the Storage page's frontend already reads, so the same struct feeds both the
+/// Storage UI and the Issues watcher — ONE definition of "failing", no drift.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DiskSmart {
+    /// Vendor overall-health self-assessment (`smart_status.passed`).
+    pub passed: Option<bool>,
+    pub temperature_c: Option<i64>,
+    pub power_on_hours: Option<u64>,
+    /// ATA attr 5 — Reallocated Sector Count (raw).
+    pub reallocated_sectors: Option<u64>,
+    /// ATA attr 197 — Current Pending Sector Count (raw).
+    pub pending_sectors: Option<u64>,
+    /// ATA attr 198 — Offline Uncorrectable (raw).
+    pub uncorrectable_sectors: Option<u64>,
+    /// ATA attr 187 — Reported Uncorrectable Errors (raw).
+    pub reported_uncorrectable: Option<u64>,
+    /// ATA attr 177 / 233 — SSD wear-leveling / media-wearout indicator.
+    pub wear_level: Option<u64>,
+    pub total_written_sectors: Option<u64>,
+    /// NVMe available_spare (normalised %, 0–100).
+    pub nvme_spare_pct: Option<u64>,
+    /// NVMe available_spare_threshold — spare below this = critical.
+    pub nvme_spare_threshold: Option<u64>,
+    /// NVMe percentage_used — endurance consumed (may exceed 100).
+    pub nvme_pct_used: Option<u64>,
+    /// NVMe media_and_data_integrity_errors (uncorrectable — data loss).
+    pub nvme_media_errors: Option<u64>,
+}
+
+impl DiskSmart {
+    /// Why this disk counts as failing, grounded in Backblaze's large-scale
+    /// study — the raw value of SMART 5 / 187 / 197 / 198 being > 0 is "a reason
+    /// to investigate" and a strong failure predictor — plus the vendor
+    /// overall-health verdict and the NVMe wear/spare signals. Empty = healthy.
+    /// (188 Command-Timeout is deliberately excluded: it's cabling/power noise
+    /// and the Storage page doesn't surface it.)
+    pub fn failing_reasons(&self) -> Vec<String> {
+        let mut r = Vec::new();
+        if self.passed == Some(false) {
+            r.push("SMART overall-health self-assessment reports FAILED".to_string());
         }
+        if let Some(n) = self.reallocated_sectors.filter(|&n| n > 0) {
+            r.push(format!("{} reallocated sector(s)", n));
+        }
+        if let Some(n) = self.pending_sectors.filter(|&n| n > 0) {
+            r.push(format!("{} current-pending sector(s)", n));
+        }
+        if let Some(n) = self.uncorrectable_sectors.filter(|&n| n > 0) {
+            r.push(format!("{} offline-uncorrectable sector(s)", n));
+        }
+        if let Some(n) = self.reported_uncorrectable.filter(|&n| n > 0) {
+            r.push(format!("{} reported-uncorrectable error(s)", n));
+        }
+        if let (Some(spare), Some(thr)) = (self.nvme_spare_pct, self.nvme_spare_threshold) {
+            // Spare below the drive's own threshold = critical wear-out.
+            if thr > 0 && spare < thr {
+                r.push(format!("NVMe available spare {}% below threshold {}%", spare, thr));
+            }
+        }
+        if let Some(u) = self.nvme_pct_used.filter(|&u| u >= 100) {
+            r.push(format!("NVMe endurance used {}% (rated life consumed)", u));
+        }
+        if let Some(e) = self.nvme_media_errors.filter(|&e| e > 0) {
+            r.push(format!("{} NVMe media/data-integrity error(s)", e));
+        }
+        r
     }
-    // No health line: smartctl found the disk in standby (we asked not to wake
-    // it) or returned nothing parseable. Treat as unknown → skip, don't alert.
-    None
+}
+
+/// Read the full SMART attribute set for a device via `smartctl --json -H -A`.
+/// `respect_standby` adds `-n standby` so a spun-down disk is NOT woken (returns
+/// None for it) — the Issues watcher passes true (polls every 60s), the Storage
+/// view passes false (an interactive read may wake the disk). None when smartctl
+/// is missing, the disk can't be read, or nothing parseable came back.
+pub fn disk_smart_health(device: &str, respect_standby: bool) -> Option<DiskSmart> {
+    let mut args: Vec<&str> = vec!["10", "smartctl", "--json=c", "-H", "-A"];
+    if respect_standby {
+        args.push("-n");
+        args.push("standby");
+    }
+    args.push(device);
+    let out = Command::new("timeout").args(&args).output().ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+
+    let attrs = json
+        .get("ata_smart_attributes")
+        .and_then(|a| a.get("table"))
+        .and_then(|t| t.as_array());
+    let find_attr = |id: u64| -> Option<u64> {
+        attrs?
+            .iter()
+            .find(|a| a.get("id").and_then(|v| v.as_u64()) == Some(id))
+            .and_then(|a| a.get("raw").and_then(|r| r.get("value")).and_then(|v| v.as_u64()))
+    };
+
+    let smart = DiskSmart {
+        passed: json.pointer("/smart_status/passed").and_then(|v| v.as_bool()),
+        temperature_c: json.pointer("/temperature/current").and_then(|v| v.as_i64()),
+        power_on_hours: json.pointer("/power_on_time/hours").and_then(|v| v.as_u64()),
+        reallocated_sectors: find_attr(5),
+        pending_sectors: find_attr(197),
+        uncorrectable_sectors: find_attr(198),
+        reported_uncorrectable: find_attr(187),
+        wear_level: find_attr(177).or_else(|| find_attr(233)),
+        total_written_sectors: json
+            .pointer("/ata_device_statistics/pages")
+            .and_then(|p| p.as_array())
+            .and_then(|pages| {
+                pages
+                    .iter()
+                    .flat_map(|page| page.get("table").and_then(|t| t.as_array()).into_iter().flatten())
+                    .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("Logical Sectors Written"))
+            })
+            .and_then(|e| e.get("value").and_then(|v| v.as_u64())),
+        nvme_spare_pct: json
+            .pointer("/nvme_smart_health_information_log/available_spare")
+            .and_then(|v| v.as_u64()),
+        nvme_spare_threshold: json
+            .pointer("/nvme_smart_health_information_log/available_spare_threshold")
+            .and_then(|v| v.as_u64()),
+        nvme_pct_used: json
+            .pointer("/nvme_smart_health_information_log/percentage_used")
+            .and_then(|v| v.as_u64()),
+        nvme_media_errors: json
+            .pointer("/nvme_smart_health_information_log/media_errors")
+            .and_then(|v| v.as_u64()),
+    };
+
+    // Nothing parseable (disk in standby, or an unsupported device that emitted
+    // only an error envelope) → None, so the caller skips rather than alerts.
+    let empty = smart.passed.is_none()
+        && attrs.is_none()
+        && smart.nvme_spare_pct.is_none()
+        && smart.nvme_pct_used.is_none()
+        && smart.nvme_media_errors.is_none();
+    if empty {
+        return None;
+    }
+    Some(smart)
 }
 
 fn filesystem_used_bytes_for(device: &str) -> Option<u64> {
@@ -1150,12 +1269,19 @@ pub fn predictive_findings() -> Vec<ArrayFinding> {
             });
         }
         for d in &arr.disks {
-            if d.smart_status.eq_ignore_ascii_case("FAILED") {
+            // Use the same full-attribute evaluator the Issues watcher / Storage
+            // page use (Backblaze SMART 5/187/197/198, NVMe wear, overall-health)
+            // rather than the overall-health-only `d.smart_status`, so this stays
+            // consistent and doesn't silently under-alert if it's ever wired in.
+            if let Some(reasons) = disk_smart_health(&d.device, true)
+                .map(|h| h.failing_reasons())
+                .filter(|r| !r.is_empty())
+            {
                 findings.push(ArrayFinding {
                     array: arr.name.clone(),
                     kind: "smart_prefail".into(),
                     severity: "critical".into(),
-                    detail: format!("disk {} reports SMART FAILED", d.device),
+                    detail: format!("disk {} is failing (SMART): {}", d.device, reasons.join("; ")),
                 });
             }
         }
@@ -1904,5 +2030,91 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
     fn decode_mount_escapes_passes_through_normal_paths() {
         assert_eq!(decode_mount_escapes("/mnt/disk1"), "/mnt/disk1");
         assert_eq!(decode_mount_escapes("/nfs/path with no escape"), "/nfs/path with no escape");
+    }
+
+    // Convenience: a disk is failing iff it has at least one reason.
+    fn failing(s: &DiskSmart) -> bool { !s.failing_reasons().is_empty() }
+
+    #[test]
+    fn disk_smart_healthy_is_not_failing() {
+        let s = DiskSmart {
+            passed: Some(true),
+            temperature_c: Some(32),
+            power_on_hours: Some(10_000),
+            reallocated_sectors: Some(0),
+            pending_sectors: Some(0),
+            uncorrectable_sectors: Some(0),
+            reported_uncorrectable: Some(0),
+            ..Default::default()
+        };
+        assert!(!failing(&s));
+        assert!(s.failing_reasons().is_empty());
+    }
+
+    #[test]
+    fn disk_smart_overall_health_failed_is_failing() {
+        let s = DiskSmart { passed: Some(false), ..Default::default() };
+        assert!(failing(&s));
+        assert!(s.failing_reasons()[0].contains("FAILED"));
+    }
+
+    #[test]
+    fn disk_smart_passed_but_bad_attributes_is_failing() {
+        // The RutgerDiehard case: vendor overall-health says PASSED, but the
+        // Backblaze attributes (reallocated/pending) are non-zero → failing.
+        // This is exactly what the Storage page reddens and Issues must mirror.
+        let realloc = DiskSmart {
+            passed: Some(true),
+            reallocated_sectors: Some(24),
+            ..Default::default()
+        };
+        assert!(failing(&realloc));
+        assert!(realloc.failing_reasons().iter().any(|r| r.contains("reallocated")));
+
+        let pending = DiskSmart { passed: Some(true), pending_sectors: Some(3), ..Default::default() };
+        assert!(failing(&pending));
+
+        let uncorr = DiskSmart { passed: Some(true), uncorrectable_sectors: Some(1), ..Default::default() };
+        assert!(failing(&uncorr));
+
+        let reported = DiskSmart { passed: Some(true), reported_uncorrectable: Some(2), ..Default::default() };
+        assert!(failing(&reported));
+    }
+
+    #[test]
+    fn disk_smart_nvme_wear_and_spare() {
+        // Spare above threshold + healthy wear → fine.
+        let ok = DiskSmart {
+            passed: Some(true),
+            nvme_spare_pct: Some(100),
+            nvme_spare_threshold: Some(10),
+            nvme_pct_used: Some(40),
+            ..Default::default()
+        };
+        assert!(!failing(&ok));
+
+        // Spare dropped below threshold → failing.
+        let low_spare = DiskSmart {
+            nvme_spare_pct: Some(5),
+            nvme_spare_threshold: Some(10),
+            ..Default::default()
+        };
+        assert!(failing(&low_spare));
+        assert!(low_spare.failing_reasons().iter().any(|r| r.contains("spare")));
+
+        // Endurance fully consumed → failing.
+        let worn = DiskSmart { nvme_pct_used: Some(100), ..Default::default() };
+        assert!(failing(&worn));
+
+        // NVMe media/data-integrity errors → failing.
+        let media = DiskSmart { nvme_media_errors: Some(1), ..Default::default() };
+        assert!(failing(&media));
+    }
+
+    #[test]
+    fn disk_smart_unknown_fields_are_not_failing() {
+        // All-None (e.g. a disk we couldn't read attributes for) must NOT alert.
+        let s = DiskSmart::default();
+        assert!(!failing(&s));
     }
 }

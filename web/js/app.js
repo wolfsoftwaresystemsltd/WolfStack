@@ -9065,10 +9065,19 @@ function renderDiskInfo(devices) {
             let smartBadge = '';
             if (dk.smart) {
                 const s = dk.smart;
-                if (s.passed === true) {
+                // A drive can pass its vendor overall-health check yet still be
+                // failing on the Backblaze attributes (reallocated/pending/
+                // uncorrectable sectors, NVMe wear). `s.failing` is the backend's
+                // unified verdict — the SAME one that raises the Issue — so show
+                // an amber CAUTION rather than a green HEALTHY in that case.
+                const smartTitle = (s.reasons && s.reasons.length)
+                    ? ` title="${escapeHtml(s.reasons.join('; '))}"` : '';
+                if (s.passed === false) {
+                    smartBadge += `<span${smartTitle} style="font-size:11px;padding:1px 6px;border-radius:3px;background:#ef4444;color:#fff;font-weight:600;">FAILING</span>`;
+                } else if (s.failing === true) {
+                    smartBadge += `<span${smartTitle} style="font-size:11px;padding:1px 6px;border-radius:3px;background:#f59e0b;color:#fff;font-weight:600;">CAUTION</span>`;
+                } else if (s.passed === true) {
                     smartBadge += `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:#10b981;color:#fff;font-weight:600;">HEALTHY</span>`;
-                } else if (s.passed === false) {
-                    smartBadge += `<span style="font-size:11px;padding:1px 6px;border-radius:3px;background:#ef4444;color:#fff;font-weight:600;">FAILING</span>`;
                 }
                 const parts = [];
                 if (s.temperature_c != null) {
@@ -9079,8 +9088,10 @@ function renderDiskInfo(devices) {
                 if (s.power_on_hours != null) parts.push(`${Number(s.power_on_hours).toLocaleString()}h`);
                 if (s.reallocated_sectors > 0) parts.push(`<span style="color:#ef4444;">${s.reallocated_sectors} realloc</span>`);
                 if (s.pending_sectors > 0) parts.push(`<span style="color:#ef4444;">${s.pending_sectors} pending</span>`);
-                if (s.nvme_pct_used != null) parts.push(`${s.nvme_pct_used}% worn`);
-                if (s.nvme_spare_pct != null) parts.push(`${s.nvme_spare_pct}% spare`);
+                if (s.uncorrectable_sectors > 0) parts.push(`<span style="color:#ef4444;">${s.uncorrectable_sectors} uncorrect</span>`);
+                if (s.reported_uncorrectable > 0) parts.push(`<span style="color:#ef4444;">${s.reported_uncorrectable} reported-unc</span>`);
+                if (s.nvme_pct_used != null) parts.push(`<span style="${s.nvme_pct_used >= 100 ? 'color:#ef4444;' : ''}">${s.nvme_pct_used}% worn</span>`);
+                if (s.nvme_spare_pct != null) { const low = s.nvme_spare_threshold != null && s.nvme_spare_pct < s.nvme_spare_threshold; parts.push(`<span style="${low ? 'color:#ef4444;' : ''}">${s.nvme_spare_pct}% spare${low ? ` (min ${s.nvme_spare_threshold}%)` : ''}</span>`); }
                 if (parts.length > 0) {
                     smartBadge += `<span style="font-size:11px;color:var(--text-muted);margin-left:4px;">${parts.join(' · ')}</span>`;
                 }
@@ -9191,10 +9202,16 @@ function renderDiskInfo(devices) {
         let healthCell = '<span style="color:var(--text-muted)">—</span>';
         if (d.type === 'disk' && d.smart) {
             const s = d.smart;
-            if (s.passed === true) {
+            const healthTitle = (s.reasons && s.reasons.length)
+                ? ` title="${escapeHtml(s.reasons.join('; '))}"` : '';
+            if (s.passed === false) {
+                healthCell = `<span${healthTitle} style="color:#ef4444;font-weight:600;font-size:12px;">FAIL</span>`;
+            } else if (s.failing === true) {
+                // Overall-health passes but Backblaze attributes flag it — same
+                // verdict that raises the Issue. Amber CAUTION, not green OK.
+                healthCell = `<span${healthTitle} style="color:#f59e0b;font-weight:600;font-size:12px;">CAUTION</span>`;
+            } else if (s.passed === true) {
                 healthCell = `<span style="color:#10b981;font-weight:600;font-size:12px;">OK</span>`;
-            } else if (s.passed === false) {
-                healthCell = `<span style="color:#ef4444;font-weight:600;font-size:12px;">FAIL</span>`;
             } else {
                 healthCell = `<span style="color:var(--text-muted);font-size:12px;">?</span>`;
             }
@@ -9208,8 +9225,9 @@ function renderDiskInfo(devices) {
             if (s.reallocated_sectors > 0) extras.push(`<span style="color:#ef4444;">${s.reallocated_sectors} realloc</span>`);
             if (s.pending_sectors > 0) extras.push(`<span style="color:#ef4444;">${s.pending_sectors} pending</span>`);
             if (s.uncorrectable_sectors > 0) extras.push(`<span style="color:#ef4444;">${s.uncorrectable_sectors} uncorrect</span>`);
-            if (s.nvme_pct_used != null) extras.push(`${s.nvme_pct_used}% worn`);
-            if (s.nvme_spare_pct != null) extras.push(`${s.nvme_spare_pct}% spare`);
+            if (s.reported_uncorrectable > 0) extras.push(`<span style="color:#ef4444;">${s.reported_uncorrectable} reported-unc</span>`);
+            if (s.nvme_pct_used != null) extras.push(`<span style="${s.nvme_pct_used >= 100 ? 'color:#ef4444;' : ''}">${s.nvme_pct_used}% worn</span>`);
+            if (s.nvme_spare_pct != null) { const low = s.nvme_spare_threshold != null && s.nvme_spare_pct < s.nvme_spare_threshold; extras.push(`<span style="${low ? 'color:#ef4444;' : ''}">${s.nvme_spare_pct}% spare${low ? ` (min ${s.nvme_spare_threshold}%)` : ''}</span>`); }
             if (s.wear_level != null) extras.push(`wear: ${s.wear_level}`);
             if (extras.length > 0) healthCell += `<div style="font-size:10px;color:var(--text-muted);margin-top:1px;">${extras.join(' · ')}</div>`;
         }
