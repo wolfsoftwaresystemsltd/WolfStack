@@ -800,7 +800,7 @@ fn host_label(ctx: &GaleraOpCtx, host: &str) -> String {
 /// Factored from provision so the exact same steps run locally or on a peer host.
 fn build_node_local(container: &str, distribution: &str, release: &str, address: &str, log: &Sender<String>) -> Result<(), String> {
     safe_token(container)?;
-    crate::containers::lxc_create(container, distribution, release, "amd64", None, None)?;
+    crate::containers::lxc_create(container, distribution, release, crate::containers::host_container_arch(), None, None)?;
     crate::containers::lxc_start(container)?;
     logln(log, format!("[{}] attaching WolfNet IP {}…", container, address));
     let _ = crate::containers::lxc_attach_wolfnet(container, address);
@@ -1002,7 +1002,7 @@ pub fn add_nodes(cluster: &GaleraCluster, p: &AddNodesRequest, log: &Sender<Stri
     let mut new_nodes: Vec<GaleraNode> = Vec::new();
     for cname in &names {
         logln(log, format!("[{}] creating container…", cname));
-        crate::containers::lxc_create(cname, &p.distribution, &p.release, "amd64", None, None)?;
+        crate::containers::lxc_create(cname, &p.distribution, &p.release, crate::containers::host_container_arch(), None, None)?;
         crate::containers::lxc_start(cname)?;
         let ip = crate::containers::next_available_wolfnet_ip()
             .ok_or("no free WolfNet IP available for the new node")?;
@@ -1280,7 +1280,7 @@ pub fn provision_maxscale(cluster: &GaleraCluster, p: &MaxScaleRequest, log: &Se
 
     // 2. Create + start the proxy container on this host, give it a WolfNet IP.
     logln(log, format!("[{}] creating proxy container…", cname));
-    crate::containers::lxc_create(&cname, &p.distribution, &p.release, "amd64", None, None)?;
+    crate::containers::lxc_create(&cname, &p.distribution, &p.release, crate::containers::host_container_arch(), None, None)?;
     crate::containers::lxc_start(&cname)?;
     let ip = crate::containers::next_available_wolfnet_ip()
         .ok_or("no free WolfNet IP available for the proxy")?;

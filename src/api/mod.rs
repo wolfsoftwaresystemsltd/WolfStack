@@ -30046,7 +30046,10 @@ pub async fn wolfrun_create(req: HttpRequest, state: web::Data<AppState>, body: 
         Some(crate::wolfrun::LxcConfig {
             distribution: body.lxc_distribution.clone().unwrap_or_else(|| "ubuntu".to_string()),
             release: body.lxc_release.clone().unwrap_or_else(|| "jammy".to_string()),
-            architecture: body.lxc_architecture.clone().unwrap_or_else(|| "amd64".to_string()),
+            // Default to THIS host's arch (arm64 on RK3588/OrangePi), not a
+            // hardcoded amd64 — this is the primary WolfRun-LXC create path.
+            architecture: body.lxc_architecture.clone()
+                .unwrap_or_else(|| crate::containers::host_container_arch().to_string()),
         })
     } else {
         None

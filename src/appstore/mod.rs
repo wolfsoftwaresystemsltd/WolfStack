@@ -5203,7 +5203,8 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl wget libssl3 ca-certificates".into(),
                     "mkdir -p /opt/vaultwarden /var/lib/vaultwarden".into(),
-                    "wget -O /tmp/vw.tar.gz https://github.com/dani-garcia/vaultwarden/releases/latest/download/vaultwarden-linux-x86_64.tar.gz || echo 'Download may require manual setup'".into(),
+                    // Arch-aware: vaultwarden names assets by `uname -m` (x86_64 / aarch64).
+                    "wget -O /tmp/vw.tar.gz https://github.com/dani-garcia/vaultwarden/releases/latest/download/vaultwarden-linux-$(uname -m).tar.gz || echo 'Download may require manual setup'".into(),
                     "cat > /etc/systemd/system/vaultwarden.service << 'EOF'\n[Unit]\nDescription=Vaultwarden\nAfter=network.target\n[Service]\nEnvironment=DATA_FOLDER=/var/lib/vaultwarden\nEnvironment=ADMIN_TOKEN=${ADMIN_TOKEN}\nExecStart=/opt/vaultwarden/vaultwarden\nRestart=always\n[Install]\nWantedBy=multi-user.target\nEOF".into(),
                     "systemctl enable vaultwarden".into(),
                 ],
@@ -5653,7 +5654,8 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl wget".into(),
-                    "wget -O /tmp/zitadel.tar.gz https://github.com/zitadel/zitadel/releases/latest/download/zitadel-linux-amd64.tar.gz".into(),
+                    // Arch-aware: zitadel names assets amd64 / arm64.
+                    "A=$(uname -m); case $A in x86_64) A=amd64;; aarch64) A=arm64;; esac; wget -O /tmp/zitadel.tar.gz https://github.com/zitadel/zitadel/releases/latest/download/zitadel-linux-$A.tar.gz".into(),
                     "mkdir -p /opt/zitadel && tar xzf /tmp/zitadel.tar.gz -C /opt/zitadel".into(),
                     "cat > /etc/systemd/system/zitadel.service << 'EOF'\n[Unit]\nDescription=Zitadel Identity Platform\nAfter=network.target\n[Service]\nExecStart=/opt/zitadel/zitadel start-from-init --masterkey \"MasterkeyNeedsToHave32Chars!!\" --tlsMode disabled\nRestart=always\n[Install]\nWantedBy=multi-user.target\nEOF".into(),
                     "systemctl enable zitadel".into(),
@@ -5718,7 +5720,8 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl git make gcc".into(),
-                    "curl -fsSL https://go.dev/dl/go1.22.0.linux-amd64.tar.gz | tar -C /usr/local -xzf -".into(),
+                    // Arch-aware: the Go toolchain names releases amd64 / arm64.
+                    "A=$(uname -m); case $A in x86_64) A=amd64;; aarch64) A=arm64;; esac; curl -fsSL https://go.dev/dl/go1.22.0.linux-$A.tar.gz | tar -C /usr/local -xzf -".into(),
                     "export PATH=$PATH:/usr/local/go/bin && git clone https://github.com/sipeed/picoclaw.git /opt/picoclaw".into(),
                     "cd /opt/picoclaw && export PATH=$PATH:/usr/local/go/bin && make deps && make build".into(),
                     "cp /opt/picoclaw/config/config.example.json /opt/picoclaw/config/config.json".into(),

@@ -9720,6 +9720,10 @@ fn extract_pve_container_meta(vmid: &str) -> Result<ContainerExportMeta, String>
     let mut memory_mb = None;
     let mut cpu_cores = None;
     let mut hostname = vmid.to_string();
+    // `pct config` reports the container's own arch (`arch: amd64` / `arm64`);
+    // use it so a cross-arch container is labelled correctly. Fall back to the
+    // host arch only when the field is absent.
+    let mut architecture = None;
 
     for line in config_text.lines() {
         let parts: Vec<&str> = line.splitn(2, ':').collect();
@@ -9730,6 +9734,7 @@ fn extract_pve_container_meta(vmid: &str) -> Result<ContainerExportMeta, String>
                 "hostname" => hostname = val.to_string(),
                 "memory" => memory_mb = val.parse().ok(),
                 "cores" => cpu_cores = val.parse().ok(),
+                "arch" if !val.is_empty() => architecture = Some(val.to_string()),
                 _ => {}
             }
         }
@@ -9739,7 +9744,7 @@ fn extract_pve_container_meta(vmid: &str) -> Result<ContainerExportMeta, String>
         name: hostname,
         distribution: "unknown".to_string(),
         release: "unknown".to_string(),
-        architecture: host_container_arch().to_string(),
+        architecture: architecture.unwrap_or_else(|| host_container_arch().to_string()),
         memory_mb,
         cpu_cores,
         source_type: "proxmox".to_string(),

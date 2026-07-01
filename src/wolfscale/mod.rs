@@ -628,7 +628,7 @@ fn setup_node_local(spec: &NodeSpec, address: &str, log: &Sender<String>) -> Res
     if !valid_secret(&spec.db_password) {
         return Err("invalid db password".into());
     }
-    crate::containers::lxc_create(&spec.container, &spec.distribution, &spec.release, "amd64", None, None)?;
+    crate::containers::lxc_create(&spec.container, &spec.distribution, &spec.release, crate::containers::host_container_arch(), None, None)?;
     crate::containers::lxc_start(&spec.container)?;
     logln(log, format!("[{}] attaching WolfNet IP {}…", spec.container, address));
     let _ = crate::containers::lxc_attach_wolfnet(&spec.container, address);
