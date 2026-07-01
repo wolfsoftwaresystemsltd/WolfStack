@@ -63,12 +63,15 @@ const SYSTEMD_TIMEOUT: Duration = Duration::from_secs(5);
 const CERT_SAMPLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Hard timeout for the full vulnerability sample (host + LXC fan-
-/// out). Larger than the others because it shells out to apt/dnf
-/// per LXC container, with each call doing a non-trivial amount of
-/// dependency-tree work. The inner sampler has its own per-target
-/// caps; this is the outer wall-clock guard so a slow tick doesn't
-/// blow past the 5-min cadence.
-const VULN_SAMPLE_TIMEOUT: Duration = Duration::from_secs(75);
+/// out). Larger than the others because it shells out to apt/dnf per LXC
+/// container AND (when trivy is installed) runs `trivy image` per unique Docker
+/// image — trivy's first scan can download its vuln DB and take tens of seconds.
+/// Sized to hold the inner worst case (host ≤20s + LXC ≤60s + Docker ≤90s =
+/// 170s) with headroom; samplers run concurrently via `tokio::join!`, so this
+/// bounds the tick's worst case (not a sum), comfortably under the 5-min
+/// cadence. If this were smaller than a single inner scan, one slow scan would
+/// trip the outer guard and discard the whole tick's findings.
+const VULN_SAMPLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Hard timeout for the OSV sampler. Inventory collection is fast
 /// (local subprocess); the HTTP layer is internally rate-limited to

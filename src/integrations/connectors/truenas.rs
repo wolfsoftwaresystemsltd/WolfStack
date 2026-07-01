@@ -7,7 +7,7 @@
 
 use crate::integrations::{
     AuthMethod, ConfigField, Connector, ConnectorCapability, ConnectorInfo,
-    HealthStatus, IntegrationInstance, ServiceStatus,
+    ConnectorOperation, HealthStatus, IntegrationInstance, ServiceStatus,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -141,6 +141,36 @@ impl Connector for TrueNasConnector {
         ]
     }
 
+    fn operations(&self) -> Vec<ConnectorOperation> {
+        // execute create_snapshot reads params["dataset"], params["name"] and
+        // optional params["recursive"] (truenas.rs). Verified.
+        vec![
+            ConnectorOperation {
+                id: "create_snapshot".to_string(),
+                label: "Create snapshot".to_string(),
+                icon: "fa-camera".to_string(),
+                params: vec![
+                    ConfigField {
+                        name: "dataset".to_string(), label: "Dataset".to_string(),
+                        field_type: "text".to_string(), required: true,
+                        default_value: None, placeholder: Some("tank/data".to_string()),
+                    },
+                    ConfigField {
+                        name: "name".to_string(), label: "Snapshot name".to_string(),
+                        field_type: "text".to_string(), required: true,
+                        default_value: None, placeholder: Some("manual-2026-07-01".to_string()),
+                    },
+                    ConfigField {
+                        name: "recursive".to_string(), label: "Recursive".to_string(),
+                        field_type: "checkbox".to_string(), required: false,
+                        default_value: Some("false".to_string()), placeholder: None,
+                    },
+                ],
+                destructive: false,
+            },
+        ]
+    }
+
     fn health_check<'a>(
         &'a self,
         instance: &'a IntegrationInstance,
@@ -208,7 +238,11 @@ impl Connector for TrueNasConnector {
                     let body = serde_json::json!({
                         "dataset": dataset,
                         "name": name,
-                        "recursive": params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false),
+                        // Accept a JSON boolean OR a "true"/"false" string, so
+                        // both a checkbox (boolean) and a raw API caller work.
+                        "recursive": params.get("recursive")
+                            .and_then(|v| v.as_bool().or_else(|| v.as_str().and_then(|s| s.parse::<bool>().ok())))
+                            .unwrap_or(false),
                     });
                     Self::api_post(base, credentials, "/api/v2.0/zfs/snapshot", &body).await
                 }

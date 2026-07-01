@@ -387,6 +387,57 @@ fn on_access_profile_for(family: &str) -> Option<OnAccessProfile> {
     }
 }
 
+/// Does systemd know about `unit` (installed, not necessarily running)?
+/// `systemctl cat` resolves template units (e.g. `clamd@scan.service`) and
+/// exits non-zero for unknown units, so it's a reliable presence check.
+fn systemd_unit_exists(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["cat", unit])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Fallback profile for distros not in `on_access_profile_for`'s known-family
+/// table (Gentoo, Void, Alpine, NixOS, exotic derivatives, …). ClamAV's
+/// clamd/clamonacc are standard across distros — only the config/service/log
+/// *paths* vary — so we detect them from the common candidates present on THIS
+/// host rather than hard-coding a family. Returns None only when no clamd.conf
+/// exists at all (clamd isn't installed), which is the genuine "can't do it"
+/// case. Every candidate is a &'static str, so the profile stays borrow-free.
+///
+/// Package auto-install still can't run on an unknown package manager
+/// (`build_install_cmd_family` returns None), so on these distros on-access
+/// requires clamd+clamonacc to be installed already — but once they are, it now
+/// works instead of hard-erroring.
+fn detect_generic_profile() -> Option<OnAccessProfile> {
+    let clamd_conf = ["/etc/clamav/clamd.conf", "/etc/clamd.d/scan.conf", "/etc/clamd.conf"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())?;
+    // Require an actual clamd service unit — a blind fallback to a guessed name
+    // would fail 5s later at `systemctl restart` with a misleading "clamonacc
+    // failed to stay running". If we can't identify how to start clamd, we
+    // honestly can't enable on-access; None here yields a clear resolve error.
+    let svc_daemon = ["clamav-daemon.service", "clamd@scan.service", "clamd.service"]
+        .into_iter()
+        .find(|u| systemd_unit_exists(u))?;
+    let svc_onacc = ["clamav-clamonacc.service", "clamonacc.service"]
+        .into_iter()
+        .find(|u| systemd_unit_exists(u));
+    let clamd_log = ["/var/log/clamav/clamav.log", "/var/log/clamd.scan"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap_or("/var/log/clamav/clamav.log");
+    Some(OnAccessProfile { pkg_daemon: "clamav", svc_daemon, svc_onacc, clamd_conf, clamd_log })
+}
+
+/// Resolve the on-access profile for a distro family, falling back to
+/// host-path detection for unknown families. Single source of truth for the
+/// enable/disable, state-detect and tailer-resume paths.
+fn resolve_on_access_profile(family: &str) -> Option<OnAccessProfile> {
+    on_access_profile_for(family).or_else(detect_generic_profile)
+}
+
 const ON_ACCESS_BLOCK_BEGIN: &str = "# === WolfStack on-access begin (do not edit between markers) ===";
 const ON_ACCESS_BLOCK_END:   &str = "# === WolfStack on-access end ===";
 const ON_ACCESS_UNIT_PATH:   &str = "/etc/systemd/system/wolfstack-clamonacc.service";
@@ -411,7 +462,7 @@ pub fn detect_install_status() -> InstallStatus {
 /// active on this host. The result is purely advisory — apply_on_access
 /// is the source of truth while a state transition is in flight.
 fn detect_on_access_state(family: &str) -> String {
-    let prof = match on_access_profile_for(family) {
+    let prof = match resolve_on_access_profile(family) {
         Some(p) => p, None => return "disabled".into(),
     };
     let daemon_active = systemd_is_active(prof.svc_daemon);
@@ -1100,10 +1151,14 @@ pub fn apply_on_access(state: std::sync::Arc<AntivirusState>, target: bool) {
 
     let (distro, id_like) = parse_os_release();
     let family = distro_family_with_idlike(&distro, &id_like);
-    let prof = match on_access_profile_for(family) {
+    let prof = match resolve_on_access_profile(family) {
         Some(p) => p,
         None => {
-            let err = format!("on-access scanning not supported on distro '{}'", distro);
+            let err = format!(
+                "on-access scanning needs ClamAV: couldn't find a clamd.conf + clamd \
+                 systemd service on distro '{}'. Install clamd + clamonacc (the \
+                 clamav / clamav-daemon package) and retry.",
+                distro);
             state.push_install_line(format!("==> ERROR: {}", err));
             finalize_install(&state, false, Some(err));
             return;
@@ -1270,7 +1325,7 @@ pub fn resume_on_access_tailer_if_enabled(state: std::sync::Arc<AntivirusState>)
     if !want { return; }
     let (distro, id_like) = parse_os_release();
     let family = distro_family_with_idlike(&distro, &id_like);
-    let prof = match on_access_profile_for(family) { Some(p) => p, None => return };
+    let prof = match resolve_on_access_profile(family) { Some(p) => p, None => return };
     // Verify systemd state matches intent — don't start a tailer if
     // clamonacc isn't actually running.
     let onacc_active = match prof.svc_onacc {

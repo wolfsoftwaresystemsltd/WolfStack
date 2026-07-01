@@ -11,7 +11,7 @@
 
 use crate::integrations::{
     AuthMethod, ConfigField, Connector, ConnectorCapability, ConnectorInfo,
-    HealthStatus, IntegrationInstance, ServiceStatus,
+    ConnectorOperation, HealthStatus, IntegrationInstance, ServiceStatus,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -210,6 +210,29 @@ impl Connector for UnifiConnector {
                 label: "Networks".to_string(),
                 icon: "fa-diagram-project".to_string(),
             },
+        ]
+    }
+
+    fn operations(&self) -> Vec<ConnectorOperation> {
+        // `execute` reads params["mac"] for all four; client ops take a client
+        // MAC, restart_device a device MAC (unifi.rs execute arms). Verified.
+        let mac_field = |label: &str| ConfigField {
+            name: "mac".to_string(),
+            label: label.to_string(),
+            field_type: "text".to_string(),
+            required: true,
+            default_value: None,
+            placeholder: Some("aa:bb:cc:dd:ee:ff".to_string()),
+        };
+        vec![
+            ConnectorOperation { id: "block_client".to_string(), label: "Block client".to_string(),
+                icon: "fa-ban".to_string(), params: vec![mac_field("Client MAC")], destructive: true },
+            ConnectorOperation { id: "unblock_client".to_string(), label: "Unblock client".to_string(),
+                icon: "fa-circle-check".to_string(), params: vec![mac_field("Client MAC")], destructive: false },
+            ConnectorOperation { id: "reconnect_client".to_string(), label: "Reconnect client".to_string(),
+                icon: "fa-rotate".to_string(), params: vec![mac_field("Client MAC")], destructive: false },
+            ConnectorOperation { id: "restart_device".to_string(), label: "Restart device".to_string(),
+                icon: "fa-power-off".to_string(), params: vec![mac_field("Device MAC")], destructive: true },
         ]
     }
 

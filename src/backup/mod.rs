@@ -2897,15 +2897,23 @@ fn store_s3(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resul
 /// Store backup to remote WolfStack node
 fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(), String> {
 
-    let import_url = format!("{}/api/backups/import?filename={}", 
-        remote_url.trim_end_matches('/'), filename);
+    let import_url = format!("{}/api/backups/import?filename={}",
+        remote_url.trim_end_matches('/'), urlencoding::encode(filename));
+    // The receiving node's /api/backups/import requires auth. Sending a backup
+    // to another node is an inter-node operation, so authenticate with the
+    // cluster secret (require_auth's X-WolfStack-Secret path) — without this the
+    // upload is rejected 401. delete_remote_backup uses the same header.
+    let secret = crate::auth::load_cluster_secret();
 
     let output = Command::new("curl")
         .args([
-            "-s", "-f",
+            // -s silences the progress meter; -S keeps error text on stderr so
+            // a 4xx/5xx isn't reported as a blank message.
+            "-s", "-S", "-f",
             "--max-time", "600",
             "-X", "POST",
             "-H", "Content-Type: application/octet-stream",
+            "-H", &format!("X-WolfStack-Secret: {}", secret),
             "--data-binary", &format!("@{}", local_path.display()),
             &import_url,
         ])
@@ -5924,11 +5932,88 @@ fn storage_label(storage: &BackupStorage) -> String {
     }
 }
 
-/// Delete a backup entry and its file
-/// Best-effort removal of a backup's on-disk file. Local/WolfDisk/NFS/SMB are
-/// handled; S3/Remote/PBS file deletion isn't implemented here (the caller
-/// still drops the index entry). Shared by single- and bulk-delete so the two
-/// can't drift.
+/// Delete a backup object from S3. Mirrors `store_s3`'s key layout
+/// (`wolfstack-backups/<filename>`) and its thread-with-own-runtime pattern:
+/// `rust-s3` is async, so we drive it on a throwaway runtime inside a spawned
+/// thread and join it, which works whether or not a tokio runtime is already
+/// active on the caller.
+fn delete_s3_object(storage: &BackupStorage, filename: &str) -> Result<(), String> {
+    let bucket_name = storage.bucket.clone();
+    let region_str = storage.region.clone();
+    let endpoint_str = storage.endpoint.clone();
+    let access_key = storage.access_key.clone();
+    let secret_key = storage.secret_key.clone();
+    // Same key the upload wrote (store_s3): wolfstack-backups/<filename>.
+    let key = format!("wolfstack-backups/{}", filename);
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("S3 delete runtime: {}", e))?;
+        rt.block_on(async {
+            let aws_region = if region_str.trim().is_empty() {
+                "us-east-1".to_string()
+            } else {
+                region_str.clone()
+            };
+            let region = s3::Region::Custom {
+                region: aws_region.clone(),
+                endpoint: if endpoint_str.is_empty() {
+                    format!("https://s3.{}.amazonaws.com", aws_region)
+                } else {
+                    endpoint_str
+                },
+            };
+            let credentials = s3::creds::Credentials::new(
+                Some(&access_key), Some(&secret_key), None, None, None,
+            ).map_err(|e| format!("S3 credentials error: {}", e))?;
+            let bucket = s3::Bucket::new(&bucket_name, region, credentials)
+                .map_err(|e| format!("S3 bucket error: {}", e))?;
+            bucket.delete_object(&key).await
+                .map_err(|e| format!("S3 delete error: {}", e))?;
+            Ok::<(), String>(())
+        })
+    }).join().map_err(|_| "S3 delete thread panicked".to_string())?
+}
+
+/// Best-effort removal of a backup replicated to another WolfStack node by
+/// `store_remote`. Calls the receiver's `DELETE /api/backups/import`, authed
+/// with the cluster secret — the same inter-node model `store_remote`'s upload
+/// uses. The remote copy is an independent, visible local backup on that node,
+/// so failure to reach an older or offline peer is not fatal; the caller logs
+/// and moves on.
+fn delete_remote_backup(remote_url: &str, filename: &str) -> Result<(), String> {
+    let url = format!("{}/api/backups/import?filename={}",
+        remote_url.trim_end_matches('/'), urlencoding::encode(filename));
+    let secret = crate::auth::load_cluster_secret();
+
+    let output = Command::new("curl")
+        .args([
+            // -S keeps curl's error text on stderr (see store_remote) so the
+            // caller's warn! logs a real message on failure, not a blank.
+            "-s", "-S", "-f",
+            "--max-time", "60",
+            "-X", "DELETE",
+            "-H", &format!("X-WolfStack-Secret: {}", secret),
+            &url,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to reach remote for delete: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!("Remote delete failed: {}",
+            String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+/// Best-effort removal of a backup's stored artifact from wherever it lives.
+/// Local/WolfDisk/NFS/SMB remove the file; S3 deletes the object; Remote calls
+/// the peer node's delete endpoint. PBS is deliberately left to its own
+/// GC/prune (see the `Pbs` arm) — matching `prune_schedule_backups`, the
+/// retention path, which this function is now the single implementation for.
+/// The match is exhaustive (no catch-all) so a new `StorageType` can't silently
+/// re-introduce the orphaning bug. Shared by single-, bulk-, and retention
+/// delete so the paths can't drift.
 fn delete_backup_file(entry: &BackupEntry) {
     match entry.storage.storage_type {
         StorageType::Local | StorageType::Wolfdisk => {
@@ -5949,7 +6034,22 @@ fn delete_backup_file(entry: &BackupEntry) {
                 if path.exists() { let _ = fs::remove_file(&path); }
             }
         },
-        _ => {} // S3, Remote, PBS deletion not implemented yet
+        StorageType::S3 => {
+            if let Err(e) = delete_s3_object(&entry.storage, &entry.filename) {
+                warn!("S3 backup object not deleted for {}: {}", entry.filename, e);
+            }
+        },
+        StorageType::Remote => {
+            if let Err(e) = delete_remote_backup(&entry.storage.remote_url, &entry.filename) {
+                warn!("Remote backup copy not deleted for {} on {}: {}",
+                    entry.filename, entry.storage.remote_url, e);
+            }
+        },
+        // PBS snapshots are content-addressed/deduplicated; PBS reclaims space
+        // via its own prune + garbage-collect schedule. WolfStack deliberately
+        // does NOT `snapshot forget` on delete — consistent with the retention
+        // path, and avoids forgetting the wrong snapshot for a shared backup-id.
+        StorageType::Pbs => {},
     }
 }
 
@@ -6284,25 +6384,10 @@ fn prune_schedule_backups(config: &mut BackupConfig, schedule_id: &str, retentio
     if schedule_entries.len() > retention {
         let to_remove: Vec<usize> = schedule_entries[retention..].to_vec();
         for &idx in to_remove.iter().rev() {
-            let entry = &config.entries[idx];
-            match entry.storage.storage_type {
-                StorageType::Local | StorageType::Wolfdisk => {
-                    let path = Path::new(&entry.storage.resolved_local_path()).join(&entry.filename);
-                    let _ = fs::remove_file(&path);
-                },
-                StorageType::Nfs => {
-                    if let Ok(dir) = ensure_nfs_mounted(&entry.storage) {
-                        let _ = fs::remove_file(Path::new(&dir).join(&entry.filename));
-                    }
-                },
-                StorageType::Smb => {
-                    if let Ok(dir) = ensure_smb_mounted(&entry.storage) {
-                        let _ = fs::remove_file(Path::new(&dir).join(&entry.filename));
-                    }
-                },
-                StorageType::Pbs => { /* PBS handles its own GC/pruning */ },
-                _ => {}
-            }
+            // Single source of truth for removing a backup's stored artifact
+            // (local file / S3 object / remote copy; PBS delegated to its GC).
+            // Keeps retention and explicit-delete from drifting.
+            delete_backup_file(&config.entries[idx]);
             config.entries.remove(idx);
         }
     }
@@ -6624,12 +6709,29 @@ pub fn check_schedules() {
 }
 
 /// Receive a backup file from a remote node — save to local storage
+/// Resolve a received-backup filename to a safe absolute path inside the
+/// received dir, rejecting anything that isn't a bare basename (no `/`, no
+/// `..`, not absolute). The filename arrives from an authenticated inter-node
+/// caller, but path-traversal defence is cheap and must not be assumed away.
+/// Shared by `import_backup` (write) and `delete_imported_backup` (remove) so
+/// the two agree on both the sanitisation and the directory.
+fn received_backup_path(filename: &str) -> Result<(String, std::path::PathBuf), String> {
+    let base = Path::new(filename).file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "invalid backup filename".to_string())?;
+    if base != filename {
+        return Err("backup filename must not contain path separators".to_string());
+    }
+    let dir = crate::paths::get().backup_received_dir;
+    let path = Path::new(&dir).join(base);
+    Ok((dir, path))
+}
+
 pub fn import_backup(data: &[u8], filename: &str) -> Result<String, String> {
-    let dest_dir = crate::paths::get().backup_received_dir;
+    let (dest_dir, dest) = received_backup_path(filename)?;
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("Failed to create import dir: {}", e))?;
 
-    let dest = Path::new(&dest_dir).join(filename);
     fs::write(&dest, data)
         .map_err(|e| format!("Failed to write imported backup: {}", e))?;
 
@@ -6660,6 +6762,42 @@ pub fn import_backup(data: &[u8], filename: &str) -> Result<String, String> {
     let _ = save_config(&config);
 
     Ok(format!("Backup imported: {}", filename))
+}
+
+/// Remove a backup previously received via `import_backup`: deletes the file
+/// from the received dir and drops the matching local index entry that import
+/// created. Counterpart to `import_backup`, called by the `DELETE
+/// /api/backups/import` handler when a source node deletes a `Remote` backup so
+/// the replicated copy here doesn't orphan. Idempotent: a missing file/entry is
+/// a successful no-op (the source may retry, or the operator may have already
+/// cleaned up on this node).
+pub fn delete_imported_backup(filename: &str) -> Result<String, String> {
+    let (dir, path) = received_backup_path(filename)?;
+    // received_backup_path guarantees filename is already a bare basename
+    // (it errored otherwise), so filename IS the stored entry's filename.
+    let base = filename.to_string();
+
+    // Drop the index entry and persist it BEFORE touching the filesystem, so a
+    // save_config failure can't leave a ghost entry pointing at an already-
+    // deleted file. Match on the received dir + filename + Local type so we
+    // never remove an unrelated local backup that happens to share a name.
+    let mut config = load_config();
+    let before = config.entries.len();
+    config.entries.retain(|e| !(
+        e.filename == base
+        && e.storage.storage_type == StorageType::Local
+        && e.storage.resolved_local_path() == dir
+    ));
+    if config.entries.len() != before {
+        save_config(&config)?;
+    }
+
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|e| format!("Failed to remove imported backup: {}", e))?;
+    }
+
+    Ok(format!("Imported backup removed: {}", base))
 }
 
 /// Guess the backup target type from filename prefix

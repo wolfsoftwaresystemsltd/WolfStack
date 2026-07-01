@@ -2089,7 +2089,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync' };
+    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -2155,6 +2155,8 @@ function selectView(page) {
         renderXoPools();
     } else if (page === 'tenants') {
         renderTenants();
+    } else if (page === 'integrations') {
+        renderIntegrations();
     } else if (page === 'fleet-security') {
         renderFleetSecurity();
     } else if (page === 'fleet-manage') {
@@ -3034,6 +3036,343 @@ async function poolWizardLoadTemplates() {
 //
 // The token is never returned by the backend — it stays server-side
 // after registration, obfuscated on disk.
+
+// ─── Integrations framework UI ───────────────────────────────────
+// Generic connector dashboard for the built-in integrations (UniFi /
+// NetBird / TrueNAS). Register instances, store their (server-side
+// encrypted) credentials, view health + capability panels, and run
+// connector operations. Everything is driven by the connector metadata
+// (config_schema / capabilities / operations) returned by the API, so
+// adding a connector server-side needs no JS change here.
+
+let intgConnectorsCache = null;
+
+async function intgConnectors() {
+    if (intgConnectorsCache) return intgConnectorsCache;
+    const r = await fetch(apiUrl('/api/integrations/connectors'));
+    if (!r.ok) throw new Error(await r.text());
+    intgConnectorsCache = await r.json();
+    return intgConnectorsCache;
+}
+
+function intgConnById(connectors, id) {
+    return (connectors || []).find(c => c.info && c.info.id === id) || null;
+}
+
+async function renderIntegrations() {
+    const host = document.getElementById('integrations-content');
+    if (!host) return;
+    host.innerHTML = `
+        <div class="card" style="margin-bottom:16px;">
+            <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                <div>
+                    <h2 style="margin:0;">Integrations</h2>
+                    <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;max-width:780px;line-height:1.5;">
+                        Connect external services — UniFi controllers, NetBird networks, TrueNAS storage — and drive
+                        them from WolfStack. Credentials are encrypted at rest with the cluster secret and never shown back.
+                    </p>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button class="btn btn-primary" onclick="intgAddModal()">+ Add integration</button>
+                </div>
+            </div>
+        </div>
+        <div id="integrations-list"><div style="color:var(--text-muted);padding:20px;text-align:center;">Loading…</div></div>
+    `;
+    await intgLoadList();
+}
+
+async function intgLoadList() {
+    const list = document.getElementById('integrations-list');
+    if (!list) return;
+    let items = [];
+    try {
+        const r = await fetch(apiUrl('/api/integrations'));
+        if (!r.ok) throw new Error(await r.text());
+        items = await r.json();
+    } catch (e) {
+        list.innerHTML = `<div class="card"><div class="card-body" style="color:var(--danger);">Couldn't load integrations: ${escapeHtml(String(e.message||e))}</div></div>`;
+        return;
+    }
+    let connectors = [];
+    try { connectors = await intgConnectors(); } catch (_) {}
+    if (!items.length) {
+        list.innerHTML = `<div class="card"><div class="card-body" style="text-align:center;padding:40px;color:var(--text-muted);">
+            <div style="font-size:15px;margin-bottom:6px;">No integrations configured yet.</div>
+            <div style="font-size:12px;">Click <strong>Add integration</strong> above to connect a service.</div>
+        </div></div>`;
+        return;
+    }
+    list.innerHTML = items.map(it => intgCardHtml(it, connectors)).join('');
+}
+
+function intgCardHtml(item, connectors) {
+    const inst = item.instance || item;
+    const health = item.health || null;
+    const conn = intgConnById(connectors, inst.connector_id);
+    const status = health ? health.status : 'unknown';
+    const colour = status === 'online' ? 'var(--success)'
+        : status === 'degraded' ? 'var(--warning,#f59e0b)'
+        : status === 'offline' ? 'var(--danger)' : 'var(--text-muted)';
+    const caps = (conn && conn.capabilities) || [];
+    const ops = (conn && conn.operations) || [];
+    const id = inst.id;
+    // ids/capability-ids/operation-ids are safe charset (uuid / snake_case),
+    // so string args in onclick are fine; only the free-text label is escaped.
+    const capBtns = caps.map(c =>
+        `<button class="btn btn-sm" onclick="intgShowDashboard('${escapeAttr(id)}','${escapeAttr(c.id)}')">${escapeHtml(c.label)}</button>`).join('');
+    const opBtns = ops.map(o =>
+        `<button class="btn btn-sm ${o.destructive?'btn-danger':''}" onclick="intgRunOpPrompt('${escapeAttr(id)}','${escapeAttr(inst.connector_id)}','${escapeAttr(o.id)}')">${escapeHtml(o.label)}</button>`).join('');
+    return `<div class="card" style="margin-bottom:14px;">
+        <div class="card-body">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+                <div style="min-width:0;flex:1;">
+                    <h3 style="margin:0 0 4px;">${escapeHtml(inst.name || inst.id)}
+                        <span style="font-size:11px;color:var(--text-muted);font-weight:normal;">${escapeHtml((conn&&conn.info&&conn.info.name)||inst.connector_id)}</span></h3>
+                    <div style="font-size:12px;color:var(--text-muted);word-break:break-all;">${escapeHtml(inst.base_url||'')}</div>
+                    <div style="margin-top:6px;font-size:12px;">
+                        <span style="color:${colour};">● ${escapeHtml(status)}</span>
+                        ${health && health.message ? `<span style="color:var(--text-muted);"> — ${escapeHtml(health.message)}</span>`:''}
+                    </div>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start;">
+                    <button class="btn btn-sm" onclick="intgSetCredModal('${escapeAttr(id)}','${escapeAttr(inst.connector_id)}')">Credentials</button>
+                    <button class="btn btn-sm btn-danger" onclick="intgDelete('${escapeAttr(id)}')">Delete</button>
+                </div>
+            </div>
+            ${caps.length ? `<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">${capBtns}</div>`:''}
+            ${ops.length ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">${opBtns}</div>`:''}
+            <div id="intg-panel-${escapeAttr(id)}" style="margin-top:10px;"></div>
+        </div>
+    </div>`;
+}
+
+// Build a form modal from a list of ConfigField specs. Returns a Promise that
+// resolves to a {name: value} object on submit, or null on cancel. Uses DOM +
+// listeners (not onclick strings) so values are captured safely.
+function intgFormModal(title, fields, submitLabel) {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;';
+        const modal = document.createElement('div');
+        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--border-color,#2d2f3a);border-radius:12px;padding:24px 28px;max-width:520px;width:90%;max-height:90vh;overflow-y:auto;color:var(--text-primary,#e4e4e7);';
+        const h = document.createElement('div');
+        h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;color:var(--accent-light,#60a5fa);';
+        h.textContent = title;
+        modal.appendChild(h);
+        const inputs = {};
+        fields.forEach(f => {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'margin-bottom:12px;';
+            const lbl = document.createElement('label');
+            lbl.style.cssText = 'display:block;font-size:12px;color:var(--text-secondary,#a1a1aa);margin-bottom:4px;';
+            lbl.textContent = f.label + (f.required ? ' *' : '');
+            wrap.appendChild(lbl);
+            const inputStyle = 'width:100%;box-sizing:border-box;padding:7px 9px;background:var(--bg-input,#14151a);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;color:var(--text-primary,#e4e4e7);font-size:13px;';
+            let input;
+            if (f.field_type === 'checkbox') {
+                input = document.createElement('input');
+                input.type = 'checkbox';
+                input.checked = f.default_value === 'true';
+            } else if (f.field_type === 'select') {
+                input = document.createElement('select');
+                input.style.cssText = inputStyle;
+                (f.options || []).forEach(o => {
+                    const opt = document.createElement('option');
+                    opt.value = o.value;
+                    opt.textContent = o.label;
+                    input.appendChild(opt);
+                });
+            } else {
+                input = document.createElement('input');
+                input.type = (f.field_type === 'password') ? 'password' : 'text';
+                if (f.placeholder) input.placeholder = f.placeholder;
+                if (f.default_value != null) input.value = f.default_value;
+                input.style.cssText = inputStyle;
+            }
+            inputs[f.name] = { input, spec: f };
+            wrap.appendChild(input);
+            modal.appendChild(wrap);
+        });
+        const err = document.createElement('div');
+        err.style.cssText = 'color:var(--danger);font-size:12px;margin-bottom:8px;min-height:0;';
+        modal.appendChild(err);
+        const btnWrap = document.createElement('div');
+        btnWrap.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+        const cancel = document.createElement('button');
+        cancel.className = 'btn btn-sm';
+        cancel.textContent = 'Cancel';
+        cancel.onclick = () => { overlay.remove(); resolve(null); };
+        const submit = document.createElement('button');
+        submit.className = 'btn btn-sm btn-primary';
+        submit.textContent = submitLabel || 'Save';
+        submit.onclick = () => {
+            const out = {};
+            for (const [name, { input, spec }] of Object.entries(inputs)) {
+                if (spec.field_type === 'checkbox') { out[name] = input.checked; continue; }
+                const v = input.value.trim();
+                if (spec.required && !v) { err.textContent = `${spec.label} is required.`; return; }
+                out[name] = v;
+            }
+            overlay.remove();
+            resolve(out);
+        };
+        btnWrap.appendChild(cancel);
+        btnWrap.appendChild(submit);
+        modal.appendChild(btnWrap);
+        overlay.onclick = e => { if (e.target === overlay) { overlay.remove(); resolve(null); } };
+        overlay.appendChild(modal);
+        (document.fullscreenElement || document.body).appendChild(overlay);
+    });
+}
+
+async function intgAddModal() {
+    let connectors;
+    try { connectors = await intgConnectors(); }
+    catch (e) { showToast('Could not load connectors: ' + (e.message||e), 'error'); return; }
+    if (!connectors.length) { showToast('No connectors available', 'error'); return; }
+    // Step 1: pick a connector from a dropdown of the available ones.
+    const pick = await intgFormModal('Add integration — pick a service', [{
+        name: 'connector_id', label: 'Connector', field_type: 'select', required: true,
+        options: connectors.map(c => ({ value: c.info.id, label: c.info.name })),
+    }], 'Next');
+    if (!pick) return;
+    const conn = intgConnById(connectors, (pick.connector_id||'').trim());
+    if (!conn) { showToast('Unknown connector', 'error'); return; }
+    // Step 2: config fields (base_url + connector config_schema) + name.
+    const info = conn.info;
+    const fields = [
+        { name: 'name', label: 'Display name', field_type: 'text', required: true, placeholder: info.name },
+        { name: 'base_url', label: 'Base URL', field_type: 'text', required: true, placeholder: 'https://host:port' },
+        // Connectors' config_schema also carries a base_url entry — drop it so it
+        // doesn't render a second "Base URL" field and clobber the one above.
+        ...(info.config_schema || []).filter(f => f.name !== 'base_url'),
+    ];
+    const cfg = await intgFormModal('Configure ' + info.name, fields, 'Create');
+    if (!cfg) return;
+    const auth_method = (info.auth_methods && info.auth_methods[0]) || 'bearer';
+    const instance = {
+        id: '', connector_id: info.id, name: cfg.name, base_url: cfg.base_url,
+        auth_method, config: {}, enabled: true, allowed_roles: [],
+    };
+    (info.config_schema || []).forEach(f => { if (cfg[f.name] != null) instance.config[f.name] = String(cfg[f.name]); });
+    let created;
+    try {
+        const r = await fetch(apiUrl('/api/integrations'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(instance),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        created = await r.json();
+    } catch (e) { showToast('Create failed: ' + (e.message||e), 'error'); return; }
+    showToast('Integration created — now set its credentials', 'success');
+    // intgSetCredModal reloads the list when it stores creds; only reload here
+    // if it didn't (operator cancelled), so the new instance still appears.
+    if (!(await intgSetCredModal(created.id, info.id))) {
+        await intgLoadList();
+    }
+}
+
+// Prompt for and store credentials for an instance, based on the connector's
+// first auth method. Returns true if credentials were stored (and the list
+// reloaded), false on cancel/error.
+async function intgSetCredModal(instanceId, connectorId) {
+    let connectors;
+    try { connectors = await intgConnectors(); } catch (e) { showToast(String(e.message||e), 'error'); return false; }
+    const conn = intgConnById(connectors, connectorId);
+    const method = (conn && conn.info && conn.info.auth_methods && conn.info.auth_methods[0]) || 'bearer';
+    const fieldsFor = {
+        bearer: [{ name: 'token', label: 'Access token / API key', field_type: 'password', required: true }],
+        api_key: [{ name: 'api_key', label: 'API key', field_type: 'password', required: true }],
+        cookie: [
+            { name: 'username', label: 'Username', field_type: 'text', required: true },
+            { name: 'password', label: 'Password', field_type: 'password', required: true },
+        ],
+        basic_auth: [
+            { name: 'username', label: 'Username', field_type: 'text', required: true },
+            { name: 'password', label: 'Password', field_type: 'password', required: true },
+        ],
+        oauth2: [{ name: 'token', label: 'OAuth2 access token', field_type: 'password', required: true }],
+    };
+    const fields = fieldsFor[method] || fieldsFor.bearer;
+    const cred = await intgFormModal('Credentials (' + method + ')', fields, 'Store');
+    if (!cred) return false;
+    try {
+        const r = await fetch(apiUrl('/api/integrations/' + encodeURIComponent(instanceId) + '/credentials'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auth_method: method, credential: cred }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        showToast('Credentials stored', 'success');
+        await intgLoadList();
+        return true;
+    } catch (e) { showToast('Storing credentials failed: ' + (e.message||e), 'error'); return false; }
+}
+
+async function intgDelete(instanceId) {
+    if (!(await showConfirm('Delete this integration and its stored credentials?', 'Delete integration'))) return;
+    try {
+        const r = await fetch(apiUrl('/api/integrations/' + encodeURIComponent(instanceId)), { method: 'DELETE' });
+        if (!r.ok) throw new Error(await r.text());
+        showToast('Integration deleted', 'success');
+        await intgLoadList();
+    } catch (e) { showToast('Delete failed: ' + (e.message||e), 'error'); }
+}
+
+async function intgShowDashboard(instanceId, capabilityId) {
+    const panel = document.getElementById('intg-panel-' + instanceId);
+    if (panel) panel.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px;">Loading ${escapeHtml(capabilityId)}…</div>`;
+    try {
+        const r = await fetch(apiUrl('/api/integrations/' + encodeURIComponent(instanceId) + '/dashboard/' + encodeURIComponent(capabilityId)));
+        const text = await r.text();
+        let j = null; try { j = JSON.parse(text); } catch (_) {}
+        if (!r.ok) throw new Error((j && j.error) || text || 'request failed');
+        if (panel) {
+            panel.innerHTML = `<div style="background:var(--bg-input,#14151a);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px;">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">${escapeHtml(capabilityId)}</div>
+                <pre style="margin:0;max-height:340px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(JSON.stringify(j && j.data, null, 2))}</pre>
+            </div>`;
+        }
+    } catch (e) {
+        if (panel) panel.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:8px;">${escapeHtml(String(e.message||e))}</div>`;
+    }
+}
+
+async function intgRunOpPrompt(instanceId, connectorId, operationId) {
+    let connectors;
+    try { connectors = await intgConnectors(); } catch (e) { showToast(String(e.message||e), 'error'); return; }
+    const conn = intgConnById(connectors, connectorId);
+    const op = conn && (conn.operations || []).find(o => o.id === operationId);
+    if (!op) { showToast('Unknown operation', 'error'); return; }
+    let params = {};
+    if (op.params && op.params.length) {
+        const res = await intgFormModal(op.label, op.params, 'Run');
+        if (!res) return;
+        params = res;
+    } else if (op.destructive) {
+        if (!(await showConfirm('Run "' + op.label + '"?', op.label))) return;
+    }
+    const panel = document.getElementById('intg-panel-' + instanceId);
+    if (panel) panel.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px;">Running ${escapeHtml(op.label)}…</div>`;
+    try {
+        const r = await fetch(apiUrl('/api/integrations/' + encodeURIComponent(instanceId) + '/action'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ operation: operationId, params }),
+        });
+        const text = await r.text();
+        let j = null; try { j = JSON.parse(text); } catch (_) {}
+        if (!r.ok) throw new Error((j && j.error) || text || 'request failed');
+        showToast(op.label + ' — done', 'success');
+        if (panel) {
+            panel.innerHTML = `<div style="background:var(--bg-input,#14151a);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px;">
+                <pre style="margin:0;max-height:340px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(JSON.stringify(j && j.data, null, 2))}</pre>
+            </div>`;
+        }
+    } catch (e) {
+        showToast(op.label + ' failed: ' + (e.message||e), 'error');
+        if (panel) panel.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:8px;">${escapeHtml(String(e.message||e))}</div>`;
+    }
+}
 
 async function renderXoPools() {
     const host = document.getElementById('xopools-content');
@@ -68381,6 +68720,10 @@ const APP_DRAWER_TILES = [
     {
         id: 'tenants', icon: '', name: 'Tenants',
         desc: 'Aggregator dashboard across every customer cluster you federate to.',
+    },
+    {
+        id: 'integrations', icon: '', name: 'Integrations',
+        desc: 'Connect UniFi, NetBird and TrueNAS — health, dashboards and actions from WolfStack.',
     },
     {
         id: 'dashboard-sync', icon: '', name: 'Dashboard Sync',

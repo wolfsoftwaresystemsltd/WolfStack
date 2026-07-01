@@ -1112,6 +1112,55 @@ pub async fn api_coordinated_rotate(
 
 // ─── At-rest credential migration (v1 XOR → v2 AES-256-GCM) ──────
 
+/// Log helper shared by the startup migration sweep — only emits when something
+/// actually changed or errored, so a fully-migrated install stays quiet.
+fn log_startup_migrate(store: &str, result: Result<(usize, usize, usize), String>) {
+    match result {
+        Ok((migrated, _already, errored)) => {
+            if errored > 0 {
+                // An entry that failed to migrate stays XOR-obfuscated and the
+                // High "legacy XOR" finding won't clear for it — surface at warn
+                // so it isn't buried in info. Retry via the manual migrate button.
+                tracing::warn!(target: "secret_rotation",
+                    "startup at-rest migrate {}: migrated={} errored={} — the errored \
+                     entr{} still uses legacy obfuscation; retry via 'Migrate at-rest \
+                     credentials to AES'",
+                    store, migrated, errored, if errored == 1 { "y" } else { "ies" });
+            } else if migrated > 0 {
+                tracing::info!(target: "secret_rotation",
+                    "startup at-rest migrate {}: migrated={}", store, migrated);
+            }
+        }
+        Err(e) => tracing::warn!(target: "secret_rotation",
+            "startup at-rest migrate {} failed: {}", store, e),
+    }
+}
+
+/// Migrate every at-rest credential store from legacy v1 (XOR, static baked-in
+/// key) to v2 (AES-256-GCM keyed off the per-install cluster secret) at process
+/// startup. This is what actually closes the High "legacy XOR" audit findings on
+/// upgraded installs — the crypto and the per-store `migrate_to_v2` already
+/// existed, but nothing ran them, so credentials stayed XOR-obfuscated until an
+/// operator happened to press the manual migrate button. Running it at boot
+/// (like the other legacy migrations in main.rs) fixes it for EVERYONE.
+///
+/// Safe on every boot: each `migrate_to_v2` is idempotent (skips entries already
+/// v2), writes a one-time `<path>.bak.<ts>` before rewriting a file that still
+/// holds v1 entries, and only saves when it migrated something. Both v1 and v2
+/// decrypt forever, so a partial failure never breaks credential lookups. A
+/// no-op on fresh installs (no v1 entries) and on already-migrated installs.
+///
+/// MUST be called after `at_rest_crypto::init` — otherwise `encrypt` falls back
+/// to v1 and nothing is upgraded.
+pub fn run_startup_at_rest_migration() {
+    log_startup_migrate("dns-providers",
+        crate::dns_providers::DnsProviderStore::load().migrate_to_v2());
+    log_startup_migrate("cloud-providers",
+        crate::edge::CloudProviderStore::load().migrate_to_v2());
+    log_startup_migrate("xo-pools",
+        crate::xo::XoStore::load().migrate_to_v2());
+}
+
 /// POST /api/security/migrate-at-rest-credentials — operator-triggered
 /// one-shot that re-encrypts every v1-XOR-format stored credential
 /// (DNS providers, cloud providers, XO tokens) to v2 AES-256-GCM
@@ -1124,9 +1173,13 @@ pub async fn api_coordinated_rotate(
 /// the system fully functional — operators can re-run the migration
 /// after fixing whatever caused the failure.
 ///
-/// Auth: operator session ONLY (not cluster-secret) — re-encrypting
-/// at-rest credentials is an explicit operator decision, not a
-/// peer-driven action.
+/// Startup auto-migration (`run_startup_at_rest_migration`) now handles the
+/// common case on every boot, so this endpoint is primarily the manual RETRY
+/// path for entries that failed to migrate automatically (and an on-demand
+/// re-run). Auth: operator session ONLY (not cluster-secret) — a peer node must
+/// never be able to rewrite this node's local credential files; that rationale
+/// still holds for the API even though the local boot-time migration does not
+/// go through it.
 pub async fn api_migrate_at_rest_credentials(
     req: HttpRequest,
     state: web::Data<crate::api::AppState>,

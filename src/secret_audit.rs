@@ -134,17 +134,15 @@ fn check_xor_dns_creds(out: &mut Vec<Finding>) {
                  WolfStack binary. Anyone who reads the source can \
                  reverse the obfuscation — the only effective defence \
                  today is filesystem permissions on /etc/wolfstack/.".into(),
-        remediation: "Mitigation today: (1) confirm /etc/wolfstack/ is \
-                      mode 0700 owned by root; (2) rotate the DNS \
-                      provider tokens at the provider's console and \
-                      paste the new values into Settings → Certificates \
-                      → DNS Providers — the new tokens are written with \
-                      the same obfuscation, but rotating limits how \
-                      long any previously-exfiltrated values stay valid. \
-                      To migrate stored entries to AES-256-GCM keyed off this \
-                      install's cluster secret, click 'Migrate at-rest \
-                      credentials to AES' on this page — backs up every file \
-                      first; safe to re-run.".into(),
+        remediation: "This install auto-migrates stored credentials to \
+                      AES-256-GCM (keyed off the per-install cluster secret) on \
+                      startup, so this finding clears after the next restart. If \
+                      it persists, a specific entry failed to migrate — check the \
+                      logs and rotate the DNS provider token at the provider's \
+                      console, pasting the new value into Settings → Certificates \
+                      → DNS Providers, or click 'Migrate at-rest credentials to \
+                      AES' on this page (backs up every file first; safe to \
+                      re-run). Keep /etc/wolfstack/ mode 0700 owned by root.".into(),
     });
 }
 
@@ -162,11 +160,14 @@ fn check_xor_cloud_creds(out: &mut Vec<Finding>) {
                  with a static key baked into the WolfStack binary. \
                  Same exposure pattern as the DNS credentials finding."
             .into(),
-        remediation: "Mitigation today: (1) confirm /etc/wolfstack/ is \
-                      mode 0700 owned by root; (2) rotate the cloud \
-                      provider tokens at the provider's console and \
-                      re-paste them in Settings → Edge → Cloud Providers. \
-                      A migration to AES-256-GCM is a planned follow-up.".into(),
+        remediation: "This install auto-migrates stored credentials to \
+                      AES-256-GCM (keyed off the per-install cluster secret) on \
+                      startup, so this finding clears after the next restart. If \
+                      it persists, a specific entry failed to migrate — check the \
+                      logs and re-paste it in Settings → Edge → Cloud Providers, \
+                      or click 'Migrate at-rest credentials to AES' on this page \
+                      (backs up every file first; safe to re-run). Either way, \
+                      keep /etc/wolfstack/ mode 0700 owned by root.".into(),
     });
 }
 
@@ -244,12 +245,16 @@ fn check_xor_xo_tokens(out: &mut Vec<Finding>) {
                  XOR-obfuscated with a static key baked into the \
                  WolfStack binary. Same exposure pattern as DNS / cloud \
                  credentials.".into(),
-        remediation: "Mitigation today: (1) confirm /etc/wolfstack/ is \
-                      mode 0700 owned by root; (2) revoke the affected \
-                      XO bearer tokens at Xen Orchestra's Settings → \
-                      Tokens and mint fresh ones to paste into Settings \
-                      → XCP-ng. A migration to AES-256-GCM is a planned \
-                      follow-up.".into(),
+        remediation: "This install auto-migrates stored tokens to AES-256-GCM \
+                      (keyed off the per-install cluster secret) on startup, so \
+                      this finding clears after the next restart. If it persists, \
+                      a specific token failed to migrate — check the logs, or \
+                      revoke the affected XO bearer tokens at Xen Orchestra's \
+                      Settings → Tokens and mint fresh ones to paste into \
+                      Settings → XCP-ng. You can also click 'Migrate at-rest \
+                      credentials to AES' on this page (backs up every file \
+                      first; safe to re-run). Keep /etc/wolfstack/ mode 0700 \
+                      owned by root.".into(),
     });
 }
 

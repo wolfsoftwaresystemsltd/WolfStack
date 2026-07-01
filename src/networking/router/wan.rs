@@ -798,16 +798,29 @@ pub fn apply(conn: &WanConnection) -> Result<(), String> {
     match &conn.mode {
         WanMode::Pppoe(p) => pppoe_apply(conn, p),
         WanMode::Dhcp => {
-            // For now we don't manage DHCP via WolfRouter — the host's
-            // existing DHCP client already handles it. Future: write a
-            // dispatcher hook.
-            warn!("WAN DHCP for {} is a passthrough — managed by the host's DHCP client", conn.name);
+            // WolfRouter defers DHCP to the host's client when one owns the NIC
+            // — the safe default that never fights NetworkManager/networkd. But
+            // on a headless router box where nothing manages the WAN NIC, the
+            // link comes up (above) with no lease and all WAN traffic
+            // black-holes. So if the interface has no IPv4 lease, request one
+            // ourselves with the same one-shot dhclient the operator "fix" runs.
+            // It only fires while there's genuinely no address, so it can't
+            // stomp a working host-managed link.
+            if interface_has_ipv4(&conn.interface) {
+                info!("WolfRouter: WAN {} already has a DHCP lease — leaving the host's client in charge", conn.interface);
+            } else {
+                match request_dhcp_lease(&conn.interface) {
+                    Ok(()) => info!("WolfRouter: requested a DHCP lease on WAN {} (no existing lease)", conn.interface),
+                    Err(e) => warn!("WolfRouter: DHCP lease request on WAN {} failed ({}) — falling back to the host's DHCP client", conn.interface, e),
+                }
+            }
             // NAT must be installed by WolfRouter even for passthrough
             // modes — without MASQUERADE on this interface, LAN clients
             // routed through it leave with private source IPs and the
             // upstream drops them. ip_forward is enabled globally
             // elsewhere (networking::mod.rs); this is the companion
-            // piece that actually makes routing reach the internet.
+            // piece that actually makes routing reach the internet. The rule
+            // is interface-based, so a DHCP lease IP change never invalidates it.
             nat_ensure(&conn.interface)?;
             Ok(())
         }
@@ -817,6 +830,48 @@ pub fn apply(conn: &WanConnection) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Does the WAN interface currently hold an IPv4 lease/address? Used to decide
+/// whether WolfRouter should request one itself (headless box) or defer to the
+/// host's DHCP client (which already gave it an address).
+fn interface_has_ipv4(iface: &str) -> bool {
+    // Require a GLOBAL-scope address — an APIPA/link-local (169.254.x.x, `scope
+    // link`), which avahi-autoipd or a prior failed DHCP attempt can leave
+    // behind, is NOT a real lease and must not suppress our DHCP request.
+    Command::new("ip")
+        .args(["-4", "addr", "show", "dev", iface])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.contains("inet ") && l.contains("scope global")))
+        .unwrap_or(false)
+}
+
+/// Request a DHCP lease on `iface` with a one-shot, non-blocking dhclient —
+/// the same client the operator "fix/dhclient" runs, kept consistent with the
+/// rest of the codebase's DHCP handling. `-1` gives up rather than retrying
+/// forever if the upstream isn't leasing; `-nw` backgrounds acquisition so this
+/// call returns promptly. dhclient's own per-iface pidfile makes a redundant
+/// invocation (e.g. two quick applies) harmless.
+fn request_dhcp_lease(iface: &str) -> Result<(), String> {
+    // Guard the iface name before it reaches dhclient's argv — a leading '-'
+    // would be parsed as a flag. Matches the operator fix endpoint's validation.
+    if iface.is_empty()
+        || iface.starts_with('-')
+        || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(format!("refusing to run dhclient on suspicious interface name '{}'", iface));
+    }
+    // `-v` matches the operator fix so failure stderr is diagnostic.
+    let out = Command::new("dhclient")
+        .args(["-v", "-1", "-nw", iface])
+        .output()
+        .map_err(|e| format!("spawn dhclient: {} (is dhclient installed?)", e))?;
+    if !out.status.success() {
+        return Err(format!("dhclient: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

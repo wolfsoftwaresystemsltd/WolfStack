@@ -6598,6 +6598,7 @@ pub fn lxc_destroy(container: &str) -> Result<String, String> {
     };
     if result.is_ok() {
         invalidate_count_caches();
+        release_lxc_vlan_allocations(container);
         return result;
     }
     // Fallback for native LXC: if lxc-destroy still couldn't load/destroy the
@@ -6616,11 +6617,41 @@ pub fn lxc_destroy(container: &str) -> Result<String, String> {
             && std::fs::remove_dir_all(&dir).is_ok()
         {
             invalidate_count_caches();
+            release_lxc_vlan_allocations(container);
             return Ok(format!(
                 "Removed '{}' by deleting its directory — lxc-destroy couldn't load its config.",
                 container
             ));
         }
+    }
+    result
+}
+
+/// Release any vSwitch/VLAN IP allocation an LXC container held once it has been
+/// permanently destroyed. The `container` identifier is the VMID on Proxmox and
+/// the container name on native LXC — the same value used at attach time — so we
+/// release both LXC target kinds; the one that doesn't match is a no-op. Called
+/// only from `lxc_destroy` (all of whose callers are permanent teardowns — LXC
+/// has no image-update recreate that would need the allocation preserved).
+/// `TargetKind::Manual` reservations are deliberately not touched here — those
+/// are operator-managed and not tied to a container's lifecycle.
+fn release_lxc_vlan_allocations(container: &str) {
+    use crate::networking::vlan::{release_target_allocations, TargetKind};
+    release_target_allocations(TargetKind::LxcNative, container);
+    release_target_allocations(TargetKind::LxcProxmox, container);
+}
+
+/// Permanently remove a Docker container AND release any vSwitch/VLAN IP
+/// allocation it held. This is deliberately SEPARATE from `docker_remove`: the
+/// image-update recreate path (`image_watcher`) uses `docker_remove` to drop and
+/// re-create the same container under the same name and MUST keep its allocation.
+/// Use this wrapper only at operator/orchestration delete boundaries where the
+/// container is going away for good.
+pub fn docker_remove_permanent(container: &str) -> Result<String, String> {
+    let result = docker_remove(container);
+    if result.is_ok() {
+        crate::networking::vlan::release_target_allocations(
+            crate::networking::vlan::TargetKind::Docker, container);
     }
     result
 }

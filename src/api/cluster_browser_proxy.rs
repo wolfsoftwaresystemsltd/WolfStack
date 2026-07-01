@@ -82,7 +82,7 @@ async fn node_proxy_request(
     node_id: &str,
     session_id: &str,
     tail: String,
-    mut payload: web::Payload,
+    payload: web::Payload,
 ) -> Result<HttpResponse, Error> {
     use futures::StreamExt as _;
 
@@ -95,13 +95,16 @@ async fn node_proxy_request(
         }
     };
 
-    // Buffer the full request body
     let method = req.method().clone();
-    let mut body_bytes = web::BytesMut::new();
-    while let Some(chunk) = payload.next().await {
-        let chunk = chunk.map_err(actix_web::error::ErrorBadRequest)?;
-        body_bytes.extend_from_slice(&chunk);
-    }
+    // Only methods that carry a request body get one attached; a GET/HEAD/DELETE
+    // asset fetch stays body-less (attaching an empty wrap_stream would force
+    // needless chunked encoding upstream).
+    let has_body = matches!(
+        method,
+        actix_web::http::Method::POST
+            | actix_web::http::Method::PUT
+            | actix_web::http::Method::PATCH
+    );
 
     // Build target URL on remote node (same endpoint this handler provides)
     let query_string = req.query_string();
@@ -134,36 +137,45 @@ async fn node_proxy_request(
     // Add inter-node auth
     builder = builder.header("X-WolfStack-Secret", state.cluster_secret.clone());
 
-    // Add body if present
-    if !body_bytes.is_empty() {
-        builder = builder.body(body_bytes.freeze());
+    // Stream the request body through to the remote node rather than buffering
+    // it (unbounded buffering would let an authenticated client OOM the daemon).
+    // Same !Send payload → Send channel bridge as proxy_http.
+    if has_body {
+        let (mut tx, rx) = futures::channel::mpsc::channel::<Result<web::Bytes, std::io::Error>>(16);
+        actix_web::rt::spawn(async move {
+            let mut payload = payload;
+            while let Some(chunk) = payload.next().await {
+                let mapped = chunk.map_err(|e| std::io::Error::other(e.to_string()));
+                let had_err = mapped.is_err();
+                if tx.send(mapped).await.is_err() {
+                    break;
+                }
+                if had_err {
+                    break;
+                }
+            }
+        });
+        builder = builder.body(reqwest::Body::wrap_stream(rx));
     }
 
-    // Execute the request
+    // Execute the request, streaming the response back rather than buffering it
+    // (Selkies asset bundles can be large).
     match builder.send().await {
         Ok(upstream) => {
-            let status = upstream.status().as_u16();
+            let status = actix_web::http::StatusCode::from_u16(upstream.status().as_u16())
+                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY);
             let resp_ct = upstream
                 .headers()
                 .get("content-type")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("application/octet-stream")
                 .to_string();
-
-            match upstream.bytes().await {
-                Ok(bytes) => {
-                    Ok(HttpResponse::build(
-                        actix_web::http::StatusCode::from_u16(status)
-                            .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY),
-                    )
-                    .content_type(resp_ct)
-                    .body(bytes.to_vec()))
-                }
-                Err(e) => {
-                    warn!("Failed to read remote proxy response: {}", e);
-                    Ok(HttpResponse::BadGateway().body(format!("Failed to read response: {}", e)))
-                }
-            }
+            let stream = upstream
+                .bytes_stream()
+                .map(|r| r.map_err(|e| actix_web::error::ErrorInternalServerError(e.to_string())));
+            Ok(HttpResponse::build(status)
+                .content_type(resp_ct)
+                .streaming(stream))
         }
         Err(e) => {
             warn!("cluster_browser remote proxy error to {}: {}", target, e);
@@ -225,7 +237,7 @@ pub async fn cluster_browser_proxy(
 /// buffering.
 async fn proxy_http(
     req: HttpRequest,
-    mut payload: web::Payload,
+    payload: web::Payload,
     host: &str,
     port: u16,
     tail: String,
@@ -241,16 +253,36 @@ async fn proxy_http(
     let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
         .map_err(|e| actix_web::error::ErrorBadRequest(format!("bad method: {}", e)))?;
 
-    // Read the full client body. Selkies POSTs are tiny config/input
-    // blobs; streaming the request body through reqwest would need a
-    // channel bridge. For now buffer — responses stream fine.
-    let mut body_bytes = web::BytesMut::new();
-    while let Some(chunk) = payload.next().await {
-        let chunk = chunk.map_err(actix_web::error::ErrorBadRequest)?;
-        body_bytes.extend_from_slice(&chunk);
-    }
-
-    let mut builder = BROWSER_PROXY_CLIENT.request(method, &target).body(body_bytes.freeze());
+    // Stream the client's request body straight through to the upstream
+    // instead of buffering it. Selkies POSTs are tiny, but reading an
+    // unbounded body into a BytesMut would let a misbehaving client exhaust
+    // the daemon's memory; streaming keeps memory flat regardless of body size
+    // and mirrors the streamed response below.
+    //
+    // actix's `web::Payload` is `!Send` (each worker is single-threaded), but
+    // `reqwest::Body::wrap_stream` needs a `Send` stream. Bridge the two by
+    // pumping chunks through an mpsc channel on the current-thread arbiter:
+    // the payload is driven where it lives, and reqwest consumes the `Send`
+    // receiver. reqwest reuses the same `bytes::Bytes` chunks, so no copy.
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<web::Bytes, std::io::Error>>(16);
+    actix_web::rt::spawn(async move {
+        let mut payload = payload;
+        while let Some(chunk) = payload.next().await {
+            let mapped = chunk.map_err(|e| std::io::Error::other(e.to_string()));
+            let had_err = mapped.is_err();
+            // Receiver dropped (upstream stopped reading) — stop pumping.
+            if tx.send(mapped).await.is_err() {
+                break;
+            }
+            // Propagated one error downstream; the stream is now unusable.
+            if had_err {
+                break;
+            }
+        }
+    });
+    let mut builder = BROWSER_PROXY_CLIENT
+        .request(method, &target)
+        .body(reqwest::Body::wrap_stream(rx));
     for (name, val) in req.headers() {
         if is_hop_by_hop(name.as_str()) {
             continue;
