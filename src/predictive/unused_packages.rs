@@ -747,6 +747,7 @@ mod tests {
             host_pm: Some(PackageManager::Apt),
             host_updates: Vec::new(),
             lxc_results: Vec::new(),
+            ..Default::default()
         };
         let store = crate::predictive::proposal::ProposalStore::default();
         let acks = AckStore::default();
@@ -822,6 +823,7 @@ mod tests {
                 PendingUpdate { package: "python3".into(), current_version: None, new_version: None, advisory: None },
             ],
             lxc_results: Vec::new(),
+            ..Default::default()
         };
         let props = analyze(&ctx, &facts, &vuln, &osv, &AckStore::default(),
             &crate::predictive::proposal::ProposalStore::default());
@@ -873,7 +875,7 @@ mod tests {
             kev_cve_count: 0,
             suppressed_no_fix_by_target: std::collections::HashMap::new(),
         };
-        let vuln = VulnerabilityFacts { host_pm: Some(PackageManager::Apt), host_updates: Vec::new(), lxc_results: Vec::new() };
+        let vuln = VulnerabilityFacts { host_pm: Some(PackageManager::Apt), host_updates: Vec::new(), lxc_results: Vec::new(), ..Default::default() };
         let props = analyze(&ctx, &facts, &vuln, &osv, &AckStore::default(),
             &crate::predictive::proposal::ProposalStore::default());
         assert!(props[0].title.contains("1 open CVE"),
@@ -895,7 +897,7 @@ mod tests {
                 open_cves: 0,
             }).collect(),
         };
-        let vuln = VulnerabilityFacts { host_pm: Some(PackageManager::Apt), host_updates: Vec::new(), lxc_results: Vec::new() };
+        let vuln = VulnerabilityFacts { host_pm: Some(PackageManager::Apt), host_updates: Vec::new(), lxc_results: Vec::new(), ..Default::default() };
         let osv = OsvFacts::default();
         let props = analyze(&ctx, &facts, &vuln, &osv, &AckStore::default(),
             &crate::predictive::proposal::ProposalStore::default());
@@ -913,7 +915,7 @@ mod tests {
             host_pm: PackageManager::Apt,
             host_removable: Vec::new(),
         };
-        let vuln = VulnerabilityFacts { host_pm: Some(PackageManager::Apt), host_updates: Vec::new(), lxc_results: Vec::new() };
+        let vuln = VulnerabilityFacts { host_pm: Some(PackageManager::Apt), host_updates: Vec::new(), lxc_results: Vec::new(), ..Default::default() };
         let osv = OsvFacts::default();
         let props = analyze(&ctx, &facts, &vuln, &osv, &AckStore::default(),
             &crate::predictive::proposal::ProposalStore::default());
