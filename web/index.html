@@ -1804,6 +1804,104 @@
         </div>
 
         <!-- ═══ WolfRun Orchestration Page ═══ -->
+        <!-- ═══ WolfFunctions (cluster-scoped page) ═══ -->
+        <div id="page-wolffunctions" class="page-view" style="display:none;">
+            <!-- Header -->
+            <div class="card"
+                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(168,85,247,0.12), rgba(59, 130, 246,0.08)); border-color:rgba(168,85,247,0.25);">
+                <div class="card-body"
+                    style="display:flex; align-items:center; justify-content:space-between; padding:28px 32px; flex-wrap:wrap; gap:16px;">
+                    <div style="display:flex; align-items:center; gap:20px;">
+                        <div
+                            style="width:64px; height:64px; background:linear-gradient(135deg,#a855f7,#3b82f6); border-radius:16px; display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 4px 20px rgba(168,85,247,0.3);">
+                            <span class="ws-icon-clean-wrap" data-icon="lightning"></span></div>
+                        <div>
+                            <h2 style="font-size:24px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
+                                WolfFunctions <span id="wolffn-cluster-label"
+                                    style="font-size:14px; font-weight:400; color:var(--text-secondary);"></span></h2>
+                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">Serverless functions —
+                                write a handler, and warm sandboxed copies run across your cluster. Node loss changes nothing.</p>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <button class="btn btn-primary" onclick="openWolfFunctionEditor(null)" style="font-weight:600;">
+                            <span class="ws-icon-clean-wrap" data-icon="add"></span> New Function
+                        </button>
+                        <button class="btn" onclick="loadWolfFunctions()"
+                            style="background:var(--bg-secondary); border:1px solid var(--border);">
+                            <span class="ws-icon-clean-wrap" data-icon="refresh"></span> Refresh
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Summary Stats -->
+            <div class="stats-grid" style="margin-bottom:20px;">
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Functions</span>
+                        <div class="stat-icon" style="background:rgba(168,85,247,0.15); color:#a855f7;"><span class="ws-icon-clean-wrap" data-icon="lightning"></span></div>
+                    </div>
+                    <div class="stat-value" id="wolffn-stat-functions">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Warm Instances</span>
+                        <div class="stat-icon" style="background:rgba(16,185,129,0.15); color:#10b981;"><span class="ws-icon-clean-wrap" data-icon="check-circle"></span></div>
+                    </div>
+                    <div class="stat-value" id="wolffn-stat-warm" style="color:#10b981;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Capable Nodes</span>
+                        <div class="stat-icon" style="background:rgba(59,130,246,0.15); color:#3b82f6;"><span class="ws-icon-clean-wrap" data-icon="computer"></span></div>
+                    </div>
+                    <div class="stat-value" id="wolffn-stat-nodes">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-header">
+                        <span class="stat-label">Invocations (recent)</span>
+                        <div class="stat-icon" style="background:rgba(234,179,8,0.15); color:#eab308;"><span class="ws-icon-clean-wrap" data-icon="clipboard"></span></div>
+                    </div>
+                    <div class="stat-value" id="wolffn-stat-invocations">0</div>
+                </div>
+            </div>
+
+            <!-- Node runtime health strip -->
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header"><h3>Node Runtimes</h3></div>
+                <div class="card-body" id="wolffn-nodes-strip" style="display:flex; gap:10px; flex-wrap:wrap;"></div>
+            </div>
+
+            <!-- Functions Table -->
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header">
+                    <h3>Functions</h3>
+                </div>
+                <div class="card-body" style="overflow-x:auto;">
+                    <table class="data-table" id="wolffn-table">
+                        <thead>
+                            <tr>
+                                <th>Function</th>
+                                <th>Runtime</th>
+                                <th>Replicas</th>
+                                <th>Triggers</th>
+                                <th>Status</th>
+                                <th style="text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="wolffn-tbody"></tbody>
+                    </table>
+                    <div id="wolffn-empty"
+                        style="display:none; padding:48px; text-align:center; color:var(--text-muted);">
+                        <div style="font-size:48px; margin-bottom:12px;"><span class="ws-icon-clean-wrap" data-icon="lightning"></span></div>
+                        <p style="font-size:14px; margin:0 0 6px;">No functions yet. Click <strong>New Function</strong> —
+                            write the handler yourself or let AI draft it from a description.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div id="page-wolfrun" class="page-view" style="display:none;">
             <!-- Header -->
             <div class="card"

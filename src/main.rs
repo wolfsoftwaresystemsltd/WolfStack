@@ -54,6 +54,7 @@ mod telegram_bot;
 mod whatsapp_bot;
 mod mcp;
 mod wolfnote;
+mod wolffunctions;
 mod wolfusb;
 mod dashboard_sync;
 mod paths;
@@ -692,6 +693,11 @@ async fn main() -> std::io::Result<()> {
         // Initialize WolfRun orchestration state
         let wolfrun_state = Arc::new(wolfrun::WolfRunState::new());
         let wolfflow_state = Arc::new(wolfflow::WolfFlowState::new());
+        let wolffunctions_state = Arc::new(wolffunctions::WolfFunctionsState::new());
+        // Event-trigger hook: lets alerting/backup fire wolffunction
+        // events without threading state through their call sites.
+        wolffunctions::init_event_hook(
+            wolffunctions_state.clone(), cluster.clone(), cluster_secret.clone());
 
         // Initialize Status Page monitoring state
         let statuspage_state = Arc::new(statuspage::StatusPageState::new());
@@ -732,6 +738,7 @@ async fn main() -> std::io::Result<()> {
             ai_agent: ai_agent.clone(),
             cached_status: cached_status.clone(),
             wolfrun: wolfrun_state.clone(),
+            wolffunctions: wolffunctions_state.clone(),
             wolfflow: wolfflow_state.clone(),
             statuspage: statuspage_state.clone(),
             tls_enabled,
@@ -3571,6 +3578,78 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     wolfrun::manage_standby(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
                     // Broadcast updated instance status to cluster peers
                     wolfrun::broadcast_to_cluster(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
+                }
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+        });
+
+        // Background: WolfFunctions reconciliation loop (every 15s).
+        // EVERY node runs local_reconcile (each node owns its own warm
+        // sandboxes); only the leader computes placements, fires schedules,
+        // detects node online/offline transitions, and broadcasts config.
+        let wolffn_cluster = cluster.clone();
+        let wolffn_secret = cluster_secret.clone();
+        let wolffn_bg = wolffunctions_state.clone();
+        tokio::spawn(async move {
+            // Reap sandboxes orphaned by a PREVIOUS run FIRST — before the
+            // API can accept an invoke that would create a live sandbox this
+            // reap must not touch (it skips the live registry, but running
+            // early avoids the race entirely). No pre-sleep here.
+            wolffunctions::runtime::cleanup_orphans(&wolffn_bg).await;
+            // Adopt config from peers if this node has none (fresh join).
+            wolffunctions::pull_from_peers(&wolffn_bg, &wolffn_cluster, &wolffn_secret).await;
+            // Pre-warm the runtime (single-flighted runsc download) so the
+            // first invocation on a fresh node doesn't pay the ~20s fetch
+            // inside its own timeout budget.
+            wolffunctions::runtime::probe_eligibility(&wolffn_bg).await;
+            info!("WolfFunctions reconciliation loop started");
+            let mut prev_online: Option<std::collections::HashSet<String>> = None;
+            let mut last_broadcast = std::time::Instant::now();
+            loop {
+                let mut broadcast_now = false;
+                if wolfrun::is_leader(&wolffn_cluster) {
+                    if wolffunctions::runtime::leader_place(&wolffn_bg, &wolffn_cluster) {
+                        broadcast_now = true;
+                    }
+                    if wolffunctions::runtime::schedule_tick(
+                        &wolffn_bg, &wolffn_cluster, &wolffn_secret).await
+                    {
+                        broadcast_now = true;
+                    }
+                    // Node online/offline transition events for subscribed
+                    // functions. First tick only seeds the baseline.
+                    let self_cluster = wolffunctions::self_cluster_name(&wolffn_cluster);
+                    let current: std::collections::HashSet<String> = wolffn_cluster
+                        .get_all_nodes().iter()
+                        .filter(|n| n.online
+                            && n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster)
+                        .map(|n| n.id.clone())
+                        .collect();
+                    if let Some(prev) = &prev_online {
+                        for gone in prev.difference(&current) {
+                            wolffunctions::fire_event(
+                                &wolffn_bg, &wolffn_cluster, &wolffn_secret,
+                                wolffunctions::TriggerEvent::NodeOffline,
+                                serde_json::json!({ "node_id": gone }), false).await;
+                        }
+                        for back in current.difference(prev) {
+                            wolffunctions::fire_event(
+                                &wolffn_bg, &wolffn_cluster, &wolffn_secret,
+                                wolffunctions::TriggerEvent::NodeOnline,
+                                serde_json::json!({ "node_id": back }), false).await;
+                        }
+                    }
+                    prev_online = Some(current);
+                }
+                wolffunctions::runtime::local_reconcile(&wolffn_bg, &wolffn_cluster).await;
+                // Config broadcast: immediately after placement/schedule
+                // changes, and at least every 60s (carries last_fired so a
+                // leader change never double-fires schedules).
+                let has_functions = !wolffn_bg.config.read().unwrap().functions.is_empty();
+                if has_functions && (broadcast_now || last_broadcast.elapsed().as_secs() >= 60) {
+                    wolffunctions::broadcast_to_cluster(
+                        &wolffn_bg, &wolffn_cluster, &wolffn_secret).await;
+                    last_broadcast = std::time::Instant::now();
                 }
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }

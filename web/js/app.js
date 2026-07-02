@@ -3975,6 +3975,9 @@ function buildServerTree(nodes) {
                     <span class="icon ws-icon-clean-wrap" data-icon="rocket" style="font-size:15px;"></span> <span style="font-weight:600;">WolfRun</span>
                     <span class="wolfrun-svc-count" id="wolfrun-count-${clusterId}" style="margin-left:auto; font-size:10px; padding:1px 6px; background:var(--primary-color,#3b82f6); color:#fff; border-radius:10px; display:none;"></span>
                 </a>
+                <a class="nav-item server-child-item wolffn-cluster-item" data-cluster="${escapedName}" data-view="wolffunctions" onclick="showWolfFunctionsPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
+                    <span class="icon ws-icon-clean-wrap" data-icon="lightning" style="font-size:15px;"></span> <span style="font-weight:600;">WolfFunctions</span>
+                </a>
                 <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon ws-icon-clean-wrap" data-icon="save" style="font-size:15px;"></span> <span style="font-weight:600;">Backups</span>
                 </a>
@@ -46440,6 +46443,409 @@ async function testAlerting() {
 
 let wolfrunCurrentCluster = '';
 let wolfrunRefreshTimer = null;
+
+// ═══════════════════════════════════════════════════════════
+// ─── WolfFunctions (serverless FaaS, cluster-scoped) ───
+// ═══════════════════════════════════════════════════════════
+let wolffnCurrentCluster = '';
+let wolffnRefreshTimer = null;
+let wolffnOverviewCache = null;
+
+const WOLFFN_RUNTIMES = [
+    { id: 'python312', label: 'Python 3.12' },
+    { id: 'node22', label: 'Node.js 22' },
+];
+const WOLFFN_EVENTS = [
+    { id: 'alert_fired', label: 'Alert fired' },
+    { id: 'node_offline', label: 'Node went offline' },
+    { id: 'node_online', label: 'Node came online' },
+    { id: 'backup_completed', label: 'Backup completed' },
+    { id: 'backup_failed', label: 'Backup failed' },
+];
+
+const WOLFFN_STARTER = {
+    python312: "def handler(event, context):\n    # event = trigger payload, context = {function, node, trigger, ...}\n    print(\"invoked with\", event)\n    return {\"message\": \"hello from WolfFunctions\", \"event\": event}\n",
+    node22: "exports.handler = async (event, context) => {\n    // event = trigger payload, context = {function, node, trigger, ...}\n    console.log('invoked with', event);\n    return { message: 'hello from WolfFunctions', event };\n};\n",
+};
+
+function showWolfFunctionsPage(clusterName) {
+    closeSidebarMobile();
+    wolffnCurrentCluster = clusterName;
+    currentPage = 'wolffunctions';
+    currentNodeId = null;
+    currentComponent = null;
+
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-wolffunctions');
+    if (el) el.style.display = 'block';
+
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const item = document.querySelector(`.wolffn-cluster-item[data-cluster="${clusterName}"]`);
+    if (item) item.classList.add('active');
+
+    document.getElementById('page-title').textContent = `WolfFunctions — ${clusterName}`;
+    const lbl = document.getElementById('wolffn-cluster-label');
+    if (lbl) lbl.textContent = `— ${clusterName}`;
+
+    loadWolfFunctions();
+
+    if (wolffnRefreshTimer) clearInterval(wolffnRefreshTimer);
+    wolffnRefreshTimer = setInterval(() => {
+        if (currentPage === 'wolffunctions') loadWolfFunctions();
+        else clearInterval(wolffnRefreshTimer);
+    }, 30000);
+}
+
+// Proxy WolfFunctions API calls through a target-cluster node when the
+// local server isn't a member (mirrors wolfrunApiUrl).
+function wolffnApiUrl(path) {
+    const localNode = allNodes.find(n => n.is_self);
+    const localCluster = localNode ? (localNode.cluster_name || 'WolfStack') : '';
+    if (localCluster === wolffnCurrentCluster) return path;
+    const clusterNode = allNodes.find(n =>
+        n.online && !n.is_self &&
+        (n.cluster_name || 'WolfStack') === wolffnCurrentCluster &&
+        n.node_type !== 'proxmox'
+    );
+    if (!clusterNode) return path;
+    const cleanPath = path.replace(/^\/api\//, '');
+    return `/api/nodes/${clusterNode.id}/proxy/${cleanPath}`;
+}
+
+async function loadWolfFunctions() {
+    try {
+        const resp = await fetch(wolffnApiUrl('/api/wolffunctions/overview'));
+        if (!resp.ok) throw new Error('overview request failed');
+        const data = await resp.json();
+        wolffnOverviewCache = data;
+        renderWolfFunctions(data);
+    } catch (e) {
+        const tbody = document.getElementById('wolffn-tbody');
+        if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="color:var(--danger);padding:16px;">Could not load functions: ${escapeHtml(e.message || String(e))}</td></tr>`;
+    }
+}
+
+function renderWolfFunctions(data) {
+    const functions = data.functions || [];
+    const nodes = data.nodes || [];
+
+    // Aggregate warm instances per function id, across nodes.
+    const warmByFn = {};
+    let totalWarm = 0;
+    let capableNodes = 0;
+    nodes.forEach(n => {
+        if (n.eligibility && n.eligibility.mode) capableNodes++;
+        (n.instances || []).forEach(inst => {
+            if (inst.status === 'warm' || inst.status === 'busy') {
+                warmByFn[inst.function_id] = (warmByFn[inst.function_id] || 0) + 1;
+                totalWarm++;
+            }
+        });
+    });
+
+    document.getElementById('wolffn-stat-functions').textContent = functions.length;
+    document.getElementById('wolffn-stat-warm').textContent = totalWarm;
+    document.getElementById('wolffn-stat-nodes').textContent = capableNodes;
+
+    // Node runtime strip
+    const strip = document.getElementById('wolffn-nodes-strip');
+    if (strip) {
+        if (nodes.length === 0) {
+            strip.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">No nodes in this cluster.</span>';
+        } else {
+            strip.innerHTML = nodes.map(n => {
+                let color, label, title;
+                if (!n.online) { color = '#6b7280'; label = 'offline'; title = 'Node offline'; }
+                else if (n.error) { color = '#ef4444'; label = 'probe failed'; title = n.error; }
+                else if (n.eligibility && n.eligibility.mode === 'gvisor') { color = '#10b981'; label = 'gVisor'; title = n.eligibility.detail; }
+                else if (n.eligibility && n.eligibility.mode === 'docker') { color = '#eab308'; label = 'Docker (reduced isolation)'; title = n.eligibility.detail; }
+                else { color = '#ef4444'; label = 'not capable'; title = (n.eligibility && n.eligibility.detail) || 'This node cannot run functions'; }
+                const count = (n.instances || []).length;
+                return `<div style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;min-width:150px;" title="${escapeAttr(title)}">
+                    <div style="display:flex;align-items:center;gap:6px;">
+                        <span style="width:9px;height:9px;border-radius:50%;background:${color};display:inline-block;"></span>
+                        <span style="font-weight:600;font-size:12px;">${escapeHtml(n.hostname || n.node_id)}</span>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">${escapeHtml(label)} · ${count} inst</div>
+                </div>`;
+            }).join('');
+        }
+    }
+
+    // Invocation count — filled asynchronously per function; show placeholder now.
+    document.getElementById('wolffn-stat-invocations').textContent = '—';
+
+    const tbody = document.getElementById('wolffn-tbody');
+    const empty = document.getElementById('wolffn-empty');
+    const table = document.getElementById('wolffn-table');
+    if (functions.length === 0) {
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        return;
+    }
+    table.style.display = '';
+    empty.style.display = 'none';
+
+    tbody.innerHTML = functions.map(f => {
+        const rt = WOLFFN_RUNTIMES.find(r => r.id === f.runtime);
+        const warm = warmByFn[f.id] || 0;
+        const triggers = [];
+        if (f.public_slug) triggers.push(`<span class="badge" style="font-size:9px;" title="Public URL: /fn/${escapeAttr(f.public_slug)}">HTTP</span>`);
+        if ((f.schedules || []).length) triggers.push(`<span class="badge" style="font-size:9px;">⏱ ${f.schedules.length}</span>`);
+        if ((f.events || []).length) triggers.push(`<span class="badge" style="font-size:9px;">⚡ ${f.events.length}</span>`);
+        triggers.push(`<span class="badge" style="font-size:9px;">manual</span>`);
+        const statusColor = !f.enabled ? '#6b7280' : (warm >= 1 ? '#10b981' : '#eab308');
+        const statusText = !f.enabled ? 'disabled' : (warm >= 1 ? `${warm} warm` : 'cold');
+        return `<tr>
+            <td><div style="font-weight:600;">${escapeHtml(f.name)}</div>
+                <div style="font-size:11px;color:var(--text-muted);">${escapeHtml(f.description || '')}</div></td>
+            <td>${escapeHtml(rt ? rt.label : f.runtime)}</td>
+            <td>${f.replicas} node${f.replicas === 1 ? '' : 's'}</td>
+            <td style="display:flex;gap:4px;flex-wrap:wrap;">${triggers.join('')}</td>
+            <td><span style="color:${statusColor};font-weight:600;">${escapeHtml(statusText)}</span></td>
+            <td style="text-align:right;white-space:nowrap;">
+                <button class="btn btn-sm" onclick="wolffnTestInvoke('${escapeAttr(f.id)}')" title="Test invoke">Test</button>
+                <button class="btn btn-sm" onclick="wolffnShowLogs('${escapeAttr(f.id)}')" title="Recent invocations">Logs</button>
+                <button class="btn btn-sm" onclick="openWolfFunctionEditor('${escapeAttr(f.id)}')">Edit</button>
+                <button class="btn btn-sm" onclick="wolffnDelete('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" style="color:var(--danger);">Delete</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function wolffnCloseEditor() {
+    const ov = document.getElementById('wolffn-editor-overlay');
+    if (ov) ov.remove();
+}
+
+function openWolfFunctionEditor(id) {
+    const existing = id && wolffnOverviewCache
+        ? (wolffnOverviewCache.functions || []).find(f => f.id === id)
+        : null;
+    const f = existing || {
+        name: '', runtime: 'python312', code: WOLFFN_STARTER.python312,
+        description: '', memory_mb: 128, timeout_secs: 30, replicas: 2,
+        max_per_node: 4, env: [], public_slug: '', schedules: [], events: [], enabled: true,
+    };
+    wolffnCloseEditor();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'wolffn-editor-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center;';
+    const eventChecks = WOLFFN_EVENTS.map(ev => `
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">
+            <input type="checkbox" class="wolffn-event-cb" value="${ev.id}" ${(f.events || []).includes(ev.id) ? 'checked' : ''}> ${ev.label}
+        </label>`).join('');
+    const scheduleVal = (f.schedules && f.schedules[0]) ? f.schedules[0].interval_secs : '';
+
+    overlay.innerHTML = `
+    <div role="dialog" aria-modal="true" aria-label="Function editor" style="background:var(--bg-card,#1e2028);border:1px solid var(--border);border-radius:12px;width:92%;max-width:960px;max-height:92vh;overflow-y:auto;padding:24px 28px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <h3 style="margin:0;font-size:17px;">${existing ? 'Edit' : 'New'} Function</h3>
+            <button class="btn btn-sm" onclick="wolffnCloseEditor()">✕</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+            <div><label style="font-size:12px;color:var(--text-secondary);">Name (a-z, 0-9, -)</label>
+                <input id="wolffn-f-name" class="form-control" value="${escapeAttr(f.name)}" placeholder="my-function" style="width:100%;"></div>
+            <div><label style="font-size:12px;color:var(--text-secondary);">Runtime</label>
+                <select id="wolffn-f-runtime" class="form-control" style="width:100%;" onchange="wolffnRuntimeChanged()">
+                    ${WOLFFN_RUNTIMES.map(r => `<option value="${r.id}" ${f.runtime === r.id ? 'selected' : ''}>${r.label}</option>`).join('')}
+                </select></div>
+        </div>
+        <div style="margin-bottom:12px;"><label style="font-size:12px;color:var(--text-secondary);">Description</label>
+            <input id="wolffn-f-desc" class="form-control" value="${escapeAttr(f.description || '')}" style="width:100%;"></div>
+
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+            <label style="font-size:12px;color:var(--text-secondary);flex:1;">Handler code</label>
+            <input id="wolffn-ai-prompt" class="form-control" placeholder="Describe what it should do — AI drafts the code" style="flex:2;font-size:12px;">
+            <button class="btn btn-sm" id="wolffn-ai-btn" onclick="wolffnAiGenerate()">✨ Generate</button>
+        </div>
+        <textarea id="wolffn-f-code" spellcheck="false" style="width:100%;height:280px;font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre;overflow:auto;">${escapeHtml(f.code)}</textarea>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0;">
+            <div><label style="font-size:12px;color:var(--text-secondary);">Memory (MB)</label>
+                <input id="wolffn-f-mem" type="number" min="32" max="8192" class="form-control" value="${f.memory_mb}" style="width:100%;"></div>
+            <div><label style="font-size:12px;color:var(--text-secondary);">Timeout (s)</label>
+                <input id="wolffn-f-timeout" type="number" min="1" max="900" class="form-control" value="${f.timeout_secs}" style="width:100%;"></div>
+            <div><label style="font-size:12px;color:var(--text-secondary);" title="How many nodes keep a warm copy">Replicas (nodes)</label>
+                <input id="wolffn-f-replicas" type="number" min="0" max="64" class="form-control" value="${f.replicas}" style="width:100%;"></div>
+            <div><label style="font-size:12px;color:var(--text-secondary);">Max per node</label>
+                <input id="wolffn-f-maxpernode" type="number" min="1" max="32" class="form-control" value="${f.max_per_node}" style="width:100%;"></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+            <div><label style="font-size:12px;color:var(--text-secondary);">Environment (KEY=VALUE per line)</label>
+                <textarea id="wolffn-f-env" class="form-control" style="width:100%;height:70px;font-family:monospace;font-size:12px;">${escapeHtml((f.env || []).join('\n'))}</textarea></div>
+            <div>
+                <label style="font-size:12px;color:var(--text-secondary);">Triggers</label>
+                <div style="margin-top:4px;">
+                    <label style="font-size:12px;display:block;margin-bottom:4px;">Public URL slug (blank = no public URL)
+                        <input id="wolffn-f-slug" class="form-control" value="${escapeAttr(f.public_slug || '')}" placeholder="none" style="width:100%;font-size:12px;"></label>
+                    <label style="font-size:12px;display:block;margin-bottom:4px;">Schedule every N seconds (blank = none)
+                        <input id="wolffn-f-schedule" type="number" min="60" class="form-control" value="${scheduleVal}" placeholder="e.g. 300" style="width:100%;font-size:12px;"></label>
+                    <div style="display:flex;flex-direction:column;gap:2px;margin-top:4px;">${eventChecks}</div>
+                </div>
+            </div>
+        </div>
+
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:16px;">
+            <input type="checkbox" id="wolffn-f-enabled" ${f.enabled ? 'checked' : ''}> Enabled
+        </label>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+            <button class="btn" onclick="wolffnCloseEditor()">Cancel</button>
+            <button class="btn btn-primary" id="wolffn-save-btn" onclick="wolffnSave(${existing ? `'${escapeAttr(f.id)}'` : 'null'})">${existing ? 'Save changes' : 'Create function'}</button>
+        </div>
+    </div>`;
+    overlay.onclick = (e) => { if (e.target === overlay) wolffnCloseEditor(); };
+    document.body.appendChild(overlay);
+}
+
+// Swap the starter template when the runtime changes, but only if the
+// code box still holds an untouched starter (don't clobber real code).
+function wolffnRuntimeChanged() {
+    const rt = document.getElementById('wolffn-f-runtime').value;
+    const codeEl = document.getElementById('wolffn-f-code');
+    const isStarter = Object.values(WOLFFN_STARTER).some(s => s.trim() === codeEl.value.trim());
+    if (isStarter && WOLFFN_STARTER[rt]) codeEl.value = WOLFFN_STARTER[rt];
+}
+
+async function wolffnAiGenerate() {
+    const prompt = (document.getElementById('wolffn-ai-prompt').value || '').trim();
+    if (!prompt) { showToast('Describe what the function should do first', 'error'); return; }
+    const btn = document.getElementById('wolffn-ai-btn');
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Generating…';
+    try {
+        const resp = await fetch(wolffnApiUrl('/api/wolffunctions/ai-generate'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt, runtime: document.getElementById('wolffn-f-runtime').value }),
+        });
+        const data = await resp.json();
+        if (data.code) {
+            document.getElementById('wolffn-f-code').value = data.code;
+            showToast('AI draft inserted — review it before saving', 'success');
+        } else {
+            showToast(data.error || 'AI generation failed', 'error');
+        }
+    } catch (e) {
+        showToast('AI generation failed: ' + (e.message || e), 'error');
+    } finally {
+        btn.disabled = false; btn.textContent = orig;
+    }
+}
+
+function wolffnCollectBody() {
+    const events = Array.from(document.querySelectorAll('.wolffn-event-cb'))
+        .filter(cb => cb.checked).map(cb => cb.value);
+    const scheduleRaw = (document.getElementById('wolffn-f-schedule').value || '').trim();
+    const schedules = scheduleRaw ? [{ interval_secs: parseInt(scheduleRaw, 10), last_fired: 0 }] : [];
+    const env = (document.getElementById('wolffn-f-env').value || '')
+        .split('\n').map(l => l.trim()).filter(Boolean);
+    const slug = (document.getElementById('wolffn-f-slug').value || '').trim();
+    return {
+        name: (document.getElementById('wolffn-f-name').value || '').trim(),
+        runtime: document.getElementById('wolffn-f-runtime').value,
+        code: document.getElementById('wolffn-f-code').value,
+        description: (document.getElementById('wolffn-f-desc').value || '').trim(),
+        memory_mb: parseInt(document.getElementById('wolffn-f-mem').value, 10) || 128,
+        timeout_secs: parseInt(document.getElementById('wolffn-f-timeout').value, 10) || 30,
+        replicas: parseInt(document.getElementById('wolffn-f-replicas').value, 10),
+        max_per_node: parseInt(document.getElementById('wolffn-f-maxpernode').value, 10) || 4,
+        env,
+        public_slug: slug || null,
+        schedules,
+        events,
+        enabled: document.getElementById('wolffn-f-enabled').checked,
+    };
+}
+
+async function wolffnSave(id) {
+    const body = wolffnCollectBody();
+    if (!body.name) { showToast('Function needs a name', 'error'); return; }
+    if (isNaN(body.replicas)) body.replicas = 2;
+    const btn = document.getElementById('wolffn-save-btn');
+    btn.disabled = true;
+    try {
+        const url = id ? wolffnApiUrl('/api/wolffunctions/' + id) : wolffnApiUrl('/api/wolffunctions');
+        const resp = await fetch(url, {
+            method: id ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+            showToast(id ? 'Function saved' : 'Function created', 'success');
+            wolffnCloseEditor();
+            loadWolfFunctions();
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Save failed: ' + (e.message || e), 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function wolffnDelete(id, name) {
+    const ok = await showConfirm(`Delete function "${name}"? Warm instances on every node will be torn down.`, 'Delete function');
+    if (!ok) return;
+    try {
+        const resp = await fetch(wolffnApiUrl('/api/wolffunctions/' + id), { method: 'DELETE' });
+        if (resp.ok) { showToast('Function deleted', 'success'); loadWolfFunctions(); }
+        else { const d = await resp.json().catch(() => ({})); showToast(d.error || 'Delete failed', 'error'); }
+    } catch (e) {
+        showToast('Delete failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function wolffnTestInvoke(id) {
+    showModal('Invoking… (a cold start may take a couple of seconds)', 'Test Invoke', { noOk: true });
+    try {
+        const resp = await fetch(wolffnApiUrl('/api/wolffunctions/' + id + '/invoke'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ test: true, ts: Date.now() }),
+        });
+        const data = await resp.json();
+        document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
+        const pretty = JSON.stringify(data.ok ? data.result : { error: data.error }, null, 2);
+        showModal(
+            `<div style="font-size:12px;margin-bottom:8px;color:${data.ok ? '#10b981' : '#ef4444'};font-weight:600;">${data.ok ? '✓ Success' : '✗ Error'}</div>` +
+            `<pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:340px;">${escapeHtml(pretty)}</pre>`,
+            'Invocation result');
+    } catch (e) {
+        document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
+        showModal('Invocation failed: ' + escapeHtml(e.message || String(e)), 'Test Invoke');
+    }
+}
+
+async function wolffnShowLogs(id) {
+    try {
+        const resp = await fetch(wolffnApiUrl('/api/wolffunctions/' + id + '/invocations'));
+        const data = await resp.json();
+        const recs = data.invocations || [];
+        if (recs.length === 0) {
+            showModal('No invocations recorded yet.', 'Invocation log');
+            return;
+        }
+        const rows = recs.map(r => {
+            const when = new Date((r.ts || 0) * 1000).toLocaleString();
+            const color = r.ok ? '#10b981' : '#ef4444';
+            return `<div style="border-bottom:1px solid var(--border);padding:8px 0;">
+                <div style="display:flex;justify-content:space-between;font-size:12px;">
+                    <span style="color:${color};font-weight:600;">${r.ok ? 'ok' : 'error'}</span>
+                    <span style="color:var(--text-muted);">${escapeHtml(when)} · ${escapeHtml(r.node || '')} · ${r.duration_ms}ms · ${escapeHtml(r.trigger || '')}</span>
+                </div>
+                ${r.error ? `<div style="color:#ef4444;font-size:11px;margin-top:2px;">${escapeHtml(r.error)}</div>` : ''}
+                ${r.logs ? `<pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:6px;font-size:11px;margin-top:4px;overflow:auto;max-height:120px;">${escapeHtml(r.logs)}</pre>` : ''}
+            </div>`;
+        }).join('');
+        showModal(`<div style="max-height:420px;overflow-y:auto;">${rows}</div>`, 'Invocation log (recent)');
+    } catch (e) {
+        showModal('Could not load invocations: ' + escapeHtml(e.message || String(e)), 'Invocation log');
+    }
+}
 
 function showWolfRunPage(clusterName) {
     closeSidebarMobile();

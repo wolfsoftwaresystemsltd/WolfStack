@@ -5820,6 +5820,23 @@ pub fn create_backup_with_log(
     let fail = entries.iter().filter(|e| e.status == BackupStatus::Failed).count();
     let _ = log.send(format!("\nDone: {} succeeded, {} failed", ok, fail));
 
+    // WolfFunctions backup triggers — one event per job run, on the node
+    // that ran it.
+    let backup_event = serde_json::json!({
+        "succeeded": ok,
+        "failed": fail,
+        "items": entries.iter().map(|e| serde_json::json!({
+            "filename": e.filename, "status": format!("{:?}", e.status),
+        })).collect::<Vec<_>>(),
+    });
+    if fail > 0 {
+        crate::wolffunctions::fire_event_global(
+            crate::wolffunctions::TriggerEvent::BackupFailed, backup_event, true);
+    } else if ok > 0 {
+        crate::wolffunctions::fire_event_global(
+            crate::wolffunctions::TriggerEvent::BackupCompleted, backup_event, true);
+    }
+
     let mut config = load_config();
     config.entries.extend(entries.clone());
     let _ = save_config(&config);

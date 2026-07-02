@@ -725,6 +725,21 @@ pub async fn send_node_alert(
     title: &str,
     body: &str,
 ) {
+    // WolfFunctions alert_fired trigger — BEFORE the human-channel gate:
+    // quiet hours silence pages, but automation (auto-remediation
+    // functions) should run at 3am precisely when nobody is watching.
+    crate::wolffunctions::fire_event_global(
+        crate::wolffunctions::TriggerEvent::AlertFired,
+        serde_json::json!({
+            "cluster": cluster_name,
+            "hostname": hostname,
+            "category": format!("{:?}", category),
+            "title": title,
+            "body": body,
+        }),
+        true,
+    );
+
     let alert_cfg = AlertConfig::load();
     let now = chrono::Utc::now();
     if !alert_cfg.allows_at(category, now) {

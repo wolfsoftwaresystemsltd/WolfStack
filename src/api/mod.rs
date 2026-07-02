@@ -254,6 +254,7 @@ pub struct AppState {
     pub cached_status: Arc<std::sync::RwLock<Option<serde_json::Value>>>,
     /// WolfRun orchestration state
     pub wolfrun: Arc<crate::wolfrun::WolfRunState>,
+    pub wolffunctions: Arc<crate::wolffunctions::WolfFunctionsState>,
     pub wolfflow: Arc<crate::wolfflow::WolfFlowState>,
     /// Status page monitoring state
     pub statuspage: Arc<crate::statuspage::StatusPageState>,
@@ -30890,6 +30891,538 @@ pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body:
     HttpResponse::Ok().json(serde_json::json!({ "synced": true }))
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ─── WolfFunctions — serverless functions across the cluster ───
+// ═══════════════════════════════════════════════════════════════
+
+/// Kick an immediate config broadcast after a mutation so peers converge
+/// in seconds instead of waiting for the 60s periodic tick.
+fn wolffunctions_broadcast_soon(state: &web::Data<AppState>) {
+    let fns = state.wolffunctions.clone();
+    let cluster = state.cluster.clone();
+    let secret = state.cluster_secret.clone();
+    tokio::spawn(async move {
+        crate::wolffunctions::broadcast_to_cluster(&fns, &cluster, &secret).await;
+    });
+}
+
+/// GET /api/wolffunctions — list this cluster's functions.
+pub async fn wolffunctions_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster_name = local_cluster_name(&state.cluster);
+    let functions: Vec<crate::wolffunctions::WolfFunction> =
+        state.wolffunctions.config.read().unwrap().functions.iter()
+            .filter(|f| f.cluster == cluster_name)
+            .cloned().collect();
+    HttpResponse::Ok().json(serde_json::json!({ "cluster": cluster_name, "functions": functions }))
+}
+
+/// GET /api/wolffunctions/config — full config (peer pull bootstrap).
+pub async fn wolffunctions_config(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cfg = state.wolffunctions.config.read().unwrap().clone();
+    HttpResponse::Ok().json(cfg)
+}
+
+/// POST /api/wolffunctions/sync — receive a peer's cluster-scoped function
+/// set. Inter-node only: requires the cluster secret strictly (no session
+/// fallback), because this replaces a whole cluster's functions and the UI
+/// never calls it — a logged-in session has no business here. merge_cluster
+/// clamps peer-supplied limits, so a compromised peer can't push
+/// out-of-range values past the create/update validation.
+pub async fn wolffunctions_sync(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<crate::wolffunctions::SyncPayload>,
+) -> HttpResponse {
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+    let payload = body.into_inner();
+    state.wolffunctions.merge_cluster(&payload.cluster, payload.functions);
+    HttpResponse::Ok().json(serde_json::json!({ "synced": true }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct WolfFunctionUpsertBody {
+    pub name: String,
+    pub runtime: crate::wolffunctions::FunctionRuntime,
+    pub code: String,
+    #[serde(default)]
+    pub description: String,
+    pub memory_mb: Option<u32>,
+    pub timeout_secs: Option<u32>,
+    pub replicas: Option<u32>,
+    pub max_per_node: Option<u32>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub public_slug: Option<String>,
+    #[serde(default)]
+    pub schedules: Vec<crate::wolffunctions::FunctionSchedule>,
+    #[serde(default)]
+    pub events: Vec<crate::wolffunctions::TriggerEvent>,
+    pub enabled: Option<bool>,
+}
+
+fn validate_upsert(body: &WolfFunctionUpsertBody) -> Result<(), String> {
+    if !crate::wolffunctions::valid_name(&body.name) {
+        return Err("Function name must be 1-63 chars of a-z, 0-9, and hyphens".into());
+    }
+    if body.code.trim().is_empty() {
+        return Err("Function code is empty".into());
+    }
+    if body.code.len() > 512 * 1024 {
+        return Err("Function code exceeds 512KB".into());
+    }
+    if let Some(slug) = body.public_slug.as_deref()
+        && !slug.is_empty() && !crate::wolffunctions::valid_name(slug)
+    {
+        return Err("Public slug must be 1-63 chars of a-z, 0-9, and hyphens".into());
+    }
+    for kv in &body.env {
+        if !kv.contains('=') || kv.starts_with('=') {
+            return Err(format!("Environment entry '{}' is not KEY=VALUE", kv));
+        }
+    }
+    for s in &body.schedules {
+        if s.interval_secs < 60 {
+            return Err("Schedule intervals must be at least 60 seconds".into());
+        }
+    }
+    Ok(())
+}
+
+/// POST /api/wolffunctions — create a function.
+pub async fn wolffunctions_create(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<WolfFunctionUpsertBody>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let body = body.into_inner();
+    if let Err(e) = validate_upsert(&body) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+    }
+    let cluster_name = local_cluster_name(&state.cluster);
+    if state.wolffunctions.get_by_name(&cluster_name, &body.name).is_some() {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("A function named '{}' already exists in this cluster", body.name)
+        }));
+    }
+    let slug = body.public_slug.clone().filter(|s| !s.is_empty());
+    if let Some(s) = &slug
+        && state.wolffunctions.get_by_slug(s).is_some()
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("Public slug '{}' is already in use", s)
+        }));
+    }
+    let now = crate::wolffunctions::now_secs();
+    let func = crate::wolffunctions::WolfFunction {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: body.name,
+        cluster: cluster_name,
+        runtime: body.runtime,
+        code: body.code,
+        description: body.description,
+        memory_mb: body.memory_mb.unwrap_or(128).clamp(32, 8192),
+        timeout_secs: body.timeout_secs.unwrap_or(30).clamp(1, 900),
+        replicas: body.replicas.unwrap_or(2).min(64),
+        max_per_node: body.max_per_node.unwrap_or(4).clamp(1, 32),
+        env: body.env,
+        placed_nodes: Vec::new(),
+        public_slug: slug,
+        schedules: body.schedules,
+        events: body.events,
+        enabled: body.enabled.unwrap_or(true),
+        version: 1,
+        created_at: now,
+        updated_at: now,
+    };
+    let out = serde_json::json!({ "ok": true, "function": func });
+    state.wolffunctions.upsert(func);
+    wolffunctions_broadcast_soon(&state);
+    HttpResponse::Ok().json(out)
+}
+
+/// PUT /api/wolffunctions/{id} — update a function. Version bumps when an
+/// execution-affecting field changes so warm instances get replaced.
+pub async fn wolffunctions_update(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Json<WolfFunctionUpsertBody>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let body = body.into_inner();
+    if let Err(e) = validate_upsert(&body) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
+    }
+    let Some(mut func) = state.wolffunctions.get(&id) else {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Function not found" }));
+    };
+    let cluster_name = func.cluster.clone();
+    if body.name != func.name
+        && state.wolffunctions.get_by_name(&cluster_name, &body.name).is_some()
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("A function named '{}' already exists in this cluster", body.name)
+        }));
+    }
+    let slug = body.public_slug.clone().filter(|s| !s.is_empty());
+    if let Some(s) = &slug
+        && state.wolffunctions.get_by_slug(s).map(|f| f.id != id).unwrap_or(false)
+    {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!("Public slug '{}' is already in use", s)
+        }));
+    }
+
+    let memory_mb = body.memory_mb.unwrap_or(func.memory_mb).clamp(32, 8192);
+    let needs_new_version = func.code != body.code
+        || func.env != body.env
+        || func.runtime != body.runtime
+        || func.memory_mb != memory_mb;
+    func.name = body.name;
+    func.runtime = body.runtime;
+    func.code = body.code;
+    func.description = body.description;
+    func.memory_mb = memory_mb;
+    func.timeout_secs = body.timeout_secs.unwrap_or(func.timeout_secs).clamp(1, 900);
+    func.replicas = body.replicas.unwrap_or(func.replicas).min(64);
+    func.max_per_node = body.max_per_node.unwrap_or(func.max_per_node).clamp(1, 32);
+    func.env = body.env;
+    func.public_slug = slug;
+    func.schedules = body.schedules;
+    func.events = body.events;
+    func.enabled = body.enabled.unwrap_or(func.enabled);
+    if needs_new_version { func.version += 1; }
+    func.updated_at = crate::wolffunctions::now_secs();
+
+    let out = serde_json::json!({ "ok": true, "function": func });
+    state.wolffunctions.upsert(func);
+    wolffunctions_broadcast_soon(&state);
+    HttpResponse::Ok().json(out)
+}
+
+/// DELETE /api/wolffunctions/{id} — remove a function. Warm instances on
+/// every node are torn down by each node's next reconcile pass.
+pub async fn wolffunctions_delete(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    if !state.wolffunctions.remove(&id) {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Function not found" }));
+    }
+    wolffunctions_broadcast_soon(&state);
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+}
+
+/// POST /api/wolffunctions/{id}/invoke — invoke with cluster routing.
+/// Body is the event (any JSON).
+pub async fn wolffunctions_invoke(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Bytes,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let Some(func) = state.wolffunctions.get(&path.into_inner()) else {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Function not found" }));
+    };
+    let event: serde_json::Value = serde_json::from_slice(&body)
+        .unwrap_or(serde_json::Value::Null);
+    match crate::wolffunctions::runtime::invoke_routed(
+        &state.wolffunctions, &state.cluster, &state.cluster_secret, &func, event, "manual",
+    ).await {
+        Ok(result) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "result": result })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// POST /api/wolffunctions/{id}/invoke-local — invoke on THIS node only.
+/// Inter-node routing target; cluster secret required.
+pub async fn wolffunctions_invoke_local(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_cluster_auth(&req, &state) { return resp; }
+    let Some(func) = state.wolffunctions.get(&path.into_inner()) else {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Function not found" }));
+    };
+    let payload = body.into_inner();
+    let event = payload.get("event").cloned().unwrap_or(serde_json::Value::Null);
+    let trigger = payload.get("trigger").and_then(|t| t.as_str()).unwrap_or("forwarded").to_string();
+    let node_name = state.cluster.get_all_nodes().iter()
+        .find(|n| n.is_self).map(|n| n.hostname.clone()).unwrap_or_else(|| "local".into());
+    match crate::wolffunctions::runtime::invoke_local(
+        &state.wolffunctions, &func, event, &trigger, &node_name,
+    ).await {
+        Ok(result) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "result": result })),
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// GET /api/wolffunctions/{id}/invocations — recent invocations aggregated
+/// from every placed node (each node holds only its own ring buffer).
+pub async fn wolffunctions_invocations(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+    let Some(func) = state.wolffunctions.get(&id) else {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Function not found" }));
+    };
+    let mut records: Vec<serde_json::Value> = state.wolffunctions.recent_invocations(&id)
+        .into_iter().map(|r| serde_json::to_value(r).unwrap_or_default()).collect();
+
+    let nodes = state.cluster.get_all_nodes();
+    let client = &*API_HTTP_CLIENT;
+    for node_id in &func.placed_nodes {
+        let Some(node) = nodes.iter().find(|n| &n.id == node_id && n.online && !n.is_self) else { continue; };
+        let path = format!("/api/wolffunctions/{}/invocations-local", id);
+        for url in build_node_urls(&node.address, node.port, &path) {
+            match client.get(&url)
+                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .timeout(std::time::Duration::from_secs(5))
+                .send().await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await
+                        && let Some(arr) = v.get("invocations").and_then(|a| a.as_array())
+                    {
+                        records.extend(arr.iter().cloned());
+                    }
+                    break;
+                }
+                Ok(resp) => { drain_response(resp).await; }
+                Err(_) => {}
+            }
+        }
+    }
+    records.sort_by_key(|r| std::cmp::Reverse(r.get("ts").and_then(|t| t.as_u64()).unwrap_or(0)));
+    records.truncate(200);
+    HttpResponse::Ok().json(serde_json::json!({ "invocations": records }))
+}
+
+/// GET /api/wolffunctions/{id}/invocations-local — this node's ring only.
+pub async fn wolffunctions_invocations_local(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let records = state.wolffunctions.recent_invocations(&path.into_inner());
+    HttpResponse::Ok().json(serde_json::json!({ "invocations": records }))
+}
+
+/// GET /api/wolffunctions/node-local — this node's eligibility + instances.
+pub async fn wolffunctions_node_local(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let elig = crate::wolffunctions::runtime::probe_eligibility(&state.wolffunctions).await;
+    let instances: Vec<crate::wolffunctions::Instance> = state.wolffunctions.instances
+        .lock().unwrap().values().flatten().cloned().collect();
+    HttpResponse::Ok().json(serde_json::json!({ "eligibility": elig, "instances": instances }))
+}
+
+/// GET /api/wolffunctions/overview — functions + per-node runtime state for
+/// the dashboard (fans out to same-cluster peers).
+pub async fn wolffunctions_overview(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cluster_name = local_cluster_name(&state.cluster);
+    let functions: Vec<crate::wolffunctions::WolfFunction> =
+        state.wolffunctions.config.read().unwrap().functions.iter()
+            .filter(|f| f.cluster == cluster_name).cloned().collect();
+
+    let mut nodes_out: Vec<serde_json::Value> = Vec::new();
+    let nodes = state.cluster.get_all_nodes();
+    let client = &*API_HTTP_CLIENT;
+    for node in nodes.iter().filter(|n| {
+        n.cluster_name.as_deref().unwrap_or("WolfStack") == cluster_name
+    }) {
+        if node.is_self {
+            let elig = crate::wolffunctions::runtime::probe_eligibility(&state.wolffunctions).await;
+            let instances: Vec<crate::wolffunctions::Instance> = state.wolffunctions.instances
+                .lock().unwrap().values().flatten().cloned().collect();
+            nodes_out.push(serde_json::json!({
+                "node_id": node.id, "hostname": node.hostname, "online": true,
+                "eligibility": elig, "instances": instances,
+            }));
+            continue;
+        }
+        if !node.online {
+            nodes_out.push(serde_json::json!({
+                "node_id": node.id, "hostname": node.hostname, "online": false,
+            }));
+            continue;
+        }
+        let mut fetched = false;
+        for url in build_node_urls(&node.address, node.port, "/api/wolffunctions/node-local") {
+            match client.get(&url)
+                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .timeout(std::time::Duration::from_secs(8))
+                .send().await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(mut v) = resp.json::<serde_json::Value>().await {
+                        v["node_id"] = serde_json::json!(node.id);
+                        v["hostname"] = serde_json::json!(node.hostname);
+                        v["online"] = serde_json::json!(true);
+                        nodes_out.push(v);
+                        fetched = true;
+                    }
+                    break;
+                }
+                Ok(resp) => { drain_response(resp).await; }
+                Err(_) => {}
+            }
+        }
+        if !fetched {
+            nodes_out.push(serde_json::json!({
+                "node_id": node.id, "hostname": node.hostname, "online": true,
+                "error": "node did not answer the runtime probe",
+            }));
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "cluster": cluster_name, "functions": functions, "nodes": nodes_out,
+    }))
+}
+
+/// POST /api/wolffunctions/ai-generate — generate handler code with the
+/// configured AI provider. Returns code for the editor; nothing deploys
+/// until the operator reviews and saves.
+pub async fn wolffunctions_ai_generate(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let prompt = body.get("prompt").and_then(|p| p.as_str()).unwrap_or("").trim().to_string();
+    if prompt.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Describe what the function should do" }));
+    }
+    let runtime: crate::wolffunctions::FunctionRuntime =
+        match serde_json::from_value(body.get("runtime").cloned().unwrap_or_default()) {
+            Ok(r) => r,
+            Err(_) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Unknown runtime" })),
+        };
+    let cfg = crate::ai::AiConfig::load();
+    if !cfg.is_configured() {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "error": "No AI provider is configured — set one up under AI Assistant settings first"
+        }));
+    }
+    let contract = match runtime {
+        crate::wolffunctions::FunctionRuntime::Python312 =>
+            "You write WolfFunctions serverless handlers in Python 3.12.\n\
+             The handler is a SINGLE file that defines exactly:\n\
+             def handler(event, context):\n\
+             `event` is the trigger payload (dict or None); `context` is a dict with\n\
+             function/version/memory_mb/node/trigger keys. The return value must be\n\
+             JSON-serializable. Only the Python standard library is available —\n\
+             no pip packages. print() output becomes the invocation log.\n\
+             Respond with ONLY the complete file content — no explanations, no\n\
+             markdown fences.",
+        crate::wolffunctions::FunctionRuntime::Node22 =>
+            "You write WolfFunctions serverless handlers for Node.js 22.\n\
+             The handler is a SINGLE CommonJS file that defines exactly:\n\
+             exports.handler = async (event, context) => { ... }\n\
+             `event` is the trigger payload; `context` has function/version/\n\
+             memory_mb/node/trigger keys. The return value must be JSON-serializable.\n\
+             Only Node's standard library is available — no npm packages.\n\
+             console.log output becomes the invocation log.\n\
+             Respond with ONLY the complete file content — no explanations, no\n\
+             markdown fences.",
+    };
+    match crate::ai::simple_chat(&cfg, contract, &[], &prompt).await {
+        Ok(raw) => {
+            // Strip markdown fences if the model added them anyway.
+            let mut code = raw.trim().to_string();
+            if code.starts_with("```") {
+                code = code.lines().skip(1)
+                    .take_while(|l| !l.trim_start().starts_with("```"))
+                    .collect::<Vec<_>>().join("\n");
+            }
+            HttpResponse::Ok().json(serde_json::json!({ "ok": true, "code": code }))
+        }
+        Err(e) => HttpResponse::Ok().json(serde_json::json!({ "error": format!("AI generation failed: {}", e) })),
+    }
+}
+
+/// GET /api/wolffunctions/settings-local — this node's execution settings.
+pub async fn wolffunctions_settings_local_get(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cfg = crate::wolffunctions::runtime::LocalConfig::load();
+    let elig = crate::wolffunctions::runtime::probe_eligibility(&state.wolffunctions).await;
+    HttpResponse::Ok().json(serde_json::json!({ "settings": cfg, "eligibility": elig }))
+}
+
+/// POST /api/wolffunctions/settings-local — change this node's execution
+/// mode (auto/gvisor/docker). Re-probes eligibility immediately so the UI
+/// reflects the outcome, and existing sandboxes are replaced by reconcile.
+pub async fn wolffunctions_settings_local_set(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<crate::wolffunctions::runtime::LocalConfig>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cfg = body.into_inner();
+    cfg.save();
+    crate::wolffunctions::runtime::reset_eligibility(&state.wolffunctions);
+    let elig = crate::wolffunctions::runtime::probe_eligibility(&state.wolffunctions).await;
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true, "settings": cfg, "eligibility": elig }))
+}
+
+/// Public trigger rate limit: per-slug fixed window. Public surfaces get
+/// abuse protection by default. NOTE: this is per-NODE in-memory state, so a
+/// slug reachable via N cluster nodes tolerates up to N×this rate overall —
+/// it's a basic per-node abuse guard, not a cluster-wide quota.
+static WOLFFN_PUBLIC_RL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (u64, u32)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const WOLFFN_PUBLIC_RL_PER_MIN: u32 = 60;
+
+/// GET/POST /fn/{slug} — public HTTP trigger. No auth by design (the
+/// operator opted in per function); errors are generic so nothing internal
+/// leaks through a public surface — details live in the invocation log.
+pub async fn wolffunctions_public_trigger(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>, body: web::Bytes,
+) -> HttpResponse {
+    let slug = path.into_inner();
+    let Some(func) = state.wolffunctions.get_by_slug(&slug) else {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "not found" }));
+    };
+    if !func.enabled {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "not found" }));
+    }
+    {
+        let now = crate::wolffunctions::now_secs();
+        let mut rl = WOLFFN_PUBLIC_RL.lock().unwrap();
+        let entry = rl.entry(slug.clone()).or_insert((now, 0));
+        if now.saturating_sub(entry.0) >= 60 { *entry = (now, 0); }
+        entry.1 += 1;
+        if entry.1 > WOLFFN_PUBLIC_RL_PER_MIN {
+            return HttpResponse::TooManyRequests().json(serde_json::json!({ "error": "rate limited" }));
+        }
+    }
+    let body_json: serde_json::Value = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&body).to_string()));
+    let event = serde_json::json!({
+        "trigger": "http",
+        "method": req.method().as_str(),
+        "query": req.query_string(),
+        "body": body_json,
+        "source_ip": req.peer_addr().map(|a| a.ip().to_canonical().to_string()).unwrap_or_default(),
+    });
+    match crate::wolffunctions::runtime::invoke_routed(
+        &state.wolffunctions, &state.cluster, &state.cluster_secret, &func, event, "http",
+    ).await {
+        Ok(result) => HttpResponse::Ok().json(result),
+        Err(e) => {
+            tracing::warn!("WolfFunctions: public trigger {} failed: {}", slug, e);
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": "function error" }))
+        }
+    }
+}
+
 /// Get the local cluster name from cluster state
 fn local_cluster_name(cluster: &crate::agent::ClusterState) -> String {
     let nodes = cluster.nodes.read().unwrap();
@@ -38789,6 +39322,27 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/integrations/{id}/credentials", web::post().to(integrations_store_credential))
         .route("/api/integrations/{id}/action", web::post().to(integrations_action))
         .route("/api/integrations/{id}/dashboard/{capability}", web::get().to(integrations_dashboard))
+        // WolfFunctions — serverless functions across the cluster.
+        // Fixed paths BEFORE the {id} parameterised ones so "overview"
+        // etc. never match as a function id.
+        .route("/api/wolffunctions", web::get().to(wolffunctions_list))
+        .route("/api/wolffunctions", web::post().to(wolffunctions_create))
+        .route("/api/wolffunctions/config", web::get().to(wolffunctions_config))
+        .route("/api/wolffunctions/sync", web::post().to(wolffunctions_sync))
+        .route("/api/wolffunctions/overview", web::get().to(wolffunctions_overview))
+        .route("/api/wolffunctions/node-local", web::get().to(wolffunctions_node_local))
+        .route("/api/wolffunctions/ai-generate", web::post().to(wolffunctions_ai_generate))
+        .route("/api/wolffunctions/settings-local", web::get().to(wolffunctions_settings_local_get))
+        .route("/api/wolffunctions/settings-local", web::post().to(wolffunctions_settings_local_set))
+        .route("/api/wolffunctions/{id}", web::put().to(wolffunctions_update))
+        .route("/api/wolffunctions/{id}", web::delete().to(wolffunctions_delete))
+        .route("/api/wolffunctions/{id}/invoke", web::post().to(wolffunctions_invoke))
+        .route("/api/wolffunctions/{id}/invoke-local", web::post().to(wolffunctions_invoke_local))
+        .route("/api/wolffunctions/{id}/invocations", web::get().to(wolffunctions_invocations))
+        .route("/api/wolffunctions/{id}/invocations-local", web::get().to(wolffunctions_invocations_local))
+        // Public HTTP trigger — no auth by design, per-function opt-in slug.
+        .route("/fn/{slug}", web::get().to(wolffunctions_public_trigger))
+        .route("/fn/{slug}", web::post().to(wolffunctions_public_trigger))
         // WolfRun — container orchestration
         .route("/api/wolfrun/services", web::get().to(wolfrun_list))
         .route("/api/wolfrun/services", web::post().to(wolfrun_create))

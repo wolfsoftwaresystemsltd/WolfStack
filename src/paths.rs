@@ -98,6 +98,14 @@ pub struct FileLocations {
     #[serde(default = "default_wolfrun_failover_events")]
     pub wolfrun_failover_events: String,
 
+    // ── WolfFunctions ─────────────────────────────
+    #[serde(default = "default_wolffunctions_dir")]
+    pub wolffunctions_dir: String,
+    #[serde(default = "default_wolffunctions_functions")]
+    pub wolffunctions_functions: String,
+    #[serde(default = "default_wolffunctions_runtime_dir")]
+    pub wolffunctions_runtime_dir: String,
+
     // ── WolfFlow ──────────────────────────────────
     #[serde(default = "default_wolfflow_dir")]
     pub wolfflow_dir: String,
@@ -226,6 +234,10 @@ fn default_ai_suppress_secret() -> String { "/etc/wolfstack/ai-suppress-secret".
 fn default_wolfrun_dir() -> String { "/etc/wolfstack/wolfrun".into() }
 fn default_wolfrun_services() -> String { "/etc/wolfstack/wolfrun/services.json".into() }
 fn default_wolfrun_failover_events() -> String { "/etc/wolfstack/wolfrun/failover-events.json".into() }
+
+fn default_wolffunctions_dir() -> String { "/etc/wolfstack/wolffunctions".into() }
+fn default_wolffunctions_functions() -> String { "/etc/wolfstack/wolffunctions/functions.json".into() }
+fn default_wolffunctions_runtime_dir() -> String { "/var/lib/wolfstack/wolffunctions".into() }
 
 fn default_wolfflow_dir() -> String { "/etc/wolfstack/wolfflow".into() }
 fn default_wolfflow_workflows() -> String { "/etc/wolfstack/wolfflow/workflows.json".into() }
