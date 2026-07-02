@@ -786,6 +786,11 @@ function importBookmarks() {
 }
 
 // ─── Dashboard Layout Preferences ───
+const DC_LAYOUT_META = {
+    grid: { icon: '⊞', label: 'Grid' },
+    serverroom: { icon: '▥', label: 'Server Room' },
+    tiny: { icon: '∷', label: 'Tiny' },
+};
 let dcLayout = localStorage.getItem('wolfstack_dc_layout') || 'grid';
 let dcCompact = localStorage.getItem('wolfstack_dc_compact') === '1';
 let dcBgImage = localStorage.getItem('wolfstack_dc_bg_image') || '';
@@ -802,6 +807,22 @@ function toggleLayoutDropdown() {
     });
     const ct = document.getElementById('dc-compact-toggle');
     if (ct) ct.checked = dcCompact;
+    updateCompactToggleState();
+}
+
+// Compact Mode only applies to Grid/Server Room cards — Tiny is already the
+// densest view. Grey the checkbox out (with a hint) rather than leaving a
+// control that silently does nothing.
+function updateCompactToggleState() {
+    const ct = document.getElementById('dc-compact-toggle');
+    const lbl = document.getElementById('dc-compact-label');
+    const inert = dcLayout === 'tiny';
+    if (ct) ct.disabled = inert;
+    if (lbl) {
+        lbl.style.opacity = inert ? '0.5' : '';
+        lbl.style.cursor = inert ? 'default' : 'pointer';
+        lbl.title = inert ? 'Not used in Tiny layout' : '';
+    }
 }
 
 function toggleBgSettingsPanel() {
@@ -814,13 +835,15 @@ function toggleBgSettingsPanel() {
 function setDcLayout(layout) {
     dcLayout = layout;
     savePref('wolfstack_dc_layout', layout);
+    const meta = DC_LAYOUT_META[layout] || DC_LAYOUT_META.grid;
     const icon = document.getElementById('dc-layout-icon');
     const label = document.getElementById('dc-layout-label');
-    if (icon) icon.textContent = layout === 'grid' ? '⊞' : '▥';
-    if (label) label.textContent = layout === 'grid' ? 'Grid' : 'Server Room';
+    if (icon) icon.textContent = meta.icon;
+    if (label) label.textContent = meta.label;
     document.querySelectorAll('.dc-layout-option').forEach(o => {
         o.classList.toggle('active', o.getAttribute('data-layout') === layout);
     });
+    updateCompactToggleState();
     renderDatacenterOverview();
 }
 
@@ -951,15 +974,15 @@ function applyDcBackground() {
 
 function initDcLayoutToolbar() {
     // Restore layout button label
+    const meta = DC_LAYOUT_META[dcLayout] || DC_LAYOUT_META.grid;
     const icon = document.getElementById('dc-layout-icon');
     const label = document.getElementById('dc-layout-label');
-    if (dcLayout === 'serverroom') {
-        if (icon) icon.textContent = '▥';
-        if (label) label.textContent = 'Server Room';
-    }
+    if (icon) icon.textContent = meta.icon;
+    if (label) label.textContent = meta.label;
     // Restore compact toggle
     const ct = document.getElementById('dc-compact-toggle');
     if (ct) ct.checked = dcCompact;
+    updateCompactToggleState();
     // Restore background sliders
     const brSlider = document.getElementById('dc-bg-brightness');
     const brVal = document.getElementById('dc-bg-bright-val');
@@ -4237,6 +4260,40 @@ function renderDatacenterOverview() {
     // Helper to render a single compact node card
     const renderCard = (node) => {
         const m = node.metrics;
+
+        // Tiny: server name + ONE worst-of status LED, nothing else — for
+        // small screens with lots of servers. Same per-metric thresholds as
+        // the compact-mode LEDs (>90 red, >70 orange), collapsed to the
+        // worst colour across CPU/Mem/Disk. Offline is red.
+        if (dcLayout === 'tiny') {
+            let critical, ledColor, ledGlow, detail, offline = false;
+            if (!m || !node.online) {
+                offline = true;
+                critical = true;
+                ledColor = 'var(--danger)';
+                ledGlow = 'rgba(239,68,68,0.4)';
+                detail = 'Offline';
+            } else {
+                // Round to one decimal first — exact parity with ledDot's
+                // toFixed(1)→parseFloat path so both modes flip colour at
+                // the same reading.
+                const cpu = parseFloat((m.cpu_usage_percent || 0).toFixed(1));
+                const mem = parseFloat((m.memory_percent || 0).toFixed(1));
+                const rootDisk = m.disks?.find(d => d.mount_point === '/') || m.disks?.[0];
+                const disk = rootDisk ? parseFloat((rootDisk.usage_percent || 0).toFixed(1)) : 0;
+                const worst = Math.max(cpu, mem, disk);
+                critical = worst > 90;
+                ledColor = worst > 90 ? 'var(--danger)' : worst > 70 ? 'var(--warning)' : 'var(--success)';
+                ledGlow = worst > 90 ? 'rgba(239,68,68,0.4)' : worst > 70 ? 'rgba(245,158,11,0.3)' : 'rgba(16,185,129,0.3)';
+                detail = `CPU ${cpu.toFixed(0)}% · Mem ${mem.toFixed(0)}% · Disk ${rootDisk ? disk.toFixed(0) + '%' : '—'}`;
+            }
+            const tip = `${node.hostname || nodeName(node)} — ${detail}`;
+            return `<div class="card dc-tiny-card${critical ? ' dc-card-critical' : ''}" style="cursor:pointer;${offline ? 'opacity:0.7;' : ''}" onclick="selectServerView('${node.id}', 'dashboard')" title="${escapeAttr(tip)}">
+                <span class="dc-led" style="background:${ledColor};box-shadow:0 0 6px ${ledGlow};"></span>
+                <span class="dc-tiny-name">${escapeHtml(nodeName(node))}</span>
+            </div>`;
+        }
+
         const isPve = node.node_type === 'proxmox';
         const pveBadge = isPve ? '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(59, 130, 246,0.15);color:var(--accent-light);margin-left:4px;">PVE</span>' : '';
 
@@ -4385,8 +4442,11 @@ function renderDatacenterOverview() {
         });
         container.innerHTML = html;
     } else {
-        // Grid: default left-to-right auto-fill grid
-        container.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px;';
+        // Grid: default left-to-right auto-fill grid.
+        // Tiny: same flow but dense name+LED chips (small screens, many servers).
+        container.style.cssText = dcLayout === 'tiny'
+            ? 'display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:6px;'
+            : 'display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px;';
         container.classList.remove('dc-serverroom-scroll');
 
         let html = '';

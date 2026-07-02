@@ -3667,7 +3667,7 @@ body.sidebar-collapsed #task-log-footer {
     box-shadow: var(--shadow-lg);
     padding: 12px;
     z-index: 100;
-    min-width: 220px;
+    min-width: 300px;
 }
 
 .dc-layout-dropdown-title {
@@ -3737,6 +3737,29 @@ body.sidebar-collapsed #task-log-footer {
     display: flex;
     align-items: center;
     gap: 6px;
+}
+
+/* ─── Tiny Layout (name + single status LED) ─── */
+.dc-tiny-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.dc-tiny-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.15);
+}
+
+.dc-tiny-name {
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
 }
 
 /* ─── LED Dot (Compact Mode) ─── */

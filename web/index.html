@@ -523,10 +523,14 @@
                                     <div class="dc-layout-option-icon">▥</div>
                                     <div class="dc-layout-option-label">Server Room</div>
                                 </div>
+                                <div class="dc-layout-option" data-layout="tiny" onclick="setDcLayout('tiny')">
+                                    <div class="dc-layout-option-icon">∷</div>
+                                    <div class="dc-layout-option-label">Tiny</div>
+                                </div>
                             </div>
                         </div>
                         <div style="border-top:1px solid var(--border);padding-top:10px;">
-                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-secondary);">
+                            <label id="dc-compact-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-secondary);">
                                 <input type="checkbox" id="dc-compact-toggle" onchange="toggleDcCompact(this.checked)">
                                 Compact Mode (LED indicators)
                             </label>
