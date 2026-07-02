@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.3: fix container->WolfNet DNAT accumulation + orphans (KO4BSR/Gary)** _(2026-07-02 — [`f7e6924b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f7e6924b1197def2b04235104684ed78989fcb15))_
+- **v25.2.3: fix container→WolfNet DNAT accumulation + orphans (KO4BSR/Gary)** _(2026-07-02 — [`393c3dbd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/393c3dbdee712b4d3ada730d835c8718fb8f012e))_
 - **v25.2.2: fix cluster leader election on mixed node-id clusters (WolfRun + WolfFunctions)** _(2026-07-02 — [`a1ad3fe6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a1ad3fe6fe8fbf3e13b5cae6548c19471f3e26c9))_
 - **v25.2.1: WolfFunctions header follows the selected theme (was hardcoded purple)** _(2026-07-02 — [`c042284a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c042284a102f588d50089d29311d798bd8a2e82f))_
 - **v25.2.0: WolfFunctions — serverless functions-as-a-service across the cluster** _(2026-07-02 — [`ad6d49c0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ad6d49c0c1800a9dd62d42b7e0c49912ed396577))_
