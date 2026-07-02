@@ -46601,7 +46601,7 @@ function renderWolfFunctions(data) {
                 <div style="font-size:11px;color:var(--text-muted);">${escapeHtml(f.description || '')}</div></td>
             <td>${escapeHtml(rt ? rt.label : f.runtime)}</td>
             <td>${f.replicas} node${f.replicas === 1 ? '' : 's'}</td>
-            <td style="display:flex;gap:4px;flex-wrap:wrap;">${triggers.join('')}</td>
+            <td><div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">${triggers.join('')}</div></td>
             <td><span style="color:${statusColor};font-weight:600;">${escapeHtml(statusText)}</span></td>
             <td style="text-align:right;white-space:nowrap;">
                 <button class="btn btn-sm" onclick="wolffnTestInvoke('${escapeAttr(f.id)}')" title="Test invoke">Test</button>
@@ -46618,13 +46618,22 @@ function wolffnCloseEditor() {
     if (ov) ov.remove();
 }
 
+// Default replica count for a new function: 2 for HA on multi-node clusters,
+// capped at the number of nodes that can actually run functions — a standalone
+// deployment defaults to 1 instead of an unfulfillable 2.
+function wolffnDefaultReplicas() {
+    if (!wolffnOverviewCache || !Array.isArray(wolffnOverviewCache.nodes)) return 2;
+    const capable = wolffnOverviewCache.nodes.filter(n => n.eligibility && n.eligibility.mode).length;
+    return Math.min(2, Math.max(1, capable));
+}
+
 function openWolfFunctionEditor(id) {
     const existing = id && wolffnOverviewCache
         ? (wolffnOverviewCache.functions || []).find(f => f.id === id)
         : null;
     const f = existing || {
         name: '', runtime: 'python312', code: WOLFFN_STARTER.python312,
-        description: '', memory_mb: 128, timeout_secs: 30, replicas: 2,
+        description: '', memory_mb: 128, timeout_secs: 30, replicas: wolffnDefaultReplicas(),
         max_per_node: 4, env: [], public_slug: '', schedules: [], events: [], enabled: true,
     };
     wolffnCloseEditor();
@@ -46763,7 +46772,7 @@ function wolffnCollectBody() {
 async function wolffnSave(id) {
     const body = wolffnCollectBody();
     if (!body.name) { showToast('Function needs a name', 'error'); return; }
-    if (isNaN(body.replicas)) body.replicas = 2;
+    if (isNaN(body.replicas)) body.replicas = wolffnDefaultReplicas();
     const btn = document.getElementById('wolffn-save-btn');
     btn.disabled = true;
     try {
