@@ -585,7 +585,11 @@ pub fn rank_nodes_for_placement(
                     m.cpu_usage_percent * 0.4 + m.memory_percent * 0.4 + disk * 0.2
                 })
                 .unwrap_or(f32::MAX);
-            (score, n.id.clone())
+            // Store the CANONICAL global id (self_id / `ws-…`) so `placed_nodes`
+            // is meaningful on every node. The local registry key (`node-…` for
+            // remotes) is only known to THIS node — a peer could never recognise
+            // itself in it, so it would never warm its own replica.
+            (score, n.self_id.clone().unwrap_or_else(|| n.id.clone()))
         })
         .collect();
     candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)

@@ -1151,7 +1151,8 @@ pub async fn invoke_routed(
     }
     let nodes = cluster.get_all_nodes();
     let self_node = nodes.iter().find(|n| n.is_self);
-    let self_id = self_node.map(|n| n.id.clone()).unwrap_or_default();
+    // Canonical global id, matching the form stored in `placed_nodes`.
+    let self_id = cluster.self_id.clone();
     let node_name = self_node.map(|n| n.hostname.clone()).unwrap_or_else(|| "local".to_string());
 
     if func.placed_nodes.is_empty() || func.placed_nodes.contains(&self_id) {
@@ -1161,7 +1162,9 @@ pub async fn invoke_routed(
     let client = &*FN_RPC_CLIENT;
     let payload = serde_json::json!({ "event": event, "trigger": trigger });
     for placed in &func.placed_nodes {
-        let Some(node) = nodes.iter().find(|n| &n.id == placed && n.online) else { continue; };
+        // `placed` is a canonical `ws-…` id; get_node resolves it whether the
+        // local registry keys that node as `ws-…` or `node-…`.
+        let Some(node) = cluster.get_node(placed).filter(|n| n.online) else { continue; };
         let path = format!("/api/wolffunctions/{}/invoke-local", func.id);
         for url in crate::api::build_node_urls(&node.address, node.port, &path) {
             match client.post(&url)
@@ -1205,8 +1208,10 @@ pub async fn local_reconcile(
     let elig = probe_eligibility(state).await;
     let Some(mode) = elig.mode else { return; };
 
-    let self_id = cluster.get_all_nodes().iter()
-        .find(|n| n.is_self).map(|n| n.id.clone()).unwrap_or_default();
+    // Match against our CANONICAL global id — the same form placement now
+    // stores in `placed_nodes`. Using the local registry key would miss a
+    // placement recorded under this node's `ws-…` self_id.
+    let self_id = cluster.self_id.clone();
     let self_cluster = self_cluster_name(cluster);
     let functions: Vec<WolfFunction> = state.config.read().unwrap().functions.iter()
         .filter(|f| f.cluster == self_cluster).cloned().collect();

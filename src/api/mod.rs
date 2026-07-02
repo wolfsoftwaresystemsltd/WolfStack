@@ -31171,10 +31171,11 @@ pub async fn wolffunctions_invocations(
     let mut records: Vec<serde_json::Value> = state.wolffunctions.recent_invocations(&id)
         .into_iter().map(|r| serde_json::to_value(r).unwrap_or_default()).collect();
 
-    let nodes = state.cluster.get_all_nodes();
     let client = &*API_HTTP_CLIENT;
     for node_id in &func.placed_nodes {
-        let Some(node) = nodes.iter().find(|n| &n.id == node_id && n.online && !n.is_self) else { continue; };
+        // placed_nodes holds canonical `ws-…` ids; get_node resolves either
+        // registry form. Skip self (our own ring is already included above).
+        let Some(node) = state.cluster.get_node(node_id).filter(|n| n.online && !n.is_self) else { continue; };
         let path = format!("/api/wolffunctions/{}/invocations-local", id);
         for url in build_node_urls(&node.address, node.port, &path) {
             match client.get(&url)

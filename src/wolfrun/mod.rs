@@ -735,28 +735,105 @@ pub async fn broadcast_to_cluster(
 /// Leader = lowest alphabetical node ID among online same-cluster nodes.
 /// This is deterministic and requires no election protocol.
 pub fn is_leader(cluster: &ClusterState) -> bool {
-    let nodes = cluster.get_all_nodes();
+    is_leader_among(&cluster.get_all_nodes(), &cluster.self_id)
+}
 
-    // Find our cluster name
+/// Pure leader test — extracted from `is_leader` so it can be unit-tested
+/// without constructing a `ClusterState` (which does filesystem I/O).
+///
+/// Elects on each node's CANONICAL global id (its `self_id`, the `ws-…`
+/// form) rather than the local registry key. Remote nodes are often keyed
+/// locally as `node-…` (e.g. on public-address joins) while the SELF node is
+/// keyed as its `ws-…` self_id. Sorting raw keys sorts every peer's `node-…`
+/// ahead of the self `ws-…`, so NO node ever sees its own id as lowest and
+/// the cluster is left with no leader (placement/reconcile silently never
+/// runs). Canonicalising first makes every node agree on the same ordering
+/// and elect exactly one leader.
+fn is_leader_among(nodes: &[crate::agent::Node], self_id: &str) -> bool {
     let self_cluster = nodes.iter()
         .find(|n| n.is_self)
         .and_then(|n| n.cluster_name.clone())
         .unwrap_or_else(|| "WolfStack".to_string());
 
-    // Get all online same-cluster node IDs
-    let mut cluster_node_ids: Vec<&str> = nodes.iter()
+    let mut cluster_node_ids: Vec<String> = nodes.iter()
         .filter(|n| {
             n.online && n.cluster_name.as_deref().unwrap_or("WolfStack") == self_cluster
         })
-        .map(|n| n.id.as_str())
+        .map(|n| n.self_id.clone().unwrap_or_else(|| n.id.clone()))
         .collect();
 
     cluster_node_ids.sort();
 
-    // Leader is the lowest ID; if no nodes found, we are leader by default
+    // Leader is the lowest canonical id; if no nodes found, we are leader.
     match cluster_node_ids.first() {
-        Some(leader_id) => *leader_id == cluster.self_id,
-        None => true, // Solo node — we are leader
+        Some(leader_id) => leader_id == self_id,
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod leader_election_tests {
+    use super::is_leader_among;
+
+    // Build a Node from a compact JSON spec (Node has no Default and 31
+    // fields; most carry serde defaults). Pure — no filesystem I/O.
+    fn node(id: &str, self_id: Option<&str>, is_self: bool) -> crate::agent::Node {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "hostname": id, "address": "10.0.0.1", "port": 8553u16,
+            "last_seen": 0, "metrics": serde_json::Value::Null, "components": [],
+            "online": true, "is_self": is_self,
+            "node_type": "wolfstack", "cluster_name": "intelligentwolf",
+            "self_id": self_id,
+        })).expect("valid test node")
+    }
+
+    // Each node's OWN registry view: itself keyed by its ws- self_id, peers
+    // keyed by a local node- key but carrying their gossiped ws- self_id.
+    fn view(me: &str, peers: &[(&str, &str)]) -> Vec<crate::agent::Node> {
+        let mut nodes = vec![node(me, Some(me), true)];
+        for (local_key, ws_id) in peers {
+            nodes.push(node(local_key, Some(ws_id), false));
+        }
+        nodes
+    }
+
+    #[test]
+    fn exactly_one_leader_on_mixed_id_cluster() {
+        let a = view("ws-a", &[("node-b", "ws-b"), ("node-c", "ws-c")]);
+        let b = view("ws-b", &[("node-a", "ws-a"), ("node-c", "ws-c")]);
+        let c = view("ws-c", &[("node-a", "ws-a"), ("node-b", "ws-b")]);
+        // ws-a is the lowest canonical id, so it is leader on every node's view.
+        assert!(is_leader_among(&a, "ws-a"));
+        assert!(!is_leader_among(&b, "ws-b"));
+        assert!(!is_leader_among(&c, "ws-c"));
+        let count = [
+            is_leader_among(&a, "ws-a"),
+            is_leader_among(&b, "ws-b"),
+            is_leader_among(&c, "ws-c"),
+        ].iter().filter(|x| **x).count();
+        assert_eq!(count, 1, "exactly one node must be leader");
+    }
+
+    #[test]
+    fn solo_node_is_leader() {
+        assert!(is_leader_among(&view("ws-a", &[]), "ws-a"));
+    }
+
+    #[test]
+    fn all_consistent_ids_still_elect_lowest() {
+        // A normal cluster keyed entirely by ws- ids behaves unchanged.
+        let nodes = view("ws-b", &[("ws-a", "ws-a"), ("ws-c", "ws-c")]);
+        assert!(is_leader_among(&nodes, "ws-a"));
+        assert!(!is_leader_among(&nodes, "ws-b"));
+    }
+
+    #[test]
+    fn offline_lowest_is_skipped() {
+        // If the lowest-id node is offline, leadership moves to the next.
+        let mut nodes = view("ws-b", &[("node-a", "ws-a"), ("node-c", "ws-c")]);
+        nodes.iter_mut().find(|n| n.self_id.as_deref() == Some("ws-a"))
+            .unwrap().online = false;
+        assert!(is_leader_among(&nodes, "ws-b"));
     }
 }
 
