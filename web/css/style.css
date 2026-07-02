@@ -2166,12 +2166,17 @@ body.sidebar-collapsed #task-log-footer {
     text-align: center;
 }
 
+/* Count badges (Containers, Components, …) are informational, not alerts —
+   outline style so they never read as errors on red-accent themes
+   (RutgerDiehard, 2026-07-02). Genuine alert badges (predictive inbox,
+   task log) are inline-styled solid #ef4444 and keep that treatment. */
 .nav-item .badge {
     margin-left: auto;
-    background: var(--accent);
-    color: white;
+    background: transparent;
+    color: var(--accent-light);
+    border: 1px solid var(--accent);
     font-size: 11px;
-    padding: 2px 8px;
+    padding: 1px 7px;
     border-radius: 10px;
     font-weight: 600;
 }
