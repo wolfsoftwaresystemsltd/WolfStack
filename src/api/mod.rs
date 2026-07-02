@@ -31319,6 +31319,13 @@ pub async fn wolffunctions_ai_generate(
              function/version/memory_mb/node/trigger keys. The return value must be\n\
              JSON-serializable. Only the Python standard library is available —\n\
              no pip packages. print() output becomes the invocation log.\n\
+             When the function is called over its public HTTP URL and you need to\n\
+             control the HTTP response (status, content type, or serve HTML/text/\n\
+             redirects), return an AWS-Lambda-proxy-style dict:\n\
+             {'statusCode': 200, 'headers': {'Content-Type': 'text/html'},\n\
+             'body': '<html>...</html>'}. `body` must be a string; set\n\
+             'isBase64Encoded': True and base64-encode `body` for binary responses.\n\
+             Without a numeric statusCode the return value is sent as JSON.\n\
              Respond with ONLY the complete file content — no explanations, no\n\
              markdown fences.",
         crate::wolffunctions::FunctionRuntime::Node22 =>
@@ -31329,6 +31336,13 @@ pub async fn wolffunctions_ai_generate(
              memory_mb/node/trigger keys. The return value must be JSON-serializable.\n\
              Only Node's standard library is available — no npm packages.\n\
              console.log output becomes the invocation log.\n\
+             When the function is called over its public HTTP URL and you need to\n\
+             control the HTTP response (status, content type, or serve HTML/text/\n\
+             redirects), return an AWS-Lambda-proxy-style object:\n\
+             { statusCode: 200, headers: { 'Content-Type': 'text/html' },\n\
+             body: '<html>...</html>' }. `body` must be a string; set\n\
+             isBase64Encoded: true and base64-encode `body` for binary responses.\n\
+             Without a numeric statusCode the return value is sent as JSON.\n\
              Respond with ONLY the complete file content — no explanations, no\n\
              markdown fences.",
     };
@@ -31380,6 +31394,97 @@ static WOLFFN_PUBLIC_RL: std::sync::LazyLock<std::sync::Mutex<std::collections::
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 const WOLFFN_PUBLIC_RL_PER_MIN: u32 = 60;
 
+/// Map a WolfFunctions handler result to the HTTP response served on the
+/// public `/fn/{slug}` trigger.
+///
+/// If the function returns an AWS Lambda proxy-integration shape — an object
+/// with a numeric `statusCode`, plus optional `headers`, `body` (string), and
+/// `isBase64Encoded` — honour it, so functions can serve HTML, redirects, or
+/// any content type (this is what AWS API Gateway / GCP HTTP functions do, and
+/// what our own docs example returns). Otherwise fall back to JSON-encoding the
+/// whole result with `application/json` (unchanged legacy behaviour).
+///
+/// `multiValueHeaders` (AWS's mechanism for genuinely repeating a header, e.g.
+/// multiple `Set-Cookie`) is not supported — the single `headers` map is the
+/// documented contract; each header name appears at most once on the wire.
+fn wolffn_result_to_response(result: &serde_json::Value) -> HttpResponse {
+    use actix_web::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
+    // Only an object carrying a numeric statusCode is treated as proxy-shaped;
+    // anything else keeps the legacy JSON behaviour.
+    let obj = match result.as_object() {
+        Some(o) if o.get("statusCode").and_then(|v| v.as_u64()).is_some() => o,
+        _ => return HttpResponse::Ok().json(result),
+    };
+    let status = obj.get("statusCode").and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .and_then(|n| actix_web::http::StatusCode::from_u16(n).ok())
+        .unwrap_or(actix_web::http::StatusCode::OK);
+
+    // Collect function-supplied headers into a case-insensitive map before
+    // emitting, so a result with two case-variant keys (e.g. "Content-Type"
+    // AND "content-type" — distinct keys in a JSON object) can't put duplicate,
+    // conflicting headers on the wire (a content-type-confusion / cache-
+    // poisoning vector on this public surface). `HeaderName` is stored
+    // lowercased by the http crate, so the map dedups case variants; last value
+    // wins. Framing headers actix must own are dropped; any name/value the http
+    // crate rejects (e.g. CRLF-injection attempts) is skipped, not fatal.
+    let mut hdrs: std::collections::HashMap<HeaderName, HeaderValue> =
+        std::collections::HashMap::new();
+    if let Some(headers) = obj.get("headers").and_then(|v| v.as_object()) {
+        for (k, v) in headers {
+            let val = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            let lk = k.to_ascii_lowercase();
+            if lk == "content-length" || lk == "transfer-encoding" || lk == "connection" {
+                continue;
+            }
+            if let (Ok(name), Ok(value)) =
+                (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&val))
+            {
+                hdrs.insert(name, value);
+            }
+        }
+    }
+
+    // Body: a string is served as-is (base64-decoded to binary when the
+    // function sets isBase64Encoded); a non-string body is JSON-encoded.
+    let is_b64 = obj.get("isBase64Encoded").and_then(|v| v.as_bool()).unwrap_or(false);
+    let body_bytes: Vec<u8> = match obj.get("body") {
+        Some(serde_json::Value::String(s)) => {
+            if is_b64 {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.decode(s).unwrap_or_default()
+            } else {
+                s.clone().into_bytes()
+            }
+        }
+        Some(serde_json::Value::Null) | None => Vec::new(),
+        Some(other) => {
+            if hdrs.contains_key(&CONTENT_TYPE) {
+                // Malformed function output: an explicit content-type but a
+                // non-string body we can only JSON-encode. Serve JSON but leave
+                // a breadcrumb so the author can diagnose the mismatch.
+                tracing::debug!("WolfFunctions: handler set an explicit Content-Type but returned a non-string body; JSON-encoding it (set `body` to a string to control the payload)");
+            }
+            serde_json::to_vec(other).unwrap_or_default()
+        }
+    };
+
+    // AWS defaults proxy responses with no explicit content-type to JSON.
+    hdrs.entry(CONTENT_TYPE)
+        .or_insert_with(|| HeaderValue::from_static("application/json"));
+
+    let mut builder = HttpResponse::build(status);
+    for (name, value) in hdrs {
+        builder.append_header((name, value));
+    }
+    builder.body(body_bytes)
+}
+
 /// GET/POST /fn/{slug} — public HTTP trigger. No auth by design (the
 /// operator opted in per function); errors are generic so nothing internal
 /// leaks through a public surface — details live in the invocation log.
@@ -31416,7 +31521,7 @@ pub async fn wolffunctions_public_trigger(
     match crate::wolffunctions::runtime::invoke_routed(
         &state.wolffunctions, &state.cluster, &state.cluster_secret, &func, event, "http",
     ).await {
-        Ok(result) => HttpResponse::Ok().json(result),
+        Ok(result) => wolffn_result_to_response(&result),
         Err(e) => {
             tracing::warn!("WolfFunctions: public trigger {} failed: {}", slug, e);
             HttpResponse::InternalServerError().json(serde_json::json!({ "error": "function error" }))
@@ -40423,6 +40528,101 @@ pub fn configure_statuspage_only(cfg: &mut web::ServiceConfig) {
         .route("/", web::get().to(statuspage_public_index))
         .route("/status", web::get().to(statuspage_public_index))
         .route("/status/{slug}", web::get().to(statuspage_public_page_dedicated));
+}
+
+#[cfg(test)]
+mod wolffn_response_tests {
+    use super::wolffn_result_to_response;
+    use serde_json::json;
+
+    fn ctype(resp: &actix_web::HttpResponse) -> String {
+        resp.headers().get("content-type")
+            .and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+    }
+
+    #[actix_web::test]
+    async fn proxy_shape_honours_status_headers_and_html_body() {
+        let resp = wolffn_result_to_response(&json!({
+            "statusCode": 200,
+            "headers": { "Content-Type": "text/html" },
+            "body": "<html><body><h1>Hello, World!</h1></body></html>"
+        }));
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(ctype(&resp), "text/html");
+        let body = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        assert_eq!(body, "<html><body><h1>Hello, World!</h1></body></html>");
+    }
+
+    #[actix_web::test]
+    async fn non_proxy_result_falls_back_to_json() {
+        // No statusCode → legacy behaviour: whole value JSON-encoded.
+        let resp = wolffn_result_to_response(&json!({ "sum": 42 }));
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(ctype(&resp), "application/json");
+        let body = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        assert_eq!(body, r#"{"sum":42}"#);
+    }
+
+    #[actix_web::test]
+    async fn custom_status_and_redirect_header() {
+        let resp = wolffn_result_to_response(&json!({
+            "statusCode": 302,
+            "headers": { "Location": "https://example.com/" }
+        }));
+        assert_eq!(resp.status().as_u16(), 302);
+        assert_eq!(resp.headers().get("location").unwrap().to_str().unwrap(),
+                   "https://example.com/");
+        // No body key → empty body; no explicit content-type → defaults to JSON.
+        assert_eq!(ctype(&resp), "application/json");
+    }
+
+    #[actix_web::test]
+    async fn base64_body_is_decoded_to_binary() {
+        // base64("PNG") = "UE5H"
+        let resp = wolffn_result_to_response(&json!({
+            "statusCode": 200,
+            "headers": { "Content-Type": "image/png" },
+            "body": "UE5H",
+            "isBase64Encoded": true
+        }));
+        assert_eq!(ctype(&resp), "image/png");
+        let body = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        assert_eq!(&body[..], b"PNG");
+    }
+
+    #[actix_web::test]
+    async fn case_variant_header_keys_do_not_duplicate_on_the_wire() {
+        // A JSON object can carry two distinct keys that name the same HTTP
+        // header ("Content-Type" vs "content-type"). They must collapse to a
+        // single header on the wire, not two conflicting ones (content-type
+        // confusion / cache-poisoning risk on a public surface).
+        let resp = wolffn_result_to_response(&json!({
+            "statusCode": 200,
+            "headers": { "Content-Type": "text/html", "content-type": "text/plain" },
+            "body": "hi"
+        }));
+        assert_eq!(resp.headers().get_all("content-type").count(), 1,
+                   "case-variant header keys must not emit duplicate headers");
+    }
+
+    #[actix_web::test]
+    async fn framing_and_injection_headers_are_dropped() {
+        let resp = wolffn_result_to_response(&json!({
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "text/plain",
+                "Content-Length": "999",           // framing — actix must own it
+                "X-Evil": "a\r\nInjected: yes"      // CRLF — rejected by http crate
+            },
+            "body": "hi"
+        }));
+        assert_eq!(ctype(&resp), "text/plain");
+        // Our bogus Content-Length was skipped (actix sets the real one at wire
+        // encoding time, so it isn't on the in-memory response object here).
+        assert!(resp.headers().get("content-length").is_none(),
+                "function-supplied Content-Length must be dropped");
+        assert!(resp.headers().get("x-evil").is_none(), "CRLF header must be dropped");
+    }
 }
 
 #[cfg(test)]

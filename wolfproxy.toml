@@ -1,0 +1,14 @@
+[server]
+host = "0.0.0.0"
+http_port = 80
+https_port = 443
+
+[nginx]
+config_dir = "/etc/nginx"
+auto_reload = false
+
+[monitoring]
+enabled = true
+port = 5001
+username = "admin"
+password = "admin"
