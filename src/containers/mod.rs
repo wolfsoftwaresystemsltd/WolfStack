@@ -672,6 +672,110 @@ pub fn lxc_base_dir(container: &str) -> String {
 /// Clean up stale /32 kernel routes for WolfNet IPs that don't belong to local containers.
 /// Stale routes (from deleted/moved containers) override the wolfnet0 /24 route and
 /// prevent cross-node container routing through the WolfNet tunnel.
+/// Comment tag on container→WolfNet DNAT rules so they're identifiable in
+/// `iptables-save` and cleanable by comment. (KO4BSR/Gary saw untagged rules
+/// he couldn't attribute.) WolfRun VIP-map rules use `wolfstack-vip-map-*`.
+const WOLFNET_CT_COMMENT: &str = "wolfstack-wolfnet-container";
+
+/// For an `iptables -S` line, return the DNAT destination-match IP (the `-d`
+/// address) IFF the line is a container→WolfNet exposure DNAT rule we own.
+/// Ownership signature: it is a DNAT whose `-d` is a WolfNet IP (starts with
+/// `wolfnet_prefix`, e.g. `"10.10.10."`) and whose `--to-destination` is a
+/// container bridge IP OUTSIDE the WolfNet subnet. That last condition is what
+/// separates our rules from an `IpMapping` DNAT (`public_ip → wolfnet_ip`,
+/// where `--to` IS inside WolfNet), so we can never sweep a legitimate IP
+/// mapping even if its public_ip were set inside the WolfNet range. WolfRun
+/// vip-map and standard ip-map comment tags are also excluded defensively.
+/// Returns the bare `-d` IP without the `/32`. Pure — unit-tested — so the
+/// accumulation/orphan matching can't regress.
+fn container_dnat_dst_ip(line: &str, wolfnet_prefix: &str) -> Option<String> {
+    if !line.contains("DNAT")
+        || line.contains("wolfstack-vip-map")
+        || line.contains("wolfstack-ip-map")
+    {
+        return None;
+    }
+    // -d must be a WolfNet IP (and not a negated `! -d`).
+    let dpos = line.find(" -d ")?;
+    if line[..dpos].ends_with('!') { return None; }
+    let dcidr = line[dpos + 4..].split_whitespace().next()?;
+    let dip = dcidr.split('/').next()?;
+    if !dip.starts_with(wolfnet_prefix) { return None; }
+    // --to-destination must be a bridge IP OUTSIDE the WolfNet subnet.
+    let tpos = line.find("--to-destination ")?;
+    let tdest = line[tpos + 17..].split_whitespace().next()?;
+    let tip = tdest.split(':').next()?; // strip :port if present
+    if tip.starts_with(wolfnet_prefix) { return None; }
+    Some(dip.to_string())
+}
+
+/// Delete EVERY container→WolfNet DNAT rule in `chain` whose destination is
+/// exactly `ip`, while leaving WolfRun vip-map / IpMapping rules alone (see
+/// `container_dnat_dst_ip`). Deleting by exact spec (from `iptables -S`) is
+/// nft-safe and position-independent. Used to clear stale/accumulated rules:
+/// a container's Docker IP changes on redeploy, so the old delete (keyed on
+/// the *current* Docker IP) left the previous rule behind and they piled up.
+fn purge_container_dnat_for_ip(chain: &str, ip: &str, wolfnet_prefix: &str) {
+    let out = match Command::new("iptables").args(["-t", "nat", "-S", chain]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+    let add_prefix = format!("-A {} ", chain);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if container_dnat_dst_ip(line, wolfnet_prefix).as_deref() != Some(ip) { continue; }
+        let spec = match line.strip_prefix(&add_prefix) { Some(s) => s, None => continue };
+        let mut argv: Vec<&str> = vec!["-t", "nat", "-D", chain];
+        argv.extend(spec.split_whitespace());
+        let _ = Command::new("iptables").args(&argv).output();
+    }
+}
+
+#[cfg(test)]
+mod container_dnat_tests {
+    use super::container_dnat_dst_ip;
+    const P: &str = "10.10.10.";
+
+    #[test]
+    fn matches_container_dnat_and_extracts_dst() {
+        assert_eq!(
+            container_dnat_dst_ip("-A PREROUTING -d 10.10.10.3/32 -j DNAT --to-destination 172.18.0.4", P),
+            Some("10.10.10.3".to_string()));
+        assert_eq!(
+            container_dnat_dst_ip("-A OUTPUT -d 10.10.10.3/32 -j DNAT --to-destination 172.18.0.2 -m comment --comment wolfstack-wolfnet-container", P),
+            Some("10.10.10.3".to_string()));
+    }
+
+    #[test]
+    fn does_not_confuse_similar_prefix_ips() {
+        assert_eq!(
+            container_dnat_dst_ip("-A PREROUTING -d 10.10.10.30/32 -j DNAT --to-destination 172.18.0.9", P),
+            Some("10.10.10.30".to_string()));
+    }
+
+    #[test]
+    fn skips_vip_map_ip_map_and_non_dnat() {
+        // WolfRun VIP-map LB rules are protected.
+        assert_eq!(
+            container_dnat_dst_ip("-A PREROUTING -d 10.10.10.3/32 -m statistic --mode nth --every 2 --packet 0 -j DNAT --to-destination 10.0.0.5 -m comment --comment wolfstack-vip-map-abc", P),
+            None);
+        assert_eq!(container_dnat_dst_ip("-A POSTROUTING ! -s 10.10.10.0/24 -o wolfnet0 -j MASQUERADE", P), None);
+        assert_eq!(container_dnat_dst_ip("-A FORWARD -d 10.10.10.3/32 -j ACCEPT", P), None);
+    }
+
+    #[test]
+    fn protects_ip_mapping_dnat_pointing_into_wolfnet() {
+        // An IpMapping DNAT whose -d is (unusually) a WolfNet IP but whose
+        // --to-destination is a WolfNet IP must NOT be treated as ours.
+        assert_eq!(
+            container_dnat_dst_ip("-A PREROUTING -d 10.10.10.3/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 10.10.10.50:80", P),
+            None);
+        // A negated -d is not a destination match.
+        assert_eq!(
+            container_dnat_dst_ip("-A PREROUTING ! -d 10.10.10.3/32 -j DNAT --to-destination 172.18.0.4", P),
+            None);
+    }
+}
+
 pub fn cleanup_stale_wolfnet_routes() {
     let local_ips: std::collections::HashSet<String> = wolfnet_used_ips_cached().into_iter().collect();
 
@@ -722,10 +826,21 @@ pub fn cleanup_stale_wolfnet_routes() {
     // Ensure Docker containers with WolfNet IPs have correct host routes
     // Uses each container's actual bridge device (docker0 or br-<id> for custom networks)
     let mut bridge_devs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Ok(output) = Command::new("docker")
+    // WolfNet IPs CLAIMED by a container that still carries a WolfNet label —
+    // running OR stopped. The orphan sweep below only removes DNAT rules for
+    // IPs NOT in this set, so a temporarily-stopped-but-labeled container
+    // (planned restart / compose bounce) is never swept; only a genuinely
+    // label-removed / deleted container's rules are.
+    let mut claimed_ips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // CRITICAL: gate on the process EXIT status, not just Ok(spawned). A failed
+    // `docker ps` (dockerd restarting/upgrading) returns Ok with empty stdout;
+    // treating that as "no containers" would make the sweep delete EVERY
+    // container DNAT rule on the host. On failure we skip the whole block and
+    // retry next tick — leftover rules are harmless, a wrongful mass-delete is not.
+    let ps = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
-        .output()
-    {
+        .output();
+    if let Some(output) = ps.as_ref().ok().filter(|o| o.status.success()) {
         let text = String::from_utf8_lossy(&output.stdout);
         for name in text.lines().filter(|l| !l.is_empty()) {
             // Check override file first, then Docker label
@@ -733,6 +848,8 @@ pub fn cleanup_stale_wolfnet_routes() {
                 Some(ip) => ip,
                 None => continue,
             };
+            // A labeled container claims its WolfNet IP even while stopped.
+            claimed_ips.insert(label.clone());
 
             // Check if the container is running (needs a PID for nsenter)
             let pid_out = Command::new("docker")
@@ -790,27 +907,60 @@ pub fn cleanup_stale_wolfnet_routes() {
                 {
                     let docker_ip = String::from_utf8_lossy(&docker_ip_out.stdout).trim().to_string();
                     if !docker_ip.is_empty() && docker_ip != label {
-                        // Remove old DNAT rules for this WolfNet IP (idempotent)
-                        let _ = Command::new("iptables").args([
-                            "-t", "nat", "-D", "PREROUTING",
-                            "-d", &label, "-j", "DNAT", "--to-destination", &docker_ip
-                        ]).output();
-                        // Add DNAT: wolfnet_ip → docker_ip (all ports)
-                        let _ = Command::new("iptables").args([
-                            "-t", "nat", "-A", "PREROUTING",
-                            "-d", &label, "-j", "DNAT", "--to-destination", &docker_ip
-                        ]).output();
-                        // Also handle locally-generated traffic (curl from host)
-                        let _ = Command::new("iptables").args([
-                            "-t", "nat", "-D", "OUTPUT",
-                            "-d", &label, "-j", "DNAT", "--to-destination", &docker_ip
-                        ]).output();
-                        let _ = Command::new("iptables").args([
-                            "-t", "nat", "-A", "OUTPUT",
-                            "-d", &label, "-j", "DNAT", "--to-destination", &docker_ip
-                        ]).output();
+                        // DNAT WolfNet IP → the container's CURRENT Docker IP, on
+                        // both PREROUTING (host-forwarded) and OUTPUT (host-local).
+                        // Idempotent via -C: steady state makes NO change, so there
+                        // is no reachability gap on the reconcile tick. Only when the
+                        // correct tagged rule is absent (fresh, or the container was
+                        // redeployed onto a new Docker IP) do we first purge EVERY
+                        // DNAT for this WolfNet IP — clearing stale rules that point
+                        // at a previous Docker IP (the accumulation Gary hit:
+                        // 10.10.10.3 → .2/.3/.4) plus any legacy comment-less rule —
+                        // then add the fresh, tagged one.
+                        for chain in ["PREROUTING", "OUTPUT"] {
+                            let correct = Command::new("iptables").args([
+                                "-t", "nat", "-C", chain, "-d", &label,
+                                "-j", "DNAT", "--to-destination", &docker_ip,
+                                "-m", "comment", "--comment", WOLFNET_CT_COMMENT,
+                            ]).output().map(|o| o.status.success()).unwrap_or(false);
+                            if correct { continue; }
+                            purge_container_dnat_for_ip(chain, &label, &prefix);
+                            let _ = Command::new("iptables").args([
+                                "-t", "nat", "-A", chain, "-d", &label,
+                                "-j", "DNAT", "--to-destination", &docker_ip,
+                                "-m", "comment", "--comment", WOLFNET_CT_COMMENT,
+                            ]).output();
+                        }
                     }
                 }
+            }
+        }
+
+        // ── Orphan sweep ──────────────────────────────────────────────
+        // Remove container→WolfNet DNAT rules for any WolfNet IP no longer
+        // CLAIMED by a labeled container. This is what was missing entirely:
+        // when a WolfNet label is removed the container drops out of the loop
+        // above, so nothing ever cleaned its DNAT rules and the IP stayed
+        // pingable (KO4BSR/Gary). container_dnat_dst_ip identifies our rules by
+        // shape (WolfNet -d, bridge --to) so it also clears legacy untagged
+        // rules and accumulated duplicates while never touching vip-map or
+        // IpMapping rules. Runs only when `docker ps` genuinely SUCCEEDED
+        // (checked above), so a dockerd hiccup can't be mistaken for
+        // "everything orphaned".
+        let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for chain in ["PREROUTING", "OUTPUT"] {
+            if let Ok(out) = Command::new("iptables").args(["-t", "nat", "-S", chain]).output() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Some(ip) = container_dnat_dst_ip(line, &prefix) {
+                        present.insert(ip);
+                    }
+                }
+            }
+        }
+        for ip in present {
+            if !claimed_ips.contains(&ip) {
+                purge_container_dnat_for_ip("PREROUTING", &ip, &prefix);
+                purge_container_dnat_for_ip("OUTPUT", &ip, &prefix);
             }
         }
     }
