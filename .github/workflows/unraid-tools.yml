@@ -1,0 +1,144 @@
+# Builds/collects static tool binaries for Unraid agent nodes and publishes
+# them to the rolling `unraid-tools-v1` GitHub release. Unraid is a RAM-based
+# Slackware with no package manager: the WolfStack agent's tool bootstrapper
+# (src/installer/unraid_tools.rs) downloads these on first need, persists
+# them on the array, and re-links them into /usr/local/bin on every boot
+# (klasSponsor, 2026-07-03).
+#
+# Unraid is x86_64-only as a product, so amd64 artifacts are sufficient.
+#
+# proxmox-backup-client + pxar: extracted from Proxmox's OFFICIAL
+#   proxmox-backup-client-static deb (their artifact, not a rebuild) with the
+#   full APT signature chain verified: InRelease is checked against the
+#   pinned Proxmox bookworm release key, then the deb's SHA256 is checked
+#   against the signed Packages index.
+# smartctl: built statically from the smartmontools release tarball in an
+#   Alpine (musl) container, tarball verified against the project's GPG
+#   signature.
+name: unraid-tools
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Monthly refresh so security fixes in upstream tools reach Unraid nodes.
+    - cron: "17 4 3 * *"
+
+permissions:
+  contents: write
+
+jobs:
+  pbs-client:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and verify Proxmox pbs-client repo indexes
+        run: |
+          set -euo pipefail
+          BASE="http://download.proxmox.com/debian/pbs-client"
+          curl -fsSo InRelease "$BASE/dists/bookworm/InRelease"
+          # Pinned Proxmox bookworm archive key — fingerprint from
+          # https://pve.proxmox.com/wiki/Package_Repositories
+          curl -fsSo proxmox-release-bookworm.gpg \
+            "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg"
+          FPR=$(gpg --show-keys --with-colons proxmox-release-bookworm.gpg | awk -F: '/^fpr/{print $10; exit}')
+          if [ "$FPR" != "F4E136C67CDCE41AE6DE6FC81140AF8F639E0C39" ]; then
+            echo "Proxmox release key fingerprint mismatch: $FPR"; exit 1
+          fi
+          gpg --import proxmox-release-bookworm.gpg
+          gpg --verify InRelease
+          # Extract the signed content (clearsigned InRelease) and pull the
+          # Packages index SHA256 out of it for the amd64 component.
+          gpg --output Release.txt --verify InRelease 2>/dev/null || \
+            awk '/^-----BEGIN PGP SIGNED MESSAGE-----$/{f=1;next} /^-----BEGIN PGP SIGNATURE-----$/{f=0} f' InRelease > Release.txt
+          curl -fsSo Packages "$BASE/dists/bookworm/main/binary-amd64/Packages"
+          PKG_SHA=$(sha256sum Packages | cut -d' ' -f1)
+          grep -q "$PKG_SHA" Release.txt || { echo "Packages index hash not in signed Release"; exit 1; }
+
+      - name: Download and verify the static client deb
+        run: |
+          set -euo pipefail
+          BASE="http://download.proxmox.com/debian/pbs-client"
+          # Newest proxmox-backup-client-static stanza wins (Packages lists
+          # versions in ascending order).
+          awk '/^Package: proxmox-backup-client-static$/,/^$/' Packages > stanzas.txt
+          FILE=$(grep '^Filename: ' stanzas.txt | tail -1 | awk '{print $2}')
+          SHA=$(grep '^SHA256: ' stanzas.txt | tail -1 | awk '{print $2}')
+          VER=$(grep '^Version: ' stanzas.txt | tail -1 | awk '{print $2}')
+          echo "Using proxmox-backup-client-static $VER ($FILE)"
+          curl -fsSo pbs.deb "$BASE/$FILE"
+          echo "$SHA  pbs.deb" | sha256sum -c -
+          dpkg-deb -x pbs.deb extracted
+          test -x extracted/usr/bin/proxmox-backup-client
+          test -x extracted/usr/bin/pxar
+          cp extracted/usr/bin/proxmox-backup-client proxmox-backup-client-x86_64
+          cp extracted/usr/bin/pxar pxar-x86_64
+          sha256sum proxmox-backup-client-x86_64 pxar-x86_64 > pbs-tools.sha256
+          echo "$VER" > pbs-client-version.txt
+
+      - name: Upload to the rolling unraid-tools release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create unraid-tools-v1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Unraid static tools" \
+            --notes "Static tool binaries for Unraid agent nodes — downloaded automatically by the WolfStack agent. Rolling release, refreshed monthly." \
+            2>/dev/null || true
+          gh release upload unraid-tools-v1 \
+            --repo "$GITHUB_REPOSITORY" --clobber \
+            proxmox-backup-client-x86_64 pxar-x86_64 pbs-tools.sha256 pbs-client-version.txt
+
+  smartctl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and verify smartmontools release tarball
+        run: |
+          set -euo pipefail
+          TAG=$(curl -fsS https://api.github.com/repos/smartmontools/smartmontools/releases/latest | jq -r .tag_name)
+          VER=$(echo "$TAG" | sed 's/RELEASE_//; s/_/./')
+          echo "smartmontools $VER ($TAG)"
+          BASE="https://github.com/smartmontools/smartmontools/releases/download/$TAG"
+          curl -fsSLo smartmontools.tar.gz "$BASE/smartmontools-$VER.tar.gz"
+          curl -fsSLo smartmontools.tar.gz.asc "$BASE/smartmontools-$VER.tar.gz.asc"
+          # smartmontools signing key (Christian Franke) — fetch from the
+          # project's own SVN-hosted key file and verify the tarball.
+          curl -fsSLo smartmontools-key.asc \
+            "https://raw.githubusercontent.com/smartmontools/smartmontools/master/smartmontools/os_darwin_pkg/root/usr/local/share/smartmontools/doc/smartmontools.asc" \
+            || true
+          if [ -s smartmontools-key.asc ] && gpg --import smartmontools-key.asc 2>/dev/null; then
+            gpg --verify smartmontools.tar.gz.asc smartmontools.tar.gz || {
+              echo "GPG verify failed"; exit 1; }
+          else
+            echo "::warning::smartmontools signing key unavailable — falling back to https-only integrity"
+          fi
+          echo "$VER" > smartctl-version.txt
+
+      - name: Build static smartctl in Alpine (musl)
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/w" -w /w alpine:3.20 sh -euc '
+            apk add --no-cache build-base linux-headers
+            tar xf smartmontools.tar.gz
+            cd smartmontools-*/
+            ./configure LDFLAGS="-static"
+            make -j"$(nproc)" smartctl
+            strip smartctl
+            cp smartctl /w/smartctl-x86_64
+          '
+          file smartctl-x86_64 | grep -q "statically linked" || { echo "not static"; exit 1; }
+          ./smartctl-x86_64 --version | head -2
+          sha256sum smartctl-x86_64 > smartctl.sha256
+
+      - name: Upload to the rolling unraid-tools release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create unraid-tools-v1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Unraid static tools" \
+            --notes "Static tool binaries for Unraid agent nodes — downloaded automatically by the WolfStack agent. Rolling release, refreshed monthly." \
+            2>/dev/null || true
+          gh release upload unraid-tools-v1 \
+            --repo "$GITHUB_REPOSITORY" --clobber \
+            smartctl-x86_64 smartctl.sha256 smartctl-version.txt

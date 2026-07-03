@@ -291,6 +291,11 @@ if [ -f /etc/unraid-version ]; then
                 printf '%s\n' "  [ -x \"$WS_APPDATA/wolfstack\" ] || exit 0"
                 printf '%s\n' "  ln -sfn \"$WS_APPDATA/etc\" /etc/wolfstack"
                 printf '%s\n' "  ln -sf \"$WS_APPDATA/wolfstack\" /usr/local/bin/wolfstack"
+                # Persisted static tools (proxmox-backup-client, pxar, smartctl —
+                # fetched by the agent's unraid_tools bootstrapper) re-linked into
+                # RAM-backed /usr/local/bin so they're on PATH from the first
+                # moment; the agent re-checks at startup as belt-and-braces.
+                printf '%s\n' "  for t in \"$WS_APPDATA/tools/\"*; do [ -x \"\$t\" ] && ln -sf \"\$t\" \"/usr/local/bin/\$(basename \"\$t\")\"; done || true"
                 printf '%s\n' "  cd \"$WS_APPDATA\" && ./wolfstack --agent </dev/null >> \"$WS_APPDATA/wolfstack.log\" 2>&1"
                 printf '%s\n' ") &"
                 printf '%s\n' "$GO_END"

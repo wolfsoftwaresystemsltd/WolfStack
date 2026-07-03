@@ -6,6 +6,7 @@
 
 pub mod packages;
 pub mod self_signed;
+pub mod unraid_tools;
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;

@@ -618,6 +618,11 @@ async fn main() -> std::io::Result<()> {
     std::thread::spawn(move || {
         vms::manager::VmManager::new().autostart_vms();
         storage::auto_mount_all();
+        // Unraid only (no-op elsewhere): restore/download static tools
+        // (proxmox-backup-client, pxar, smartctl) into RAM-backed
+        // /usr/local/bin — Unraid recreates it every boot (klas 2026-07-03).
+        // After auto_mount_all so /mnt/user (the persistence home) is up.
+        installer::unraid_tools::ensure_unraid_tools();
         networking::apply_ip_mappings();
         // Heal LXC configs that carry an apparmor key this host's LXC can't
         // parse (Fedora/SELinux builds) BEFORE autostart, so broken containers
