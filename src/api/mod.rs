@@ -4151,10 +4151,17 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                     }
                 }
                 // Got a response but couldn't parse — try next URL
-                last_error = format!("Unparseable response from {}", url);
+                if !last_error.is_empty() { last_error.push_str(" | "); }
+                last_error.push_str(&format!("Unparseable response from {}", url));
             }
             Err(e) => {
-                last_error = format!("{}", e);
+                // Accumulate EVERY attempt's failure. Reporting only the last
+                // one showed the legacy plain-http fallback's error and hid
+                // that https (tried FIRST) had already failed — operators
+                // reasonably concluded WolfStack "uses http instead of https"
+                // (masterpier, 2026-07-03).
+                if !last_error.is_empty() { last_error.push_str(" | "); }
+                last_error.push_str(&format!("{}: {}", url, e));
                 // Connection failed — try next URL
             }
         }
@@ -4162,7 +4169,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
 
     if !verified {
         return HttpResponse::BadGateway().json(serde_json::json!({
-            "error": format!("Cannot reach remote server at {}:{} — {}", body.address, port, last_error)
+            "error": format!("Cannot reach remote server at {}:{}. Tried every scheme — {}", body.address, port, last_error)
         }));
     }
 
