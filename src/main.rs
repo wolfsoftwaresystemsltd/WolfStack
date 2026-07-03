@@ -1464,18 +1464,35 @@ async fn main() -> std::io::Result<()> {
         // don't stomp any routes that were legitimately seeded from
         // an existing routes.json (non-tmpfs systems).
         {
-            let local_ips = containers::wolfnet_used_ips_cached();
-            if local_ips.len() > 1 {
-                let host_ip = &local_ips[0];
-                let mut local_routes = std::collections::HashMap::new();
-                for ip in &local_ips[1..] {
-                    if !ip.is_empty() && ip != host_ip {
-                        local_routes.insert(ip.clone(), host_ip.clone());
+            // Guarded: the IP sweep shells out per container (docker ps +
+            // per-container inspect, pct/qm probes) and sits on the pre-bind
+            // path — on masterpier's athena a wedged dockerd hung the v25.2.3
+            // startup exactly here (his stuck `docker network inspect wolfnet`
+            // child), and even with per-command caps a big fleet of 10s
+            // timeouts would stall the bind for minutes. One thread + one
+            // timeout bounds the WHOLE sweep; on timeout the T+5 push loop
+            // seeds the cache instead once the system responds.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(containers::wolfnet_used_ips_cached());
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+                Ok(local_ips) if local_ips.len() > 1 => {
+                    let host_ip = &local_ips[0];
+                    let mut local_routes = std::collections::HashMap::new();
+                    for ip in &local_ips[1..] {
+                        if !ip.is_empty() && ip != host_ip {
+                            local_routes.insert(ip.clone(), host_ip.clone());
+                        }
+                    }
+                    if !local_routes.is_empty() {
+                        containers::update_wolfnet_routes(&local_routes);
+                        info!("WolfNet: seeded {} local container route(s) into cache before first push", local_routes.len());
                     }
                 }
-                if !local_routes.is_empty() {
-                    containers::update_wolfnet_routes(&local_routes);
-                    info!("WolfNet: seeded {} local container route(s) into cache before first push", local_routes.len());
+                Ok(_) => {} // no container IPs to seed
+                Err(_) => {
+                    tracing::warn!("WolfNet: route seed timed out (15s) — binding anyway; the push loop will seed routes once container runtimes respond");
                 }
             }
         }
