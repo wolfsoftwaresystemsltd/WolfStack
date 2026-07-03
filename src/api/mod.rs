@@ -16955,6 +16955,12 @@ pub struct CreateScheduleRequest {
     pub storage: backup::BackupStorage,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Pre/post hook commands (wabil 2026-07-02). Default-empty so older
+    /// frontends that don't send them keep working.
+    #[serde(default)]
+    pub pre_command: String,
+    #[serde(default)]
+    pub post_command: String,
 }
 
 #[derive(Deserialize)]
@@ -17981,6 +17987,8 @@ pub async fn backup_schedule_create(
         created_at: editing.as_ref().map(|s| s.created_at.clone())
             .filter(|c| !c.is_empty())
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        pre_command: body.pre_command.clone(),
+        post_command: body.post_command.clone(),
     };
     match backup::save_schedule(schedule) {
         Ok(s) => HttpResponse::Ok().json(serde_json::json!({

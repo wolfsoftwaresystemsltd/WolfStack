@@ -204,6 +204,20 @@ pub enum ActionType {
         container_names: Vec<String>,
     },
 
+    // ─── Backup ───
+
+    /// Run a WolfStack backup schedule (on the node executing the step) and
+    /// wait for it to finish. Backups go through the normal pipeline, so
+    /// they appear in the Backups section for management and restore, honour
+    /// the schedule's retention, and run its pre/post commands (wabil
+    /// 2026-07-02). The step fails if any backup in the run fails.
+    /// HOST-scoped: container/VM step targeting doesn't apply — schedules
+    /// live on the node, and `execute_action_in_container` falls back to
+    /// local execution for this variant.
+    RunBackupSchedule {
+        schedule_id: String,
+    },
+
     // ─── Generic HTTP Request ───
 
     /// Make an HTTP request to any external API
@@ -1281,6 +1295,36 @@ pub async fn execute_action_local(action: &ActionType) -> Result<StepOutput, Str
                 format!("Updated {}/{} container(s) successfully", success_count, events.len()),
                 data,
             ))
+        }
+
+        // ─── Backup ───
+        ActionType::RunBackupSchedule { schedule_id } => {
+            let id = schedule_id.trim().to_string();
+            if id.is_empty() {
+                return Err("No backup schedule selected".to_string());
+            }
+            // run_schedule_now_summary is fully blocking (tars containers,
+            // uploads to storage) — never run it on the async runtime.
+            let summary = tokio::task::spawn_blocking(move || {
+                crate::backup::run_schedule_now_summary(&id)
+            })
+            .await
+            .map_err(|e| format!("backup schedule worker failed: {}", e))??;
+
+            let mut data = serde_json::Map::new();
+            data.insert("schedule".to_string(), serde_json::json!(summary.name));
+            data.insert("total".to_string(), serde_json::json!(summary.total));
+            data.insert("completed".to_string(), serde_json::json!(summary.completed));
+            data.insert("failed".to_string(), serde_json::json!(summary.failed));
+            if summary.failed > 0 {
+                // Strict: a flow gated on "backup first" must not proceed to
+                // its update/destructive steps on a partial backup.
+                return Err(format!(
+                    "{} — {} of {} backup(s) failed",
+                    summary.message, summary.failed, summary.total
+                ));
+            }
+            Ok(structured_output(summary.message, data))
         }
 
         // ─── Generic HTTP Request ───
@@ -2769,6 +2813,17 @@ pub fn toolbox_actions() -> serde_json::Value {
             ]
         },
         {
+            "action": "run_backup_schedule",
+            "label": "Run Backup Schedule",
+            "description": "Run a WolfStack backup schedule and wait for it to finish — backups appear in the Backups section for management and restore, honour retention, and run the schedule's pre/post commands. Fails if any backup in the run fails. Runs on the node executing the workflow (not inside containers).",
+            "icon": "fa-box-archive",
+            "category": "system",
+            "fields": [
+                { "name": "schedule_id", "label": "Backup Schedule", "type": "text", "required": true, "placeholder": "Schedule ID (see Backups → Scheduled)" }
+            ],
+            "outputs": ["schedule", "total", "completed", "failed"]
+        },
+        {
             "action": "run_command",
             "label": "Run Shell Command",
             "description": "Execute an arbitrary shell command with a timeout",
@@ -3091,11 +3146,13 @@ mod tests {
         // 16 base actions + AiInvoke + AgentChat added in v18.1
         // + docker_update_many + docker_check_update_many added in
         // v24.7.16 (sponsor request — bulk Docker container update so
-        // operators don't have to chain one step per image).
+        // operators don't have to chain one step per image)
+        // + run_backup_schedule (wabil 2026-07-02 — flows that snapshot/
+        // quiesce, back up through the normal pipeline, then update).
         // Bump this when you add a new toolbox entry — the frontend's
         // editor relies on one card per action, so `len` IS the right
         // assertion even if it reads like a fragile hardcode.
-        assert_eq!(arr.len(), 20);
+        assert_eq!(arr.len(), 21);
         // Check that each action has required fields
         for a in arr {
             assert!(a.get("action").is_some());
@@ -3117,5 +3174,19 @@ mod tests {
             "toolbox missing docker_update_many");
         assert!(names.contains(&"docker_check_update_many"),
             "toolbox missing docker_check_update_many");
+        assert!(names.contains(&"run_backup_schedule"),
+            "toolbox missing run_backup_schedule");
+    }
+
+    #[test]
+    fn run_backup_schedule_action_parses() {
+        // The catalog's "run_backup_schedule" + a schedule_id field must
+        // deserialize into the enum variant the executor matches on.
+        let json = r#"{"action":"run_backup_schedule","schedule_id":"abc-123"}"#;
+        let action: ActionType = serde_json::from_str(json).unwrap();
+        match action {
+            ActionType::RunBackupSchedule { schedule_id } => assert_eq!(schedule_id, "abc-123"),
+            _ => panic!("Wrong variant"),
+        }
     }
 }

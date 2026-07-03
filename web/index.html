@@ -4477,6 +4477,18 @@
                         <label>Retention (keep N backups, 0 = unlimited)</label>
                         <input type="number" id="schedule-retention" class="form-control" value="7" min="0">
                     </div>
+                    <details class="form-group" id="schedule-hooks">
+                        <summary style="cursor:pointer; font-size:13px; color:var(--text-secondary);">Pre/post commands (advanced)</summary>
+                        <div class="form-group" style="margin-top:10px;">
+                            <label>Run before the backup (a failure aborts the run)</label>
+                            <textarea id="schedule-pre-command" class="form-control" rows="2" placeholder="e.g. docker stop mydb &#10;or zfs snapshot pool/data@backup" style="font-family:monospace; font-size:12px;"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Run after the backup (always runs, even on failure)</label>
+                            <textarea id="schedule-post-command" class="form-control" rows="2" placeholder="e.g. docker start mydb" style="font-family:monospace; font-size:12px;"></textarea>
+                        </div>
+                        <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0;">Runs as root on the node performing the backup (bash -c, 1&nbsp;hour timeout). Env vars: <code>WOLFSTACK_SCHEDULE</code>, <code>WOLFSTACK_HOOK_PHASE</code> (pre/post), <code>WOLFSTACK_BACKUP_STATUS</code> (post: completed/failed/aborted).</p>
+                    </details>
                     <div class="form-group" id="schedule-target-group">
                         <label>Items to back up</label>
                         <div id="schedule-target-list" style="max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px;"></div>
