@@ -1467,8 +1467,11 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
     } else {
         &["ps", "-a", "--format", "{{.Names}}"]
     };
-    if let Ok(output) = Command::new("docker")
-        .args(docker_ps_args)
+    // 10s cap — wedged dockerd protection, same as the inspect above.
+    let mut capped_ps: Vec<&str> = vec!["10", "docker"];
+    capped_ps.extend_from_slice(docker_ps_args);
+    if let Ok(output) = Command::new("timeout")
+        .args(&capped_ps)
         .output()
     {
         let text = String::from_utf8_lossy(&output.stdout);
@@ -5454,9 +5457,11 @@ pub fn docker_effective_wolfnet_ip(container: &str) -> Option<String> {
     if let Some(ip) = docker_get_wolfnet_ip(container) {
         return Some(ip);
     }
-    // Fall back to Docker label
-    if let Ok(output) = Command::new("docker")
-        .args(["inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", container])
+    // Fall back to Docker label. 10s cap — this runs per-container inside
+    // the WolfNet IP sweep; unbounded, a wedged dockerd hung the sweep
+    // (masterpier's athena, 2026-07-03).
+    if let Ok(output) = Command::new("timeout")
+        .args(["10", "docker", "inspect", "--format", "{{index .Config.Labels \"wolfnet.ip\"}}", container])
         .output()
     {
         let label = String::from_utf8_lossy(&output.stdout).trim().to_string();
