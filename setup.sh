@@ -743,7 +743,7 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         # Debian/Ubuntu — minimal cloud images skip them with -y, then the
         # first `lxc-start` fails with "apparmor_parser not available".
         # Pin them explicitly so containers actually start out of the box.
-        ws_install_pkgs git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates apparmor apparmor-utils dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3
+        ws_install_pkgs git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates apparmor apparmor-utils dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3 smartmontools
         apt install -y s3fs-fuse 2>/dev/null || apt install -y s3fs 2>/dev/null || echo "  ⚠ s3fs not available — S3 mounts will use built-in sync"
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
@@ -753,7 +753,7 @@ elif [ "$PKG_MANAGER" = "dnf" ]; then
     else
         QEMU_DNF="qemu-kvm qemu-img"
     fi
-    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_DNF socat s3fs-fuse nfs-utils fuse3
+    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_DNF socat s3fs-fuse nfs-utils fuse3 smartmontools
 elif [ "$PKG_MANAGER" = "yum" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -761,7 +761,7 @@ elif [ "$PKG_MANAGER" = "yum" ]; then
     else
         QEMU_YUM="qemu-kvm qemu-img"
     fi
-    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_YUM socat s3fs-fuse nfs-utils fuse
+    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_YUM socat s3fs-fuse nfs-utils fuse smartmontools
 elif [ "$PKG_MANAGER" = "zypper" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -770,7 +770,7 @@ elif [ "$PKG_MANAGER" = "zypper" ]; then
         QEMU_ZYPP="qemu-kvm qemu-tools"
     fi
     # SUSE uses AppArmor by default — same Recommends-not-Depends trap.
-    ws_install_pkgs git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc apparmor-parser apparmor-utils dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3
+    ws_install_pkgs git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc apparmor-parser apparmor-utils dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3 smartmontools
 elif [ "$PKG_MANAGER" = "pacman" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -778,7 +778,7 @@ elif [ "$PKG_MANAGER" = "pacman" ]; then
     else
         QEMU_PAC="qemu-full"
     fi
-    ws_install_pkgs git curl base-devel openssl pkg-config lxc dnsmasq $QEMU_PAC socat s3fs-fuse nfs-utils fuse3 rustup
+    ws_install_pkgs git curl base-devel openssl pkg-config lxc dnsmasq $QEMU_PAC socat s3fs-fuse nfs-utils fuse3 rustup smartmontools
 fi
 
 # Decide whether to disable the freshly-installed dnsmasq.service.

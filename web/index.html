@@ -7744,6 +7744,29 @@ dns_cloudflare_api_token = your_token_here"
                     </table>
                 </div>
             </div>
+
+            <!-- Network & cluster filesystems (GlusterFS/NFS/CIFS/SSHFS/WolfDisk) —
+                 not block devices, so they never appear in the disk layout above.
+                 Hidden unless the node actually has such mounts. -->
+            <div id="network-mounts-section" class="card" style="margin-top:20px; display:none;">
+                <div class="card-header">
+                    <h3>Network &amp; Cluster Filesystems</h3>
+                </div>
+                <div class="card-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Source</th>
+                                <th>Type</th>
+                                <th>Mount Point</th>
+                                <th>Size</th>
+                                <th>Used</th>
+                            </tr>
+                        </thead>
+                        <tbody id="network-mounts-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- ═══ WolfKube (per-node) ═══ -->

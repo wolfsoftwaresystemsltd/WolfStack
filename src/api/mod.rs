@@ -19828,7 +19828,42 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
         }
     }
 
-    HttpResponse::Ok().json(serde_json::json!({ "devices": entries }))
+    // Network / cluster filesystems (GlusterFS, NFS, CIFS, SSHFS, s3fs, CephFS,
+    // WolfDisk) never appear in lsblk — they aren't block devices — so the node
+    // Storage view silently omitted them (Paul 2026-07-03: a gluster mount was
+    // invisible). Parse /proc/mounts and join usage from the same df snapshot
+    // the disk entries use.
+    let mut network_mounts: Vec<serde_json::Value> = Vec::new();
+    if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+        for line in mounts.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 { continue; }
+            let (source, target, fstype) = (parts[0], parts[1], parts[2]);
+            let is_net = matches!(fstype,
+                "fuse.glusterfs" | "nfs" | "nfs4" | "cifs" | "smb3"
+                | "fuse.sshfs" | "fuse.s3fs" | "fuse.rclone" | "ceph")
+                // WolfDisk mounts with FSName("wolfdisk") and no fuse subtype
+                // (wolfdisk/src/main.rs:2481), so it shows as fstype "fuse"
+                // with the fsname as the source field.
+                || (fstype == "fuse" && source == "wolfdisk");
+            if !is_net { continue; }
+            // /proc/mounts octal-escapes spaces in paths as \040.
+            let target_clean = target.replace("\\040", " ");
+            let df = df_map.get(target_clean.as_str()).cloned()
+                .unwrap_or(serde_json::Value::Null);
+            network_mounts.push(serde_json::json!({
+                "source": source,
+                "mountpoint": target_clean,
+                "fstype": fstype,
+                "df": df,
+            }));
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "devices": entries,
+        "network_mounts": network_mounts,
+    }))
 }
 
 // ─── Disk Partitioning & Formatting ───

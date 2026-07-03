@@ -1076,6 +1076,70 @@ fn smart_summary(device: &str) -> Option<(String, Option<i32>)> {
     Some((status, temp))
 }
 
+/// Best-effort one-time install of smartmontools when `smartctl` is missing.
+/// Without it every SMART surface (failing-disk Issues alerts, Storage health
+/// badges, upgrade-scanner disk checks) silently degrades to "no data" — the
+/// operator believes disks are monitored when nothing is being read (Paul,
+/// 2026-07-03). Guarded to ONE resolution per process: a system where the
+/// install fails (offline, or no package manager at all — e.g. Unraid, where
+/// setup.sh's static-binary path applies instead) is remembered and never
+/// retried, so the 60s watcher doesn't hammer the package manager.
+/// Same runtime-install approach as `storage::install_s3fs`; the package is
+/// named `smartmontools` on every supported family. The install is bounded by
+/// coreutils `timeout` so a hung package manager can't wedge the watcher; the
+/// caller runs on the blocking pool, never on the async runtime.
+pub fn ensure_smartmontools() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = unresolved, 1 = smartctl available, 2 = unavailable (gave up),
+    // 3 = install attempt claimed (in flight)
+    static SMARTCTL_STATE: AtomicU8 = AtomicU8::new(0);
+    match SMARTCTL_STATE.load(Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let have = Command::new("which").arg("smartctl").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    if have {
+        SMARTCTL_STATE.store(1, Ordering::Relaxed);
+        return true;
+    }
+    // Claim the single install attempt via CAS — a concurrent second caller
+    // (future call sites; today's watcher is sequential) must not race a
+    // second package-manager run, lose to the dpkg/rpm lock, and poison the
+    // verdict to "unavailable" when the winner actually installed it
+    // (review catch, 2026-07-03). Losers report "not yet available" for this
+    // call; the next poll re-reads the winner's resolved state.
+    if SMARTCTL_STATE.compare_exchange(0, 3, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return SMARTCTL_STATE.load(Ordering::Relaxed) == 1;
+    }
+    tracing::info!("smartctl not found — attempting one-time smartmontools install");
+    let output = match crate::installer::detect_distro() {
+        crate::installer::DistroFamily::Arch =>
+            Command::new("timeout").args(["300", "pacman", "-S", "--noconfirm", "smartmontools"]).output(),
+        crate::installer::DistroFamily::Alpine =>
+            Command::new("timeout").args(["300", "apk", "add", "smartmontools"]).output(),
+        crate::installer::DistroFamily::RedHat =>
+            Command::new("timeout").args(["300", "dnf", "install", "-y", "smartmontools"]).output(),
+        crate::installer::DistroFamily::Suse =>
+            Command::new("timeout").args(["300", "zypper", "--non-interactive", "install", "smartmontools"]).output(),
+        // Debian family + Unknown: apt-get (matches install_s3fs's fallback).
+        _ =>
+            Command::new("timeout").args(["300", "apt-get", "install", "-y", "smartmontools"]).output(),
+    };
+    let installed = output.map(|o| o.status.success()).unwrap_or(false)
+        && Command::new("which").arg("smartctl").output()
+            .map(|o| o.status.success()).unwrap_or(false);
+    if installed {
+        tracing::info!("smartmontools installed — SMART disk monitoring active");
+        SMARTCTL_STATE.store(1, Ordering::Relaxed);
+    } else {
+        tracing::warn!("smartmontools could not be installed — SMART disk monitoring unavailable on this node (install it manually to enable failing-disk alerts)");
+        SMARTCTL_STATE.store(2, Ordering::Relaxed);
+    }
+    installed
+}
+
 /// List whole physical disk device paths (`/dev/sda`, `/dev/nvme0n1`, …) —
 /// lsblk type=disk only, so partitions, loop and rom devices are excluded.
 pub fn list_physical_disks() -> Vec<String> {

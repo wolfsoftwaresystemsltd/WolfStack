@@ -278,7 +278,17 @@ impl ImageRef {
     /// - `nginx`            → registry-1.docker.io / library/nginx : latest
     /// - `user/repo:v2`     → registry-1.docker.io / user/repo    : v2
     /// - `ghcr.io/org/app:latest` → ghcr.io / org/app : latest
+    /// - `docker.io/redis:6.2-alpine@sha256:905c…` → registry-1.docker.io /
+    ///   library/redis : 6.2-alpine (digest pin stripped — the tag's CURRENT
+    ///   remote digest is what an update check compares against)
     pub fn parse(image: &str) -> Self {
+        // Digest-pinned references (`repo:tag@sha256:…`, as compose files
+        // write after `docker compose pull`) broke the old parser: the last
+        // colon sits INSIDE the digest, so repo became "redis:6.2-alpine@sha256"
+        // and the token scope was garbage (pm1, 2026-07-03). Strip the pin —
+        // digest comparison against the local RepoDigest works unchanged.
+        let image = image.split_once('@').map(|(before, _)| before).unwrap_or(image);
+
         let (name, tag) = match image.rsplit_once(':') {
             // Guard against treating a port number as a tag, e.g. "host:5000/repo"
             Some((n, t)) if !t.contains('/') => (n, t.to_string()),
@@ -300,7 +310,18 @@ impl ImageRef {
             let first = parts[0];
             let rest = parts[1];
 
-            if first.contains('.') || first.contains(':') || first == "localhost" {
+            if first == "docker.io" || first == "index.docker.io" {
+                // Explicit Hub prefix (compose files write `docker.io/redis`).
+                // The Hub's API host is registry-1.docker.io — treating
+                // "docker.io" as a literal registry sent token requests to
+                // https://docker.io/token, which doesn't exist (pm1,
+                // 2026-07-03). Single-component repos need `library/`.
+                Self {
+                    registry: "registry-1.docker.io".into(),
+                    repo: if rest.contains('/') { rest.into() } else { format!("library/{}", rest) },
+                    tag,
+                }
+            } else if first.contains('.') || first.contains(':') || first == "localhost" {
                 // Custom registry: "ghcr.io/org/app" or "localhost:5000/myimg"
                 Self {
                     registry: first.into(),
@@ -346,11 +367,17 @@ impl ImageWatcherConfig {
 
 /// Get the image digest for a running container by inspecting Docker locally.
 /// Returns the repo-digest string (e.g. `nginx@sha256:abc123...`).
-pub fn get_local_digest(container_name: &str) -> Result<String, String> {
+/// Async: runs on the tokio runtime inside the watcher's check sweep — the
+/// old sync `std::process::Command` here (and in the other check-path
+/// functions) blocked a runtime worker for every docker exec; on a node with
+/// dozens of containers and a busy dockerd, a sweep visibly stalled the whole
+/// web UI including WebSocket terminals (wabil's pm1, 2026-07-03).
+pub async fn get_local_digest(container_name: &str) -> Result<String, String> {
     // First, get the image name from the container
-    let image_out = Command::new("docker")
+    let image_out = tokio::process::Command::new("docker")
         .args(["inspect", "--format", "{{.Config.Image}}", container_name])
         .output()
+        .await
         .map_err(|e| format!("Failed to run docker inspect: {}", e))?;
 
     if !image_out.status.success() {
@@ -367,9 +394,10 @@ pub fn get_local_digest(container_name: &str) -> Result<String, String> {
     }
 
     // Get the repo digest for the image
-    let digest_out = Command::new("docker")
+    let digest_out = tokio::process::Command::new("docker")
         .args(["image", "inspect", "--format", "{{index .RepoDigests 0}}", &image])
         .output()
+        .await
         .map_err(|e| format!("Failed to inspect image '{}': {}", image, e))?;
 
     if !digest_out.status.success() {
@@ -392,10 +420,48 @@ pub fn get_local_digest(container_name: &str) -> Result<String, String> {
 // ─── Registry Authentication ───
 // ═══════════════════════════════════════════════
 
+/// Last digest-check error per image ref — lets the watcher WARN only on
+/// change/recovery instead of every poll cycle. std::sync::Mutex is fine:
+/// never held across an await (lock, compare, insert/remove, drop).
+static DIGEST_CHECK_LAST_ERRORS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Token response from a registry's auth endpoint.
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     token: String,
+}
+
+/// Discover a registry's token endpoint from the `WWW-Authenticate` header of
+/// an unauthenticated `/v2/` probe (the flow the OCI distribution spec
+/// defines). Returns `realm` and `service`. Guessing `https://{host}/token`
+/// worked for ghcr but 404'd on lscr.io and other Harbor/quay-style hosts
+/// (pm1, 2026-07-03) — the header is the authoritative source.
+async fn discover_token_endpoint(registry: &str) -> Result<(String, String), String> {
+    let url = format!("https://{}/v2/", registry);
+    let resp = IMG_WATCH_CLIENT
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Probe of {} failed: {}", url, e))?;
+    let hdr = resp
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let _ = resp.bytes().await; // drain — socket back to the pool
+    let hdr = hdr.ok_or_else(|| format!("{} sent no WWW-Authenticate header", url))?;
+    // Format: Bearer realm="https://…",service="…"[,…] — quoted-string values.
+    let field = |name: &str| -> Option<String> {
+        let pat = format!("{}=\"", name);
+        let start = hdr.find(&pat)? + pat.len();
+        let end = hdr[start..].find('"')? + start;
+        Some(hdr[start..end].to_string())
+    };
+    let realm = field("realm").ok_or_else(|| format!("No realm in WWW-Authenticate: {}", hdr))?;
+    // service is optional in the spec; default to the registry host.
+    let service = field("service").unwrap_or_else(|| registry.to_string());
+    Ok((realm, service))
 }
 
 /// Obtain a bearer token for pulling manifest metadata from a registry.
@@ -410,10 +476,14 @@ pub async fn get_registry_token(registry: &str, repo: &str) -> Result<String, St
             repo
         ),
         other => {
-            // Generic OCI token endpoint — try the standard path
+            // Every other registry: ask the registry itself where its token
+            // endpoint lives instead of guessing a path.
+            let (realm, service) = discover_token_endpoint(other).await?;
             format!(
-                "https://{}/token?service={}&scope=repository:{}:pull",
-                other, other, repo
+                "{}?service={}&scope=repository:{}:pull",
+                realm,
+                urlencoding::encode(&service),
+                repo
             )
         }
     };
@@ -467,6 +537,13 @@ pub async fn get_remote_digest(image_ref: &ImageRef) -> Result<String, String> {
             "Accept",
             "application/vnd.docker.distribution.manifest.list.v2+json",
         )
+        // Multi-arch OCI images (immich, most modern ghcr images) publish an
+        // OCI image INDEX; without this accept type ghcr answers 404
+        // MANIFEST_UNKNOWN even though the tag exists (pm1, 2026-07-03).
+        .header(
+            "Accept",
+            "application/vnd.oci.image.index.v1+json",
+        )
         .send()
         .await
         .map_err(|e| format!("Manifest HEAD request to {} failed: {}", url, e))?;
@@ -496,10 +573,12 @@ pub async fn get_remote_digest(image_ref: &ImageRef) -> Result<String, String> {
 pub async fn check_container_update(container_name: &str) -> Result<ImageCheckResult, String> {
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Get the image name from the container
-    let image_out = Command::new("docker")
+    // Get the image name from the container. Async docker exec — this runs
+    // on the runtime inside the watcher sweep; see get_local_digest's doc.
+    let image_out = tokio::process::Command::new("docker")
         .args(["inspect", "--format", "{{.Config.Image}}", container_name])
         .output()
+        .await
         .map_err(|e| format!("Failed to run docker inspect: {}", e))?;
 
     if !image_out.status.success() {
@@ -516,7 +595,7 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
     }
 
     // Get local digest
-    let local_digest = match get_local_digest(container_name) {
+    let local_digest = match get_local_digest(container_name).await {
         Ok(d) => d,
         Err(e) => {
             return Ok(ImageCheckResult {
@@ -535,6 +614,14 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
     let image_ref = ImageRef::parse(&image);
     match get_remote_digest(&image_ref).await {
         Ok(remote) => {
+            // A previously-failing image now checks cleanly — log the
+            // recovery once and forget the failure so a relapse warns anew.
+            {
+                let mut last = DIGEST_CHECK_LAST_ERRORS.lock().unwrap_or_else(|p| p.into_inner());
+                if last.remove(&image).is_some() {
+                    tracing::info!("Remote digest check recovered for {}", image);
+                }
+            }
             // Extract just the digest portion from the local repo-digest (after '@')
             let local_hash = local_digest
                 .rsplit_once('@')
@@ -553,7 +640,20 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
             })
         }
         Err(e) => {
-            warn!("Failed to check remote digest for {}: {}", image, e);
+            // WARN only when this image's failure is NEW or its message
+            // changed — the watcher re-checks on a timer, and repeating the
+            // identical warning every cycle buries real problems (pm1 journal,
+            // 2026-07-03; log-state-changes-not-heartbeats rule). The full
+            // error still lands in ImageCheckResult.error for the UI every
+            // time. Recovery clears the entry (see the Ok arm) so a relapse
+            // warns again.
+            {
+                let mut last = DIGEST_CHECK_LAST_ERRORS.lock().unwrap_or_else(|p| p.into_inner());
+                if last.get(&image).map(|prev| prev != &e).unwrap_or(true) {
+                    warn!("Failed to check remote digest for {}: {}", image, e);
+                    last.insert(image.clone(), e.clone());
+                }
+            }
             Ok(ImageCheckResult {
                 container_name: container_name.into(),
                 image,
@@ -824,10 +924,11 @@ fn wait_for_healthy(container_name: &str, timeout_secs: u64) -> bool {
 /// Check all running Docker containers for available image updates.
 /// Containers with an `Ignore` policy are skipped.
 pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheckResult> {
-    // List all running container names
-    let output = match Command::new("docker")
+    // List all running container names (async exec — see get_local_digest)
+    let output = match tokio::process::Command::new("docker")
         .args(["ps", "--format", "{{.Names}}"])
         .output()
+        .await
     {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
@@ -945,6 +1046,49 @@ mod tests {
         assert_eq!(r.registry, "registry.example.com");
         assert_eq!(r.repo, "team/project/app");
         assert_eq!(r.tag, "1.0");
+    }
+
+    #[test]
+    fn parse_digest_pinned_hub_image() {
+        // Compose-style pin: the digest is stripped; tag survives; docker.io
+        // maps to the real API host with library/ prefixing (pm1 2026-07-03).
+        let r = ImageRef::parse("docker.io/redis:6.2-alpine@sha256:905c4ee67b8e0aa955331960d2aa745781e6bd89afc44a8584bfd13bc890f0ae");
+        assert_eq!(r.registry, "registry-1.docker.io");
+        assert_eq!(r.repo, "library/redis");
+        assert_eq!(r.tag, "6.2-alpine");
+    }
+
+    #[test]
+    fn parse_digest_pinned_user_image() {
+        let r = ImageRef::parse("docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0@sha256:90724186f0a3517cf6914295b5ab410db9ce23190a2d9d0b9dd6463e3fa298f0");
+        assert_eq!(r.registry, "registry-1.docker.io");
+        assert_eq!(r.repo, "tensorchord/pgvecto-rs");
+        assert_eq!(r.tag, "pg14-v0.2.0");
+    }
+
+    #[test]
+    fn parse_digest_only_pin_defaults_tag() {
+        // Pin with no tag at all: `nginx@sha256:…` → tag falls back to latest.
+        let r = ImageRef::parse("nginx@sha256:aaaabbbbccccddddeeeeffff00001111222233334444555566667777888899aa");
+        assert_eq!(r.registry, "registry-1.docker.io");
+        assert_eq!(r.repo, "library/nginx");
+        assert_eq!(r.tag, "latest");
+    }
+
+    #[test]
+    fn parse_docker_io_prefix_without_digest() {
+        let r = ImageRef::parse("docker.io/redis:7");
+        assert_eq!(r.registry, "registry-1.docker.io");
+        assert_eq!(r.repo, "library/redis");
+        assert_eq!(r.tag, "7");
+    }
+
+    #[test]
+    fn parse_index_docker_io_alias() {
+        let r = ImageRef::parse("index.docker.io/library/nginx:stable");
+        assert_eq!(r.registry, "registry-1.docker.io");
+        assert_eq!(r.repo, "library/nginx");
+        assert_eq!(r.tag, "stable");
     }
 
     #[test]

@@ -1115,6 +1115,12 @@ async fn main() -> std::io::Result<()> {
                     // at all — fixed there — plus USB drives needing `-d sat`, now
                     // retried in disk_smart_health. PapaSchlumpf, 2026-07-01.)
                     let phys = tokio::task::spawn_blocking(|| {
+                        // Auto-install smartmontools if absent (one-shot, cached
+                        // verdict) — without smartctl this whole SMART sweep is
+                        // a silent no-op and disks go unmonitored.
+                        if !crate::array::ensure_smartmontools() {
+                            return Vec::new();
+                        }
                         crate::array::list_physical_disks().into_iter()
                             .filter_map(|dev| {
                                 let guard = crate::array::disk_is_rotational(&dev);

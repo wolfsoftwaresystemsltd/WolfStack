@@ -7479,6 +7479,16 @@ const MOUNT_TYPE_LABELS = { s3: 'S3', nfs: 'NFS', smb: 'SMB/CIFS', directory: 'D
 // affect the whole trusted pool. Mirrors the Ceph UI shape but rendered into a
 // single Storage-page card.
 let _glusterStatus = null;
+// When the node serving the UI isn't a gluster peer but another cluster node
+// is, all gluster reads AND actions are routed through that node's proxy so
+// the Storage page shows (and manages) the real pool instead of an install
+// banner (Paul 2026-07-03: gluster on wolfstack-1/2 was invisible from the
+// management node).
+let _glusterViaNodeId = null;
+
+function glApiUrl(path) {
+    return _glusterViaNodeId ? nodeApiUrl(_glusterViaNodeId, path) : apiUrl(path);
+}
 
 function _glFmtBytes(b) {
     if (!b || b <= 0) return '—';
@@ -7490,16 +7500,51 @@ function _glFmtBytes(b) {
 async function loadGlusterStatus() {
     const body = document.getElementById('gluster-body');
     if (!body) return;
+    _glusterViaNodeId = null; // re-evaluate every load; prefer the local node
     try {
-        const iRes = await fetch(apiUrl('/api/gluster/install-status'));
-        const install = iRes.ok ? await iRes.json() : {};
+        let iRes = await fetch(apiUrl('/api/gluster/install-status'));
+        let install = iRes.ok ? await iRes.json() : {};
+        // This node may not be a gluster peer while another node IN THE SAME
+        // CLUSTER is — probe those via the node proxy and adopt the first
+        // configured peer's view (reads and actions both route through it,
+        // see glApiUrl). Scoped strictly to the viewed node's cluster: an
+        // unscoped probe would happily adopt — and send volume/brick actions
+        // to — a completely different cluster's pool (review catch,
+        // 2026-07-03).
+        if (!(install.installed && install.glusterd_running && install.configured)) {
+            const refNode = currentNodeId
+                ? (allNodes || []).find(n => n.id === currentNodeId)
+                : (allNodes || []).find(n => n.is_self);
+            const refCluster = (refNode && refNode.cluster_name) || 'WolfStack';
+            const others = (allNodes || []).filter(n =>
+                (!refNode || n.id !== refNode.id) &&
+                n.node_type !== 'proxmox' &&
+                (n.cluster_name || 'WolfStack') === refCluster &&
+                n.online !== false);
+            for (const n of others) {
+                try {
+                    const r = await fetch(nodeApiUrl(n.id, '/api/gluster/install-status'));
+                    if (!r.ok) continue;
+                    const inst = await r.json();
+                    if (inst.installed && inst.glusterd_running && inst.configured) {
+                        _glusterViaNodeId = n.id;
+                        install = inst;
+                        break;
+                    }
+                } catch (e) { /* node unreachable — try the next */ }
+            }
+        }
         // Only fetch full status (peers/volumes — heavier) once gluster is
         // actually installed and running; otherwise the install banner is built
         // from install-status alone.
         let status = {};
         if (install.installed && install.glusterd_running) {
-            const sRes = await fetch(apiUrl('/api/gluster/status'));
+            const sRes = await fetch(glApiUrl('/api/gluster/status'));
             status = sRes.ok ? await sRes.json() : {};
+        }
+        if (_glusterViaNodeId) {
+            const vn = (allNodes || []).find(n => n.id === _glusterViaNodeId);
+            status._via_node = vn ? (vn.hostname || vn.address || vn.id) : _glusterViaNodeId;
         }
         _glusterStatus = status;
         renderGluster(install, status);
@@ -7542,7 +7587,12 @@ function renderGluster(install, status) {
     // Configured → full management view.
     const healthColor = { ok: '#22c55e', warn: '#f59e0b', error: '#ef4444' }[status.health] || 'var(--text-muted)';
     const healthLabel = { ok: 'Healthy', warn: 'Degraded', error: 'Problem', unknown: 'Unknown' }[status.health] || 'Unknown';
-    let html = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+    let html = '';
+    if (status._via_node) {
+        html += `<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;padding:6px 10px;background:var(--bg-tertiary);border-radius:6px;">
+            Shown via node <strong>${escapeHtml(status._via_node)}</strong> — this node is not a gluster peer; actions are applied on that node.</div>`;
+    }
+    html += `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
         <span style="font-weight:600;color:${healthColor};">● ${healthLabel}</span>
         ${status.cluster_name ? `<span style="font-size:12px;color:var(--text-muted);">Cluster: ${escapeHtml(status.cluster_name)}</span>` : ''}
         ${status.version ? `<span style="font-size:12px;color:var(--text-muted);">${escapeHtml(status.version)}</span>` : ''}
@@ -7646,7 +7696,7 @@ async function _glusterPost(path, method, bodyObj, okMsg) {
     try {
         const opts = { method };
         if (bodyObj) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(bodyObj); }
-        const res = await fetch(apiUrl(path), opts);
+        const res = await fetch(glApiUrl(path), opts);
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.ok === false) {
             showToast(data.error || ('GlusterFS action failed (' + res.status + ')'), 'error');
@@ -9344,9 +9394,44 @@ async function loadDiskInfo() {
         if (!resp.ok) throw new Error(await resp.text());
         const data = await resp.json();
         renderDiskInfo(data.devices || []);
+        renderNetworkMounts(data.network_mounts || []);
     } catch (e) {
         tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color:#ef4444; padding:20px;">Failed to load disk info: ${escapeHtml(e.message)}</td></tr>`;
     }
+}
+
+// Network / cluster filesystems (GlusterFS, NFS, CIFS, SSHFS, WolfDisk…) —
+// invisible in lsblk, so they get their own card under the disk layout.
+// The card stays hidden on nodes that have none (most nodes).
+function renderNetworkMounts(mounts) {
+    const section = document.getElementById('network-mounts-section');
+    const tbody = document.getElementById('network-mounts-tbody');
+    if (!section || !tbody) return;
+    if (!mounts.length) { section.style.display = 'none'; return; }
+    const typeLabel = (m) => {
+        if (m.fstype === 'fuse.glusterfs') return 'GlusterFS';
+        if (m.fstype === 'fuse' && m.source === 'wolfdisk') return 'WolfDisk';
+        if (m.fstype === 'nfs' || m.fstype === 'nfs4') return 'NFS';
+        if (m.fstype === 'cifs' || m.fstype === 'smb3') return 'SMB/CIFS';
+        if (m.fstype === 'fuse.sshfs') return 'SSHFS';
+        if (m.fstype === 'fuse.s3fs') return 'S3 (s3fs)';
+        if (m.fstype === 'fuse.rclone') return 'rclone';
+        if (m.fstype === 'ceph') return 'CephFS';
+        return m.fstype;
+    };
+    tbody.innerHTML = mounts.map(m => {
+        const df = m.df || null;
+        const size = df && df.total_bytes ? _glFmtBytes(df.total_bytes) : '—';
+        const usedPct = df && df.use_pct != null ? `${df.use_pct.toFixed(0)}%` : '—';
+        return `<tr>
+            <td style="font-family:monospace; font-size:12px;">${escapeHtml(m.source)}</td>
+            <td>${escapeHtml(typeLabel(m))}</td>
+            <td style="font-family:monospace; font-size:12px;">${escapeHtml(m.mountpoint)}</td>
+            <td>${escapeHtml(size)}</td>
+            <td>${escapeHtml(usedPct)}</td>
+        </tr>`;
+    }).join('');
+    section.style.display = '';
 }
 
 const _PART_COLORS = [
