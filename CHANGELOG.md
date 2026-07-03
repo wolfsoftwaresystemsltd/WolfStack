@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.9: Unraid static tool bootstrapper — PBS client, pxar, smartctl survive reboots (klasSponsor)** _(2026-07-03 — [`f6e1e778`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f6e1e7783c49b8dea709512987019ed8848f37b0))_
+- **v25.2.9: Unraid static tool bootstrapper — PBS client, pxar, smartctl survive reboots (klasSponsor)** _(2026-07-03 — [`e07f3c66`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e07f3c66b4eda2c4285a13a464f5e7ff3c040577))_
 - **v25.2.8: startup can no longer hang before binding the dashboard (masterpier)** _(2026-07-03 — [`3cf288e9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3cf288e9ae8e1e3d158b638f21a376afe88fb354))_
 - **v25.2.8: startup can no longer hang before binding the dashboard (masterpier)** _(2026-07-03 — [`cbcd70ea`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cbcd70ea9ccae4ed9710d3087494281cb5210470))_
 - **v25.2.7: image-watcher fixes (wabil lag + registry errors), gluster on storage pages, smartmontools auto-install** _(2026-07-03 — [`6b078158`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6b07815833c0dc2cdc7bc293ccf38801cc1127d7))_
