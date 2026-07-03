@@ -31156,6 +31156,19 @@ let _editingSchedule = null;
 // path then preserves the schedule's existing targets untouched.
 let _editScheduleTargetsLocked = false;
 
+// Fill the modal's pre/post hook fields. Called on EVERY modal-open path
+// (create, folder, edit) — the modal is shared, so skipping the reset would
+// leak the previous schedule's hooks into a new one. Auto-expands the
+// "advanced" section when the schedule being edited actually uses hooks.
+function setScheduleHookFields(pre, post) {
+    const preEl = document.getElementById('schedule-pre-command');
+    const postEl = document.getElementById('schedule-post-command');
+    if (preEl) preEl.value = pre || '';
+    if (postEl) postEl.value = post || '';
+    const det = document.getElementById('schedule-hooks');
+    if (det) det.open = !!(pre || post);
+}
+
 // Edit a schedule (Gary 2026-06-25): open the create-schedule modal pre-filled
 // with the schedule's name/frequency/time/retention, and its targets + mount
 // exclusions pre-loaded into the modal's own editable picker so they can be
@@ -31175,6 +31188,7 @@ function editSchedule(id) {
     setVal('schedule-frequency', s.frequency);
     setVal('schedule-time', s.time);
     setVal('schedule-retention', s.retention);
+    setScheduleHookFields(s.pre_command, s.post_command);
 
     const schedTargets = Array.isArray(s.targets) ? s.targets : [];
     // Pre-load this schedule's per-target mount exclusions into the modal-only map
@@ -31422,6 +31436,7 @@ async function scheduleSystemFolder() {
     if (summary) summary.textContent = `Will schedule backup of ${targets.length > 1 ? targets.length + ' folders' : 'folder ' + pathLabel} → ${storage.path || storage.type || 'destination'}`;
     setScheduleModalChrome(false);
     document.getElementById('schedule-name').value = (targets.length === 1 ? targets[0].name : 'Folders') + ' folder';
+    setScheduleHookFields('', '');
     document.getElementById('create-schedule-modal').classList.add('active');
 }
 
@@ -31855,6 +31870,7 @@ async function showScheduleSelectedModal() {
     _editingSchedule = null; // opening for a NEW schedule, not an edit
     setScheduleModalChrome(false);
     document.getElementById('schedule-name').value = '';
+    setScheduleHookFields('', '');
     document.getElementById('create-schedule-modal').classList.add('active');
 }
 
@@ -31915,6 +31931,8 @@ async function createSchedule() {
         targets: finalTargets,
         storage,
         enabled: editing ? !!editing.enabled : true,
+        pre_command: (document.getElementById('schedule-pre-command')?.value || '').trim(),
+        post_command: (document.getElementById('schedule-post-command')?.value || '').trim(),
     };
     if (editing) body.id = editing.id; // update in place
 
@@ -56771,6 +56789,42 @@ function renderActionFields(actionKey, container, actionData) {
     if (actionKey === 'condition') {
         renderWfOutputPicker(container);
     }
+
+    // Backup-schedule step: swap the free-text schedule_id input for a live
+    // picker — schedule IDs are UUIDs nobody should have to copy by hand.
+    if (actionKey === 'run_backup_schedule') {
+        wfPopulateSchedulePicker(container, actionData);
+    }
+}
+
+/** Replace the run_backup_schedule step's schedule_id text input with a
+ * select of the backup schedules on this node. If the fetch fails or no
+ * schedules exist, the plain text input stays (still fully functional). */
+async function wfPopulateSchedulePicker(container, actionData) {
+    const input = container.querySelector('input[data-field="schedule_id"]');
+    if (!input) return;
+    try {
+        const res = await fetch(apiUrl('/api/backups/schedules'), { credentials: 'include' });
+        if (!res.ok) return;
+        const schedules = await res.json();
+        if (!Array.isArray(schedules) || schedules.length === 0) return;
+        const current = (actionData && actionData.schedule_id) || input.value || '';
+        const sel = document.createElement('select');
+        sel.className = 'form-control wf-action-field';
+        sel.setAttribute('data-field', 'schedule_id');
+        sel.style.fontSize = '12px';
+        let opts = '<option value="">— select a schedule —</option>' + schedules.map(s =>
+            `<option value="${escapeAttr(s.id)}" ${s.id === current ? 'selected' : ''}>${escapeHtml(s.name)} (${escapeHtml(String(s.frequency))} ${escapeHtml(s.time)})</option>`
+        ).join('');
+        // A saved id that no longer exists here (deleted, or schedule lives on
+        // another node) stays selectable — replacing it silently would make
+        // "Save" quietly re-target the step.
+        if (current && !schedules.some(s => s.id === current)) {
+            opts += `<option value="${escapeAttr(current)}" selected>${escapeHtml(current)} (not found on this node)</option>`;
+        }
+        sel.innerHTML = opts;
+        input.replaceWith(sel);
+    } catch (e) { /* keep the text-input fallback */ }
 }
 
 /** Render a clickable list of {{step_name.key}} references from previous steps */

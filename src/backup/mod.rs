@@ -785,6 +785,20 @@ pub struct BackupSchedule {
     /// which preserves the prior (fire-immediately) behaviour for them.
     #[serde(default)]
     pub created_at: String,
+    /// Shell command run on this node BEFORE the backup starts (empty = none).
+    /// Non-zero exit or timeout aborts the run — no backups are taken — and a
+    /// Failed entry records the output so the abort is visible in the Backups
+    /// list (wabil 2026-07-02: quiesce databases / take a ZFS snapshot first).
+    #[serde(default)]
+    pub pre_command: String,
+    /// Shell command run on this node AFTER the backup finishes (empty = none).
+    /// Always runs — even when the backup or the pre-command failed — because
+    /// it is the cleanup path (restart containers, drop the snapshot) and
+    /// skipping it would leave the system in the "quiesced" state forever.
+    /// Its failure is recorded as a Failed entry but never un-completes
+    /// backups that already succeeded.
+    #[serde(default)]
+    pub post_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -6415,40 +6429,197 @@ fn prune_schedule_backups(config: &mut BackupConfig, schedule_id: &str, retentio
 /// scheduler: runs the schedule's targets (or all), tags the new entries with the
 /// schedule id, stamps last_run, and prunes by retention. Runs synchronously —
 /// the API handler wraps it in web::block.
-pub fn run_schedule_now(id: &str) -> Result<String, String> {
+/// Outcome of one schedule run, for callers that need more than a message
+/// string — WolfFlow's "Run Backup Schedule" step exposes these counts as
+/// step outputs so flows can branch on them.
+pub struct ScheduleRunSummary {
+    pub name: String,
+    /// Entries produced this run, including synthetic hook-failure entries.
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub message: String,
+}
+
+/// Hard cap on pre/post hook commands so a hung script can't wedge the
+/// scheduler thread forever. Generous because "dump the database first" is a
+/// legitimate hook; `timeout` SIGTERMs at the cap and SIGKILLs 30s later.
+const HOOK_TIMEOUT_SECS: u64 = 3600;
+
+/// Run a schedule's pre or post command via `bash -c` under coreutils
+/// `timeout` (same pattern as containers/proxy_runtime). The command sees
+/// WOLFSTACK_SCHEDULE / WOLFSTACK_HOOK_PHASE / WOLFSTACK_BACKUP_STATUS so one
+/// script can serve both phases. Returns combined output on success, and an
+/// exit-code + output-tail description on failure (124 = timed out).
+fn run_hook_command(phase: &str, command: &str, schedule_name: &str, backup_status: &str) -> Result<String, String> {
+    let timeout_arg = HOOK_TIMEOUT_SECS.to_string();
+    let output = Command::new("timeout")
+        .args(["--kill-after=30", &timeout_arg, "bash", "-c", command])
+        .env("WOLFSTACK_SCHEDULE", schedule_name)
+        .env("WOLFSTACK_HOOK_PHASE", phase)
+        .env("WOLFSTACK_BACKUP_STATUS", backup_status)
+        .output()
+        .map_err(|e| format!("failed to launch {}-command: {}", phase, e))?;
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() { combined.push('\n'); }
+        combined.push_str(&stderr);
+    }
+    // Keep only a tail — hook output lands inside BackupEntry.error / logs and
+    // a chatty script must not bloat backup.json. The cut point must land on a
+    // char boundary: hook output is user-controlled UTF-8 and a mid-codepoint
+    // slice would panic the scheduler thread.
+    let tail = |s: &str| {
+        let t = s.trim();
+        if t.len() > 2000 {
+            let mut start = t.len() - 2000;
+            while !t.is_char_boundary(start) { start += 1; }
+            format!("…{}", &t[start..])
+        } else {
+            t.to_string()
+        }
+    };
+    if output.status.success() {
+        Ok(tail(&combined))
+    } else {
+        let code = output.status.code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "killed by signal".to_string());
+        let timed_out = output.status.code() == Some(124);
+        Err(format!(
+            "{}-command failed (exit {}{}): {}",
+            phase, code,
+            if timed_out { format!(", timed out after {}s", HOOK_TIMEOUT_SECS) } else { String::new() },
+            tail(&combined)
+        ))
+    }
+}
+
+/// Synthetic Failed entry that surfaces a hook failure in the Backups list —
+/// hooks have no tarball, but the operator manages backups there and must see
+/// "the pre-command aborted last night's run" without reading server logs.
+fn hook_failure_entry(schedule: &BackupSchedule, phase: &str, err: &str) -> BackupEntry {
+    BackupEntry {
+        id: Uuid::new_v4().to_string(),
+        target: BackupTarget {
+            name: format!("{} ({}-command)", schedule.name, phase),
+            ..Default::default() // Config target type; no container/VM behind a hook
+        },
+        storage: schedule.storage.clone(),
+        filename: String::new(),
+        size_bytes: 0,
+        created_at: Utc::now().to_rfc3339(),
+        status: BackupStatus::Failed,
+        error: err.to_string(),
+        schedule_id: schedule.id.clone(),
+        comments: format!("{}-command hook", phase),
+        node_hostname: local_hostname(),
+        docker_config: String::new(),
+        mounts: Vec::new(),
+    }
+}
+
+/// Run one schedule end-to-end: pre-command → backups → post-command.
+/// Shared by the nightly scheduler (`check_schedules`) and the on-demand path
+/// (`run_schedule_now_summary`) so hook semantics can never drift between
+/// them. Returned entries are already tagged with the schedule id and include
+/// synthetic entries for hook failures.
+fn execute_schedule_run(schedule: &BackupSchedule) -> (Vec<BackupEntry>, ScheduleRunSummary) {
+    let mut entries: Vec<BackupEntry> = Vec::new();
+    let mut pre_ok = true;
+
+    if !schedule.pre_command.trim().is_empty() {
+        match run_hook_command("pre", &schedule.pre_command, &schedule.name, "") {
+            Ok(out) => info!("Schedule '{}' pre-command ok: {}", schedule.name, out),
+            Err(e) => {
+                error!("Schedule '{}': {} — backup run aborted", schedule.name, e);
+                entries.push(hook_failure_entry(schedule, "pre", &e));
+                pre_ok = false;
+            }
+        }
+    }
+
+    let mut backups_made = 0usize;
+    if pre_ok {
+        // Scheduler form may have saved storage as `{type:"pbs"}` only; fill in
+        // saved server/credentials (same as both pre-existing call sites did).
+        let mut storage = schedule.storage.clone();
+        merge_pbs_secrets(&mut storage);
+        let backups: Vec<BackupEntry> = if schedule.backup_all {
+            backup_all(&storage)
+        } else {
+            schedule.targets.iter()
+                .map(|t| create_backup_entry(t.clone(), &storage))
+                .collect()
+        };
+        backups_made = backups.len();
+        entries.extend(backups);
+    }
+
+    let backups_failed = entries.iter().filter(|e| e.status == BackupStatus::Failed).count();
+    if !schedule.post_command.trim().is_empty() {
+        let status_env = if !pre_ok {
+            "aborted"
+        } else if backups_failed > 0 {
+            "failed"
+        } else {
+            "completed"
+        };
+        match run_hook_command("post", &schedule.post_command, &schedule.name, status_env) {
+            Ok(out) => info!("Schedule '{}' post-command ok: {}", schedule.name, out),
+            Err(e) => {
+                error!("Schedule '{}': {}", schedule.name, e);
+                entries.push(hook_failure_entry(schedule, "post", &e));
+            }
+        }
+    }
+
+    for entry in entries.iter_mut() {
+        entry.schedule_id = schedule.id.clone();
+    }
+    let total = entries.len();
+    let completed = entries.iter().filter(|e| e.status == BackupStatus::Completed).count();
+    let failed = total - completed;
+    // Message counts BACKUPS, not entries — a post-hook failure adds a synthetic
+    // entry but must not inflate "N backup(s) created" (and matches the exact
+    // pre-hooks wording for schedules that don't use hooks).
+    let message = if !pre_ok {
+        format!("Schedule '{}' aborted by pre-command — no backups taken", schedule.name)
+    } else {
+        format!("Ran scheduled backup '{}' — {} backup(s) created", schedule.name, backups_made)
+    };
+    let summary = ScheduleRunSummary { name: schedule.name.clone(), total, completed, failed, message };
+    (entries, summary)
+}
+
+/// On-demand schedule run returning the full summary (WolfFlow step).
+pub fn run_schedule_now_summary(id: &str) -> Result<ScheduleRunSummary, String> {
     let mut config = load_config();
     let idx = config.schedules.iter().position(|s| s.id == id)
         .ok_or_else(|| format!("Schedule not found: {}", id))?;
 
-    // Snapshot what we need so we don't hold a borrow of schedules while mutating entries.
-    let (mut storage, backup_all_flag, targets, retention, schedule_id, name) = {
-        let s = &config.schedules[idx];
-        (s.storage.clone(), s.backup_all, s.targets.clone(), s.retention, s.id.clone(), s.name.clone())
-    };
-    merge_pbs_secrets(&mut storage);
-
-    let new_entries = if backup_all_flag {
-        backup_all(&storage)
-    } else {
-        targets.iter().map(|t| create_backup_entry(t.clone(), &storage)).collect::<Vec<_>>()
-    };
-    let made = new_entries.len();
+    let schedule = config.schedules[idx].clone();
+    let (new_entries, summary) = execute_schedule_run(&schedule);
     // Only count the run as "ran" (which gates the nightly auto-run) if at least
     // one backup actually completed — a fully-failed on-demand run must not
     // suppress tonight's scheduled run.
     let any_ok = new_entries.iter().any(|e| e.status == BackupStatus::Completed);
-    for mut entry in new_entries {
-        entry.schedule_id = schedule_id.clone();
-        config.entries.push(entry);
-    }
+    config.entries.extend(new_entries);
     if any_ok {
         config.schedules[idx].last_run = Utc::now().to_rfc3339();
     }
-    if retention > 0 {
-        prune_schedule_backups(&mut config, &schedule_id, retention as usize);
+    if schedule.retention > 0 {
+        prune_schedule_backups(&mut config, &schedule.id, schedule.retention as usize);
     }
     save_config(&config)?;
-    Ok(format!("Ran scheduled backup '{}' — {} backup(s) created", name, made))
+    Ok(summary)
+}
+
+/// On-demand schedule run — message-string façade kept for the existing
+/// `POST /api/backups/schedules/{id}/run` handler (behaviour unchanged).
+pub fn run_schedule_now(id: &str) -> Result<String, String> {
+    run_schedule_now_summary(id).map(|s| s.message)
 }
 
 // ─── Available Targets ───
@@ -6684,28 +6855,11 @@ pub fn check_schedules() {
             }
         }
 
-        // Time to run this schedule!
-
-        // Scheduler form may have saved storage as `{type:"pbs"}` only.
-        // Fill in server/user/credentials from the saved PBS config so
-        // proxmox-backup-client gets PBS_PASSWORD instead of failing with
-        // "no password input mechanism".
-        let mut storage = schedule.storage.clone();
-        merge_pbs_secrets(&mut storage);
-
-        let new_entries = if schedule.backup_all {
-            backup_all(&storage)
-        } else {
-            schedule.targets.iter()
-                .map(|t| create_backup_entry(t.clone(), &storage))
-                .collect()
-        };
-
-        // Tag entries with schedule ID
-        for mut entry in new_entries {
-            entry.schedule_id = schedule.id.clone();
-            config.entries.push(entry);
-        }
+        // Time to run this schedule! Hooks + backups share one code path with
+        // the on-demand runner (execute_schedule_run) — entries come back
+        // already tagged with the schedule id.
+        let (new_entries, _summary) = execute_schedule_run(&*schedule);
+        config.entries.extend(new_entries);
 
         schedule.last_run = now.to_rfc3339();
         changed = true;
@@ -7751,5 +7905,108 @@ mod restore_warning_tests {
         assert_eq!(std::fs::read_to_string(dest.join("cert.pem")).unwrap(), "CERTDATA",
             "symlinked cert must be backed up by content");
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod schedule_hook_tests {
+    use super::*;
+
+    /// A schedule with NO targets and backup_all=false runs zero backups —
+    /// execute_schedule_run then exercises ONLY the hook path, which is what
+    /// makes these tests safe to run anywhere (no docker/tar/storage I/O).
+    fn hook_only_schedule(pre: &str, post: &str) -> BackupSchedule {
+        BackupSchedule {
+            id: "test-schedule-id".to_string(),
+            name: "hook-test".to_string(),
+            frequency: BackupFrequency::Daily,
+            time: "02:00".to_string(),
+            retention: 0,
+            backup_all: false,
+            targets: Vec::new(),
+            storage: BackupStorage::default(),
+            enabled: true,
+            last_run: String::new(),
+            created_at: String::new(),
+            pre_command: pre.to_string(),
+            post_command: post.to_string(),
+        }
+    }
+
+    #[test]
+    fn hook_command_success_returns_output() {
+        let out = run_hook_command("pre", "echo mithril", "s", "").unwrap();
+        assert!(out.contains("mithril"));
+    }
+
+    #[test]
+    fn hook_command_failure_reports_exit_code_and_output() {
+        let err = run_hook_command("pre", "echo doom >&2; exit 3", "s", "").unwrap_err();
+        assert!(err.contains("exit 3"), "missing exit code: {}", err);
+        assert!(err.contains("doom"), "missing stderr tail: {}", err);
+        assert!(err.starts_with("pre-command failed"), "missing phase: {}", err);
+    }
+
+    #[test]
+    fn hook_command_exposes_env_vars() {
+        // The script itself asserts on the env — non-zero exit fails the test.
+        run_hook_command(
+            "pre",
+            "test \"$WOLFSTACK_SCHEDULE\" = moria && test \"$WOLFSTACK_HOOK_PHASE\" = pre",
+            "moria",
+            "",
+        ).unwrap();
+    }
+
+    #[test]
+    fn pre_failure_aborts_run_and_records_failed_entry() {
+        let s = hook_only_schedule("exit 7", "");
+        let (entries, summary) = execute_schedule_run(&s);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, BackupStatus::Failed);
+        assert!(entries[0].target.name.contains("(pre-command)"));
+        assert_eq!(entries[0].schedule_id, "test-schedule-id");
+        assert!(entries[0].filename.is_empty(), "hook entries have no tarball");
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.completed, 0);
+        assert!(summary.message.contains("aborted"), "message: {}", summary.message);
+    }
+
+    #[test]
+    fn post_runs_after_pre_failure_with_aborted_status() {
+        // Post asserts it sees WOLFSTACK_BACKUP_STATUS=aborted; if the env or
+        // the always-run guarantee broke, post would fail and a SECOND
+        // synthetic entry would appear.
+        let s = hook_only_schedule("false", "test \"$WOLFSTACK_BACKUP_STATUS\" = aborted");
+        let (entries, _) = execute_schedule_run(&s);
+        assert_eq!(entries.len(), 1, "post must succeed (only the pre entry): {:?}",
+            entries.iter().map(|e| &e.target.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn post_failure_is_recorded_but_message_stays_normal() {
+        let s = hook_only_schedule("", "exit 9");
+        let (entries, summary) = execute_schedule_run(&s);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].target.name.contains("(post-command)"));
+        assert_eq!(summary.failed, 1);
+        assert!(!summary.message.contains("aborted"));
+    }
+
+    #[test]
+    fn no_hooks_no_targets_is_a_clean_empty_run() {
+        let s = hook_only_schedule("", "");
+        let (entries, summary) = execute_schedule_run(&s);
+        assert!(entries.is_empty());
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.failed, 0);
+    }
+
+    #[test]
+    fn post_sees_completed_status_when_nothing_failed() {
+        let s = hook_only_schedule("", "test \"$WOLFSTACK_BACKUP_STATUS\" = completed");
+        let (entries, _) = execute_schedule_run(&s);
+        assert!(entries.is_empty(), "post asserting status=completed must pass: {:?}",
+            entries.iter().map(|e| &e.error).collect::<Vec<_>>());
     }
 }
