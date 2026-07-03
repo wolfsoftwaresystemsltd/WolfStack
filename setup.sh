@@ -210,18 +210,26 @@ if [ -f /etc/unraid-version ]; then
     # without errors yet stayed on the old version (klasSponsor, Unraid,
     # 2026-06-22). "wolfstack --agent" matches both the relative and absolute
     # forms; on an Unraid agent node it's the only such process.
+    # Download the static musl binary BEFORE stopping the running agent.
+    # download_prebuilt writes to a temp file and mv's into place, and mv over
+    # a running binary's path is safe (the old process keeps its inode) — so
+    # the old agent keeps serving until the new binary is provably on disk.
+    # The previous order (kill first, download second) left the node DARK
+    # whenever the download failed or the GUI-spawned environment couldn't
+    # reach github.com: nothing was left running and nothing new was started
+    # (PineappleGod, Unraid, 2026-07-03 — GUI update killed the node while the
+    # same update over ssh worked).
+    if ! download_prebuilt "wolfsoftwaresystemsltd/WolfStack" "wolfstack" "$WS_APPDATA/wolfstack"; then
+        echo "✗ Could not download the prebuilt WolfStack binary for $BINARY_ARCH."
+        echo "  Check this server's internet access to github.com and re-run."
+        echo "  The running agent (if any) has NOT been touched."
+        exit 1
+    fi
+
     if pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
         echo "  Stopping running WolfStack agent for upgrade..."
         pkill -f "wolfstack --agent" 2>/dev/null || true
         sleep 2
-    fi
-
-    # Download the static musl binary (the same release artifact the normal path
-    # uses). Unraid can't build from source, so a failure here is fatal.
-    if ! download_prebuilt "wolfsoftwaresystemsltd/WolfStack" "wolfstack" "$WS_APPDATA/wolfstack"; then
-        echo "✗ Could not download the prebuilt WolfStack binary for $BINARY_ARCH."
-        echo "  Check this server's internet access to github.com and re-run."
-        exit 1
     fi
 
     # /etc is RAM-fresh each boot, so /etc/wolfstack must be a symlink onto the
@@ -297,6 +305,27 @@ if [ -f /etc/unraid-version ]; then
     # </dev/null so the backgrounded agent never holds the curl|bash pipe open.
     ( cd "$WS_APPDATA" && nohup ./wolfstack --agent </dev/null >> "$WS_APPDATA/wolfstack.log" 2>&1 & )
     sleep 3
+
+    # The whole point of an update is a RUNNING agent — verify it, don't
+    # assume it. A one-shot retry covers the "old process still releasing
+    # the port during our sleep 2" race; if the agent still isn't up, say so
+    # loudly and point at the log instead of printing the success banner over
+    # a dead node (PineappleGod, Unraid, 2026-07-03).
+    if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
+        echo "  ⚠ Agent not running after start — retrying once..."
+        ( cd "$WS_APPDATA" && nohup ./wolfstack --agent </dev/null >> "$WS_APPDATA/wolfstack.log" 2>&1 & )
+        sleep 5
+    fi
+    if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
+        echo ""
+        echo "  ✗ WolfStack agent FAILED to start. Last log lines:"
+        tail -20 "$WS_APPDATA/wolfstack.log" 2>/dev/null | sed 's/^/    /'
+        echo "  Start it manually after fixing the above:"
+        echo "    cd $WS_APPDATA && nohup ./wolfstack --agent >> wolfstack.log 2>&1 &"
+        [ -t 0 ] || cat >/dev/null 2>&1 || true
+        exit 1
+    fi
+    echo "  ✓ Agent is running"
 
     # awk (not grep -PoP) so it works on busybox grep too: pull the token after "src".
     WS_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
