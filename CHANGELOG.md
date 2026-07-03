@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.7: image-watcher fixes (wabil lag + registry errors), gluster on storage pages, smartmontools auto-install** _(2026-07-03 — [`6b078158`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6b07815833c0dc2cdc7bc293ccf38801cc1127d7))_
+- **v25.2.7: image-watcher fixes (wabil lag + registry errors), gluster on storage pages, smartmontools auto-install** _(2026-07-03 — [`7656ff28`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7656ff2870c46d2e1b8373e427ee3897b13d5420))_
 - **v25.2.6: backup pre/post commands + WolfFlow 'Run Backup Schedule' step (wabil)** _(2026-07-03 — [`9f10f13c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9f10f13c5ed440a37c52bcb3611fef5ad0977dea))_
 - **v25.2.6: backup pre/post commands + WolfFlow 'Run Backup Schedule' step (wabil)** _(2026-07-03 — [`520c3333`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/520c3333da504f3e2f07636aa8deb2ac8578ddf6))_
 - **v25.2.5: WolfFunctions UI — triggers column alignment + cluster-aware replicas default (KO4BSR/Gary)** _(2026-07-03 — [`a895f00f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a895f00ff2e6be886c797f9fcc00132aaa6af430))_
