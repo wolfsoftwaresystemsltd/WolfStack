@@ -358,6 +358,16 @@ async fn console_session(
             };
             let is_inline = inline_script.is_some();
 
+            // wolfdisk's setup.sh detects the console PTY as a real terminal
+            // and goes INTERACTIVE — the "install" window sat waiting at a
+            // "Node ID [...]:" prompt while every other component installs
+            // unattended, which read as "the button didn't work" (wabil,
+            // 2026-07-04). Its documented -y flag installs with defaults;
+            // operators who want custom peers/data-dir use the CLI (or edit
+            // /etc/wolfdisk/config.toml after). Only wolfdisk is verified to
+            // accept -y — do not blanket-apply to the other scripts.
+            let script_args = if component == "wolfdisk" { " -s -- -y" } else { "" };
+
             match target {
                 None | Some("host") => {
                     // Install on host
@@ -373,9 +383,9 @@ async fn console_session(
                         cmd.arg(format!(
                             "echo '\\x1b[1;36mInstalling {} on this host...\\x1b[0m' && \
                              export DEBIAN_FRONTEND=noninteractive && \
-                             curl -fsSL '{}' | bash; \
+                             curl -fsSL '{}' | bash{}; \
                              echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                            component, install_script
+                            component, install_script, script_args
                         ));
                     }
                 }
@@ -414,9 +424,9 @@ async fn console_session(
                                          'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
                                           yum install -y -q curl 2>/dev/null || \
                                           apk add --quiet curl 2>/dev/null || true && \
-                                          curl -fsSL \"{}\" | bash'; \
+                                          curl -fsSL \"{}\" | bash{}'; \
                                          echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                                        component, container, container, install_script
+                                        component, container, container, install_script, script_args
                                     ));
                                 }
                             }
@@ -442,9 +452,9 @@ async fn console_session(
                                          'apt-get update -qq && apt-get install -y -qq curl 2>/dev/null || \
                                           yum install -y -q curl 2>/dev/null || \
                                           apk add --quiet curl 2>/dev/null || true && \
-                                          curl -fsSL \"{}\" | bash'; \
+                                          curl -fsSL \"{}\" | bash{}'; \
                                          echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                                        component, container, lxc_p, container, install_script
+                                        component, container, lxc_p, container, install_script, script_args
                                     ));
                                 }
                             }
