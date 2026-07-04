@@ -13,14 +13,15 @@
 //! the right cluster's Storage view.
 //!
 //! Transport note: TrueNAS is migrating off REST. SCALE up to 25.04 serves the
-//! full `/api/v2.0` REST API; 25.10 removed the ZFS REST endpoints; TrueNAS 26
-//! removes REST entirely — everything moves to the versioned JSON-RPC 2.0 API
-//! over WebSocket at `wss://<host>/api/current`. We keep REST as the PRIMARY
-//! transport (so every existing instance — TrueNAS CORE and SCALE ≤25.04 — is
-//! byte-identical on upgrade) and fall back to the WebSocket JSON-RPC transport
-//! only when a REST call returns 404 (the endpoint has been removed). The chosen
-//! transport is cached per host so a TrueNAS 26 box pays the doomed REST probe
-//! just once. The middleware methods behind REST and JSON-RPC are the same
+//! full `/api/v2.0` REST API; 25.10 removed the ZFS REST endpoints and nags the
+//! operator about every deprecated REST authentication; TrueNAS 26 removes REST
+//! entirely — everything moves to the versioned JSON-RPC 2.0 API over WebSocket
+//! at `wss://<host>/api/current`. The WebSocket JSON-RPC transport is PRIMARY
+//! (RutgerDiehard 2026-07-04: REST-first polling triggered TrueNAS's
+//! "deprecated REST API was used to authenticate N times" alert); hosts where
+//! `/api/current` doesn't exist (CORE, older SCALE) fail the one-time WS probe
+//! and stay on REST exactly as before — the chosen transport is cached per
+//! host. The middleware methods behind REST and JSON-RPC are the same
 //! (`/pool`↔`pool.query`, `/zfs/snapshot`↔`pool.snapshot.query`, …) so the
 //! response shapes — and therefore the parsing below — are identical either way.
 //! All size fields are parsed defensively (flat number OR nested
@@ -359,42 +360,66 @@ impl TrueNasClient {
         })
     }
 
-    /// Run a request REST-first, falling back to the JSON-RPC WebSocket transport
-    /// when the REST endpoint is gone (404). `rest_*` is the legacy REST call;
+    /// Run a request, preferring the modern JSON-RPC WebSocket transport and
+    /// falling back to legacy REST. `rest_*` is the legacy REST call;
     /// `ws_method`/`ws_params` the equivalent JSON-RPC 2.0 call. Both reach the
     /// same middleware method, so the returned `result` matches the REST body and
     /// the existing parsers below work unchanged.
     ///
-    /// Transitional note: on SCALE 25.10 only the ZFS REST endpoints 404 while
-    /// pool/dataset/disk/NFS reads still answer over REST. The first snapshot call
-    /// flips this host's cache to `Ws`, after which all reads also use the WS
-    /// transport (correct, identical data, just a per-call WS handshake instead of
-    /// a REST GET). The cache deliberately models two states, not a per-endpoint
-    /// matrix — the simplicity is worth the modest extra handshake on 25.10, and
-    /// 25.04/CORE (REST throughout) and 26 (WS throughout) are both optimal.
+    /// Preference order (per-host, probed once, cached):
+    ///   1. Host cached as Ws → JSON-RPC (modern SCALE / TrueNAS 26).
+    ///   2. Host cached as Rest → REST (CORE, SCALE without /api/current); a
+    ///      404 there still upgrades to Ws (SCALE 25.10 removed only the ZFS
+    ///      REST endpoints — first snapshot call flips the whole host to Ws).
+    ///   3. Unknown host (first contact / after restart): try JSON-RPC FIRST.
+    ///      Success → cache Ws; connect failure or auth-mechanism absence →
+    ///      REST and cache Rest on success.
+    ///
+    /// WS-first is deliberate (was REST-first until v25.2.x): every REST call
+    /// authenticates via the deprecated API and TrueNAS 25.10 nags the operator
+    /// about each one — "deprecated REST API was used to authenticate 10 times
+    /// in the last 24 hours" (RutgerDiehard, 2026-07-04). One WS probe per
+    /// process lifetime replaces per-poll REST auth on every modern box, while
+    /// CORE / old SCALE probe WS once, fail fast, and stay on REST exactly as
+    /// before. A genuinely bad API key fails on BOTH transports and still
+    /// surfaces as the same Auth error.
     async fn dispatch(&self, rest_method: reqwest::Method, rest_path: &str,
                       rest_body: Option<serde_json::Value>,
                       ws_method: &str, ws_params: serde_json::Value)
         -> Result<serde_json::Value, TnErr>
     {
-        // A host already known to be WebSocket-only (REST removed) skips the
-        // doomed REST probe entirely.
-        if transport_cached(&self.base_url) == Some(Transport::Ws) {
-            return self.ws_jsonrpc(ws_method, ws_params).await;
-        }
-        match self.rest_request(rest_method, rest_path, rest_body).await {
-            Ok(v) => {
-                transport_remember(&self.base_url, Transport::Rest);
-                Ok(v)
+        match transport_cached(&self.base_url) {
+            Some(Transport::Ws) => self.ws_jsonrpc(ws_method, ws_params).await,
+            Some(Transport::Rest) => {
+                match self.rest_request(rest_method, rest_path, rest_body).await {
+                    Ok(v) => Ok(v),
+                    Err(TnErr::NotFound) => {
+                        // Endpoint removed on an otherwise-REST host (SCALE
+                        // 25.10 ZFS endpoints) — upgrade the host to WS.
+                        let v = self.ws_jsonrpc(ws_method, ws_params).await?;
+                        transport_remember(&self.base_url, Transport::Ws);
+                        Ok(v)
+                    }
+                    Err(e) => Err(e),
+                }
             }
-            Err(TnErr::NotFound) => {
-                // Endpoint removed (SCALE 25.10 ZFS endpoints, or all of REST on
-                // TrueNAS 26) — use the modern JSON-RPC WebSocket transport.
-                let v = self.ws_jsonrpc(ws_method, ws_params).await?;
-                transport_remember(&self.base_url, Transport::Ws);
-                Ok(v)
+            None => {
+                // First contact: probe the modern transport. Auth errors are
+                // NOT a transport signal (the key is bad either way) — surface
+                // them; everything else falls back to REST.
+                match self.ws_jsonrpc(ws_method, ws_params.clone()).await {
+                    Ok(v) => {
+                        transport_remember(&self.base_url, Transport::Ws);
+                        Ok(v)
+                    }
+                    Err(TnErr::Auth) => Err(TnErr::Auth),
+                    Err(_) => {
+                        let v = self.rest_request(rest_method, rest_path, rest_body).await?;
+                        transport_remember(&self.base_url, Transport::Rest);
+                        Ok(v)
+                    }
+                }
             }
-            Err(e) => Err(e),
         }
     }
 
