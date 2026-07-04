@@ -46815,7 +46815,10 @@ function openWolfFunctionEditor(id) {
             <button class="btn btn-primary" id="wolffn-save-btn" onclick="wolffnSave(${existing ? `'${escapeAttr(f.id)}'` : 'null'})">${existing ? 'Save changes' : 'Create function'}</button>
         </div>
     </div>`;
-    overlay.onclick = (e) => { if (e.target === overlay) wolffnCloseEditor(); };
+    // Deliberately NO backdrop-click-to-close: the editor holds unsaved work
+    // (code, env, triggers) and a click that misses the dialog — e.g. while
+    // dragging the scrollbar down to the Save button — must not destroy it.
+    // Closing is explicit only: the ✕ button or Cancel.
     document.body.appendChild(overlay);
 }
 
