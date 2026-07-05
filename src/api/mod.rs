@@ -4035,9 +4035,12 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         if cap > 0 {
             let current = state.cluster.get_all_nodes().len() as u32;
             if current + 1 > cap {
+                // Tier names/prices/caps per web/includes/stripe-tiers.php
+                // (homelab £12/10 hosts, team £149/50, msp £499/unlimited).
+                // resolve_tier never returns "pro" — it aliases to "msp".
                 let upgrade = match tier {
-                    "homelab" => "Upgrade to Pro (£49/mo, 25 hosts) at https://wolfstack.org/enterprise.php",
-                    "pro"     => "Upgrade to Enterprise (unlimited hosts) at https://wolfstack.org/enterprise.php",
+                    "homelab" => "Upgrade to Team (£149/mo, 50 hosts) at https://wolfstack.org/enterprise.php",
+                    "team"    => "Upgrade to MSP (£499/mo, unlimited hosts) at https://wolfstack.org/enterprise.php",
                     _         => "Contact sales@wolf.uk.com to raise the cap",
                 };
                 Some(serde_json::json!({

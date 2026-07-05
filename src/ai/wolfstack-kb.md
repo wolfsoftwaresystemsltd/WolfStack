@@ -16,6 +16,7 @@
 - Default ports: 8553 (HTTPS / dashboard), 8554 (HTTP inter-node, TLS-only installs), 8550 (public status pages)
 - Requires root (reads /etc/shadow for auth)
 - Background tasks: self-monitoring (2s), node polling (10s), status page checks (30s), session cleanup (300s), backup scheduling (60s)
+- Startup is hardened to never hang before the dashboard binds: no unbounded subprocess execs or statvfs on possibly-dead FUSE mounts run pre-bind (whole pre-bind steps run on guarded timeout threads)
 
 ## Ports Configuration
 - Per-node ports persisted to /etc/wolfstack/ports.json as `{ api, inter_node, status }`
@@ -84,12 +85,14 @@
 - Log viewing, exec into container
 - WolfNet IP assignment for containers
 - Auto-restart policy management
+- Image update watcher: background checker compares local image digests against registries (Docker Hub, ghcr, lscr, private) and shows update badges; supports OCI multi-arch manifests and @sha256-pinned refs
 
 ## LXC Container Management
 - Full lifecycle: create from templates, start, stop, destroy
 - File manager: browse, read, write, delete files inside LXC containers
 - Exec commands inside containers
 - Resource limits (CPU, memory)
+- Container architecture follows the host (`containers::host_container_arch()`) — arm64 hosts get arm64 templates/images; arm64 is a shipped CI target
 
 ## WolfNet (Encrypted Mesh VPN)
 - Userspace VPN: X25519 key exchange + ChaCha20-Poly1305 encryption
@@ -99,26 +102,37 @@
 - Docker image published to `ghcr.io/wolfsoftwaresystemsltd/wolfnet:latest` (multi-arch: linux/amd64 + linux/arm64)
 - For NAS platforms (Unraid, Synology, TrueNAS), use the satellite compose file at docker/docker-compose.satellite.yml in the WolfStack repo — bundles WolfNet + WolfDisk
 - Gateway mode: NAT traffic through a WolfNet peer
+- Docker containers carry WolfNet IPs via a `wolfnet.ip` container label; LXC via registered storage paths. Stale container→WolfNet DNAT rules are cleaned by `containers::cleanup_stale_wolfnet_routes`
 
 ## WolfDisk (Distributed Filesystem)
-- Rust FUSE-based replicated/shared storage across nodes
-- Docker image published to `ghcr.io/wolfsoftwaresystemsltd/wolfdisk:latest` (multi-arch)
-- Runs as native systemd service on Linux hosts (compile-from-source via setup.sh) or as a Docker container on NAS boxes
+- Rust FUSE-based replicated/shared storage across nodes; roles Leader/Follower/Client/Auto; Shared vs Replicated mode; content-addressed SHA256 dedup; optional S3 gateway
+- Native systemd service on Linux hosts (binary `wolfdisk`, config `/etc/wolfdisk/config.toml`) — installed from the Components page or setup script; Docker image `ghcr.io/wolfsoftwaresystemsltd/wolfdisk:latest` for NAS boxes
 - Default bind port 8550 — conflicts with WolfStack's status page when both are on the same host; WolfStack's status-port auto-fallback resolves this
-- Satellite compose pairs WolfDisk with WolfNet for NAS deployments
+- **Wire-version handshake (WDHS, wolfdisk v2.11.8+)**: peers exchange magic `WDHS` + wire version + software version before any frame. **Mixed wolfdisk versions CANNOT sync** — a version-skewed peer gets a clear log error ("peer runs pre-2.11.8 wolfdisk. Mixed versions cannot sync; upgrade all nodes together"). Fix: stop all → upgrade all → start all.
+- Daemon rewrites `cluster_status.json` every ~1s with index_version, file_count, peer freshness, and (v2.11.8+) its software version
+- **Cluster Health UI** (WolfDisk sidebar page): per-node index version column, software-version column, banner states — `✓ In sync`, `⟳ Syncing`, `⚠ N not reporting` (status stale >10s), `✗ Mixed wolfdisk versions` (red — cannot sync), `✗ Not progressing` (a behind node hasn't advanced for ≥3 min; suggests `journalctl -u wolfdisk | grep Re-sync`)
+- Diagnostic: `wolfdisk --version` on every node is the first check for any sync-stuck report
+
+## WolfFunctions (serverless FaaS, cluster-scoped) — v25.2.0+
+Lambda-style functions instead of provisioning a container/VM. Definitions replicate to every same-cluster peer; any node accepts invocations; the cluster leader places warm instances and fires schedules.
+- **Runtimes**: Python 3.12 (`def handler(event, context)`) and Node 22 (`exports.handler = async (event, context)`) — exactly two
+- **Sandbox**: gVisor `runsc` is primary (auto-downloaded from Google's release bucket, sha512-verified); config-driven Docker fallback ("reduced isolation"). Per-node ExecutionMode Auto|Gvisor|Docker in local.json. **Docker is required even in gVisor mode** — rootfs images are built via `docker pull/export`
+- **Placement**: `replicas` = number of NODES keeping warm copies (default 2, capped at capable-node count; 0 = scale-from-zero); `max_per_node` burst instances (default 4) reaped after 300s idle. Leader ranks nodes by load score; failover cold-starts locally as last resort
+- **Triggers**: (1) public URL `/fn/{slug}` (opt-in per function, rate-limited 60/min/node); (2) interval schedules (min 60s, leader-fired); (3) five internal events: alert_fired, node_offline, node_online, backup_completed, backup_failed
+- **Limits**: memory 32–8192 MB (default 128), timeout 1–900s (default 30, bounds the handler call; cold-start has a separate 90s budget)
+- **`/fn/{slug}` responses** use AWS Lambda proxy-integration semantics: handler returns `{statusCode, headers, body, isBase64Encoded}` → honoured (framing headers dropped, header names case-deduped); any other return value is JSON-encoded with 200. `multiValueHeaders` NOT supported. Event = `{trigger:"http", method, query, body, source_ip}`
+- **AI codegen**: describe the function in the editor → `POST /api/wolffunctions/ai-generate` drafts code via the configured AI provider; nothing deploys until saved
+- Config `/etc/wolfstack/wolffunctions/functions.json` (replicated); runtime state `/var/lib/wolfstack/wolffunctions`
+- Editor modal closes only via ✕/Cancel — backdrop clicks never discard work (v25.2.13)
 
 ## WolfFlow (Workflow Automation)
-- Visual drag-and-drop editor with 16 action types
-- Actions sorted alphabetically: Check Disk Space, Clean Journal Logs, Condition (If/Else), Docker Container Update, Docker Prune, Docker Update Check, HTTP Request, Integration Action, NetBird API, Restart Container, Restart Systemd Service, Run Shell Command, TrueNAS API, Unifi Controller, Update System Packages, Update WolfStack
-- Structured outputs: each action returns key-value data that downstream steps can reference via {{step_name.key}}
-- Conditional branching: If/Else nodes evaluate expressions and jump to different steps
-- Output reference picker: when editing a Condition, click to insert {{step.key}} references
-- Retry logic: per-step retry count and delay
-- Workflow timeout: max_runtime_secs
-- 5 failure policies: Abort, Continue, Alert, Notify & Abort, Notify & Continue
-- Cron scheduling with quick presets (Daily 3am, Hourly, Weekly, etc.)
-- Parallel execution across cluster nodes
-- Email results with HTML reports
+- Visual drag-and-drop editor. **23 action types**: UpdatePackages, UpdateWolfstack, RestartService, RunCommand, CleanLogs, CheckDiskSpace, RestartContainer, DockerPrune, DockerCheckUpdate, DockerUpdate, DockerCheckUpdateMany, DockerUpdateMany, RunBackupSchedule, HttpRequest, Condition (If/Else), NetBirdAction, TrueNasAction, UnifiAction, IntegrationAction, AiInvoke, AgentChat, SqlQuery, SendEmail
+- **RunBackupSchedule**: runs a real backup schedule through the normal pipeline (appears in Backups, honours retention + pre/post hooks); HOST-scoped; step fails if any backup failed. Builder has a live schedule picker
+- **SqlQuery** goes through the guarded SQL connections pool with tiered permissions (read / update / delete — DDL never allowed, statements classified by sqlparser)
+- Structured outputs: each action returns key-value data referenced downstream via {{step_name.key}}; output reference picker in the Condition editor
+- Retry logic per step; workflow timeout via max_runtime_secs
+- 5 failure policies: Abort (default), Continue, Alert, Notify & Abort, Notify & Continue
+- Cron scheduling with quick presets; parallel execution across cluster nodes; email results with HTML reports
 
 ### Check Disk Space Outputs
 - available_gb, total_gb, usage_pct, mount_point, over_threshold
@@ -154,25 +168,24 @@
 - Enable WebSocket upgrades — consoles, VNC, k8s provisioning, and cluster browser all use WS on the same port.
 - Status pages work out of the box at `https://your-domain/status/{slug}` with no extra routing.
 - Port 8550 (dedicated status listener) is NOT needed behind a proxy and can be left un-forwarded; it's only there for admins who want no-auth public pages on a separate port without a proxy.
+- **Public base URL pin**: `/etc/wolfstack/reverse-proxy.json` (`GET/POST /api/reverse-proxy/config`) stores a `public_base_url` so public links (status pages, cluster-browser share URLs) use the admin domain instead of the node IP.
 
 ## Backups
 - Scheduled backups with multiple destination types
-- Docker: commit + save + volume backup
-- LXC: full container backup
-- VM: disk image backup
-- Seven destination types: Local, S3, Remote (WolfStack node), WolfDisk, PBS (Proxmox Backup Server), NFS, SMB/CIFS
-- NFS/SMB backups mount the share idempotently at /mnt/wolfstack-backup/<kind>-<sanitised-source>/ and write through like Local
+- Docker: commit + save + volume backup; LXC: full container backup; VM: disk image backup
+- **Seven destination types**: Local, S3, Remote (another WolfStack node), WolfDisk, PBS (Proxmox Backup Server, including `pbs_file_level` pxar mode), NFS, SMB/CIFS
+- NFS/SMB backups mount the share idempotently under /mnt/wolfstack-backup/ and write through like Local
 - SMB fields on BackupStorage: smb_source (//server/share or \\server\share — normalised), smb_subpath, smb_username, smb_password, smb_domain, smb_options. Defaults to SMB 3.0.
 - NFS fields: nfs_source (server:/export), nfs_options (defaults to rw,soft,timeo=50)
 - Pre-flight at save time: `POST /api/backups/test-storage` exercises the mount path without doing a real backup, so missing-package errors surface at schedule save instead of silently failing later
-- The backup runs hidden in a background task, so the UI wouldn't otherwise see MISSING_PACKAGE errors until the first run
+- **Pre/post hooks** per schedule: commands run via `timeout --kill-after=30 3600 bash -c <cmd>` (hard cap 1 hour, exit 124 = timed out). Env vars: `WOLFSTACK_SCHEDULE`, `WOLFSTACK_HOOK_PHASE` (pre/post), `WOLFSTACK_BACKUP_STATUS` (empty on pre; aborted/failed/completed on post). A failing pre-command **aborts the whole run** (no backups taken, synthetic Failed entry appears in the list); the post-command ALWAYS runs, even after a pre failure
 
 ## Storage
 - Mount types: S3, NFS, SMB/CIFS, SSHFS, Directory (bind mount), WolfDisk
 - SMB/CIFS: guest or username/password/domain auth. Defaults to SMB 3.0 (matches Synology/QNAP defaults). `smb_options` can override e.g. `vers=2.1` for older NAS firmware.
 - Source normalisation: `\\server\share` gets converted to `//server/share` automatically
-- Auto-mount on boot
-- Global mounts replicate across cluster nodes
+- Auto-mount on boot; global mounts replicate across cluster nodes
+- Storage pages also list existing **network mounts** discovered from /proc/mounts (GlusterFS, NFS, CIFS, SSHFS, s3fs, rclone, Ceph, WolfDisk) even when not created through WolfStack
 
 ## Auto-install for Mount Helpers
 - When a mount needs `mount.cifs` (cifs-utils) or `mount.nfs` (nfs-common/nfs-utils/nfs-client) and it's missing, WolfStack does NOT silently apt-get
@@ -188,429 +201,405 @@
 - Alert cooldown to prevent spam
 
 ## App Store
-- 510+ one-click applications
-- Four install targets: Docker, LXC, bare-metal, VM
+- **~530 one-click applications**
+- **Four install targets**: Docker, LXC, bare-metal, VM — a manifest can offer any subset (`docker` / `lxc` / `bare_metal` / `vm` fields)
 - User input fields for configuration (passwords, domains, etc.)
 - Install modal detects which targets the manifest supports and shows matching pills
 - Ports/env/memory sections auto-hide for non-Docker targets
+- Installed-apps list is cluster-wide (fetches every online node via the cluster proxy)
 
 ### Docker deployment modes (v19.0.6+)
-- Docker-target apps can be installed two ways: **Standard (`docker run`)** or **Docker Compose**. The radio appears in the install modal only when target is Docker AND the backend advertises `compose_available: true` on the app manifest response
-- **Standard** is the default and the legacy path — completely unchanged behaviour (`install_docker` → `docker_create_with_cmd`). Every existing installed app keeps working as before
-- **Compose** is opt-in per install. Writes `/etc/wolfstack/compose/appstore-{install_id}/docker-compose.yml`, runs `docker compose -f … up -d`, and records `deployment_type: "docker-compose"` + `compose_stack_name` on the `InstalledApp`
-- Compose-backed installs appear on the existing Compose Stacks page automatically because they live in the same directory as user-created stacks — look for the `appstore-` prefix
-- Compose template resolution (`resolve_compose_template`): hand-crafted override in `handcrafted_compose_template` takes priority; otherwise synthesised from the `DockerTarget` (image, ports, env, volumes, sidecars → one compose service each; named volumes declared at the top level)
-- View / edit the compose file via `GET`/`PUT /api/appstore/installed/{install_id}/compose.yaml`. Save re-runs `docker compose up -d`
-- Uninstall of a compose app runs `docker compose down -v` (wipes named volumes). Frontend gates this behind the typed-YES modal (`confirmTypedYes`)
-- Existing `installed.json` records without the new fields default to `deployment_type: "docker-run"` via `#[serde(default)]` — zero migration
-- Legacy `prepare-install` terminal flow is bypassed for compose installs; the call goes straight to `/api/appstore/apps/{id}/install` because `docker compose up` is non-interactive
-- **Installed-apps list is cluster-wide**: fetches local installs plus every online WolfStack node via `/api/nodes/{id}/proxy/appstore/installed`, annotates each row with `__node_id`, and routes View / Edit / Uninstall through the cluster proxy when the install is remote
-- **YAML escaping**: `yaml_double_quoted()` handles backslashes, quotes, newlines, tabs and control chars per the YAML spec. User inputs containing any of these no longer break the synthesised compose file
-- **Install failure rollback**: if `docker compose up -d` fails on a fresh install, `install_compose` runs `down -v --remove-orphans` and deletes the stack directory before returning the error — no orphaned `/etc/wolfstack/compose/appstore-*` dirs
+- Docker-target apps install two ways: **Standard (`docker run`)** or **Docker Compose**. The radio appears only when target is Docker AND the manifest advertises `compose_available: true`
+- **Standard** is the default/legacy path — unchanged behaviour
+- **Compose** writes `/etc/wolfstack/compose/appstore-{install_id}/docker-compose.yml`, runs `docker compose up -d`, records `deployment_type: "docker-compose"`. Appears on the Compose Stacks page (look for the `appstore-` prefix)
+- View / edit compose via `GET`/`PUT /api/appstore/installed/{install_id}/compose.yaml`; save re-runs `up -d`
+- Uninstall of a compose app runs `docker compose down -v` (wipes named volumes) behind the typed-YES modal
+- Install failure rollback: failed `up -d` on a fresh install runs `down -v --remove-orphans` and deletes the stack dir
 
 ### VM Target (ISO-Based Apps)
 - For apps that want a whole OS (PBS, pfSense, OPNsense, Home Assistant OS, etc.)
 - VmTarget fields: iso_url, memory_mb, cores, disk_gb, optional data_disk_gb + data_disk_label, vga
-- install_vm: downloads ISO to /var/lib/wolfstack/iso/<app_id>.iso (cached, reused across installs), auto-allocates a WolfNet IP, creates the VM via VmManager::create_vm, starts it
-- User overrides via user_inputs: disk_gb, data_disk_gb, memory_mb, cores. Manifest defaults kick in if missing/zero/unparseable.
-- Data disk: when manifest's data_disk_gb is Some, install_vm pushes a StorageVolume onto extra_disks. Works on all three backends: qm_create adds `--scsi{N} <storage>:<size>`, virsh_create appends `--disk path=...,size=N,format=qcow2,bus=virtio`, standalone QEMU creates the volume file and attaches via -drive.
-- ISO fetch: tries the manifest URL first; if wget fails (404), calls resolve_latest_iso which scrapes the parent directory's HTML index and picks the newest file matching the same stem. Handles Proxmox's no-`_latest.iso`-alias quirk.
-
-### Proxmox Backup Server (PBS) entry
-- First VM-target app in the catalogue
-- Defaults: 16 GB OS disk, 200 GB data disk, 4 GB RAM, 2 cores
-- User picks storage in the install modal; everything else auto
-- Points user to open VNC for the PBS installer, then add PBS as a backup destination cluster-wide via its WolfNet IP
+- install_vm: downloads ISO to /var/lib/wolfstack/iso/<app_id>.iso (cached), auto-allocates a WolfNet IP, creates + starts the VM
+- User overrides via user_inputs: disk_gb, data_disk_gb, memory_mb, cores
+- Data disk works on all three VM backends (qm --scsiN, virsh --disk, standalone -drive)
+- ISO fetch falls back to scraping the parent directory index for the newest matching file (handles Proxmox's no-`_latest.iso` quirk)
 
 ## Authentication
 - Linux crypt() against /etc/shadow (default)
 - WolfStack native user accounts with Argon2 password hashing
 - TOTP two-factor authentication
 - WebAuthn / passkey login (v22.3.0+) — additive, sits alongside PAM
-- OIDC/SSO (Enterprise): Authentik, Azure AD, Okta, Keycloak, any OIDC provider
+- OIDC/SSO (Team/MSP/Enterprise licence): Authentik, Azure AD, Okta, Keycloak, any OIDC provider
 - Cookie-based sessions (wolfstack_session cookie)
 - Inter-node auth: X-WolfStack-Secret header
 
+### Login lockout (brute-force protection)
+- Defaults: **3 failed attempts within 5 minutes → 48-hour kernel-level block** (`/etc/wolfstack/auth-lockout.json`; pre-v23.12.13 default of 10 auto-migrates to 3)
+- One limiter unifies failures from the WolfStack UI, sshd, and Proxmox pveproxy
+- **Trusted IPs / CIDRs** (Security page textarea) bypass lockout entirely — operators can't lock themselves out
+- Lockouts propagate fleet-wide; receiving nodes re-validate against their own trusted list so a peer can't be tricked into blocking an admin IP
+- Manual unblock: `/api/security/auth-unblock` (propagates); lockout list at `/api/security/auth-lockouts`
+
 ### Passkey login behind a reverse proxy (v22.6.9+)
-- `passkey_rp_origin()` reads `X-Forwarded-Proto` and `X-Forwarded-Host` first, falls back to `Host` + `state.tls_enabled`. Without these, a wolfstack running plain HTTP behind nginx/Caddy/Traefik that terminates TLS would derive `origin=http://example.com` while the browser presents `origin=https://example.com` → webauthn-rs rejects with "host header is incorrect for passkeys"
-- Multi-hop proxy chains: takes the first comma-separated value from the header (the original client-facing host/scheme)
-- Bogus `X-Forwarded-Proto` values fall back to local TLS state, so a misconfigured proxy doesn't break direct access
-- IPv6 hosts (`[::1]:8553`) handled correctly — port stripping only fires when the suffix is all-digits
+- `passkey_rp_origin()` reads `X-Forwarded-Proto` and `X-Forwarded-Host` first, falls back to `Host` + local TLS state. Missing headers behind a TLS-terminating proxy → "host header is incorrect for passkeys"
+- Multi-hop proxy chains: takes the first comma-separated value (original client-facing host/scheme)
+- Bogus `X-Forwarded-Proto` values fall back to local TLS state; IPv6 hosts handled correctly
 
 ## Certificates page (v22.6.9+)
-- Three input modes: Let's Encrypt (certbot, existing), Generate Self-Signed, Install / Update
-- Self-signed: `openssl req -x509 -newkey rsa:2048 -nodes -sha256` with `-addext "subjectAltName=..."`. Auto-detects DNS vs IP for each SAN entry. Default validity 825 days.
-- Install / Update: paste cert + key PEM; supports encrypted PKCS#8 (`BEGIN ENCRYPTED PRIVATE KEY`) and legacy PEM (`Proc-Type: 4,ENCRYPTED`) via a `key_passphrase` field. Passphrase passed to openssl via `WS_KEY_PASS` env var, never argv. Decrypted key is what gets stored on disk.
-- Atomic write: everything goes through `<path>.new` + `verify_cert_key_pair` (modulus check for RSA, public-key comparison for EC) + `rename`. A bad upload never overwrites a working cert.
-- Path whitelist: `/etc/wolfstack/`, `/etc/pve/local/`, `/etc/pve/nodes/`. Anything else (including path traversal) is rejected.
-- Discovery (existing): scans certbot CLI, `/etc/letsencrypt/live/`, `/etc/wolfstack/cert.pem` + `key.pem`, and Proxmox `pveproxy-ssl` pairs across all nodes/per-node directories. Lists everything in the page.
-- Diagnostics: warns if only one of `/etc/wolfstack/cert.pem` and `key.pem` exists (the manual-install footgun)
-- "Update" button on existing proxmox/custom certs pre-fills the install target so the user can replace them in place
-- After install: API response carries `restart_service` (`wolfstack` or `pveproxy`). Frontend opens a `confirm()` dialog — never auto-restart. User clicks OK → POST `/api/certificates/restart-service` schedules a deferred restart (1.5s for wolfstack so HTTP response flushes, 100ms for pveproxy)
-- Endpoints: `POST /api/certificates/install`, `POST /api/certificates/self-signed`, `POST /api/certificates/restart-service`, `GET /api/certificates/list`, `POST /api/certificates` (Let's Encrypt)
+- Three input modes: Let's Encrypt (certbot), Generate Self-Signed, Install / Update
+- Self-signed: `openssl req -x509 -newkey rsa:2048 -nodes -sha256` with SAN auto-detect (DNS vs IP). Default validity 825 days.
+- Install / Update: paste cert + key PEM; supports encrypted PKCS#8 and legacy encrypted PEM via `key_passphrase` (passed via env, never argv). Decrypted key is stored.
+- Atomic write: `<path>.new` + `verify_cert_key_pair` + rename. A bad upload never overwrites a working cert.
+- Path whitelist: `/etc/wolfstack/`, `/etc/pve/local/`, `/etc/pve/nodes/`
+- Discovery scans certbot, `/etc/letsencrypt/live/`, `/etc/wolfstack/cert.pem`+`key.pem`, Proxmox pveproxy-ssl pairs across nodes
+- After install: response carries `restart_service` (wolfstack or pveproxy); frontend confirms before POST `/api/certificates/restart-service` (deferred restart)
+
+### Local CA (internal domains)
+- Issues TLS certs for unregistered internal domains (e.g. `*.ai.home`) that public ACME can't validate
+- Root CA: RSA-4096, 10-year, at `/etc/wolfstack/local-ca/ca-cert.pem` (downloadable to install in browsers) + `ca-key.pem` (mode 0600, **never leaves the box, never returned by any API**)
+- Leaf certs: RSA-2048, 825 days, SAN covers domain + `*.domain` + IPs
+- Endpoints: `/api/certificates/local-ca` (status), `/init`, `/download`, `/issue`
+
+### Certbot engine (WolfProxy sites)
+- `src/certbot`: ACME issuance/renewal for WolfProxy-managed sites. Webroot mode (default — zero-downtime, ACME served from `/var/lib/wolfstack/acme-webroot` through the running proxy) or DNS-01 for wildcards/no-port-80
+- Daily renewal task runs `certbot renew --quiet` with a deploy hook reloading WolfProxy. Config `/etc/wolfstack/certbot.json`
 
 ## DNS providers + DNS-01 / wildcard certs (v22.14.12+)
-- Module: `src/dns_providers/mod.rs`. Store at `/etc/wolfstack/dns-providers.json` (mode 0600). Credentials are XOR-obfuscated using the same `wolfstack-dns-v1` key pattern as `xo::obfuscate_token` — defence is fs perms, not crypto.
-- Plugin whitelist (`KNOWN_PLUGINS`) gates which `--dns-<plugin>` strings can land on the certbot argv. Hand-editing the JSON to inject a new plugin is rejected at materialise time too (`issue_via_provider` re-checks).
-- Materialise-to-tmp pattern: `DnsProviderStore::materialize(id)` writes a unique `/run/wolfstack/dns-creds/<id>-<rand>.ini` at mode 0600, returns a `MaterializedCreds` RAII guard whose `Drop` unlinks the file. Caller MUST bind to a local across the entire `certbot` invocation; using `web::block` keeps the guard on one thread.
-- Endpoints: `GET/POST /api/dns-providers`, `PUT/DELETE /api/dns-providers/{id}`, `POST /api/dns-providers/{id}/test` (staging dry-run, stores result on the provider entry).
-- Cert issuance: `POST /api/certs` accepts `dns_provider_id` and `dns_provider_id` wins over `challenge` when set. Wildcards (`*.zone.tld`) work for free over DNS-01.
-- Port-80 collision: `installer::request_certificate` probes `TcpListener::bind(0.0.0.0:80)` + `[::]:80` before calling certbot. Busy → returns `PORT_80_BUSY:` prefixed error → API maps to 409 with `port_80_busy: true` → frontend `requestCertificate()` flips the radio to DNS-01 and surfaces the CTA. The old "raw certbot port 80 stderr" UX is gone.
-- UI: Settings → DNS Providers tab (add/edit/delete/test). Certificates page gains an HTTP-01/DNS-01 radio; DNS-01 reveals the provider dropdown and updates the help text. The provider dropdown is refreshed both when the tab is selected AND when the cert page loads, so newly-added providers appear without a hard reload.
+- Module: `src/dns_providers/mod.rs`. Store at `/etc/wolfstack/dns-providers.json` (mode 0600); credentials AES-encrypted at rest (v2) with legacy-XOR fallback for old entries
+- Plugin whitelist (`KNOWN_PLUGINS`) gates which `--dns-<plugin>` strings can land on the certbot argv; re-checked at materialise time
+- Materialise-to-tmp: creds written to a unique `/run/wolfstack/dns-creds/<id>-<rand>.ini` (0600), RAII-unlinked after certbot exits
+- Endpoints: `GET/POST /api/dns-providers`, `PUT/DELETE /api/dns-providers/{id}`, `POST /api/dns-providers/{id}/test` (staging dry-run)
+- Cert issuance: `POST /api/certs` accepts `dns_provider_id` (wins over `challenge`). Wildcards (`*.zone.tld`) work over DNS-01
+- Port-80 collision: bind-probe before certbot; busy → 409 `port_80_busy` → frontend flips the radio to DNS-01
 
 ## Installer (setup.sh)
 - Curl-piped: `curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash`
-- Flags: `--beta` (use beta branch), `--yes`/`-y` (skip confirmation), `--agent` (agent-only install — see Clustering), `--install-dir <path>` (redirect Cargo target dir to external mount for low-disk hosts)
-- Pre-flight checks (v22.6.9+) run before any package install:
-  - DNS-on-:53 conflicts: Technitium, Pi-hole, AdGuard, BIND, Unbound, dnsmasq, systemd-resolved (the last is handled automatically — left alone)
-  - Port conflicts on 8553/8554/8550 with role labels; distinguishes "our previous wolfstack" vs other process
-  - Reverse proxies on 80/443 (info only — WolfStack core doesn't bind these)
-  - Existing `/etc/wolfstack/` content → flagged as upgrade; explicit warning when `custom-cluster-secret` is present (move-to-new-cluster footgun)
-  - ufw / firewalld active without :8553 allowed → exact `ufw allow` / `firewall-cmd` command shown
-  - Architecture not in {x86_64, aarch64} → warns about source-build path (~10–30 min, ~3 GB free disk)
-  - Confirmation prompt with TTY detection: works under `bash setup.sh` AND `curl|bash` (reads from /dev/tty)
-- Install manifest at `/var/log/wolfstack/install-<timestamp>.log`: full diff of installed packages before vs after via `dpkg-query` / `rpm -qa` / `pacman -Q`. Used by the uninstaller for rollback.
-- Join token: pre-generated at `/etc/wolfstack/join-token` (mode 0600) using `openssl rand -hex 32` or `od /dev/urandom` fallback. Format matches Rust's `load_join_token()` so the binary picks it up on first start. Printed in the completion banner — paste into master server's "Add Node" form.
-- Local uninstaller: fetched from same branch as setup.sh, saved to `/usr/local/bin/wolfstack-uninstall`. Falls back to inline minimal stub if offline (stops service, removes binary + unit, optional `--purge` for /etc/wolfstack). Reachable when DNS is broken.
-- Disk-space check: only on source-build fallback (when prebuilt binary download fails). Requires ~3 GB at the build dir; prompts to continue if less.
+- Flags: `--beta` (beta branch), `--yes`/`-y`, `--agent` (agent-only install), `--install-dir <path>` (redirect build dir for low-disk hosts)
+- Pre-flight checks: DNS-on-:53 conflicts (Technitium/Pi-hole/AdGuard/BIND/Unbound/dnsmasq; systemd-resolved handled automatically), port conflicts on 8553/8554/8550, reverse proxies on 80/443 (info), existing `/etc/wolfstack/` → upgrade warning (custom-cluster-secret footgun called out), ufw/firewalld hint with exact allow command, architecture warning for non-x86_64/aarch64 (source build ~10-30 min, ~3 GB)
+- Install manifest at `/var/log/wolfstack/install-<timestamp>.log` (package diff, used by uninstaller)
+- Join token pre-generated at `/etc/wolfstack/join-token` (0600), printed in the completion banner
+- Local uninstaller saved to `/usr/local/bin/wolfstack-uninstall` (works offline)
+- **Unraid**: install/upgrade downloads the static musl binary BEFORE killing the running agent (download-before-kill — a failed download never leaves the node dark); startup wired into `/boot/config/go` with a wait-for-array loop; a post-boot bootstrapper downloads static tools (proxmox-backup-client, pxar, smartctl) from the `unraid-tools-v1` GitHub release, persists them at `/mnt/user/appdata/wolfstack/tools`, and re-links into `/usr/local/bin` every boot (Unraid's /usr/local/bin is RAM-backed). Tools already on PATH are never shadowed. Detection: `/etc/unraid-version`
 
 ## AI Agent
-- Six providers: Claude (Anthropic), Gemini (Google), OpenAI (ChatGPT), OpenRouter (100+ models), Cloudflare Workers AI, Local AI (self-hosted)
-- Local AI supports any OpenAI-compatible server: Ollama, LM Studio, LocalAI, vLLM, text-generation-webui, llama.cpp
-- Common local URLs: Ollama http://localhost:11434, LM Studio http://localhost:1234/v1, LocalAI http://localhost:8080/v1
-- Cloudflare Workers AI: enter the account ID and a Workers-AI-permission API token — WolfStack builds the endpoint URL automatically (`https://api.cloudflare.com/client/v4/accounts/{id}/ai`). Compact system prompt is used since most CF chat models ship with 8K context windows. Free tier covers most homelabs.
-- Auto-detects available models from each provider's models API; CF returns a curated short list (the full Workers AI catalogue churns too fast to enumerate reliably).
-- Every model dropdown ends with a `Custom…` option that reveals a text input — type any model name the provider accepts (private Ollama tags, brand-new releases, `@cf/…` IDs not in the curated list).
-- API key optional for most local servers.
-- Expert knowledge base shipped with WolfStack — AI gives deep answers about the platform.
-- AI can execute read-only commands on the server via [EXEC] tags.
-- Health monitoring: periodic scans with AI-generated recommendations. Interval can be set to **Off** to keep the chat agent live but skip the periodic LLM probe — useful for metered or free-tier backends.
-- **Master enable/disable toggle** (v24.7.24): "Enable AI agent" checkbox at the top of Settings → AI Agent. When off, the chat bubble hides, the health-check loop pauses, validation is skipped on save (so a fresh install can save partial config while disabled), but every key/model/account-ID is preserved. One click brings it back.
-- **Tool-call cap** (per-turn round limit): off by default; tick to apply a 1–100 cap. Default cap is 6 once enabled. Raise for reasoning-heavy investigations (Opus / o-series / GPT-5); tighten for misbehaving local models that loop forever. Hand-edited bad values clamped to [1, 100] on load.
-- Alerts go to email + Discord / Telegram / Slack on private channels — NEVER auto-posted to the public status page (host internals must not leak to anonymous viewers).
-- "Cleared" notifications on the alert→OK transition so no silent recoveries.
+- **Seven providers**: Claude (Anthropic API), **Claude Code CLI** (uses the operator's Claude Pro/Max subscription login — shells out to the `claude` binary, no API key, built-in tools disabled), Gemini (Google), OpenAI (ChatGPT), OpenRouter (100+ models), Cloudflare Workers AI, Local AI (self-hosted)
+- Local AI supports any OpenAI-compatible server: Ollama, LM Studio, LocalAI, vLLM, text-generation-webui, llama.cpp. Common URLs: Ollama http://localhost:11434, LM Studio http://localhost:1234/v1, LocalAI http://localhost:8080/v1
+- Cloudflare Workers AI: account ID + Workers-AI token; WolfStack builds the endpoint URL. Compact system prompt (8K-context models). Free tier covers most homelabs
+- Auto-detects available models per provider; every model dropdown ends with `Custom…` for any model name
+- Expert knowledge base shipped with WolfStack; AI executes read-only commands via [EXEC] tags
+- Health monitoring: periodic scans with AI-generated recommendations; interval can be **Off** (chat stays live, no periodic probe). Health prompts include live security findings AND a **7-day rolling metrics baseline** ("now vs ~24h vs ~7d" drift summary) so slow degradation is caught, not just threshold breaches
+- **Master enable/disable toggle** (v24.7.24): hides the chat bubble, pauses health checks, preserves all keys/config
+- **Tool-call cap**: off by default; 1–100 per-turn round limit (default 6 when enabled)
+- Alerts go to email + Discord / Telegram / Slack on private channels — NEVER auto-posted to the public status page
+- "Cleared" notifications on the alert→OK transition so no silent recoveries
+
+## WolfAgents (named AI agents / "WolfPack")
+Long-lived named AI personas with persistent memory and per-agent guardrails — distinct from the single dashboard AI chat.
+- One agent = system prompt + model + append-only JSONL memory (`/etc/wolfstack/agents/<id>/memory.jsonl`, tail-bounded, default 40 lines); definitions in `/etc/wolfstack/agents.json` (0600)
+- **Access levels**: ReadOnly (default), ReadWrite, ConfirmAll, Trusted
+- **Target scope** restricts clusters/containers/hosts/paths/API-paths/email-recipients/SQL-connections per agent
+- Chat bindings: Discord, Telegram, WhatsApp (Twilio) — per-agent bot token or the global alert config
+- Chat rate limit 20 msg/min/agent; full tool_use loop on Claude, single-shot elsewhere
+- UI: WolfAgents page
 
 ## Antivirus / Rootkit Scanning
-- Full antivirus + rootkit stack: ClamAV (signatures), rkhunter, chkrootkit. Installed on demand from the Security page.
-- **On-access scanning** via clamonacc + clamd. Real-time fanotify-based scan of files as they're written. WolfStack manages the clamd.conf block between `# === WolfStack on-access begin/end ===` markers; rediscovers non-local mounts on every apply.
-- **🛠 Repair ClamAV button** (v24.7.26, Security page next to scan): runs `ensure_clamav_user` → `freshclam` → verify DB present. Step-by-step log + structured error so the operator sees exactly which step failed (freshclam missing, network blocked, perms wrong, etc).
-- **clamav/logrotate self-heal** (v24.7.25, made periodic in v24.15.2): at startup AND every 30 min, if `/etc/logrotate.d/clamav-freshclam` exists but the `clamav` user doesn't, recreates the user; then, if `logrotate.service` is in a stale `failed` state, re-runs `logrotate /etc/logrotate.conf` and `reset-failed`s the unit *only when the re-run succeeds* (a real persistent failure stays red with logrotate's own reason logged). Fixes the recurring "logrotate failed / missing clamav user" predictive-inbox item that came back after each daily timer tick even though the user already existed and a manual `systemctl restart logrotate` cleared it.
-- **On-access apply pre-seeds signatures** (v24.7.26): if `/var/lib/clamav` is empty when enabling on-access, runs the repair flow before starting clamd. Stops the cascade where clamd dies on missing DB → clamonacc dies because clamd is dead.
-- **Auto-recovery surfaces failure reason** (v24.7.26): when a scan hits "No supported database files", the auto-retry calls the same repair flow; if it fails, the actual reason (freshclam blocked, perms wrong, etc.) is appended to the scan error rather than swallowed.
-- **Auto-actions**:
-  - Auto-quarantine confirmed ClamAV hits to `/var/quarantine/wolfstack` (preserved as evidence, not executable). One-click restore for false positives.
-  - Auto-kill processes whose executable matches a hit (SIGTERM, then SIGKILL after grace period). Configurable; some operators prefer "alert only" first.
-  - Cluster propagation: one node's finding fans out to peers via the cluster secret.
-- **Alert routing**: findings go to email + Discord / Telegram / Slack. NEVER auto-posted to public status pages.
-- **Scheduled scans**: per-node configurable interval. Walks `/`, skips `/proc`, `/sys`, `/dev`, network mounts (NFS/CIFS/FUSE/S3FS/overlay/tmpfs), and live VM disk images. Streams progress (current file being scanned) so the UI isn't a frozen "scanning…" message.
-- **API endpoints**:
-  - `POST /api/antivirus/install` — install the AV stack (apt/dnf/pacman)
-  - `POST /api/antivirus/scan` — run a full scan on this node
-  - `POST /api/antivirus/clamav/repair` — run the repair flow synchronously, returns step-by-step lines + outcome
-  - `POST /api/antivirus/on-access` — toggle on-access scanning
-  - `GET /api/antivirus/status` — installed tools + scan progress
-  - `GET /api/antivirus/findings` — recent findings, newest first
-  - `GET /api/antivirus/quarantine` — current quarantine inventory
-- **/tmp + /dev/shm exec alarm**: any running process whose `/proc/$PID/exe` resolves under `/tmp` or `/dev/shm` is a Compromise-class finding (classic malware staging path). Reports PID, ppid, cmdline, real user, sha256, file mtime/mode/size, lsof open files + sockets. Never auto-kills (legit dev tools sometimes use these paths). `/var/tmp` and `/run/user/*` are intentionally out of scope.
+- Full antivirus + rootkit stack: ClamAV (signatures), rkhunter, chkrootkit. Installed on demand from the Security page (chkrootkit unavailable on Arch — AUR-only, reported as not_available)
+- **On-access scanning** via clamonacc + clamd (WolfStack manages its own `wolfstack-clamonacc.service` unit). Real-time fanotify scan; WolfStack manages the clamd.conf block between `# === WolfStack on-access begin/end ===` markers; rediscovers non-local mounts on every apply; enabling pre-seeds signatures if the DB is empty
+- **🛠 Repair ClamAV button**: ensure clamav user → freshclam → verify DB; step-by-step log. Signature auto-recovery also fires mid-scan on "No supported database files"
+- **clamav/logrotate self-heal**: at startup and every 30 min — recreate missing clamav user, re-run + reset-failed a stale-failed logrotate unit only when the re-run succeeds
+- **Auto-actions**: auto-quarantine confirmed hits to `/var/quarantine/wolfstack` (chmod 000, one-click restore with original mode/owner); auto-kill processes holding an infected file (configurable); cluster propagation of findings
+- **Scheduled scans**: `schedule_hours` (default 24, 0 = manual). Walks `/`, skips /proc /sys /dev, network mounts, live VM disks. Streams progress
+- **Alert routing**: email + Discord/Telegram/Slack. NEVER public status pages
+- Endpoints: `POST /api/antivirus/{install,scan,on-access,clamav/repair}`, `GET /api/antivirus/{status,findings,quarantine}`, quarantine restore/delete, findings dismiss. Status/config/scan fan out fleet-wide
+- **/tmp + /dev/shm exec alarm**: any running process whose `/proc/$PID/exe` resolves under `/tmp` or `/dev/shm` is a Compromise-class finding (classic malware staging). Reports PID, ppid, cmdline, user, sha256, mtime/mode/size, open files/sockets. Never auto-kills. `/var/tmp` and `/run/user/*` intentionally out of scope
+
+## Security page & Fleet Security
+Security features live on the per-node Security page and a cross-cluster **Fleet Security** page (fan-out via the cluster proxy).
+
+### Threat Intelligence (IP blocklists)
+- Pulls public blocklists and applies them as kernel DROP rules via ipset + a `WOLFSTACK_THREAT_INTEL` iptables chain, matching both src and dst (inbound attackers AND outbound malware→C2)
+- Providers: Spamhaus DROP + FireHOL Level 1 (default-on when enabled); CrowdSec community + AbuseIPDB (default-off, need API keys)
+- **Opt-in and dry-run-first**: `enabled` defaults false; `dry_run` defaults TRUE (first refresh produces a preview report only). Emergency `paused` removes the rule but keeps config
+- Max 250k entries, refresh every 6h (1–168 clamp), atomic ipset swap
+- **Never blocks**: loopback, RFC1918, cluster node IPs, and the calling admin's IP are always stripped
+- Endpoints under `/api/threat-intel/…` (config, refresh, pause/resume, status, lookup/{ip}, test-feed, fleet-status); cluster-scoped
+
+### Outbound scan detector
+- Detects a compromised local process doing outbound scanning (SYN_SENT fan-out per PID from /proc/net/tcp)
+- **Default OFF** (flipped in v23.12.3 after it SIGKILL'd pmxcfs on a user's Proxmox host); threshold 50 distinct destinations / 60s window
+- Hard safety list (`ESSENTIAL_SAFETY_COMMS`) is checked before the operator allowlist — never kills pmxcfs, corosync, qemu, libvirtd, etcd, kubelet, databases, NetworkManager, dnsmasq, etc.; never PID 1, never itself; UID 0 never auto-blocked
+- Actions: `kill_and_block` (SIGTERM→SIGKILL + per-UID outbound REJECT) or `alert_only`. Enabling shows a destructive-action confirm
+
+### NMAP Protection ("Gandalf")
+- Optional TCP tarpit/scan-trap on **port 41910**, off by default. Any connection from outside the trusted envelope (loopback, trusted CIDRs, WolfNet, cluster peers, local LAN unless strict) gets a quiet kernel block — port scanners self-block
+- Serves a decoy nginx-branded login page. Toggle: Security page "NMAP Protection" checkbox; `/api/security/gandalf`
+
+### Secret audit & rotation
+- Read-only secret auditor feeds System Check + the licence heartbeat count: flags default cluster secret (Compromise severity, red banner), legacy XOR-obfuscated credential stores (auto-clears once migrated to AES), and plaintext backup credentials in backup-config.json (deliberately not auto-migrated)
+- **Coordinated cluster-secret rotation** (Settings → Security): 5-step operator-driven protocol — Preflight (reachability) → Propose (new 32-byte secret shown once) → Receive (pushed to peers' `.pending` under the current secret, SHA-256 ACK) → Commit (atomic promote, timestamped backups, **restart required** — no live swap) → Rollback. Audit log `/var/log/wolfstack/secret-rotation.log`; concurrent rotations rejected with 409
+- Credential stores (DNS providers, cloud providers, XO tokens, TrueNAS/Unraid keys, SQL passwords, integrations vault) are **AES-256-GCM encrypted at rest**, key HKDF-derived from the cluster secret with per-store purpose labels; legacy XOR values keep decrypting forever. Rotation re-encrypts loss-free. Threat model: leaked backup tarballs, not on-host root
+
+### Emergency root rotation
+- Fleet Security → "Rotate root passwords fleet-wide": generates a strong 32-char password per node, applies via `chpasswd` on stdin (never argv), records to `/root/.wolfstack-emergency-passwords.txt` (0600), then kills all active root SSH sessions (including the operator's — the modal warns in red). Passwords shown once + CSV download, never stored in WolfStack state
+
+### Public listening-port audit
+- Fleet Security panel lists every public listener (`0.0.0.0`/`[::]`) per node with owning process (from `ss -tlnp`). Separately, System Check flags *risky* exposed services (Docker 2375 critical, Redis, MongoDB, Elasticsearch, MySQL, etc.)
+
+### Security posture & host audit
+- There is **no numeric security score** — posture renders as System Check rows: risky listeners, world-readable configs, weak/default cluster secret, sshd hardening (via `sshd -T`), fail2ban/sshguard presence, plus active-attack checks (SSH brute-force, crypto-miner processes, fresh /tmp `/dev/shm` executables, outbound RAT/C2/mining ports, IP/MAC conflicts)
+- Fleet Security host audit enumerates risky workloads: `--privileged` containers, docker.sock mounts, network=host, host /proc//etc//root mounts, known-bad processes (zmap, masscan, kinsing…), recently-changed authorized_keys, cron jobs in /tmp
 
 ## Cluster firewall coordination
-- **3-strike auto-block**: three failed-auth events from the same source IP inside the lockout window → kernel-level `iptables -j DROP`. Block propagates to every peer in the cluster within seconds via inter-node secret.
-- **FORWARD-chain coverage** (post-v23.12): not just INPUT — containers and VMs behind a node's bridge are protected too. macvlan/ipvlan containers bypass the host FORWARD chain by kernel design; Phase-2 fix will inject the DROP inside such containers via `pct exec` / `docker exec`.
-- Survives restarts: lockouts persist to disk and reload on startup.
-- Failed-login monitor unifies WolfStack web UI, sshd, and Proxmox pvedaemon — lockouts apply to every entrypoint at once.
+- **3-strike auto-block** (see Login lockout above for exact defaults): kernel-level DROP, propagates to every peer within seconds
+- **FORWARD-chain coverage**: containers and VMs behind a node's bridge are protected too. macvlan/ipvlan containers bypass the host FORWARD chain by kernel design — DROP is injected inside such containers
+- Survives restarts: lockouts persist to disk and reload on startup
+- v4 firewall builds never name iptables built-in chains in nft flushes (avoids clobbering Docker's chains)
 
 ## Abuse reporting (MANUAL-ONLY, locked at code level)
-- When the scanner flags a confirmed attack source, WolfStack pre-fills an abuse report to the source AS's `abuse@` contact with evidence (timestamps, observed activity, source/dest IPs, WolfStack version fingerprint).
-- **Operator-pressed Send is the ONLY trigger.** No scheduled batch send, no scanner-triggered auto-send, no confidence-threshold rule.
-- Locked at the code level: a build-time test fails if any code path can trigger an outbound abuse email without a signed operator action token. Same rule for regulator filings and customer-notification emails.
+- One-click abuse-desk email for a blocked IP, pre-filled with whois-derived abuse contact + audit-log evidence, sent via the existing SMTP transport
+- **Operator-pressed Send is the ONLY trigger.** A build-time regression test walks the whole source tree and fails if `send_report` gains any caller other than the single API handler — auto-send is structurally impossible
+- whois-only enrichment (no third-party IP APIs), 6h whois cache, 7-day per-IP re-report cooldown (operator-overridable), history capped at 500 (`/etc/wolfstack/abuse-reports.json`, 0600)
+- Endpoints: `/api/security/abuse-report/{preview,send,history}`
 
-## Pricing & Tiers (v22.10.0+ rebrand)
-Five-tier model on Stripe. Pro renamed to MSP; new Team tier added in the middle. Pre-rebrand `tier=pro` licences alias to `msp` in the binary.
-- **Community** (no licence) — source-available, free for personal/non-commercial use, capped at 3 hosts
-- **Homelab £12/mo** (10 hosts) — clustering, WireGuard bridge, branded status pages, scheduled backups, AI agent, Predictive Inbox + AUTOFIX, OSV scanner, REST API keys
-- **Team £149/mo** (50 hosts) — adds OIDC/SSO (Authentik/Azure/Okta/Keycloak), white-label status pages, plugin store access, 24h email support
-- **MSP £499/mo** (unlimited hosts) — adds WolfCustom white-label, multi-tenant client portals, plugin SDK, WolfHost, Slack support, 99.5% SLA. Was "Pro" before 2026-05-09 rebrand
-- **Enterprise** — sales-led only, no public price. Custom SLA, dedicated CSM, SOC2/ISO collateral, on-prem/air-gap, bespoke development
-- **Soft host cap**: over-cap nodes still join with a warning; never blocks usage. `max_nodes=0` means unlimited
-- **Tier resolution**: `compat::resolve_tier` reads the signed `tier` field on the licence. `pro` → resolves to `msp` (legacy alias for the rebrand). Unknown slugs fall through to `enterprise` (defensive — never deny a paid customer a feature on tier-string drift)
-- **Feature bundles** in `compat::has_feature`: enterprise gets every feature; msp = `plugins`, `api_keys`, `wolfhost`, `wolfcustom`, `multi_tenancy`, `sso`; team = `sso`, `api_keys`; homelab/community = explicit features in licence only
-- **Stripe lookup_keys** under `wolfstack_<tier>_2026_05` per `web/includes/stripe-tiers.php`. Bumping the date suffix forces a fresh Stripe Price to be created on next checkout
+## Edge (public ingress strategies for HTTP proxies)
+Per-proxy "Resilience" strategy for how internet traffic reaches a WolfStack proxy node:
+- **Local** (default, no automation), **DNS round-robin** (A-record failover via a DNS provider), **Cloudflare DNS** (proxied=true → CF edge TLS/WAF/DDoS), **Hetzner Load Balancer**, **DigitalOcean Load Balancer**, **Cloudflare Tunnel** (no inbound ports, CGNAT-friendly, installs cloudflared)
+- Cloud infra tokens stored in the cloud-providers store (encrypted at rest)
+- Endpoints: `/api/edge/cloud-providers*`, `/api/edge/cloudflare-tunnel/install/{proxy_id}`
+
+## Fleet Logs (loghub — centralized logging)
+- Native, dependency-free cluster log aggregation: every enabled node runs a shipper that tails journald (+ optional Docker/LXC logs), **redacts secrets** (key=value secrets, Bearer/Authorization, AWS keys, PEM blocks, JWTs, plus operator regexes), and forwards to a designated **hub node** which stores compressed date-segmented JSONL and answers searches
+- **Off by default** (opt-in per node). Config `/etc/wolfstack/loghub.json`: retention 14 days, max 10 GiB, min-free 10%
+- Hub pauses ingest (507) on low disk; shippers spool; a `dropped` counter surfaces any loss
+- Collection is journald-based (`journalctl -o json` with a persistent cursor, no backlog replay)
+- Endpoints: `/api/logs/{stats,ingest,search,config}` + `/api/logs/cluster/{search,stats}`
+
+## Pricing & Tiers
+Four paid tiers on Stripe plus free Community use. Authoritative pricing lives at wolfstack.org — verify there for current numbers; as of 2026-05 (the `wolfstack_<tier>_2026_05` Stripe lookup keys):
+- **Community** (no licence) — source-available under PolyForm Noncommercial: free for personal & non-commercial use. **No code-enforced host cap** — the limits are licence terms, not software blocks
+- **Homelab £12/mo** — licence issued with max_nodes=10. Clustering, WireGuard bridge, branded status pages, scheduled backups, AI agent, Predictive Inbox + AUTOFIX, OSV scanner, REST API keys
+- **Team £149/mo** — max_nodes=50. Adds OIDC/SSO and 24-hour email support (feature bundle is sso + api_keys — plugin store and white-label are MSP+)
+- **MSP £499/mo** — unlimited hosts (max_nodes=0). Adds WolfCustom white-label, multi-tenant client portals, plugin SDK, WolfHost, priority support. Was "Pro" before the 2026-05 rebrand
+- **Enterprise** — sales-led only, no public price. Custom cap per contract, custom SLA, SOC2/ISO collateral, on-prem/air-gap, bespoke development
+- **Soft host cap**: over-cap nodes still join — a warning is attached and a dashboard banner shows, but usage is NEVER hard-blocked ("that's a sales conversation, not an outage"). `max_nodes=0` = unlimited; legacy/sponsor licences carry 0
+- **Tier resolution** (`compat::resolve_tier`): signed `tier` field on the licence; `pro` → `msp` (legacy alias). Unknown slugs fall through to `enterprise` (never deny a paid customer a feature on tier-string drift)
+- **Feature bundles** (`compat::has_feature`): enterprise = every feature; msp = plugins, api_keys, wolfhost, wolfcustom, multi_tenancy, sso; team = sso, api_keys; homelab/community = explicit features in the licence only (Homelab licences ship api_keys)
 
 ## Licensing model (v22.10.0+)
-Dual licensing replaces the old MIT licence. Older v22.x.y releases stay MIT forever (irrevocable for already-released code).
-- **Public source-available**: PolyForm Noncommercial 1.0.0. Free for personal & non-commercial use. NOT OSI-approved "open source" — explicit no-commercial-use clause
-- **Commercial licence**: granted automatically when subscribing to any paid tier (Homelab/Team/MSP/Enterprise). Overrides the noncommercial restriction
-- "Commercial use" = running WolfStack at a company, in a managed-service offering, or as part of a paid product. Personal homelab use is non-commercial
-- MariaDB-aligned positioning (similar dual-licence pattern), supports the technology partnership story
-- Contributions accepted via short CLA so any single contributor can't block future commercial-licence issuance
+Dual licensing. Releases up to and including v22.9.x remain MIT in perpetuity; v22.10.0+ is dual-licensed.
+- **Public source-available**: PolyForm Noncommercial 1.0.0. Free for personal & non-commercial use. NOT OSI "open source" — explicit no-commercial-use clause
+- **Commercial licence**: granted by an active subscription to any paid tier. "Commercial use" = running WolfStack at a company, in a managed-service offering, or as part of a paid product; personal homelab use is non-commercial
+- Contributions: contributor grants a perpetual dual-licence; a short CLA may be required for non-trivial contributions
+- Licence key installed via Settings (POST `/api/platform/apply`), stored at `/etc/wolfstack/license.key`, Ed25519-signed manifest (customer, email, max_nodes, expires, features, tier). `GET /api/platform/status` shows tier/cap/expiry/over-cap state
+- A daily licence heartbeat reports to wolfstack.org: licence key, node id/hostname, cluster name, version, os/arch, secret-audit finding count, default-cluster-secret flag
+
+## Supporters (Patreon & GitHub Sponsors)
+Separate from commercial licences — donations fund development and grant in-app perks, not features:
+- **Patreon link**: Settings-side OAuth connect (client secret never in the binary — token exchange proxied via wolfstack.org). Tiers by pledge: Basic ($3+), Advanced ($25+), Platinum ($95+). ANY paying tier gets the same perks: beta update channel + no login support-nag. Config `/etc/wolfstack/patreon.json`
+- **GitHub Sponsors**: honour-system self-attest toggle ("I'm a GitHub Sponsor") — same perks
+- **Support tickets** (Support tab): available to licence holders AND declared GitHub sponsors; proxied to wolfstack.org which is authoritative for entitlement
+- **Update channels**: `master` (stable) and `beta`. The beta option in the update dropdown unlocks for supporters/licence holders (`/api/patreon/status`, `/api/supporter/status`)
+- Endpoints: `/api/patreon/{connect,callback,status,sync,disconnect}`, `POST /api/sponsor/github`
 
 ## Enterprise Features
 - REST API keys (wsk_* tokens) with scoped permissions
-- Plugin system
-- OIDC/SSO
-- WolfHost (web hosting platform)
-- WolfCustom (white-label branding)
+- Plugin system, OIDC/SSO, WolfHost (web hosting platform), WolfCustom (white-label branding), multi-tenant portals
 
 ## Plugin System
-- Plugins installed to /etc/wolfstack/plugins/{id}/
-- manifest.json + web/plugin.js + optional bin/handler backend
-- Plugin Store: fetches index from GitHub, one-click install
-- Reinstall kills old handler process and starts new one automatically
+- Plugins installed to /etc/wolfstack/plugins/{id}/ — manifest.json + web/plugin.js + optional bin/handler backend
+- Backend plugins run as child processes, expose HTTP endpoints under /api/plugins/<plugin>/…
+- Plugin Store: fetches index, one-click install; reinstall kills the old handler and starts the new one
+- Handler binaries must be statically linked (musl) for cross-distro compatibility
+- Plugins run as root — sandboxed only by Unix permissions, so trust matters
 
 ## Clustering
 - Nodes discover each other via HTTP polling every 10 seconds
-- Cluster secret for inter-node authentication
-- Default secret used if no custom-cluster-secret file exists
+- Cluster secret for inter-node authentication (default secret used if no custom-cluster-secret file — flagged by the secret audit)
 - Node proxy: /api/nodes/{id}/proxy/{path} forwards API calls to remote nodes
+- Join failures list EVERY URL tried with its error (not just the last fallback)
 
 ### Server vs agent install mode (v22.6.9+)
-- Two install modes selected at `setup.sh` time: server (default) and agent (`--agent` flag)
-- Server install: full management UI on :8553, cluster API, all subsystems. Run on ONE node per management domain — that's the "single pane of glass"
-- Agent install: cluster API stays bound (so the master's node-proxy still works), but the SPA / login.html / static assets are NOT served. Hitting `/` on an agent returns a small HTML page explaining it's an agent and how to add it from the master
-- Implemented via the `--agent` CLI flag on the wolfstack binary. In agent mode, all three `HttpServer` blocks (HTTPS, HTTP inter-node, no-TLS fallback) swap the SPA + Files service for `default_service(web::to(agent_index_handler))`. `api::configure` is registered regardless, so cluster proxy works
-- setup.sh appends `--agent` to the systemd `ExecStart=` line. On a rerun with the opposite flag it sed-edits the unit file and saves a backup at `wolfstack.service.pre-agent-flip`, then daemon-reloads + restarts
-- Agent mode does NOT reduce installed runtime deps — every node still needs LXC, Docker, QEMU, etc. to actually run workloads
-- If the master has rotated the cluster secret (Settings → Security), agent nodes need the same `/etc/wolfstack/custom-cluster-secret` or X-WolfStack-Secret auth fails. Surfaced in the install banner and the agent index HTML.
+- Two install modes at setup.sh time: server (default) and agent (`--agent`)
+- Server: full management UI on :8553. Run on ONE node per management domain
+- Agent: cluster API stays bound (master's node-proxy works), but the SPA/static assets are NOT served; `/` returns a small explainer page
+- setup.sh appends `--agent` to the systemd ExecStart; rerunning with the opposite flag sed-edits the unit (backup saved)
+- Agent mode does NOT reduce runtime deps — nodes still need LXC/Docker/QEMU to run workloads
+- If the master rotated the cluster secret, agents need the same `/etc/wolfstack/custom-cluster-secret`
 
-## Common Issues
+### Federation (read-only cross-cluster links)
+- Registry of OTHER WolfStack clusters this one trusts for aggregation — NOT a merge; each cluster stays its own admin domain
+- Each entry = base_url + a read-scoped API key minted on the remote cluster (Settings → API Keys); stored 0600 in federations.json, never shown back in the UI
+- Used by e.g. the Gateway page to surface shares from every connected cluster
 
-### VM won't boot after NIC change (UEFI)
-OVMF boot entries reference device paths. Network config changes alter the topology. Fix: WolfStack v16.16.9+ auto-resets EFI vars. Manual: delete {name}_VARS.fd file.
+### Dashboard sync (config push to peers)
+- Operator-triggered only ("Push now" to chosen node IDs) — no automatic replication
+- Pushes a fixed allowlist of admin-curated config files (users/auth, statuspages, alerting, backups, storage, arrays, ceph, kubernetes, vms, providers, router, ai-config, etc.); receiver rejects non-allowlisted paths
+- Explicitly excluded: per-node hardware state, TLS certs, cluster secret, join token
+- Endpoints: `/api/dashboard-sync/{targets,push,receive}`
 
-### VM has no IP (WolfNet)
-Check dnsmasq is installed and running: `ps aux | grep dnsmasq | grep tap`. WolfStack starts a per-VM dnsmasq on the TAP interface to offer DHCP.
+## Integrations (connector framework)
+Settings/page for third-party systems; credentials AES-256-GCM encrypted in `/etc/wolfstack/integrations/vault.json` (survives cluster-secret rotation via loss-free re-encrypt).
+- **NetBird VPN** — peers/groups/routes/users; ops: disable/enable peer, create group
+- **TrueNAS** — pools/datasets/snapshots/shares (this connector is REST-based; migration to WS pending TrueNAS 26.04)
+- **UniFi** — devices/clients/networks; ops: block/unblock/reconnect client, restart device
+- Actions run via `POST /api/integrations/{id}/action`; WolfFlow has matching NetBird/TrueNAS/UniFi/generic-integration steps
 
-### VM has no IP (Bridge/Physical NIC)
-Check bridge exists: `ip link show type bridge`. Check physical NIC is a member: `bridge link show`. Router DHCP must reach through the bridge.
+### TrueNAS main integration (src/truenas)
+- Registers TrueNAS servers to view pools/datasets/disks/NFS exports/ZFS snapshots (create/delete)
+- **Transport: WebSocket JSON-RPC 2.0 (`wss://host/api/current`) is PRIMARY** with REST `/api/v2.0` fallback, chosen per host and cached — REST-first polling triggered TrueNAS 25.10's "deprecated REST API" nag. CORE/old-SCALE hosts fail the one-time WS probe and stay on REST
+- Instances in `/etc/wolfstack/truenas.json`; API key encrypted at rest, never sent to the browser; per-instance cluster tag
 
-### systemd-networkd-wait-online.service failed
-Harmless — systemd timed out waiting for all interfaces. Common with bridges/TAPs/VPNs. Does not affect networking.
-
-### Plugin backend not starting
-Check if the handler binary is compatible: `file /etc/wolfstack/plugins/{id}/bin/handler`. Must be statically linked (musl) for cross-distro compatibility.
-
-### WolfHost "could not reach WolfStack API"
-WolfHost tries HTTPS:8553 then HTTP:8554. Also tries both custom and default cluster secrets. Restart WolfHost handler after WolfStack upgrade.
-
-### VM terminal opens but is blank
-Guest OS doesn't have a serial console enabled. Fix on the guest: add `console=ttyS0` (or `console=ttyS0,115200`) to the kernel command line, enable `systemd-getty@ttyS0.service` on systemd distros. The host side is wired automatically on all three backends.
-
-### "VM not found in qm list" when opening terminal
-PVE-only. The VM exists in the WolfStack UI but not in `qm list`. Usually means the VM was created outside Proxmox or the PVE DB is out of sync. Check `qm list` from the host shell — if the name's not there, WolfStack can't resolve a vmid for `qm terminal`.
-
-### "Add serial console?" prompt on a PVE VM created in the Proxmox web UI
-PVE VMs created outside WolfStack often lack `serial0: socket`. The prompt offers `qm set <vmid> --serial0 socket` — requires a reboot to take effect if the VM is currently running. Proxmox web UI doesn't expose the flag, so this is the fastest way to enable it.
-
-### "Standalone VM was started before serial-console support was added"
-A VM running from before the v16.40 QEMU spawn change doesn't have the -chardev socket wired. Stop + start the VM (not restart — the socket is created at spawn time).
-
-### SMB backup to Synology/QNAP hangs or fails
-Most consumer NAS defaults to SMB 3.0 (WolfStack's default). Older firmware may need `vers=2.1` in the smb_options field. Guest share permissions must allow the user you configured, or mark the share as guest-accessible and leave username blank.
-
-### "MISSING_PACKAGE|mount.cifs|..." error
-cifs-utils (or nfs-common/nfs-utils/nfs-client) not installed on the host. WolfStack never auto-installs — accept the confirm prompt to run the install in a live terminal. If you dismissed the prompt, just retry the mount or save the backup destination again and click through.
-
-### Docker container ports show strikethrough + "host ports the daemon never bound" banner
-- The Predictive Inbox port-conflict detector compares `HostConfig.PortBindings` against `NetworkSettings.Ports`. If the container is in `network_mode: host` (or `container:<id>`), Docker never populates `NetworkSettings.Ports` even though the service is fully reachable on the host stack — the diff was a false positive
-- Fixed in v22.9.47: `parse_port_mappings` short-circuits and returns no mappings for host / container-namespace mode. Banner and strikethroughs disappear after upgrade. Bridge / default / custom networks still get the full diff so genuine silent-publish failures are still surfaced
-- If a host-mode container actually has a service problem, check the container logs and host firewall — the port-publish layer is bypassed entirely in this mode
-
-### Home Assistant VM setup
-1. Import the HAOS QCOW2 image via "Import Disk Image" when creating VM
-2. Set BIOS to OVMF (UEFI)
-3. Add a bridge NIC for LAN access (Physical NIC passthrough)
-4. Pass through Zigbee/Z-Wave USB dongle via Passthrough tab
-5. If no IP: set static IP from HA CLI: `ha network update enp0s3 --ipv4-method static --ipv4-address 192.168.1.x/24 --ipv4-gateway 192.168.1.1`
+### Unraid integration (src/unraid)
+- Registers Unraid servers over the official GraphQL API (`x-api-key`): array/disks/shares/parity history/Docker/VMs
+- Store `/etc/wolfstack/unraid.json`, key encrypted at rest. GraphQL reports sizes in KILOBYTES — converted once at ingest
 
 ## WireGuard Bridge (VPN access INTO the cluster from outside)
-
-This is the answer to "how do I connect from my office / phone / laptop to my WolfStack cluster or WolfNet?". WireGuard bridges bolt a standard WireGuard VPN on the side of WolfNet so external clients can join the mesh from any network.
-
-- Each cluster gets a unique /24 in 10.20.0.0/16 (e.g. 10.20.5.0/24) for its WireGuard bridge
-- Config is stored in /etc/wolfstack/wireguard-bridge.json (per-cluster entries)
-- UI: Settings → WireGuard Bridge → Create bridge for cluster → add clients
-- Each client gets a download button for their .conf file (import into WireGuard app on phone/laptop)
+This is the answer to "how do I connect from my office / phone / laptop to my WolfStack cluster or WolfNet?".
+- Each cluster gets a unique /24 in 10.20.0.0/16 for its WireGuard bridge
+- Config in /etc/wolfstack/wireguard-bridge.json (per-cluster entries)
+- UI: Settings → WireGuard Bridge → Create bridge for cluster → add clients; each client gets a .conf download
 - Endpoint = cluster node's public IP + listen port (default 51820, configurable)
-- Client traffic enters the bridge, is routed into WolfNet, reaches every node + container/VM on the mesh
-- Requires `wireguard-tools` on the host (install via the distro-aware deps page)
-- Supports multiple bridges per host (different clusters = different subnets)
-- **Wolfnet is NOT WireGuard**: WolfNet is the internal mesh overlay between cluster nodes; WireGuard bridge is the external-client door into that mesh
-- WireGuard private keys are written to /tmp/wg-<iface>-key with mode 0600 (locked down since v18.7.27), consumed by `wg set`, then removed
+- Client traffic routes into WolfNet, reaches every node + container/VM on the mesh
+- Requires `wireguard-tools` on the host; multiple bridges per host supported
+- **WolfNet is NOT WireGuard**: WolfNet is the internal mesh; the WireGuard bridge is the external-client door into it
+- WG private keys written 0600 to /tmp, consumed by `wg set`, then removed
 
 ## WolfRouter (native firewall / DHCP / DNS / WAN router on any node)
+- **Zones**: WAN / LAN / DMZ / WolfNet / Trusted / custom, per interface
+- **LAN segments**: each LAN = subnet + DHCP range + DNS. dnsmasq per-LAN, pidfiles in /run/wolfstack-router/
+- **DNS modes per LAN**: "WolfRouter" (dnsmasq serves :53) or "External" (DHCP-only, option 6 points clients at AdGuard/Pi-hole)
+- **Firewall**: iptables via iptables-restore, atomic swap; pre-flight refuses rules that would lock the admin out of :8553/:8554
+- **Safe-mode rollback**: firewall apply registers a deadman switch (default 120s) — no "Keep" click → previous ruleset restored
+- **WAN types**: DHCP, static, PPPoE (chap-secrets 0600)
+- **Host DNS panel**: release systemd-resolved's stub and/or move WolfRouter's dnsmasq off :53 — both deadman-switched
+- HTTP proxy hosts (reverse-proxying sites through the router) and self-heal `fix/*` endpoints also live here
+- Replicates config across cluster nodes; /etc/wolfstack/router.json is the source of truth
+- Diagnostic note: `dig @router_ip` from the host itself routes via loopback — use the query log + tcpdump to diagnose LAN client DNS
 
-Turn any WolfStack node into a full router — no pfSense/OPNsense box needed.
-
-- **Zones**: WAN / LAN / DMZ / WolfNet / Trusted / custom, assigned per interface
-- **LAN segments**: each LAN = subnet + DHCP range + DNS. dnsmasq runs per-LAN, one process per bridge, pidfiles in /run/wolfstack-router/
-- **DNS modes per LAN**: "WolfRouter" (dnsmasq serves :53) or "External" (dnsmasq DHCP-only, DHCP option 6 points clients at their chosen resolver — AdGuard/Pi-hole)
-- **Firewall**: iptables filter table via iptables-restore, atomic swap, pre-flight refuses rules that would lock the admin out of :8553 / :8554 (handles --dport, port ranges `8000:9000`, `-m multiport --dports`)
-- **Safe-mode rollback**: firewall apply registers a deadman-switch (default 120s) — if operator doesn't click Keep in the banner, the previous ruleset is restored automatically
-- **WAN types**: DHCP, static, PPPoE (writes /etc/ppp/chap-secrets with mode 0600)
-- **Host DNS panel**: when a container wants :53 on a node, use the Host DNS panel to release systemd-resolved's stub listener AND/OR move WolfRouter's own dnsmasq to a different port (e.g. 5353). Both actions are deadman-switched.
-- UI: WolfRouter module in the datacenter view — Topology, Zones, Rules, LANs, WANs, DNS Tools
-- Replicates config across cluster nodes automatically
-- /etc/wolfstack/router.json is the source of truth
+## Advanced networking
+- **LAN bridge builder** (`lan_bridge`): create a real L2 bridge enslaving a host NIC (e.g. br0 over eth0) so bridged LXC/VM guests are LAN-reachable. Migrates the NIC's IP to the bridge first; touching the management NIC requires accept_risk + a **90-second commit-confirm timer** that auto-reverts runtime AND persistence if not confirmed. Persists via NetworkManager/systemd-networkd/ifupdown
+- **VLAN attachments** (`vlan.rs`): provider-agnostic 802.1Q attachments + routed public IPs (proxy-ARP + DNAT). Presets: **Hetzner vSwitch** (VLAN 4000-4091, MTU 1400 mandatory), OVH vRack, Equinix Metal, Custom. State `/etc/wolfstack/vlan-attachments.json`; config writers for ifupdown/netplan/NetworkManager/systemd-networkd
+- **Guest VLAN attach** (`vlan_attach`): attach LXC (native + Proxmox), Docker (macvlan/bridge), and VMs to a VLAN bridge. VM IPs are staged via cloud-init (NoCloud seed ISO or `qm set --ipconfigN`) and apply on next boot — they cannot be set at runtime from the hypervisor
 
 ## WolfRun (container orchestration across the cluster)
-
-n8n-like service manager that spreads Docker/LXC instances across nodes.
-
-- Services = (image, replicas, placement, restart policy). Reconciler loop every 15s makes the live state match declared state
-- Placement options: any node, specific node, all nodes (DaemonSet-like), per-zone
-- Restart policy: `Always` means WolfRun auto-restarts exited containers on the next tick
-- Failover events logged to /etc/wolfstack/wolfrun/failover-events.json
-- Only the cluster LEADER runs the reconciler (Raft-free leader election via lowest node_id heuristic)
-- Config: /etc/wolfstack/wolfrun/services.json
-- UI: Datacenter → WolfRun
+- Services = (image, replicas, placement, restart policy). Reconciler loop every 15s
+- Placement: any node, specific node, all nodes (DaemonSet-like), per-zone
+- Restart policy `Always` auto-restarts exited containers next tick
+- Failover events → /etc/wolfstack/wolfrun/failover-events.json
+- Only the cluster LEADER runs the reconciler (lowest node_id heuristic)
+- Config: /etc/wolfstack/wolfrun/services.json; UI: Datacenter → WolfRun
 
 ## WolfUSB (network USB device passthrough)
-
-Expose host-plugged USB devices to containers/VMs on any node via USB/IP.
-
+- Expose host-plugged USB devices to containers/VMs on any node via USB/IP
 - Each node runs a wolfusb server on :3240 (key in /etc/wolfusb/wolfusb.env, same cluster secret)
-- Requires kernel modules vhci-hcd (client) + usbip-host (server) — auto-modprobed on install, auto-installed for distros that ship them in kernel-modules-extra
-- Assign a USB device to a container/VM via the WolfUSB panel; WolfStack auto-attaches on container start
-- Cross-node: a USB device plugged into node A can be attached to a VM on node B. Re-attach on container restart is automatic (wolfusb::on_container_started hook).
+- Requires kernel modules vhci-hcd (client) + usbip-host (server) — auto-modprobed
+- Cross-node attach; re-attach on container restart is automatic (on_container_started hook)
 - Common use: Zigbee/Z-Wave dongles for Home Assistant VMs, license dongles, webcams
 
-## WolfKube (Kubernetes lifecycle + management on the cluster)
-
-- Cluster modes: self-hosted (k3s/kubeadm installed by WolfStack), or attach to an existing kubeconfig
-- Kubeconfig uploaded via UI is stored at /etc/wolfstack/kubernetes/<id>.yaml with mode 0600 (since v18.7.27)
-- Pod terminal: WebSocket console to any container in any pod (`kubectl exec` under the hood)
-- Scale/delete workloads from the UI; see resource usage per pod
-- Stores JOIN tokens for node expansion — token endpoint is cluster-secret-auth'd
+## WolfKube (Kubernetes lifecycle + management)
+- Cluster modes: self-hosted (k3s/kubeadm installed by WolfStack), or attach an existing kubeconfig
+- Kubeconfigs stored at /etc/wolfstack/kubernetes/<id>.yaml mode 0600
+- Pod terminal: WebSocket console to any container (`kubectl exec` under the hood)
+- Scale/delete workloads from the UI; per-pod resource usage; join tokens cluster-secret-auth'd
 
 ## Cluster Browser (unified web UI for every cluster-internal service)
+- Scans all nodes for running web services (common ports 80/443/3000/8080/…)
+- One pane: "Jellyfin on node-A", "AdGuard on node-B" — click through, WolfStack reverse-proxies it
+- Discovery every 60 seconds; config /etc/wolfstack/cluster-services-discovered.json
 
-- Scans all nodes for running web services (by common ports 80/443/3000/8080/...)
-- Presents them as one pane: "Jellyfin on node-A", "AdGuard on node-B", "Grafana on node-C"
-- Click through to the service's UI — WolfStack reverse-proxies it so browser credentials aren't needed per-service
-- Discovery runs every 60 seconds via a reconciliation loop (main.rs background task)
-- Config: /etc/wolfstack/cluster-services-discovered.json
+## Control Panel (cluster-wide workload view)
+- Single view of every VM/LXC/Docker container across all nodes; group by Node/Type/Status/Cluster or drag-drop **Custom groups**
+- Custom groups persist server-side (`/etc/wolfstack/control-panel.json`); vanished workloads render as "stale"
+- Endpoints under `/api/control-panel/…` (inventory, groups CRUD, members)
+
+## Configurator (form-based config for Wolf components)
+- Structured config UIs: **WolfProxy** (nginx sites — CRUD/enable/disable/test/reload/error-log/generate/bootstrap), **WolfServe** (Apache vhosts + modules), **WolfDisk/WolfScale** (structured TOML editing with validate/repair)
+- Endpoints under `/api/configurator/…`
 
 ## Predictive Inbox (v22.7.0+)
-
-Unified ops inbox that surfaces problems *before* they page someone. One queue across the cluster, with proposed remediations the operator approves with a click.
-
-- **9 analyzers** running on a tick: backup freshness, certificate expiry, cluster health, container disk fill, container memory, container restart-loop, host disk fill, host disk verdict, OSV/CVE scanner, port-conflict detector, security posture, threshold breaches, unused-package recommender, VM disk fill, vulnerability scan, WolfNet DHCP. Source files in `src/predictive/`
-- Each analyzer emits **Proposals** with severity, scope key, evidence list, and a `RemediationPlan`. Scope keys collapse duplicates across ticks so the inbox doesn't fill up
-- **Embedded terminal pane** (v22.9.10+) — every proposal can open a sandboxed shell on the affected host without leaving the page. One shell per proposal; manual-shell access for ad-hoc investigation
-- **AUTOFIX** (v22.9.42+) — proposals with a deterministic, reversible plan can be applied with one click. The plan runs through the deadman-switch framework so a bad fix auto-rolls back
-- **OSV.dev + CISA KEV scanner** (v22.9.21+) — CVE scanning across all OSV-indexed Linux distros (Debian/Ubuntu/RHEL/Arch/Alpine/etc.) for hosts AND LXC containers. Severity floor configurable; auto-suppresses no-fix-available CVEs; clickable CVE rows; per-host/LXC findings collapse to one card (v22.9.22)
-- **Port-conflict analyzer** (v22.9.25) — detects two failure modes: (1) silent publish failure where Docker accepted the start but never bound the host port, (2) host-port collision where multiple owners want the same `(host_ip, host_port, proto)` tuple. Owners include Docker containers (published / requested-but-unpublished) and host processes from `ss -tlnp/-ulnp`. Skips containers in `host` / `container:<id>` network mode where the diff is meaningless (v22.9.47)
-- **Pre-flight validator** — proposals that can be checked before applying are dry-run first. Failure surfaces in the card before the operator has to commit
-- **Multi-cluster** — Inbox aggregates findings from every reachable cluster; Run buttons fan out via `/api/nodes/{id}/proxy/...`. Snooze / dismiss / approve / ack actions also fan out so a clear-on-one-node propagates
-- **Optimistic UI** (v22.9.18) — dismiss/approve/snooze/ack updates immediately, reconciles with backend
-- **Mobile** (v22.9.24) — Inbox list fills the viewport; terminal appears on demand (vs always-visible on desktop)
-- Endpoints under `/api/predictive/...`; orchestrator at `src/predictive/orchestrator.rs` runs the analyzers on a schedule
+Unified ops inbox that surfaces problems before they page someone; proposed remediations approved with a click.
+- Analyzers on a tick: backup freshness, certificate expiry, cluster health, container disk/memory/restart-loop, host disk fill + disk SMART verdict (Backblaze-informed SMART 5/187/197/198 + NVMe critical-warning/spare/media-errors — failing disks raise Issues + an amber Storage badge), OSV/CVE scanner, port-conflict detector, security posture, threshold breaches, unused packages, VM disk fill, vulnerability scan, WolfNet DHCP. Source in `src/predictive/`
+- Proposals carry severity, scope key (dedupe), evidence, and a RemediationPlan
+- **Embedded terminal pane** per proposal — sandboxed shell on the affected host
+- **AUTOFIX**: deterministic, reversible plans apply with one click through the deadman-switch framework
+- **OSV.dev + CISA KEV scanner**: CVEs across OSV-indexed distros for hosts AND LXC; severity floor configurable; auto-suppresses no-fix CVEs
+- **Port-conflict analyzer**: silent publish failures + host-port collisions; skips host/container-netns containers (diff meaningless there)
+- Pre-flight validator dry-runs checkable proposals; multi-cluster aggregation; optimistic UI; mobile layout
+- Endpoints under `/api/predictive/…`
 
 ## WolfStack Gateway (v22.9.0+)
-
-Universal SMB/NFS share head with cross-cluster federation — turn any node into a NAS frontend regardless of where the actual storage lives.
-
-- Sources: local directory, S3, NFS upstream, SMB upstream, SSHFS, WolfDisk, RBD, mdadm/NoNRAID arrays
-- Re-exports as **SMB (Samba)** and/or **NFS** under one Gateway config
-- **Cross-cluster federation** — a Gateway on cluster A can proxy a share that lives on cluster B; no manual replication
-- Orchestrator at `src/gateway/orchestrator.rs` reconciles `/etc/samba/` + `/etc/exports` to match the declared config
+Universal SMB/NFS share head — turn any node into a NAS frontend regardless of where storage lives.
+- Sources: local dir, S3, NFS upstream, SMB upstream, SSHFS, WolfDisk, RBD, mdadm/NoNRAID arrays
+- Re-exports as SMB (Samba) and/or NFS under one Gateway config
+- **Cross-cluster federation**: a Gateway on cluster A can proxy a share living on cluster B (via the Federation registry)
+- Orchestrator reconciles /etc/samba/ + /etc/exports to the declared config
 - UI: Datacenter → WolfStack Gateway
 
 ## Storage Array (v22.9.0+)
+- Disk-array management for **mdadm** and **NoNRAID** (Unraid-style) backends
+- Create / assemble / start / stop / monitor from the UI; cluster-wide aggregation
+- Renders as a first-class storage target; endpoints under `/api/array/…`
 
-Disk-array management for vanilla **mdadm** and **NoNRAID** (Unraid-style) backends.
-
-- Create / assemble / start / stop / monitor RAID arrays from the UI; no shell required
-- Cluster-wide aggregation (v22.9.1) — Storage Array page shows arrays across every node + federation
-- Sidebar discoverability fix in v22.9.42 (Klas)
-- Backend lives in `src/array/`; renders as a first-class storage target alongside local / NFS / SMB / S3 / SSHFS / WolfDisk / RBD
-- Endpoints under `/api/array/...` — `GET /api/array`, `POST /api/array/{name}/start`, etc.
-
-## WolfStack Pools / XCP-ng + Xen Orchestra (v22.9.37-41)
-
-Sell N VMs → auto-deploy as a federated tenant cluster across **Proxmox / native QEMU / XCP-ng**.
-
-- **XCP-ng integration** drives Xen Orchestra's REST API (not raw XAPI). Mirrors `src/proxmox/` shape — read-only inventory in v22.9.37 (P1), lifecycle + provisioning + tenant federation in v22.9.38-41 (P2-P4)
-- XCP-ng is Type-1, so no host-level LXC; VMs are the workload unit
-- Tokens XOR-obfuscated in `/etc/wolfstack/xo_pools.json`; never returned to the frontend
-- Tenant Pools: provision a multi-VM cluster as one unit, federate the tenant across the underlying hypervisors (Proxmox host A + XCP-ng pool B + native QEMU on C)
-- UI: Datacenter → Tenants / Pools
+## Galera / WolfScale / Gluster managers (database & storage cluster provisioning)
+- **Galera manager**: create or adopt MariaDB Galera clusters built from LXC containers across WolfStack nodes; live wsrep status; **evidence-based recovery** from grastate.dat seqno (split-brain rejoin from the most-advanced survivor); MaxScale deployment; default SST mariabackup. Config /etc/wolfstack/galera.json
+- **WolfScale manager**: builds/manages WolfScale replication clusters (single-leader, WAL-based, lowest-node-id wins) — each node = LXC with MariaDB fronted by the `wolfscale` binary. Ports: 7654 (replication), 8007 (MySQL proxy), 8080 (control API). Config /etc/wolfstack/wolfscale.json
+- **Gluster**: GlusterFS trusted-pool management by driving the `gluster` CLI — install, bootstrap, non-destructive **import/adopt** of a running glusterd, peers, volume CRUD, bricks, self-heal
 
 ## Ceph integration
+- Full lifecycle, not just attach: **install + bootstrap** (mon/mgr/osd), join existing, OSD add/remove/reweight, pool CRUD, CephFS, RBD images, balancer/flags/PG actions
+- RBD volumes are a first-class storage target
+- Endpoints under `/api/ceph/…` (install, bootstrap, join, cluster-bundle, pools, osds, fs, rbd…)
 
-- Attach an existing Ceph cluster (MON + keys) via Settings → Ceph → Add cluster
-- WolfStack renders Ceph health, OSD status, pool usage; can create/delete pools and RBD volumes
-- RBD volumes become a first-class storage target (alongside local, S3, NFS, SSHFS, WolfDisk)
+## WolfStack Pools / XCP-ng + Xen Orchestra
+Sell N VMs → auto-deploy as a federated tenant cluster.
+- **XCP-ng via Xen Orchestra's REST API** (not raw XAPI): pools/hosts/VMs inventory, VM lifecycle, templates, create/delete. Tokens encrypted at rest in /etc/wolfstack/xo_pools.json, never sent to the frontend. UI: XO Pools page
+- **Tenant Pools**: provision a multi-VM tenant cluster (1–10 VMs) as one unit across **three implemented backends — XO, Proxmox (clone from template + cloud-init snippet), native QEMU/libvirt (cloud-localds NoCloud seed)**. Cloud-init pre-seeds the shared cluster secret + per-VM join tokens; the tenant leader self-registers back via `/api/tenants/self-register`
 
 ## Discord / Telegram / WhatsApp bots (AI access from chat)
+- Each bot runs as a supervised background task; credentials in /etc/wolfstack/ai-config.json (0600)
+- Bots relay to the AI agent (same tool loop as dashboard chat)
+- Discord: bot token, replies in-thread. Telegram: bot token, /start, 4096-char chunking. WhatsApp: Baileys gateway (Node.js subprocess), one-time phone pairing
+- Named WolfAgents can also bind their own Discord/Telegram/WhatsApp identities
 
-- Each bot runs as a supervised background task; credentials in /etc/wolfstack/ai-config.json (mode 0600)
-- Bots relay user messages to the AI agent (same [EXEC]/[EXEC_ALL]/[WEBSEARCH]/[FETCH]/[READ]/[SECURITY_AUDIT] tool loop as the dashboard chat)
-- Discord: set DISCORD_BOT_TOKEN in the AI settings; bot joins the configured channel, replies in-thread
-- Telegram: paste bot token; /start to begin; long replies get chunked into 4096-char messages
-- WhatsApp: relays via the Baileys gateway (Node.js subprocess) — requires pairing a phone once
+## MCP endpoints (Model Context Protocol shaped)
+- NOT a full MCP server (no initialize handshake, no stdio/SSE transport). Two HTTP endpoints matching MCP JSON shapes: `POST /api/mcp/tools/list` and `POST /api/mcp/tools/call`
+- Auth: standard WolfStack session cookie
+- **Read-only, three tools**: list_nodes, get_metrics, list_containers_local
 
-## MCP server (Model Context Protocol)
-
-- Exposes the WolfStack AI toolbox as an MCP server so Claude Desktop / Cursor / other MCP clients can reach it
-- Endpoint: /api/mcp (WebSocket, session-auth)
-- Same tool set as the built-in agent: run cluster commands, propose ACTIONs, read files
-- Config: /etc/wolfstack/ai-config.json → mcp_enabled
-
-## MySQL / MariaDB editor
-
-- Attach credentials via the Database Manager panel — stored encrypted in /etc/wolfstack/
-- Browse schemas/tables, run ad-hoc queries, edit rows
-- Supports both MariaDB and MySQL protocol
+## SQL Connections + MySQL/MariaDB editor
+- **SQL Connections** (`/api/sql-connections/…`): guarded pool shared by WolfAgents and WolfFlow SqlQuery steps. MariaDB/MySQL/Postgres. Every exec: sqlparser statement classification against the connection's declared tier (Read/Update/Delete; DDL never allowed; stacked statements rejected), 5s connect / 30s exec timeouts, 10k rows / 10 MB caps, audit log at /var/log/wolfstack/sql-audit.log. Passwords AES-encrypted at rest. Saved queries + history
+- **Database Manager / MySQL editor** (older surface): browse schemas/tables, ad-hoc queries, edit rows
 
 ## Deadman-switch framework (Level 2 safety)
-
-Any operation that can brick the node's UI registers a rollback closure with a TTL. If the operator doesn't hit "Keep" in the banner before the TTL expires, the rollback fires automatically.
-
-- Host DNS release: 120s TTL → restore systemd-resolved stub
-- WolfRouter firewall apply: 120s TTL → revert to previous ruleset
-- Interface down: 90s TTL → bring interface back up
-- Endpoint: GET /api/danger/pending, POST /api/danger/confirm/{id}, POST /api/danger/rollback/{id}
+Any operation that can brick the node's UI registers a rollback closure with a TTL. No "Keep" click before expiry → rollback fires.
+- Host DNS release: 120s → restore systemd-resolved stub
+- WolfRouter firewall apply: 120s → revert ruleset
+- Interface down: 90s → bring it back up (LAN-bridge builds use the same pattern)
+- Endpoints: GET /api/danger/pending, POST /api/danger/confirm/{id}, POST /api/danger/rollback/{id}
 - Frontend banner polls every 2s, survives session expiry and network blips
-- See src/danger.rs for the registry internals
-
-## Plugin system
-
-- Plugins live in /etc/wolfstack/plugins/<plugin>/
-- Each plugin has a manifest.json declaring name, icon, backend command (if any), frontend HTML
-- Backend plugins run as child processes of WolfStack, expose HTTP endpoints under /api/plugins/<plugin>/...
-- Frontend plugins inject their HTML + JS into a dedicated tab
-- Install: drop the directory, reload WolfStack; or use the plugin install UI (fetches from a URL)
-- Plugins are sandboxed only by Unix permissions — they run as root, so trust matters
 
 ## System Check (distro-aware diagnostics)
-
 - UI: Settings → System Check
-- Runs a battery of tests: kernel modules present, iptables/nftables choice, services enabled, ports open, disk space, memory, package manager health
-- Each failing check is paired with a one-click "Fix" that knows the distro (apt/dnf/pacman/apk/zypper)
-- Used by the installer too — `setup.sh` runs a subset on fresh install
+- Battery of tests: kernel modules, iptables/nftables, services, ports, disk, memory, package manager health, plus the security posture rows
+- Each failing check pairs with a distro-aware one-click "Fix" (apt/dnf/pacman/apk/zypper)
 
 ## Services Discovery
+- Background reconciler scans nodes for well-known services; populates Cluster Browser + app-update badges
+- Definitions at /etc/wolfstack/cluster-services.json; tombstoning prevents re-discovery of deleted services
 
-- Background reconciler scans each node for well-known services (Docker registries, media servers, dashboards)
-- Populates the Cluster Browser + drives the app-update-summary badge
-- Service definitions at /etc/wolfstack/cluster-services.json
-- Tombstoning prevents re-discovering deleted services
+## Components page
+- Installs/monitors the Wolf ecosystem components on each node: **WolfNet** (mesh VPN), **WolfProxy** (reverse proxy + firewall; counted as running when PIDs listen on :80/:443 even if its unit reads inactive — it daemonizes), **WolfServe** (web server), **WolfDisk** (distributed FS), **WolfScale**, **MariaDB**, **PostgreSQL**, **Certbot**
+- Config paths: /etc/wolfnet/config.toml, /opt/wolfproxy/wolfproxy.toml, /opt/wolfserve/wolfserve.toml, /etc/wolfdisk/config.toml
+- Installs run each component's setup.sh (prebuilt CI binaries — Wolf components never compile on the host)
+- wolfusb and wolfrun are separate subsystems, NOT Components-page entries
 
-## Security posture summary (v18.7.27+)
-
-- All sensitive files under /etc/wolfstack/ are mode 0600 (custom-cluster-secret, nodes.json with PVE tokens, join-token, license.key, users.json, oidc.json, auth-config.json, ai-config.json, s3/*.passwd, chap-secrets)
-- /etc/wolfstack/ directory itself is mode 0700
-- `paths::harden_existing` runs on startup to migrate pre-v18.7.27 installs
-- `paths::write_secure(path, content)` is the canonical secure writer
+## Security posture summary (file hygiene)
+- All sensitive files under /etc/wolfstack/ are mode 0600; the directory itself 0700; `paths::harden_existing` migrates old installs on startup
 - Cluster secret validation is constant-time including length
-- Pre-flight firewall analyser refuses rules that would lock the admin out
 - AI's [READ] tool has a hard-coded deny-list covering every credential file
-- AI's [EXEC] pipe allowlist applies to EVERY pipe segment (no more exfil via `ls | wget`)
-- AI's approved-action [ACTION] path blocks `;`, `&&`, `||`, newlines (no shell-chain injection)
+- AI's [EXEC] pipe allowlist applies to EVERY pipe segment; approved [ACTION]s block `;`, `&&`, `||`, newlines
 
 ## AI tool tags reference (for the agent itself)
-
 - `[EXEC]cmd[/EXEC]` — local read-only shell, allowlist of safe commands only
 - `[EXEC_ALL]cmd[/EXEC_ALL]` — same command on every cluster node, results labelled by hostname
 - `[ACTION id=".." title=".." risk="low|medium|high" explain=".." target="local|all"]cmd[/ACTION]` — proposes a fix the operator approves with one click
@@ -618,37 +607,94 @@ Any operation that can brick the node's UI registers a rollback closure with a T
 - `[WEBSEARCH query="..."][/WEBSEARCH]` — DuckDuckGo top 5 results
 - `[FETCH url="..."][/FETCH]` — fetch a URL, strip HTML, 8 KB cap, SSRF-guarded
 - `[READ path="..."][/READ]` — read a WolfStack runtime file from a sandboxed allow-list
-- `[SECURITY_AUDIT][/SECURITY_AUDIT]` — run the built-in security audit (file perms, default secret, docker restart policies)
+- `[SECURITY_AUDIT][/SECURITY_AUDIT]` — run the built-in security audit
+
+## Common Issues
+
+### VM won't boot after NIC change (UEFI)
+OVMF boot entries reference device paths. Fix: v16.16.9+ auto-resets EFI vars. Manual: delete {name}_VARS.fd.
+
+### VM has no IP (WolfNet)
+Check dnsmasq: `ps aux | grep dnsmasq | grep tap`. WolfStack starts a per-VM dnsmasq on the TAP interface.
+
+### VM has no IP (Bridge/Physical NIC)
+Check bridge exists (`ip link show type bridge`), NIC is a member (`bridge link show`), router DHCP reaches through.
+
+### systemd-networkd-wait-online.service failed
+Harmless — timed out waiting for all interfaces. Common with bridges/TAPs/VPNs.
+
+### Plugin backend not starting
+`file /etc/wolfstack/plugins/{id}/bin/handler` — must be statically linked (musl).
+
+### WolfHost "could not reach WolfStack API"
+WolfHost tries HTTPS:8553 then HTTP:8554, both custom and default cluster secrets. Restart the WolfHost handler after a WolfStack upgrade.
+
+### VM terminal opens but is blank
+Guest lacks a serial console: add `console=ttyS0` to the kernel cmdline + enable a getty on ttyS0. Host side is wired automatically.
+
+### "VM not found in qm list" when opening terminal
+PVE-only — the VM isn't in `qm list` (created outside Proxmox or PVE DB out of sync).
+
+### "Add serial console?" prompt on a PVE VM created in the Proxmox web UI
+Offers `qm set <vmid> --serial0 socket`; reboot needed if running.
+
+### "Standalone VM was started before serial-console support was added"
+Stop + start the VM (not restart — the socket is created at spawn time).
+
+### SMB backup to Synology/QNAP hangs or fails
+Default is SMB 3.0; older firmware may need `vers=2.1` in smb_options. Check share permissions/guest access.
+
+### "MISSING_PACKAGE|mount.cifs|..." error
+cifs-utils (or nfs-common/…) missing. Accept the confirm prompt — the install runs in a live terminal. Retry the mount afterwards.
+
+### Docker container ports show strikethrough + "host ports the daemon never bound"
+False positive for `network_mode: host` / `container:<id>` — fixed v22.9.47 (no diff in those modes). If a host-mode service is genuinely down, check container logs + host firewall.
+
+### System Logs page empty on Unraid / Alpine
+Those platforms have no journald. WolfStack falls back to tail-reading `/var/log/syslog` then `/var/log/messages` (v25.2.12+); the unit filter matches the syslog tag. If both files are absent it says so explicitly.
+
+### WolfDisk node stuck at index v0 / "N behind" forever
+Almost always **mixed wolfdisk versions** — check the Version column on WolfDisk Cluster Health or run `wolfdisk --version` on every node. Mixed clusters cannot sync (wire-format change); stop all, upgrade all, start all.
+
+### Cluster node dark after reboot but service "active (running)"
+Startup-hang class (fixed v25.2.8–.11): journal stops right after "Public IP:" with no "Serving web UI" line = a pre-bind subsystem (dead dockerd/containerd, wedged FUSE mount) was blocking. Current versions bind the dashboard first and WARN about the sick subsystem instead. Check `systemctl status containerd` and look for D-state docker CLI children.
+
+### Home Assistant VM setup
+1. Import the HAOS QCOW2 via "Import Disk Image"
+2. BIOS = OVMF (UEFI)
+3. Bridge NIC for LAN access
+4. Zigbee/Z-Wave dongle via Passthrough tab (or WolfUSB from another node)
+5. No IP → `ha network update enp0s3 --ipv4-method static …` from the HA CLI
 
 ## Common user questions → where to point them
+- **"Connect from outside to my cluster/containers"** → WireGuard Bridge (Settings → WireGuard Bridge)
+- **"How do I get two nodes to talk securely?"** → WolfNet (invite → join token)
+- **"Make this node a router / firewall / DHCP server"** → WolfRouter
+- **"Run code without managing a container"** → WolfFunctions (serverless, Python/Node, public URL + schedules + events)
+- **"A persistent AI assistant with its own memory/permissions"** → WolfAgents
+- **"Automate a maintenance job across nodes"** → WolfFlow (23 step types incl. backups, SQL, integrations, AI)
+- **"Plug a USB device into my Home Assistant VM on another node"** → WolfUSB
+- **"Run a container on whichever node is free"** → WolfRun
+- **"Public status page for my apps"** → Status Pages
+- **"Manage Kubernetes from WolfStack"** → WolfKube
+- **"See all my web services in one place"** → Cluster Browser; **"see every workload in one table"** → Control Panel
+- **"Search logs across all my nodes"** → Fleet Logs (loghub — enable it first, it's off by default)
+- **"Block known-bad IPs automatically"** → Threat Intelligence (Security page; starts in dry-run)
+- **"Someone is brute-forcing my login"** → Login lockout is on by default (3 strikes/48h); add your own IP to Trusted IPs first
+- **"I think a node is compromised"** → Fleet Security host audit + emergency root rotation; the AI can run [SECURITY_AUDIT]
+- **"Put my NAS shares / S3 bucket behind SMB/NFS"** → WolfStack Gateway
+- **"Manage my TrueNAS / Unraid / UniFi / NetBird from here"** → the matching integration pages
+- **"Back up my containers / VMs"** → Backups (7 destination types; pre/post hooks available)
+- **"Use WolfStack from Claude Desktop / Cursor"** → the /api/mcp endpoints are read-only tool stubs (3 tools) — not a full MCP server yet; say so honestly
+- **"Chat with my cluster from my phone"** → Discord / Telegram / WhatsApp bots
 
-- **"Connect from outside to my cluster/containers"** → WireGuard Bridge (Settings → WireGuard Bridge → create bridge + add client → download .conf)
-- **"How do I get two nodes to talk securely?"** → WolfNet (wolfnet invite on existing node → token → wolfnet join on new node)
-- **"Make this node a router / firewall / DHCP server"** → WolfRouter module
-- **"Plug a USB device into my Home Assistant VM on another node"** → WolfUSB panel
-- **"Run a container on whichever node is free"** → WolfRun service
-- **"Public status page for my apps"** → Status Pages (cluster-scoped, served on :8550)
-- **"Manage Kubernetes from WolfStack"** → WolfKube (attach kubeconfig or let WolfStack install k3s)
-- **"See all my web services in one place"** → Cluster Browser
-- **"Use WolfStack from Claude Desktop / Cursor"** → MCP server (Settings → AI → Enable MCP)
-- **"Chat with my cluster from my phone"** → Discord / Telegram / WhatsApp bots (Settings → AI → Bots)
-- **"Back up my containers / VMs"** → Backups (scheduled, destinations: local / NFS / SMB / S3 / Proxmox Backup Server / SSHFS / WolfDisk)
+## Learn courses (in-app onboarding — THREE courses with a picker)
+The Learn drawer opens beside the live UI (compass button, dashboard banner, Apps & Tools tile, welcome modal, per-page "?" help). Each lesson has an "Ask the AI about this lesson" button that seeds this chat. When a "how do I…" question matches a lesson, answer directly AND point to it by name.
 
-## Getting Started course (in-app onboarding)
+**Getting Started** — Before you start (What even is a server?); Find your feet (What WolfStack is; 2-minute tour; The only six things); Your servers; Your first app; Build a container yourself (Docker/LXC/VM); Get a terminal; Keep your data safe (backup/automatic/restore); Lock it down (login hardening; server hardening — lockout policy, trusted IPs, exposed ports, NMAP protection, threat intel, emergency root rotation); Stay ahead of problems (Issues page; phone alerts; status page); Go further (real domain + HTTPS); The map of everything else; Starter checklist.
 
-WolfStack ships an in-app beginner course ("Getting Started") for operators who find the UI overwhelming. It opens as a slide-out drawer that stays beside the live UI, so a user can read a lesson while clicking around. Entry points: the compass button in the sidebar footer, the dismissible dashboard banner, the "Getting Started" tile in the Apps & Tools drawer, the once-per-login welcome modal, and the "?" (help-for-this-page) button in the top bar — which opens the lesson matching the page the user is on. Each lesson also has an "Ask the AI about this lesson" button that opens this chat seeded with the lesson context.
+**Level 2 · Going Further** — Link servers with WolfNet; Run a full VM; Storage that outgrows one disk; Automate with WolfFlow; AI co-pilot (WolfAgents); You're an operator now.
 
-When a user asks a "how do I…" question that a lesson covers, answer directly AND point them to the lesson by name ("there's a step-by-step in Getting Started → …"). The lessons, by module:
+**Level 3 · Defend Your Systems** — Think like a defender; Control what's reachable (firewall); Catch malware and intruders; No default secrets, no stale software; See attacks coming; When something gets in; The defender's checklist.
 
-- **Find your feet** — What WolfStack is; A 2-minute tour of the screen; The only six things you need.
-- **Your servers** — You already have a server; Adding another server.
-- **Your first app** — Install from the App Store; Find it and open it.
-- **Build a container yourself** — Docker, LXC or VM?; Make a Docker container; Make an LXC container.
-- **Get a terminal** — Open a shell on a server; Open a shell in a container.
-- **Keep your data safe** — Back something up now; Automatic backups; Restore from a backup.
-- **Lock it down (security)** — Lock down your login (password, 2FA, passkeys, force-logout sessions); Harden the server (brute-force lockout policy with trusted-IPs, blocked IPs, internet-exposed ports, NMAP protection, threat intel, emergency root rotation).
-- **Stay ahead of problems** — The Issues page; Get alerts on your phone; Put up a status page.
-- **Go further** — Put your app on a real domain with HTTPS (DNS provider + Let's Encrypt cert + WolfRouter HTTP proxy).
-- **When you're ready for more** — The map of everything else; How to get unstuck.
-
-Routing examples: "how do I take a backup?" → Backups lessons. "how do I restore / get my data back?" → Restore from a backup. "I'm getting attacked / how do I secure this?" → the Lock it down (security) lessons. "put my app on a domain / set up HTTPS" → Go further. "what is all this / where do I start?" → Find your feet.
+Routing: "how do I take a backup?" → Getting Started backup lessons. "restore my data" → Restore lesson. "I'm being attacked / secure this" → Lock it down + Level 3. "put my app on a domain / HTTPS" → Go further. "what is all this?" → Find your feet. "grow beyond one server" → Level 2.
