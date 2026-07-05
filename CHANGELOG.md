@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.16: threat-intel can no longer lock the operator out (klas)** _(2026-07-05 — [`e5befa28`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e5befa2862ecb2ad49954c5c453d76af4426ad77))_
 - **v25.2.15: LXC backups stop cold-restarting containers; snapshot-based backups; prune index fix** _(2026-07-05 — [`a3ebe352`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a3ebe35246c38397b0fb26cce4c7ebe8c6ec7519))_
 - **v25.2.14: AI knowledge base rewritten against current source; over-cap upsell quotes real tiers** _(2026-07-05 — [`78076555`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/78076555bb0b7e814130eab483ca27b5d22af01f))_
 - **v25.2.13: WolfFunctions editor no longer closes on backdrop click, losing unsaved work (KO4BSR)** _(2026-07-04 — [`66cdfce3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/66cdfce34957bfee395e7429a3fd8435498a51b0))_
