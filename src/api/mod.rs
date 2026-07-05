@@ -582,6 +582,7 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
             }
 
             state.login_limiter.clear_with(&client_ip, &body.username);
+            crate::auth::record_admin_ip(&client_ip);
             let token = state.sessions.create_session(&body.username);
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
@@ -610,6 +611,7 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     if mode == "linux" || mode == "both" {
         if crate::auth::authenticate_user(&body.username, &body.password) {
             state.login_limiter.clear_with(&client_ip, &body.username);
+            crate::auth::record_admin_ip(&client_ip);
             let token = state.sessions.create_session(&body.username);
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
@@ -1466,6 +1468,7 @@ pub async fn passkey_login_finish(req: HttpRequest, state: web::Data<AppState>, 
     match crate::auth::webauthn::finish_authentication(&mut config, &rp_id, &origin, &body.ceremony_id, &body.response) {
         Ok(username) => {
             state.login_limiter.clear(&client_ip);
+            crate::auth::record_admin_ip(&client_ip);
             let token = state.sessions.create_session(&username);
             let mut cookie = Cookie::build("wolfstack_session", &token)
                 .path("/")
@@ -34298,6 +34301,13 @@ pub async fn oidc_callback(
     // Map IdP claims to a WolfStack role using the provider's role_claim + role_mappings
     let role = crate::auth::oidc::map_claims_to_role(&claims, &provider);
     tracing::info!("OIDC login: user='{}', provider='{}', role='{}'", username, provider.id, role);
+
+    // Successful IdP login — protect this client IP from threat-intel
+    // enforcement, same as the password/passkey paths.
+    let oidc_client_ip = crate::netaddr::canonical_ip_str(
+        &strip_port(req.connection_info().peer_addr().unwrap_or("")),
+    ).into_owned();
+    crate::auth::record_admin_ip(&oidc_client_ip);
 
     // Create session and set cookie
     let token = state.sessions.create_session(&username);

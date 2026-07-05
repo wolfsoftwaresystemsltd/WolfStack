@@ -249,6 +249,38 @@ pub fn known_clusters() -> Vec<String> {
     out
 }
 
+/// `wolfstack --unblock <ip>` support: remove the address from this
+/// module's kernel ipsets immediately and persist it onto EVERY known
+/// cluster's allowlist so the next feed refresh can't re-block it.
+/// Runs daemon-independent (raw ipset + config file writes) — this is
+/// the break-glass path for an operator locked out of the dashboard.
+pub fn cli_unblock_ip(ip: &str) {
+    let v6 = ip.contains(':');
+    let set = if v6 { IPSET_NAME_V6 } else { IPSET_NAME_V4 };
+    let _ = std::process::Command::new("ipset").args(["del", set, ip]).output();
+    let mut clusters = known_clusters();
+    if clusters.is_empty() {
+        clusters.push(String::new());
+    }
+    println!("  ✓ threat-intel: removed from ipset '{}'", set);
+    let mut failed = 0u32;
+    for cluster in clusters {
+        let mut cfg = ThreatIntelConfig::load_for(&cluster);
+        if !cfg.allowlist.iter().any(|e| e == ip) {
+            cfg.allowlist.push(ip.to_string());
+            if let Err(e) = cfg.save_for(&cluster) {
+                failed += 1;
+                eprintln!("  ✗ threat-intel allowlist ({}): {}", config_path_for(&cluster), e);
+            }
+        }
+    }
+    if failed == 0 {
+        println!("  ✓ threat-intel: allowlisted on every cluster config");
+    } else {
+        eprintln!("  ✗ threat-intel: {} cluster allowlist(s) could not be written — the next feed sync may re-block this IP there", failed);
+    }
+}
+
 impl ThreatIntelConfig {
     pub fn load() -> Self { Self::load_for("") }
 
@@ -387,6 +419,37 @@ pub fn lookup_ip_for(cluster: &str, ip: &str) -> Vec<String> {
 
 /// Lightweight CIDR-containment check without pulling in a CIDR crate.
 /// Handles "a.b.c.d/n" and "abcd::/n".
+/// Parse "a.b.c.d", "a.b.c.d/n", or v6 equivalents into (base, prefix,
+/// canonical "base/prefix" string). Bare addresses get a full-length
+/// prefix. None for garbage or out-of-range prefixes.
+fn entry_net(entry: &str) -> Option<(std::net::IpAddr, u8, String)> {
+    let entry = entry.trim();
+    match entry.rsplit_once('/') {
+        Some((ip_s, p_s)) => {
+            let ip: std::net::IpAddr = ip_s.trim().parse().ok()?;
+            let p: u8 = p_s.trim().parse().ok()?;
+            let max = if ip.is_ipv4() { 32 } else { 128 };
+            if p > max { return None; }
+            Some((ip, p, entry.to_string()))
+        }
+        None => {
+            let ip: std::net::IpAddr = entry.parse().ok()?;
+            let max = if ip.is_ipv4() { 32 } else { 128 };
+            Some((ip, max, format!("{}/{}", ip, max)))
+        }
+    }
+}
+
+/// Two networks (either may be a bare address) overlap iff the one with
+/// the shorter prefix contains the other's base address. Cross-family
+/// pairs never overlap (cidr_contains is family-exact).
+fn nets_overlap(a: &str, b: &str) -> bool {
+    let (Some((a_ip, a_p, a_full)), Some((b_ip, b_p, b_full))) = (entry_net(a), entry_net(b)) else {
+        return false;
+    };
+    if a_p <= b_p { cidr_contains(&a_full, &b_ip) } else { cidr_contains(&b_full, &a_ip) }
+}
+
 fn cidr_contains(cidr: &str, ip: &std::net::IpAddr) -> bool {
     let (net_str, prefix_str) = match cidr.rsplit_once('/') {
         Some((n, p)) => (n, p),
@@ -463,25 +526,18 @@ pub fn filter_safe(
     let safe = if is_v6 { SAFE_CIDRS_V6 } else { SAFE_CIDRS_V4 };
     let mut kept = BTreeSet::new();
     let mut dropped = Vec::new();
+    // True network-overlap in BOTH directions: the old check only asked
+    // "does a safe/allowlisted CIDR contain the feed entry's base?",
+    // which let a feed CIDR swallow a protected host inside it (klas
+    // 2026-07-05: FireHOL listed a range covering his admin IP; every
+    // node blocked his browser) and let a feed range straddling a safe
+    // range through. Two networks overlap iff the shorter prefix
+    // contains the other's base — nets_overlap() below.
     for entry in candidates.iter() {
-        let parsed: Option<std::net::IpAddr> = entry.split('/').next().and_then(|s| s.parse().ok());
-        let mut overlaps = false;
-        if let Some(ip) = parsed {
-            let user_iter = user_allowlist.iter().map(|s| s.as_str());
-            for c in safe.iter().copied().chain(user_iter) {
-                if cidr_contains(c, &ip) {
-                    overlaps = true;
-                    break;
-                }
-            }
-            if !overlaps {
-                for n in cluster_node_ips {
-                    if let Ok(node_ip) = n.parse::<std::net::IpAddr>() {
-                        if node_ip == ip { overlaps = true; break; }
-                    }
-                }
-            }
-        }
+        let overlaps = safe.iter().copied()
+            .chain(user_allowlist.iter().map(|s| s.as_str()))
+            .chain(cluster_node_ips.iter().map(|s| s.as_str()))
+            .any(|c| nets_overlap(entry, c));
         if overlaps {
             dropped.push(entry.clone());
         } else {
@@ -539,6 +595,27 @@ mod tests {
         let ip2: std::net::IpAddr = "::1".parse().unwrap();
         assert!(cidr_contains("::1/128", &ip2));
         assert!(!cidr_contains("fe80::/10", &ip2));
+    }
+
+    /// klas 2026-07-05 regression: overlap must work in BOTH directions —
+    /// a feed CIDR wrapping a protected bare IP or a narrower allowlist
+    /// CIDR, and a feed range merely straddling a safe range.
+    #[test]
+    fn test_filter_safe_overlap_both_directions() {
+        let mut candidates = BTreeSet::new();
+        candidates.insert("84.12.0.0/16".to_string());   // wraps the exempt bare IP
+        candidates.insert("198.51.0.0/16".to_string());  // wraps the narrower allowlist /24
+        candidates.insert("8.0.0.0/6".to_string());      // 8.0.0.0–11.255.255.255 straddles RFC1918 10.0.0.0/8
+        candidates.insert("203.0.113.1".to_string());    // disjoint — must be kept
+        let (kept, dropped) = filter_safe(
+            &candidates,
+            &["198.51.100.0/24".to_string()],
+            &["84.12.34.56".to_string()],
+            false,
+        );
+        assert_eq!(kept.len(), 1, "kept: {:?}", kept);
+        assert!(kept.contains("203.0.113.1"));
+        assert_eq!(dropped.len(), 3, "dropped: {:?}", dropped);
     }
 
     #[test]
@@ -830,8 +907,18 @@ pub async fn refresh_all_for(
     // Apply safe-filter (loopback / RFC1918 / cluster IPs / admin IP / user allowlist).
     let mut combined_exempts: Vec<String> = cluster_node_ips;
     combined_exempts.extend(extra_exempt_ips);
-    let (kept_v4, _dropped_v4) = filter_safe(&all_v4, &cfg.allowlist, &combined_exempts, false);
-    let (kept_v6, _dropped_v6) = filter_safe(&all_v6, &cfg.allowlist, &combined_exempts, true);
+    // Auth trusted_ips + every IP with a successful dashboard login in the
+    // last 30 days: a feed update must never blackhole the operator's own
+    // client address (klas 2026-07-05 — same doctrine as the calling-admin
+    // exemption, extended to admins who aren't mid-request when the feed
+    // refreshes). CIDR-shaped entries ride the allowlist (CIDR-matched);
+    // bare IPs ride the exempt list (exact + wrapped-by-feed-CIDR matched).
+    let mut allowlist = cfg.allowlist.clone();
+    for prot in crate::auth::protected_client_ips() {
+        if prot.contains('/') { allowlist.push(prot); } else { combined_exempts.push(prot); }
+    }
+    let (kept_v4, _dropped_v4) = filter_safe(&all_v4, &allowlist, &combined_exempts, false);
+    let (kept_v6, _dropped_v6) = filter_safe(&all_v6, &allowlist, &combined_exempts, true);
 
     // Cap at MAX_BLOCKLIST_SIZE — v4 first because that's where the volume is.
     let mut capped_v4: BTreeSet<String> = BTreeSet::new();

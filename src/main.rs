@@ -156,6 +156,16 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     wolfrouter_restore: Option<String>,
 
+    /// Emergency unblock: remove an IP from EVERY WolfStack enforcement
+    /// surface — login-lockout / NMAP-protection kernel blocks, both
+    /// threat-intelligence blocklists — and persist it to the threat-intel
+    /// allowlists so the next feed sync can't re-block it. Run this from
+    /// SSH when you can reach the server but not the dashboard (e.g. a
+    /// feed update listed your own IP). Takes effect immediately; no
+    /// service restart needed.
+    #[arg(long, value_name = "IP")]
+    unblock: Option<String>,
+
     /// Wipe this node's cluster membership state and exit. Deletes
     /// `self_cluster.json`, `nodes.json`, `deleted_nodes.json`, and
     /// `node_id` so that the daemon comes back up as a fresh
@@ -326,6 +336,33 @@ async fn main() -> std::io::Result<()> {
             Err(e) => {
                 eprintln!("Restore failed: {}", e);
                 std::process::exit(1);
+            }
+        }
+    }
+
+    // --unblock <ip>: emergency removal of an address from every
+    // enforcement surface, then exit. The operator's break-glass path
+    // when a threat-intel feed update blocks their own client IP
+    // (klas 2026-07-05 — dashboard unreachable, SSH fine).
+    if let Some(raw) = cli.unblock.as_deref() {
+        if !deps::is_root() {
+            eprintln!("--unblock needs root (it edits ipsets, iptables, and /etc/wolfstack). Re-run with sudo.");
+            std::process::exit(1);
+        }
+        match raw.trim().parse::<std::net::IpAddr>() {
+            Ok(parsed) => {
+                let ip = parsed.to_canonical().to_string();
+                println!("Unblocking {} from every WolfStack enforcement surface:", ip);
+                auth::kernel_unblock_ip(&ip);
+                println!("  ✓ login-lockout / NMAP-protection: kernel block removed (ipset + INPUT/FORWARD)");
+                predictive::threat_intel::cli_unblock_ip(&ip);
+                threat_intel::cli_unblock_ip(&ip);
+                println!("Done. Changes are live now; the allowlist entries stop the next feed sync from re-blocking it.");
+                return Ok(());
+            }
+            Err(_) => {
+                eprintln!("--unblock: '{}' is not a valid IP address", raw);
+                std::process::exit(2);
             }
         }
     }

@@ -38,13 +38,19 @@ pub fn iptables_lines_v4() -> String {
     out.push_str(":");
     out.push_str(super::CHAIN_NAME);
     out.push_str(" - [0:0]\n");
-    // Inbound from blocklisted source.
+    // Inbound from blocklisted source — NEW connections only, so a feed
+    // update that lists an operator's IP can never sever their LIVE
+    // session (klas 2026-07-05); fresh attack connections are still
+    // dropped. Applied atomically via iptables-restore chain rebuild,
+    // so no legacy-rule migration is needed here.
     out.push_str("-A ");
     out.push_str(super::CHAIN_NAME);
-    out.push_str(" -m set --match-set ");
+    out.push_str(" -m conntrack --ctstate NEW -m set --match-set ");
     out.push_str(super::IPSET_NAME_V4);
     out.push_str(" src -j DROP\n");
     // Outbound to blocklisted destination — catches C2 callouts.
+    // Deliberately NOT state-limited: an already-established channel to
+    // a listed C2 is exactly what this rule must sever.
     out.push_str("-A ");
     out.push_str(super::CHAIN_NAME);
     out.push_str(" -m set --match-set ");
@@ -77,9 +83,12 @@ pub fn ip6tables_lines() -> String {
     out.push_str(":");
     out.push_str(super::CHAIN_NAME);
     out.push_str(" - [0:0]\n");
+    // Same state policy as v4: inbound NEW-only (operator's live session
+    // survives a feed update), outbound unconditional (established C2
+    // channels get severed).
     out.push_str("-A ");
     out.push_str(super::CHAIN_NAME);
-    out.push_str(" -m set --match-set ");
+    out.push_str(" -m conntrack --ctstate NEW -m set --match-set ");
     out.push_str(super::IPSET_NAME_V6);
     out.push_str(" src -j DROP\n");
     out.push_str("-A ");

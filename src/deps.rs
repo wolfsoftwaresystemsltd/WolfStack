@@ -341,7 +341,7 @@ fn which(bin: &str) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     // Safe because geteuid is a pure syscall with no args and a
     // trivially-valid return type. We avoid pulling in the `nix` crate
     // just for this one call.

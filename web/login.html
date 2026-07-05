@@ -451,6 +451,14 @@
         <div id="ws-starting-cert-hint" role="note" aria-live="polite" style="display:none; font-size:12px; color:#fcd34d; max-width:460px; text-align:center; line-height:1.5; border:1px solid rgba(252,211,77,0.35); background:rgba(252,211,77,0.08); padding:10px 14px; border-radius:8px;">
             You're reaching WolfStack by <strong>IP address over HTTPS</strong>. If you installed a domain certificate, your browser won't trust it for a bare IP — so the dashboard can't talk to the API. Open WolfStack by its <strong>domain name</strong> instead (the hostname your certificate was issued for, e.g. <code style="background:rgba(252,211,77,0.15); padding:1px 5px; border-radius:4px;">https://host.example.com:8553</code>).
         </div>
+        <div id="ws-starting-lockout-hint" role="note" aria-live="polite" style="display:none; font-size:12px; color:#fca5a5; max-width:480px; text-align:left; line-height:1.6; border:1px solid rgba(252,165,165,0.35); background:rgba(252,165,165,0.08); padding:10px 14px; border-radius:8px;">
+            <strong>Can't login — you may be locked out on your IP.</strong> If SSH to the server works but this page never loads, a security feature (threat-intel feed update, brute-force lockout) may be blocking your address. To fix it:
+            <ul style="margin:6px 0 0 18px; padding:0;">
+                <li><strong>Use a VPN</strong> (or another network / mobile hotspot) — a different IP gets you straight back in, and logging in successfully protects that IP.</li>
+                <li>Connect from your <strong>LAN or WireGuard bridge</strong> — internal addresses are never feed-blocked.</li>
+                <li>Over SSH, run <code style="background:rgba(252,165,165,0.15); padding:1px 5px; border-radius:4px;">wolfstack --unblock YOUR.PUBLIC.IP</code> — lifts every block for your address immediately and allowlists it.</li>
+            </ul>
+        </div>
     </div>
     <style>@keyframes ws-spin { to { transform: rotate(360deg); } }</style>
 
@@ -510,10 +518,18 @@
                             // up. Detail wording escalates so the user
                             // knows we're alive but persistent.
                             showOverlay();
+                            // After ~8 failed probes a plain restart is looking
+                            // unlikely — surface the IP-lockout self-help card
+                            // (threat-intel feed / lockout can block this IP
+                            // while SSH from elsewhere still works).
+                            if (attempts > 8) {
+                                const lockoutHint = document.getElementById('ws-starting-lockout-hint');
+                                if (lockoutHint) lockoutHint.style.display = 'block';
+                            }
                             const detail = document.getElementById('ws-starting-detail');
                             if (detail) {
                                 if (attempts > 60) {
-                                    detail.textContent = attempts + ' attempts. Backend hasn\'t responded yet — we\'ll keep checking forever. If this is unexpected, SSH in and check `systemctl status wolfstack`.';
+                                    detail.textContent = attempts + ' attempts. Backend hasn\'t responded yet — we\'ll keep checking forever. If this is unexpected, SSH in and check `systemctl status wolfstack`. If the service IS running, your IP may have been blocked (e.g. by a threat-intel feed update) — from SSH run `wolfstack --unblock YOUR.IP.HERE` to lift every block for your address.';
                                 } else if (attempts > 30) {
                                     detail.textContent = attempts + ' attempts (~' + Math.round(attempts/60) + ' min). Long upgrades and `cargo build` on slow boxes can take this long. Still retrying.';
                                 } else if (attempts > 10) {

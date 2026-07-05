@@ -771,6 +771,86 @@ impl LoginLockoutConfig {
     }
 }
 
+// ─── Known admin client IPs + shared protected-IPs provider ───
+//
+// Threat-intel enforcement must never blackhole an address an operator
+// authenticates from (klas 2026-07-05: a FireHOL feed update listed his
+// browser's public IP; all three of his nodes kernel-DROPped it at once
+// and only SSH from an internal address still worked). Every successful
+// dashboard login records its source IP here; both threat-intel modules
+// union this with the operator's trusted_ips before enforcing.
+//
+// Bounded: entries expire after 30 days without a successful login and
+// the map is capped (oldest evicted) so a shared/roaming setup can't
+// grow the file forever. Mode 0600 like every other auth artefact.
+
+const KNOWN_ADMIN_IPS_MAX: usize = 64;
+const KNOWN_ADMIN_IP_TTL_SECS: u64 = 30 * 24 * 3600;
+
+fn known_admin_ips_path() -> String {
+    format!("{}/known-admin-ips.json", crate::paths::get().config_dir)
+}
+
+fn load_known_admin_ips(now: u64) -> std::collections::BTreeMap<String, u64> {
+    let mut map: std::collections::BTreeMap<String, u64> =
+        std::fs::read_to_string(known_admin_ips_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    map.retain(|_, ts| now.saturating_sub(*ts) < KNOWN_ADMIN_IP_TTL_SECS);
+    map
+}
+
+/// Record a successful dashboard login's source IP. Called from every
+/// login-success path (password, TOTP, passkey, OIDC). Loopback and
+/// unspecified addresses are skipped — they never need feed protection.
+pub fn record_admin_ip(ip: &str) {
+    let parsed: std::net::IpAddr = match ip.trim().parse() {
+        Ok(a) => std::net::IpAddr::to_canonical(&a),
+        Err(_) => return,
+    };
+    if parsed.is_loopback() || parsed.is_unspecified() {
+        return;
+    }
+    // Serialize the read-modify-write: two admins logging in at the same
+    // moment must not clobber each other's entry (last-writer-wins on the
+    // whole file would silently drop one IP's protection). Never held
+    // across an await — this is a plain sync fn.
+    static RECORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = RECORD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut map = load_known_admin_ips(now);
+    map.insert(parsed.to_string(), now);
+    while map.len() > KNOWN_ADMIN_IPS_MAX {
+        match map.iter().min_by_key(|(_, ts)| **ts).map(|(k, _)| k.clone()) {
+            Some(oldest) => { map.remove(&oldest); }
+            None => break,
+        }
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = crate::paths::write_secure(&known_admin_ips_path(), &json);
+    }
+}
+
+/// Every address enforcement features must never block: the operator's
+/// trusted_ips entries (verbatim — single IPs or CIDRs) plus every IP
+/// with a successful dashboard login in the last 30 days. Consumers do
+/// their own family filtering / CIDR math.
+pub fn protected_client_ips() -> Vec<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut out: Vec<String> = LoginLockoutConfig::load().trusted_ips.clone();
+    out.extend(load_known_admin_ips(now).into_keys());
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn ip_in_cidr(target: &std::net::IpAddr, net: &std::net::IpAddr, prefix: u8) -> bool {
     match (target, net) {
         (std::net::IpAddr::V4(t), std::net::IpAddr::V4(n)) => {

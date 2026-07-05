@@ -559,18 +559,45 @@ fn count_ipset_entries(name: &str) -> usize {
         .count()
 }
 
+/// The exact rule spec per chain. INPUT matches only NEW connections so
+/// a feed update that suddenly lists an operator's IP cannot cut off
+/// their LIVE dashboard/SSH session (klas 2026-07-05) — inbound attack
+/// traffic is new flows by definition. OUTPUT stays unconditional: its
+/// job is severing traffic to listed C2/botnet addresses, and an
+/// already-established reverse-shell channel is exactly what it must
+/// kill, not spare.
+fn rule_spec(chain: &str, direction: &str) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = Vec::new();
+    if chain == "INPUT" {
+        v.extend(["-m", "conntrack", "--ctstate", "NEW"]);
+    }
+    v.extend(["-m", "set", "--match-set", IPSET_NAME]);
+    v.push(if direction == "src" { "src" } else { "dst" });
+    v.extend(["-j", "DROP"]);
+    v
+}
+
+/// Legacy pre-v25.2.16 form (no conntrack match on INPUT). Kept only so
+/// installs can migrate it away and teardown can remove it.
+fn legacy_rule_spec(direction: &str) -> Vec<&'static str> {
+    vec!["-m", "set", "--match-set", IPSET_NAME,
+         if direction == "src" { "src" } else { "dst" }, "-j", "DROP"]
+}
+
 fn rules_are_present() -> bool {
-    let input = std::process::Command::new("iptables")
-        .args(["-C", "INPUT", "-m", "set", "--match-set", IPSET_NAME, "src", "-j", "DROP"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    let output = std::process::Command::new("iptables")
-        .args(["-C", "OUTPUT", "-m", "set", "--match-set", IPSET_NAME, "dst", "-j", "DROP"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    input && output
+    // CURRENT form only, deliberately: a node still carrying only the
+    // legacy rule must report "absent" so the remediation tick calls
+    // install_iptables_rules(), which is the only path that migrates
+    // legacy → current. Counting the legacy form as present left every
+    // pre-fix node stuck on the old rule forever (review 2026-07-05).
+    // No enforcement gap during migration: the legacy rule keeps
+    // dropping until the install replaces it.
+    let check = |chain: &str, direction: &str| -> bool {
+        std::process::Command::new("iptables")
+            .arg("-C").arg(chain).args(rule_spec(chain, direction))
+            .output().map(|o| o.status.success()).unwrap_or(false)
+    };
+    check("INPUT", "src") && check("OUTPUT", "dst")
 }
 
 /// Post-sample remediation. Refreshes the feed if stale, populates
@@ -793,6 +820,64 @@ pub fn test_feed_blocking() -> FeedTestResult {
 /// Atomic ipset replacement: build a fresh set in a tmp name then
 /// `ipset swap` to switch it in. Prevents the multi-second window
 /// where the kernel set is empty mid-rebuild.
+/// `wolfstack --unblock <ip>` support: remove the address from the
+/// kernel ipset immediately and persist it into the operator allowlist
+/// file (which `parse_allowlist` re-reads on every sync, so the next
+/// feed refresh can't re-block it). Daemon-independent break-glass.
+pub fn cli_unblock_ip(ip: &str) {
+    let _ = std::process::Command::new("ipset").args(["del", IPSET_NAME, ip]).output();
+    let _ = std::fs::create_dir_all("/var/lib/wolfstack/threat-intel");
+    println!("  ✓ predictive blocklist: removed from ipset '{}'", IPSET_NAME);
+    let existing = std::fs::read_to_string(ALLOWLIST_PATH).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == ip) {
+        println!("  ✓ predictive allowlist: already contains {}", ip);
+    } else {
+        let mut out = existing;
+        if !out.is_empty() && !out.ends_with('\n') { out.push('\n'); }
+        out.push_str(ip);
+        out.push('\n');
+        match std::fs::write(ALLOWLIST_PATH, out) {
+            Ok(()) => println!("  ✓ predictive allowlist: added to {}", ALLOWLIST_PATH),
+            Err(e) => eprintln!("  ✗ predictive allowlist ({}): {} — the next feed sync may re-block this IP", ALLOWLIST_PATH, e),
+        }
+    }
+}
+
+/// A parsed IPv4 network (base, prefix) for protected-IP overlap math.
+/// Accepts "a.b.c.d" (prefix 32) or "a.b.c.d/n"; None for v6/garbage —
+/// the FireHOL feed and the kernel set here are inet (v4) only.
+fn parse_v4_net(entry: &str) -> Option<(u32, u8)> {
+    let (ip_str, prefix) = match entry.split_once('/') {
+        Some((i, p)) => (i, p.parse::<u8>().ok().filter(|p| *p <= 32)?),
+        None => (entry, 32),
+    };
+    let ip: std::net::Ipv4Addr = ip_str.trim().parse().ok()?;
+    Some((u32::from(ip), prefix))
+}
+
+fn v4_mask(prefix: u8) -> u32 {
+    if prefix == 0 { 0 } else { !0u32 << (32 - prefix) }
+}
+
+/// Two v4 networks overlap iff the shorter prefix contains the other's
+/// base address. Used to drop any feed entry that touches a protected
+/// address in EITHER direction: a protected CIDR covering a feed IP,
+/// or a feed CIDR covering a protected IP (the case the old exact-string
+/// `allow.contains()` check could not see — a /16 on the feed silently
+/// swallowed an allowlisted host inside it).
+fn v4_nets_overlap(a: (u32, u8), b: (u32, u8)) -> bool {
+    let p = a.1.min(b.1);
+    let mask = v4_mask(p);
+    (a.0 & mask) == (b.0 & mask)
+}
+
+fn entry_touches_protected(entry: &str, protected: &[(u32, u8)]) -> bool {
+    match parse_v4_net(entry) {
+        Some(net) => protected.iter().any(|p| v4_nets_overlap(net, *p)),
+        None => false,
+    }
+}
+
 fn sync_ipset_to_feed() -> RemediationOutcome {
     let action = "sync ipset to feed".to_string();
     let entries = parse_feed_entries(FEED_LOCAL_PATH);
@@ -813,20 +898,26 @@ fn sync_ipset_to_feed() -> RemediationOutcome {
     let auto = auto_allowlist();
     let auto_count = auto.len();
     allow.extend(auto);
+    // Operator trusted_ips + every IP with a successful dashboard login
+    // in the last 30 days (klas 2026-07-05: a feed update listed his
+    // browser's public IP and every node blocked him at once; only SSH
+    // from an internal address worked). These join the allowlist as
+    // CIDR-aware entries below.
+    allow.extend(crate::auth::protected_client_ips());
+    // Parse every allow entry into v4 nets once, for overlap checks that
+    // ALSO catch a feed CIDR wrapping a protected host — the old exact-
+    // string check couldn't see a /16 swallowing an allowlisted IP.
+    let protected: Vec<(u32, u8)> = allow.iter().filter_map(|e| parse_v4_net(e)).collect();
     // Build a restore-formatted batch script.
     let tmp_name = format!("{}_swap", IPSET_NAME);
     let mut script = String::with_capacity(entries.len() * 32);
     script.push_str(&format!("create {} hash:net family inet hashsize 4096 maxelem 131072\n", tmp_name));
     let mut skipped_by_allow = 0u32;
     for e in &entries {
-        // The allowlist holds bare IPs (auto-allowlist) and may also
-        // hold CIDRs (operator allowlist). For an exact-match in
-        // either direction we check direct membership; for a feed
-        // CIDR that wraps an allowlisted host we'd want to also
-        // skip, but FireHOL's IPs rarely span our cluster's IPs.
-        // Direct membership is the operative case and handles the
-        // Hetzner-IP-reuse scenario this filter exists for.
-        if allow.contains(e) { skipped_by_allow += 1; continue; }
+        if allow.contains(e) || entry_touches_protected(e, &protected) {
+            skipped_by_allow += 1;
+            continue;
+        }
         script.push_str(&format!("add {} {}\n", tmp_name, e));
     }
     // Ensure the real set exists so swap has a destination.
@@ -879,7 +970,9 @@ fn sync_ipset_to_feed() -> RemediationOutcome {
                     .unwrap_or_else(|e| e.to_string())),
         };
     }
-    let kept = entries.iter().filter(|e| !allow.contains(*e)).count();
+    let kept = entries.iter()
+        .filter(|e| !allow.contains(*e) && !entry_touches_protected(e, &protected))
+        .count();
     // State-change logging: this sync runs every enforcement tick and almost
     // always lands on identical numbers — that's a heartbeat, not news (it
     // was a WARN on every tick; operator: "we are really spamming the logs").
@@ -917,14 +1010,30 @@ fn install_iptables_rules() -> RemediationOutcome {
     let mut errors: Vec<String> = Vec::new();
     let mut added = 0u32;
     for (chain, direction) in [("INPUT", "src"), ("OUTPUT", "dst")] {
+        let rule = rule_spec(chain, direction);
+        let legacy = legacy_rule_spec(direction);
+        // Migrate away the pre-v25.2.16 form where it differs from the
+        // current one (INPUT): delete every stacked copy or the old rule
+        // keeps dropping established flows the new form spares. On OUTPUT
+        // the forms are identical — deleting would just flap the rule.
+        if legacy != rule {
+            loop {
+                let removed = std::process::Command::new("iptables")
+                    .arg("-D").arg(chain).args(&legacy)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !removed { break; }
+            }
+        }
         let exists = std::process::Command::new("iptables")
-            .args(["-C", chain, "-m", "set", "--match-set", IPSET_NAME, direction, "-j", "DROP"])
+            .arg("-C").arg(chain).args(&rule)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
         if exists { continue; }
         let out = std::process::Command::new("iptables")
-            .args(["-I", chain, "-m", "set", "--match-set", IPSET_NAME, direction, "-j", "DROP"])
+            .arg("-I").arg(chain).args(&rule)
             .output();
         match out {
             Ok(o) if o.status.success() => added += 1,
@@ -1201,13 +1310,20 @@ fn tear_down_kernel_state() {
     // isn't present; that's fine. Loop a few times to catch any
     // duplicate rules an earlier buggy version may have inserted.
     for (chain, direction) in [("INPUT", "src"), ("OUTPUT", "dst")] {
-        for _ in 0..8 {
-            let out = std::process::Command::new("iptables")
-                .args(["-D", chain, "-m", "set", "--match-set", IPSET_NAME, direction, "-j", "DROP"])
-                .output();
-            match out {
-                Ok(o) if o.status.success() => continue,
-                _ => break,
+        // Both rule forms: pre-v25.2.16 legacy and the current spec
+        // (identical on OUTPUT — dedup so we don't loop twice).
+        let mut forms = vec![legacy_rule_spec(direction)];
+        let current = rule_spec(chain, direction);
+        if current != forms[0] { forms.push(current); }
+        for rule in forms {
+            for _ in 0..8 {
+                let out = std::process::Command::new("iptables")
+                    .arg("-D").arg(chain).args(&rule)
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => continue,
+                    _ => break,
+                }
             }
         }
     }
@@ -1823,5 +1939,39 @@ mod tests {
         assert!(entries.contains(&"83.168.95.185".to_string()));
         assert!(entries.contains(&"5.6.7.0/24".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// klas 2026-07-05 regression: a feed entry must be skipped when it
+    /// touches a protected address in EITHER direction — including a
+    /// feed CIDR that wraps a protected host, which the old exact-string
+    /// membership check could never catch.
+    #[test]
+    fn protected_overlap_both_directions() {
+        let protected: Vec<(u32, u8)> = ["84.12.34.56", "10.0.0.0/8"]
+            .iter().filter_map(|e| parse_v4_net(e)).collect();
+        // Feed CIDR wrapping a protected bare IP → skip.
+        assert!(entry_touches_protected("84.12.0.0/16", &protected));
+        // Exact protected IP on the feed → skip.
+        assert!(entry_touches_protected("84.12.34.56", &protected));
+        // Feed IP inside a protected CIDR → skip.
+        assert!(entry_touches_protected("10.99.1.2", &protected));
+        // Disjoint → block as normal.
+        assert!(!entry_touches_protected("203.0.113.7", &protected));
+        assert!(!entry_touches_protected("84.13.0.0/16", &protected));
+        // Garbage / v6 feed entries are not protected-matched (and the
+        // feed parser never emits them for the inet set anyway).
+        assert!(!entry_touches_protected("2001:db8::1", &protected));
+        assert!(!entry_touches_protected("not-an-ip", &protected));
+    }
+
+    #[test]
+    fn v4_net_parsing_rules() {
+        assert_eq!(parse_v4_net("1.2.3.4"), Some((0x01020304, 32)));
+        assert_eq!(parse_v4_net("1.2.3.0/24"), Some((0x01020300, 24)));
+        assert_eq!(parse_v4_net("1.2.3.0/33"), None);
+        assert_eq!(parse_v4_net("::1"), None);
+        // /0 wildcard overlaps everything — a protected 0.0.0.0/0 would
+        // disable the feature entirely, which is the operator's call.
+        assert!(v4_nets_overlap((0, 0), (0x08080808, 32)));
     }
 }
