@@ -51,6 +51,7 @@ pub mod disk_verdict;
 pub mod disk_fill;
 pub mod container_disk;
 pub mod container_restart;
+pub mod container_boot;
 pub mod container_memory;
 pub mod threshold;
 pub mod cert_expiry;
