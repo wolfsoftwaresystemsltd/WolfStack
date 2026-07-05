@@ -74,6 +74,16 @@ pub struct BackupTarget {
     /// Empty for every other target type.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub system_path: String,
+    /// Native-LXC targets only: stop the container for the duration of the
+    /// tar (fully consistent archive, at the cost of downtime AND a restart
+    /// whose clean boot is the container's problem — wolfscale-3 2026-07-05:
+    /// the implicit nightly stop/start left a broken-boot container's
+    /// database down until manual repair). OFF by default: the container
+    /// keeps running and the tarball is crash-consistent, like a power-loss
+    /// snapshot. `#[serde(default)]` so every existing config gets the
+    /// non-disruptive behaviour. Proxmox LXC ignores this (vzdump snapshots).
+    #[serde(default)]
+    pub stop_for_backup: bool,
 }
 
 impl Default for BackupTarget {
@@ -86,6 +96,7 @@ impl Default for BackupTarget {
             specs: None,
             exclude_mounts: Vec::new(),
             system_path: String::new(),
+            stop_for_backup: false,
         }
     }
 }
@@ -1475,7 +1486,101 @@ fn tar_path_to_gz(src: &str, archive: &Path) -> Result<u64, String> {
 }
 
 /// Backup an LXC container — tar rootfs + config
-pub fn backup_lxc(name: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64), String> {
+/// How to clean up a filesystem snapshot of the container tree. Held by
+/// SnapshotGuard so EVERY exit path (tar failure, layout mismatch, early
+/// return) removes the snapshot via Drop — no manual bookkeeping.
+enum SnapshotKind {
+    Zfs { dataset: String, snap: String },
+    Btrfs { path: PathBuf },
+}
+
+struct SnapshotGuard {
+    /// Directory inside the snapshot that mirrors `lxc_base` — tar runs
+    /// `-C` here exactly as it would against the live tree, producing an
+    /// identical archive layout (`<name>/rootfs/...` + `<name>/config`).
+    tar_base: PathBuf,
+    kind: SnapshotKind,
+}
+
+impl Drop for SnapshotGuard {
+    fn drop(&mut self) {
+        match &self.kind {
+            SnapshotKind::Zfs { dataset, snap } => {
+                let _ = Command::new("zfs")
+                    .args(["destroy", &format!("{}@{}", dataset, snap)]).output();
+            }
+            SnapshotKind::Btrfs { path } => {
+                let _ = Command::new("btrfs")
+                    .args(["subvolume", "delete", &path.to_string_lossy()]).output();
+            }
+        }
+    }
+}
+
+/// Take a point-in-time filesystem snapshot covering `<lxc_base>/<name>`,
+/// when the storage supports it (ZFS dataset or btrfs subvolume).
+///
+/// Returns Ok(None) when the tree isn't snapshot-capable OR the layout
+/// defeats snapshots: a per-container child dataset / nested subvolume is
+/// NOT captured by its parent's snapshot — it shows up as an EMPTY
+/// directory inside the snapshot. The rootfs-has-content sanity check
+/// below catches that; backing it up anyway would produce a config-only
+/// tarball that looks like a real backup until someone tries to restore.
+fn try_lxc_snapshot(lxc_base: &str, name: &str) -> Result<Option<SnapshotGuard>, String> {
+    // Which filesystem is the container tree on, and where is it rooted?
+    // findmnt -T resolves the CONTAINING mount for a path.
+    let out = Command::new("findmnt")
+        .args(["-no", "FSTYPE,SOURCE,TARGET", "-T", lxc_base])
+        .output().map_err(|e| format!("findmnt: {}", e))?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let mut it = line.split_whitespace();
+    let (Some(fstype), Some(source), Some(target)) = (it.next(), it.next(), it.next()) else {
+        return Ok(None);
+    };
+    // lxc_base relative to the filesystem root, so we can find the same
+    // subtree inside the snapshot.
+    let rel = Path::new(lxc_base).strip_prefix(target)
+        .unwrap_or_else(|_| Path::new("")).to_path_buf();
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S");
+    let guard = match fstype {
+        "zfs" => {
+            let snap = format!("wolfstack-backup-{}", stamp);
+            let full = format!("{}@{}", source, snap);
+            let o = Command::new("zfs").args(["snapshot", &full]).output()
+                .map_err(|e| format!("zfs: {}", e))?;
+            if !o.status.success() {
+                return Err(format!("zfs snapshot {}: {}", full, String::from_utf8_lossy(&o.stderr)));
+            }
+            // Snapshots are exposed read-only at <mountpoint>/.zfs/snapshot/<name>/
+            // (reachable by direct path even with snapdir=hidden).
+            let tar_base = Path::new(target).join(".zfs/snapshot").join(&snap).join(&rel);
+            SnapshotGuard { tar_base, kind: SnapshotKind::Zfs { dataset: source.to_string(), snap } }
+        }
+        "btrfs" => {
+            // Read-only snapshot of the mounted subvolume, created on the
+            // same filesystem (btrfs snapshots can't cross filesystems).
+            let snap_path = Path::new(target).join(format!(".wolfstack-backup-snap-{}", stamp));
+            let o = Command::new("btrfs")
+                .args(["subvolume", "snapshot", "-r", target, &snap_path.to_string_lossy()])
+                .output().map_err(|e| format!("btrfs: {}", e))?;
+            if !o.status.success() {
+                return Err(format!("btrfs snapshot: {}", String::from_utf8_lossy(&o.stderr)));
+            }
+            let tar_base = snap_path.join(&rel);
+            SnapshotGuard { tar_base, kind: SnapshotKind::Btrfs { path: snap_path } }
+        }
+        _ => return Ok(None),
+    };
+    // Layout sanity check (see doc comment): refuse an empty rootfs.
+    let snap_rootfs = guard.tar_base.join(name).join("rootfs");
+    let has_content = fs::read_dir(&snap_rootfs).map(|mut d| d.next().is_some()).unwrap_or(false);
+    if !has_content {
+        return Ok(None); // guard drops here → snapshot removed
+    }
+    Ok(Some(guard))
+}
+
+pub fn backup_lxc(name: &str, exclude_mounts: &[String], stop_for_backup: bool) -> Result<(PathBuf, u64), String> {
 
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
@@ -1489,22 +1594,65 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64
     let filename = format!("lxc-{}-{}.tar.gz", name, timestamp);
     let tar_path = staging.join(&filename);
 
-    // Check if container is running — stop it for consistent backup
-    let was_running = is_lxc_running(name);
-    if was_running {
+    // Cold backup is opt-in per target (stop_for_backup). The old
+    // unconditional stop turned every scheduled backup into a silent
+    // outage — and a restart the container has to survive (wolfscale-3
+    // 2026-07-05: broken container boot left mariadb down after each
+    // nightly backup).
+    let running = is_lxc_running(name);
+    let mut stopped_for_backup = stop_for_backup && running;
+    if stopped_for_backup {
         let _ = Command::new("lxc-stop").args(["-n", name]).output();
         std::thread::sleep(std::time::Duration::from_secs(3));
+        if is_lxc_running(name) {
+            // Stop didn't take (hung init / D-state children). Carry on as
+            // a hot backup: the tar keeps its changed-file tolerance and
+            // the restart gates stay off — the container never stopped.
+            warn!("backup {}: lxc-stop did not stop the container; falling back to hot backup", name);
+            stopped_for_backup = false;
+        }
     }
 
     // Check LXC path — could be /var/lib/lxc/{name} or custom storage
     let lxc_base = crate::containers::lxc_base_dir(name);
     let lxc_path = format!("{}/{}", lxc_base, name);
     if !Path::new(&lxc_path).exists() {
-        if was_running {
+        if stopped_for_backup {
             let _ = Command::new("lxc-start").args(["-n", name]).output();
         }
         return Err(format!("LXC container path not found: {}", lxc_path));
     }
+
+    // Preferred: a point-in-time filesystem snapshot (ZFS/btrfs) —
+    // consistent AND fast. A running container is frozen only for the
+    // snapshot instant (not the whole tar); a stopped-for-backup container
+    // is restarted the moment the snapshot exists, shrinking downtime from
+    // the whole tar duration to seconds. No snapshot support → tar the
+    // live tree directly (crash-consistent hot tar, or the full cold tar
+    // when the operator opted into stop_for_backup).
+    let mut froze = false;
+    if running && !stopped_for_backup {
+        froze = Command::new("lxc-freeze").args(["-n", name]).output()
+            .map(|o| o.status.success()).unwrap_or(false);
+    }
+    let snapshot = match try_lxc_snapshot(&lxc_base, name) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("backup {}: snapshot failed, falling back to direct tar: {}", name, e);
+            None
+        }
+    };
+    if froze {
+        let _ = Command::new("lxc-unfreeze").args(["-n", name]).output();
+    }
+    if stopped_for_backup && snapshot.is_some() {
+        // Snapshot secured — the container doesn't need to stay down
+        // while we tar; bring it back now.
+        let _ = Command::new("lxc-start").args(["-n", name]).output();
+    }
+    // Hot smear (files changing under tar) only applies when tarring the
+    // LIVE tree of a running container.
+    let hot = snapshot.is_none() && running && !stopped_for_backup;
 
     // Create tar.gz of the entire container directory (rootfs + config).
     // Honour operator exclusions: only paths that actually fall UNDER the
@@ -1527,20 +1675,36 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64
             tar_cmd.arg(format!("--exclude={}", rel.to_string_lossy()));
         }
     }
+    // Hot backup of a running container: files WILL change or vanish while
+    // tar reads the tree — that's the crash-consistency trade-off, not a
+    // failure. Quiet the per-file warnings and don't die on a file that
+    // disappeared between scan and read. (man tar: exit 1 = "some files
+    // were changed while being archived... the resulting archive does not
+    // contain the exact copy" — the archive is still written; 2 = fatal.)
+    if hot {
+        tar_cmd.args(["--warning=no-file-changed", "--warning=no-file-removed", "--ignore-failed-read"]);
+    }
     // `-czf` (dashed): the `--exclude` flags above precede the operation, so the
     // old-style bare `czf` (which must be the first argument) made tar abort
     // whenever an exclusion was present. Same fix as backup_system_path.
-    tar_cmd.args(["-czf", &tar_path.to_string_lossy(), "-C", &lxc_base, name]);
-    let output = tar_cmd
-        .output()
-        .map_err(|e| format!("Failed to tar LXC container: {}", e))?;
+    // With a snapshot, -C into the snapshot's mirror of lxc_base — member
+    // names (and the exclude globs rewritten above) are identical.
+    let tar_base = snapshot.as_ref()
+        .map(|s| s.tar_base.to_string_lossy().into_owned())
+        .unwrap_or_else(|| lxc_base.clone());
+    tar_cmd.args(["-czf", &tar_path.to_string_lossy(), "-C", &tar_base, name]);
+    let output = tar_cmd.output();
 
-    // Restart if it was running
-    if was_running {
+    // Restart if we stopped it and the snapshot path didn't already —
+    // BEFORE bailing on a tar spawn failure, so no error path leaves the
+    // container down.
+    if stopped_for_backup && snapshot.is_none() {
         let _ = Command::new("lxc-start").args(["-n", name]).output();
     }
+    let output = output.map_err(|e| format!("Failed to tar LXC container: {}", e))?;
 
-    if !output.status.success() {
+    let soft_ok = hot && output.status.code() == Some(1);
+    if !output.status.success() && !soft_ok {
         return Err(format!("LXC tar failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
@@ -2587,7 +2751,7 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
                 Err(e) => (Err(e), String::new(), Vec::new()),
             }
         }
-        BackupTargetType::Lxc => (backup_lxc(&target.name, &target.exclude_mounts), String::new(), Vec::new()),
+        BackupTargetType::Lxc => (backup_lxc(&target.name, &target.exclude_mounts, target.stop_for_backup), String::new(), Vec::new()),
         BackupTargetType::Vm => (backup_vm(&target.name), String::new(), Vec::new()),
         BackupTargetType::Config => (backup_config(), String::new(), Vec::new()),
         BackupTargetType::SystemPath => (
@@ -5746,8 +5910,10 @@ pub fn create_backup_with_log(
                     let _ = log.send(format!("  Running vzdump for container {}...", t.name));
                     backup_lxc_proxmox_with_log(&t.name, &t.exclude_mounts, &log)
                 } else {
-                    let _ = log.send(format!("  Tarring LXC rootfs for '{}'...", t.name));
-                    backup_lxc(&t.name, &t.exclude_mounts)
+                    let _ = log.send(format!("  Tarring LXC '{}'{} (snapshot used automatically when the storage supports it)...",
+                        t.name,
+                        if t.stop_for_backup { " — stopping for a cold backup" } else { " while it runs" }));
+                    backup_lxc(&t.name, &t.exclude_mounts, t.stop_for_backup)
                 };
                 (r, String::new(), Vec::new())
             }
@@ -6413,14 +6579,84 @@ fn prune_schedule_backups(config: &mut BackupConfig, schedule_id: &str, retentio
     // Newest first; anything past `retention` is removed.
     schedule_entries.sort_by(|a, b| config.entries[*b].created_at.cmp(&config.entries[*a].created_at));
     if schedule_entries.len() > retention {
-        let to_remove: Vec<usize> = schedule_entries[retention..].to_vec();
-        for &idx in to_remove.iter().rev() {
+        // Remove strictly highest-index-first: `Vec::remove` shifts every
+        // later element down, so any other order leaves stale indices that
+        // panic (observed 2026-07-05: "len is 9 but the index is 9") or —
+        // worse — silently delete the WRONG backup's file. The slice is
+        // ordered by created_at, which is NOT index order (entries from
+        // different targets interleave), so it must be re-sorted here.
+        let mut to_remove: Vec<usize> = schedule_entries[retention..].to_vec();
+        to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        for &idx in &to_remove {
             // Single source of truth for removing a backup's stored artifact
             // (local file / S3 object / remote copy; PBS delegated to its GC).
             // Keeps retention and explicit-delete from drifting.
             delete_backup_file(&config.entries[idx]);
             config.entries.remove(idx);
         }
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    fn mk(filename: &str, created_at: &str, schedule_id: &str) -> BackupEntry {
+        BackupEntry {
+            id: filename.to_string(),
+            target: BackupTarget { target_type: BackupTargetType::Lxc, name: filename.into(), ..Default::default() },
+            storage: BackupStorage::default(),
+            filename: format!("{}.tar.gz", filename),
+            size_bytes: 0,
+            created_at: created_at.to_string(),
+            status: BackupStatus::Completed,
+            error: String::new(),
+            schedule_id: schedule_id.to_string(),
+            comments: String::new(),
+            node_hostname: String::new(),
+            docker_config: String::new(),
+            mounts: Vec::new(),
+        }
+    }
+
+    /// 2026-07-05 regression: entries from different targets interleave, so
+    /// timestamp order ≠ index order. The old prune removed by stale indices
+    /// after each shift — panicking ("len is 9 but the index is 9") or
+    /// deleting the WRONG entry. Keep = the `retention` newest; everything
+    /// else (and nothing else) goes.
+    #[test]
+    fn prune_survives_interleaved_entry_order() {
+        let mut config = BackupConfig::default();
+        config.entries = vec![
+            mk("a-old",   "2026-07-01T03:00:00Z", "s"),
+            mk("other",   "2026-07-10T03:00:00Z", "different-schedule"),
+            mk("b-new",   "2026-07-05T03:00:00Z", "s"),
+            mk("c-mid",   "2026-07-03T03:00:00Z", "s"),
+            mk("d-newest","2026-07-06T03:00:00Z", "s"),
+            mk("e-oldest","2026-06-30T03:00:00Z", "s"),
+        ];
+        prune_schedule_backups(&mut config, "s", 2);
+        let names: Vec<&str> = config.entries.iter().map(|e| e.id.as_str()).collect();
+        // Newest two of schedule "s" survive; the other schedule is untouched.
+        assert!(names.contains(&"d-newest"), "newest kept: {:?}", names);
+        assert!(names.contains(&"b-new"), "second-newest kept: {:?}", names);
+        assert!(names.contains(&"other"), "other schedule untouched: {:?}", names);
+        assert_eq!(names.len(), 3, "exactly retention + unrelated remain: {:?}", names);
+    }
+
+    /// Retention edge: nothing to prune when at/below the cap, including 0
+    /// completed entries — must not panic on the empty slice path.
+    #[test]
+    fn prune_noop_at_or_below_retention() {
+        let mut config = BackupConfig::default();
+        config.entries = vec![
+            mk("a", "2026-07-01T03:00:00Z", "s"),
+            mk("b", "2026-07-02T03:00:00Z", "s"),
+        ];
+        prune_schedule_backups(&mut config, "s", 2);
+        assert_eq!(config.entries.len(), 2);
+        prune_schedule_backups(&mut config, "missing-schedule", 0);
+        assert_eq!(config.entries.len(), 2);
     }
 }
 

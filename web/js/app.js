@@ -30687,6 +30687,7 @@ function renderBackupTargets(targets) {
                  <div id="mount-excl-${escapeHtml(key)}" data-mount-panel="${escapeHtml(key)}" style="display:none; margin-top:6px;"></div>
                </div>`
             : '';
+        const stopOption = renderStopForBackupOption(t, '');
         return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px 14px; font-size:13px;">
             <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
                 <input type="checkbox" class="backup-target-cb" value="${val}" data-target-key="${escapeHtml(key)}" onchange="updateBackupSelectedCount()">
@@ -30699,6 +30700,7 @@ function renderBackupTargets(targets) {
                 </span>
             </label>
             ${mountsLink}
+            ${stopOption}
         </div>`;
     }).join('');
 }
@@ -30706,6 +30708,36 @@ function renderBackupTargets(targets) {
 // Per-target mount exclusions, keyed by "type:name" → [excluded source paths].
 // Merged into each target object at backup time (getSelectedTargets).
 let _backupExcludeMap = {};
+
+// Per-target "stop container for cold backup" flags, keyed like the exclude
+// maps ("type:name" → true). Page map + a modal-only map so editing a
+// schedule can't bleed into a page quick-backup (same split as exclusions).
+let _backupStopMap = {};
+let _scheduleStopMap = {};
+function stopMapFor(prefix) { return prefix === 'sched-' ? _scheduleStopMap : _backupStopMap; }
+function toggleStopForBackup(type, name, prefix, checked) {
+    const map = stopMapFor(prefix);
+    const key = `${type}:${name}`;
+    if (checked) map[key] = true; else delete map[key];
+}
+
+// Checkbox row for native-LXC targets: opt IN to stopping the container for
+// the backup. Default (unticked) backs it up live; when the storage supports
+// snapshots (ZFS/btrfs) the backend snapshots either way — a ticked box then
+// costs only seconds of downtime instead of the whole tar. Proxmox nodes
+// ignore the flag (vzdump snapshots there).
+function renderStopForBackupOption(t, prefix) {
+    if (t.type !== 'lxc') return '';
+    const key = `${t.type}:${t.name}`;
+    const checked = stopMapFor(prefix)[key] ? 'checked' : '';
+    return `<div style="margin-top:3px;${prefix ? ' padding-left:24px;' : ''}">
+        <label style="font-size:11px; color:var(--text-muted); display:inline-flex; align-items:center; gap:5px; cursor:pointer;"
+               title="Ticked: the container is stopped so the archive is fully consistent — on ZFS/btrfs storage a snapshot is taken and it restarts within seconds; elsewhere it stays down for the whole tar. Unticked (default): backed up while running (crash-consistent, like a power-loss snapshot). Proxmox containers ignore this — vzdump snapshots there.">
+            <input type="checkbox" ${checked} onchange="toggleStopForBackup('${escapeHtml(t.type)}','${escapeHtml(t.name)}','${prefix}', this.checked)">
+            Stop container for cold backup
+        </label>
+    </div>`;
+}
 
 /// Toggle the inline mount-exclusion panel for a container, lazy-loading the
 /// mount inventory from the backend the first time it's opened.
@@ -30796,6 +30828,7 @@ function getSelectedTargets() {
             const key = `${t.type}:${t.name}`;
             const excl = _backupExcludeMap[key];
             if (Array.isArray(excl) && excl.length) t.exclude_mounts = excl;
+            if (_backupStopMap[key]) t.stop_for_backup = true;
             targets.push(t);
         } catch (e) { }
     });
@@ -30847,6 +30880,7 @@ function renderScheduleTargets(selectedKeys, backupAll) {
                 <span style="color:var(--text-muted); font-size:10px; margin-left:6px;">${escapeHtml(t.type.toUpperCase())}</span></span>
             </label>
             ${mountsLink}
+            ${renderStopForBackupOption(t, 'sched-')}
         </div>`;
     }).join('');
 }
@@ -30860,6 +30894,7 @@ function getScheduleTargets() {
             const key = `${t.type}:${t.name}`;
             const excl = _scheduleExcludeMap[key];
             if (Array.isArray(excl) && excl.length) t.exclude_mounts = excl;
+            if (_scheduleStopMap[key]) t.stop_for_backup = true;
             out.push(t);
         } catch (e) { console.warn('getScheduleTargets: bad checkbox value', e); }
     });
@@ -31282,12 +31317,17 @@ function editSchedule(id) {
     setScheduleHookFields(s.pre_command, s.post_command);
 
     const schedTargets = Array.isArray(s.targets) ? s.targets : [];
-    // Pre-load this schedule's per-target mount exclusions into the modal-only map
-    // (reset first so a previous edit's exclusions don't carry over).
+    // Pre-load this schedule's per-target mount exclusions + stop-for-backup
+    // flags into the modal-only maps (reset first so a previous edit's
+    // choices don't carry over).
     _scheduleExcludeMap = {};
+    _scheduleStopMap = {};
     schedTargets.forEach(t => {
         if (t && Array.isArray(t.exclude_mounts) && t.exclude_mounts.length) {
             _scheduleExcludeMap[`${t.type}:${t.name}`] = t.exclude_mounts.slice();
+        }
+        if (t && t.stop_for_backup) {
+            _scheduleStopMap[`${t.type}:${t.name}`] = true;
         }
     });
 
@@ -31514,6 +31554,7 @@ async function scheduleSystemFolder() {
     _editingSchedule = null;               // new folder schedule, not an edit
     _editScheduleTargetsLocked = false;
     _scheduleExcludeMap = {};              // folders have no per-container mounts
+    _scheduleStopMap = {};                 // ...nor containers to stop
     const allCb = document.getElementById('schedule-backup-all');
     if (allCb) { allCb.checked = false; allCb.disabled = false; }
 
@@ -31934,9 +31975,11 @@ async function _runRestoreStream(id, overwrite, storage, name, progressEl, resul
 async function showScheduleSelectedModal() {
     _scheduleFolderTarget = null; // table-selection path — clear any folder target
     _editScheduleTargetsLocked = false;
-    // Carry any mount exclusions the operator set on the page into the modal's own
-    // map (a shallow copy — later edits reassign keys, so the page map is untouched).
+    // Carry any mount exclusions + stop-for-backup flags the operator set on the
+    // page into the modal's own maps (shallow copies — later edits reassign keys,
+    // so the page maps are untouched).
     _scheduleExcludeMap = Object.assign({}, _backupExcludeMap);
+    _scheduleStopMap = Object.assign({}, _backupStopMap);
     const targets = getSelectedTargets();
     if (targets.length === 0) {
         showToast('Please select at least one item to schedule', 'error');
