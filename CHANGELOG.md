@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.19: folder-backup exclusions now apply to PBS file-level (pxar) backups (wabil)** _(2026-07-06 — [`e96d631f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e96d631f715b2a74897f7e6d025b746ac4bbf414))_
 - **v25.2.18: Docker cold-backup (stop container) + folder-exclude visibility (wabil)** _(2026-07-06 — [`fd86434a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fd86434a9cf84bc74da6224d711f73d1f378e4e8))_
 - **v25.2.17: Predictive detects degraded container boots; exact fix card for PBS-in-LXC runtime dir (wabil)** _(2026-07-05 — [`74114f83`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/74114f83ae280646764f2766e7b1510e9b4b94fa))_
 - **v25.2.16: threat-intel can no longer lock the operator out (klas)** _(2026-07-05 — [`e5befa28`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e5befa2862ecb2ad49954c5c453d76af4426ad77))_
