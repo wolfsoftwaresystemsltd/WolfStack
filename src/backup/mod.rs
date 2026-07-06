@@ -400,6 +400,27 @@ mod tests {
     }
 
     #[test]
+    fn classify_folder_excludes_flags_out_of_folder() {
+        // Leaf-mode folder: in-folder excludes apply, cross-root ones drop.
+        let (applied, dropped) = classify_folder_excludes(
+            "/mnt/user/appdata",
+            &[
+                "/mnt/user/appdata/plex".to_string(),   // in-folder abs
+                "plex/cache".to_string(),               // in-folder rel
+                "/mnt/cache/appdata/plex".to_string(),  // Unraid cache path — different string, dropped
+                "/etc/ssl".to_string(),                 // unrelated root — dropped
+                "   ".to_string(),                      // blank — ignored entirely
+            ],
+        );
+        assert_eq!(applied, vec!["/mnt/user/appdata/plex".to_string(), "plex/cache".to_string()]);
+        assert_eq!(dropped, vec!["/mnt/cache/appdata/plex".to_string(), "/etc/ssl".to_string()]);
+        // Contents-mode (trailing slash) behaves the same for classification.
+        let (a2, d2) = classify_folder_excludes("/data/", &["/data/tmp".to_string(), "/other".to_string()]);
+        assert_eq!(a2, vec!["/data/tmp".to_string()]);
+        assert_eq!(d2, vec!["/other".to_string()]);
+    }
+
+    #[test]
     fn folder_exclude_patterns_absolute_and_relative() {
         // Leaf mode (no trailing slash): members are "<leaf>/...".
         assert_eq!(folder_exclude_pattern("/srv/data/big", "/srv/data", "data", false), Some("data/big".into()));
@@ -1180,12 +1201,49 @@ fn ensure_staging_dir() -> Result<PathBuf, String> {
 /// Bind mounts to system paths (/, /etc, /var/lib/docker, etc.) are
 /// refused with a recorded skipped_reason so the user can tell from the
 /// backup metadata what was excluded and why.
-pub fn backup_docker(name: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64, String, Vec<MountInfo>), String> {
+/// Restarts a container that we stopped for a consistent backup, on
+/// EVERY exit path (`?` error returns, panics) via Drop. Same guarantee
+/// as backup_lxc's stop/restart, without threading restart calls
+/// through every early return in the long docker backup body.
+struct DockerRestartGuard {
+    name: String,
+}
+impl Drop for DockerRestartGuard {
+    fn drop(&mut self) {
+        // The guard exists ONLY when we confirmed the container stopped,
+        // so its mere existence means "restart on the way out".
+        let _ = Command::new("docker").args(["start", &self.name]).output();
+    }
+}
+
+pub fn backup_docker(name: &str, exclude_mounts: &[String], stop_for_backup: bool) -> Result<(PathBuf, u64, String, Vec<MountInfo>), String> {
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("docker-{}-{}.tar.gz", name, timestamp);
     let final_path = staging.join(&filename);
     let temp_image = format!("wolfstack-backup/{}", name);
+
+    // Optional cold backup: stop the container so volume/bind data and
+    // the committed image layer are captured at rest (quiesced DBs, no
+    // half-written files). Off by default — the default hot backup
+    // commits + tars the live container. Restart is guaranteed by the
+    // RAII guard below even if any step errors out. `docker commit`
+    // works fine on a stopped container.
+    let _restart_guard = if stop_for_backup && docker_is_running(name) {
+        let _ = Command::new("docker").args(["stop", name]).output();
+        // Verify the stop actually took before we treat this as a cold
+        // backup — mirror backup_lxc. If the container is somehow still
+        // running (hung stop, daemon busy), don't claim consistency and
+        // don't restart something we didn't stop: fall through hot.
+        if docker_is_running(name) {
+            warn!("backup_docker: 'docker stop {}' did not stop the container; proceeding with a hot backup", name);
+            None
+        } else {
+            Some(DockerRestartGuard { name: name.to_string() })
+        }
+    } else {
+        None
+    };
 
     // Per-backup work area we'll tar up at the end.
     let work_id = Uuid::new_v4().to_string();
@@ -1834,6 +1892,20 @@ fn is_lxc_running(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True if the named Docker container is currently running. `docker
+/// inspect -f {{.State.Running}}` prints `true`/`false`; a missing
+/// container / dockerless host yields non-zero and we treat it as
+/// not-running (nothing to stop or restart).
+fn docker_is_running(name: &str) -> bool {
+    Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", name])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
 /// Backup a KVM/QEMU VM — copy disk images + JSON config.
 ///
 /// Platform dispatch:
@@ -2361,6 +2433,40 @@ pub fn validate_system_path(path: &str) -> Result<(), String> {
 /// "big/sub"). The pattern is built to match the archive member names for the
 /// mode: contents-only members are `./<rel>` (GNU tar matches the bare `<rel>`),
 /// leaf members are `<leaf>/<rel>`. Pure so the matching is unit-testable.
+/// Split operator folder-exclusions into those that apply (they're
+/// genuinely sub-paths of the backed-up folder) and those dropped
+/// because they point OUTSIDE it. The dropped set is the silent
+/// failure mode wabil hit (2026-07-05): an exclude like
+/// `/mnt/cache/appdata/x` typed against a folder backed up as
+/// `/mnt/user/appdata` (Unraid's user-share vs cache-disk paths point
+/// at the same data but are different path strings) matches no member
+/// and is discarded with no feedback. Surfacing the dropped list turns
+/// "exclusions ignored, no idea why" into an actionable log line.
+/// Pure, so it's unit-testable and reusable by both the immediate and
+/// scheduled backup log paths.
+pub fn classify_folder_excludes(path: &str, excludes: &[String]) -> (Vec<String>, Vec<String>) {
+    let contents_only = path.ends_with('/');
+    let src = path.trim_end_matches('/');
+    // `leaf` is empty only when `src` has no final component (path == "/"),
+    // which `validate_system_path` rejects before any real backup reaches
+    // here — so this matches backup_system_path's own `leaf` for every
+    // path that actually gets archived, keeping the "applied" list truthful.
+    let leaf = Path::new(src).file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut applied = Vec::new();
+    let mut dropped = Vec::new();
+    for raw in excludes {
+        if raw.trim().is_empty() { continue; }
+        if folder_exclude_pattern(raw, src, &leaf, contents_only).is_some() {
+            applied.push(raw.trim().to_string());
+        } else {
+            dropped.push(raw.trim().to_string());
+        }
+    }
+    (applied, dropped)
+}
+
 fn folder_exclude_pattern(raw: &str, src: &str, leaf: &str, contents_only: bool) -> Option<String> {
     let ex = raw.trim().trim_end_matches('/');
     if ex.is_empty() { return None; }
@@ -2406,6 +2512,21 @@ pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) ->
     let parent = p.parent().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
     let leaf = p.file_name().map(|n| n.to_string_lossy().to_string())
         .ok_or_else(|| format!("Cannot determine folder name from '{}'", src))?;
+
+    // Warn (to the journal) about excludes that don't sit under this
+    // folder — they silently do nothing, which is what made folder
+    // exclusions look broken (wabil 2026-07-05). This is the single
+    // choke point every caller hits (Backup Now, scheduled, streamed),
+    // so scheduled runs — which have no live log channel — still get
+    // the diagnostic in `journalctl -u wolfstack`.
+    let (_applied, dropped) = classify_folder_excludes(path, exclude_mounts);
+    if !dropped.is_empty() {
+        warn!(
+            "backup_system_path: {} exclude(s) IGNORED for folder '{}' — not sub-paths of it: {}. \
+             Exclusions must live inside the backed-up folder (on Unraid, use the SAME /mnt/user or /mnt/cache prefix).",
+            dropped.len(), path, dropped.join(", ")
+        );
+    }
 
     let mut tar_cmd = Command::new("tar");
     for raw in exclude_mounts {
@@ -2746,7 +2867,7 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
 
     let (result, docker_config, mounts) = match target.target_type {
         BackupTargetType::Docker => {
-            match backup_docker(&target.name, &target.exclude_mounts) {
+            match backup_docker(&target.name, &target.exclude_mounts, target.stop_for_backup) {
                 Ok((path, size, config, m)) => (Ok((path, size)), config, m),
                 Err(e) => (Err(e), String::new(), Vec::new()),
             }
@@ -5881,12 +6002,14 @@ pub fn create_backup_with_log(
         // Run the backup with line-by-line output for vzdump
         let (result, docker_config, mounts) = match t.target_type {
             BackupTargetType::Docker => {
-                let _ = log.send(format!("  Exporting Docker container '{}'...", t.name));
+                let _ = log.send(format!("  Exporting Docker container '{}'{}...",
+                    t.name,
+                    if t.stop_for_backup { " — stopping for a cold backup" } else { " while it runs" }));
                 if !t.exclude_mounts.is_empty() {
                     let _ = log.send(format!("  Excluding {} mount(s): {}",
                         t.exclude_mounts.len(), t.exclude_mounts.join(", ")));
                 }
-                match backup_docker(&t.name, &t.exclude_mounts) {
+                match backup_docker(&t.name, &t.exclude_mounts, t.stop_for_backup) {
                     Ok((path, size, config, m)) => {
                         if !m.is_empty() {
                             let archived = m.iter().filter(|x| !x.archive_path.is_empty()).count();
@@ -5928,8 +6051,21 @@ pub fn create_backup_with_log(
             BackupTargetType::SystemPath => {
                 let _ = log.send(format!("  Archiving system folder '{}'...", t.system_path));
                 if !t.exclude_mounts.is_empty() {
-                    let _ = log.send(format!("  Excluding {} sub-path(s): {}",
-                        t.exclude_mounts.len(), t.exclude_mounts.join(", ")));
+                    let (applied, dropped) = classify_folder_excludes(&t.system_path, &t.exclude_mounts);
+                    if !applied.is_empty() {
+                        let _ = log.send(format!("  Excluding {} sub-path(s): {}",
+                            applied.len(), applied.join(", ")));
+                    }
+                    // Loudly flag excludes that don't sit under this folder —
+                    // they do nothing, and silence is what made this look like
+                    // a bug (wabil 2026-07-05).
+                    if !dropped.is_empty() {
+                        let _ = log.send(format!(
+                            "  ⚠ {} exclude(s) IGNORED — not inside '{}': {}. \
+                             Exclusions must be sub-paths of the folder being backed up \
+                             (e.g. on Unraid use the SAME /mnt/user or /mnt/cache prefix as the folder).",
+                            dropped.len(), t.system_path, dropped.join(", ")));
+                    }
                 }
                 (backup_system_path(&t.name, &t.system_path, &t.exclude_mounts), String::new(), Vec::new())
             }

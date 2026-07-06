@@ -30721,18 +30721,21 @@ function toggleStopForBackup(type, name, prefix, checked) {
     if (checked) map[key] = true; else delete map[key];
 }
 
-// Checkbox row for native-LXC targets: opt IN to stopping the container for
-// the backup. Default (unticked) backs it up live; when the storage supports
-// snapshots (ZFS/btrfs) the backend snapshots either way — a ticked box then
-// costs only seconds of downtime instead of the whole tar. Proxmox nodes
-// ignore the flag (vzdump snapshots there).
+// Checkbox row for container targets (LXC + Docker): opt IN to stopping the
+// container for the backup. Default (unticked) backs it up live. For LXC on
+// ZFS/btrfs storage the backend snapshots either way, so a ticked box costs
+// only seconds of downtime; elsewhere (and for Docker) it stays down for the
+// backup. Proxmox LXC ignores the flag (vzdump snapshots there).
 function renderStopForBackupOption(t, prefix) {
-    if (t.type !== 'lxc') return '';
+    if (t.type !== 'lxc' && t.type !== 'docker') return '';
     const key = `${t.type}:${t.name}`;
     const checked = stopMapFor(prefix)[key] ? 'checked' : '';
+    const tip = t.type === 'docker'
+        ? "Ticked: the container is stopped while its volumes, bind mounts and image layer are captured, then restarted — fully consistent (quiesced databases). Unticked (default): backed up while running (crash-consistent)."
+        : "Ticked: the container is stopped so the archive is fully consistent — on ZFS/btrfs storage a snapshot is taken and it restarts within seconds; elsewhere it stays down for the whole tar. Unticked (default): backed up while running (crash-consistent). Proxmox containers ignore this — vzdump snapshots there.";
     return `<div style="margin-top:3px;${prefix ? ' padding-left:24px;' : ''}">
         <label style="font-size:11px; color:var(--text-muted); display:inline-flex; align-items:center; gap:5px; cursor:pointer;"
-               title="Ticked: the container is stopped so the archive is fully consistent — on ZFS/btrfs storage a snapshot is taken and it restarts within seconds; elsewhere it stays down for the whole tar. Unticked (default): backed up while running (crash-consistent, like a power-loss snapshot). Proxmox containers ignore this — vzdump snapshots there.">
+               title="${escapeHtml(tip)}">
             <input type="checkbox" ${checked} onchange="toggleStopForBackup('${escapeHtml(t.type)}','${escapeHtml(t.name)}','${prefix}', this.checked)">
             Stop container for cold backup
         </label>
