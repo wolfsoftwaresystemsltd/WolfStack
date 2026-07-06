@@ -399,6 +399,43 @@ mod tests {
         assert!(d.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
+    /// wabil 2026-07-06 EXACT repro: back up /mnt/docker, exclude
+    /// /mnt/docker/plex. End-to-end through the REAL backup_system_path
+    /// (pattern generation + tar), not a hand-built tar command. Proves
+    /// whether the backend honours the exclude for his precise inputs.
+    #[test]
+    fn backup_system_path_excludes_wabil_case_end_to_end() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("wsfx-{}", uuid::Uuid::new_v4().simple()));
+        // Point staging at a writable temp dir (the real default,
+        // /tmp/wolfstack-backups, is root-owned on dev boxes from live runs).
+        let mut locs = crate::paths::get();
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        locs.backup_staging_dir = staging.to_string_lossy().to_string();
+        crate::paths::set_for_test(locs);
+        let docker = root.join("docker");
+        std::fs::create_dir_all(docker.join("plex/config")).unwrap();
+        std::fs::create_dir_all(docker.join("keep")).unwrap();
+        std::fs::File::create(docker.join("plex/config/f")).unwrap().write_all(b"p").unwrap();
+        std::fs::File::create(docker.join("keep/f")).unwrap().write_all(b"k").unwrap();
+
+        let folder = docker.to_string_lossy().to_string();
+        let exclude = docker.join("plex").to_string_lossy().to_string();
+        let (tar_path, _size) = backup_system_path("docker", &folder, &[exclude])
+            .expect("backup_system_path failed");
+
+        let listing = std::process::Command::new("tar")
+            .args(["-tzf", &tar_path.to_string_lossy()])
+            .output().unwrap();
+        let members = String::from_utf8_lossy(&listing.stdout);
+        let _ = std::fs::remove_file(&tar_path);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(members.contains("docker/keep"), "keep must be present: {}", members);
+        assert!(!members.contains("plex"), "plex MUST be excluded but was present:\n{}", members);
+    }
+
     #[test]
     fn classify_folder_excludes_flags_out_of_folder() {
         // Leaf-mode folder: in-folder excludes apply, cross-root ones drop.

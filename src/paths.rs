@@ -307,6 +307,15 @@ pub fn get() -> FileLocations {
     LOCATIONS.read().unwrap().clone()
 }
 
+/// Test-only: override the in-memory locations WITHOUT persisting to
+/// disk. Lets tests point staging/config at a writable temp dir on a
+/// dev box whose real /etc/wolfstack + /tmp/wolfstack-backups are
+/// root-owned. Not compiled into the shipped binary.
+#[cfg(test)]
+pub fn set_for_test(locs: FileLocations) {
+    *LOCATIONS.write().unwrap() = locs;
+}
+
 /// Update file locations and persist to disk.
 pub fn update(locs: FileLocations) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&locs)
