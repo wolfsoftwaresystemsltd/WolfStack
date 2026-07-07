@@ -441,130 +441,53 @@
                     <button type="button" class="learn-banner-dismiss" onclick="dismissLearnBanner()" title="Dismiss" aria-label="Dismiss getting started banner">&times;</button>
                 </div>
 
-                <!-- Map + Bookmarks Row -->
-                <div class="dc-top-row" style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 12px;">
-                    <!-- World Map -->
-                    <div class="card" id="map-card" style="overflow: hidden;">
-                        <div class="card-header" style="cursor:pointer;" onclick="toggleMapCollapse()">
-                            <h3>Infrastructure</h3>
-                            <span id="map-toggle-icon" style="font-size:12px; color:var(--text-muted); transition:transform 0.3s ease;">▼</span>
-                        </div>
-                        <div id="world-map-wrap" style="height:0; overflow:hidden; transition:height 0.3s ease;">
-                            <div id="world-map" style="height: 220px; width: 100%; border: none; border-radius: 0;"></div>
-                        </div>
-                    </div>
-
-                    <!-- Bookmarks -->
-                    <div class="card" id="bookmarks-card" style="overflow: hidden;">
-                        <div class="card-header">
-                            <h3>Bookmarks</h3>
-                            <div style="display:flex;gap:4px;">
-                                <button class="btn btn-sm" onclick="importBookmarks()" style="padding: 2px 8px; font-size: 11px;" title="Import bookmarks from JSON file">Import</button>
-                                <button class="btn btn-sm" onclick="exportBookmarks()" style="padding: 2px 8px; font-size: 11px;" title="Export bookmarks as JSON file">Export</button>
-                                <button class="btn btn-sm" onclick="showAddBookmarkModal()" style="padding: 2px 10px; font-size: 12px;">+ Add</button>
-                            </div>
-                        </div>
-                        <div id="bookmarks-list" style="padding: 10px; display: flex; flex-wrap: wrap; gap: 8px; max-height: 220px; overflow-y: auto;">
-                        </div>
-                    </div>
-                </div>
-
-                <div class="stats-grid" style="margin-bottom: 10px; grid-template-columns: repeat(4, 1fr); gap: 10px;">
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Total Servers</span>
-                            <div class="stat-icon" style="background: var(--accent-glow); color: var(--accent-light);">
-                                <span class="ws-icon-clean-wrap" data-icon="computer"></span></div>
-                        </div>
-                        <div class="stat-value" id="dc-total-servers">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Online</span>
-                            <div class="stat-icon" style="background: var(--success-bg); color: var(--success);"><span class="ws-icon-clean-wrap" data-icon="check"></span></div>
-                        </div>
-                        <div class="stat-value" id="dc-online-servers">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Offline</span>
-                            <div class="stat-icon" style="background: var(--danger-bg); color: var(--danger);"><span class="ws-icon-clean-wrap" data-icon="close"></span></div>
-                        </div>
-                        <div class="stat-value" id="dc-offline-servers">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-header">
-                            <span class="stat-label">Components</span>
-                            <div class="stat-icon" style="background: var(--info-bg); color: var(--info);"><span class="ws-icon-clean-wrap" data-icon="package"></span></div>
-                        </div>
-                        <div class="stat-value" id="dc-total-components">0</div>
-                    </div>
-                </div>
-
-                <!-- Dashboard Layout Toolbar -->
-                <div id="dc-layout-toolbar" class="dc-layout-toolbar">
-                    <button id="dc-layout-btn" class="btn" onclick="toggleLayoutDropdown()" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:5px 12px;">
-                        <span id="dc-layout-icon">⊞</span>
-                        <span id="dc-layout-label">Grid</span>
-                        <span style="font-size:10px;color:var(--text-muted);">▼</span>
-                    </button>
-                    <button id="dc-bg-btn" class="btn" onclick="toggleBgSettingsPanel()" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:5px 12px;" title="Background Settings">
-                        <span class="ws-icon-clean-wrap" data-icon="image"></span> Background
-                    </button>
-                    <!-- Layout Dropdown Panel -->
-                    <div id="dc-layout-dropdown" class="dc-layout-dropdown" style="display:none;">
-                        <div style="margin-bottom:10px;">
-                            <div class="dc-layout-dropdown-title">Layout</div>
-                            <div style="display:flex;gap:8px;">
-                                <div class="dc-layout-option" data-layout="grid" onclick="setDcLayout('grid')">
-                                    <div class="dc-layout-option-icon">⊞</div>
-                                    <div class="dc-layout-option-label">Grid</div>
-                                </div>
-                                <div class="dc-layout-option" data-layout="serverroom" onclick="setDcLayout('serverroom')">
-                                    <div class="dc-layout-option-icon">▥</div>
-                                    <div class="dc-layout-option-label">Server Room</div>
-                                </div>
-                                <div class="dc-layout-option" data-layout="tiny" onclick="setDcLayout('tiny')">
-                                    <div class="dc-layout-option-icon">∷</div>
-                                    <div class="dc-layout-option-label">Tiny</div>
+                <!-- Customisable home dashboard. Widget shells are built by
+                     ensureDashboardGrid() in app.js from the per-user layout
+                     stored in the wolfstack_dashboard preference (synced
+                     server-side, so it follows the user to any browser).
+                     The old fixed map/bookmarks/stats/servers sections now
+                     live on as widgets with the same element IDs. -->
+                <div id="dash-toolbar" style="display:flex; align-items:center; justify-content:flex-end; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
+                    <!-- Pre-created freshness badge: attachLastUpdated() adopts an
+                         existing .ws-last-updated child instead of creating its own
+                         absolutely-positioned one (which would overlap widget
+                         headers in the grid). -->
+                    <span class="ws-last-updated" style="font-size:11px; color:var(--text-muted); margin-right:auto;"></span>
+                    <span id="dash-edit-hint" style="display:none; font-size:12px; color:var(--text-muted); margin-right:auto;">Drag widgets to rearrange · arrows resize · ⚙ configures · ✕ removes</span>
+                    <span id="dc-bg-wrap" style="position:relative;">
+                        <button id="dc-bg-btn" class="btn btn-sm" style="font-size:12px; padding:4px 12px;" onclick="toggleBgSettingsPanel()" title="Background image settings"><span class="ws-icon-clean-wrap" data-icon="image"></span> Background</button>
+                        <!-- Background Settings Panel -->
+                        <div id="dc-bg-panel" class="dc-layout-dropdown" style="display:none; width:260px; left:auto; right:0;">
+                            <div style="margin-bottom:10px;">
+                                <div class="dc-layout-dropdown-title">Background Image</div>
+                                <div style="display:flex;gap:6px;margin-top:6px;">
+                                    <label class="btn" style="font-size:11px;padding:4px 10px;cursor:pointer;">
+                                        Upload <input type="file" id="dc-bg-upload" accept="image/*" onchange="handleBgUpload(this)" style="display:none;">
+                                    </label>
+                                    <button class="btn" style="font-size:11px;padding:4px 10px;" onclick="clearBgImage()">Clear</button>
                                 </div>
                             </div>
-                        </div>
-                        <div style="border-top:1px solid var(--border);padding-top:10px;">
-                            <label id="dc-compact-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-secondary);">
-                                <input type="checkbox" id="dc-compact-toggle" onchange="toggleDcCompact(this.checked)">
-                                Compact Mode (LED indicators)
-                            </label>
-                        </div>
-                    </div>
-                    <!-- Background Settings Panel -->
-                    <div id="dc-bg-panel" class="dc-layout-dropdown" style="display:none;width:260px;left:auto;">
-                        <div style="margin-bottom:10px;">
-                            <div class="dc-layout-dropdown-title">Background Image</div>
-                            <div style="display:flex;gap:6px;margin-top:6px;">
-                                <label class="btn" style="font-size:11px;padding:4px 10px;cursor:pointer;">
-                                    Upload <input type="file" id="dc-bg-upload" accept="image/*" onchange="handleBgUpload(this)" style="display:none;">
+                            <div style="border-top:1px solid var(--border);padding-top:8px;margin-bottom:8px;">
+                                <label style="font-size:11px;color:var(--text-secondary);display:flex;justify-content:space-between;">
+                                    Brightness <span id="dc-bg-bright-val">100%</span>
                                 </label>
-                                <button class="btn" style="font-size:11px;padding:4px 10px;" onclick="clearBgImage()">Clear</button>
+                                <input type="range" id="dc-bg-brightness" min="0" max="100" value="100" oninput="updateBgBrightness(this.value)">
+                            </div>
+                            <div style="border-top:1px solid var(--border);padding-top:8px;">
+                                <label style="font-size:11px;color:var(--text-secondary);display:flex;justify-content:space-between;">
+                                    Blur <span id="dc-bg-blur-val">0px</span>
+                                </label>
+                                <input type="range" id="dc-bg-blur" min="0" max="20" value="0" oninput="updateBgBlur(this.value)">
                             </div>
                         </div>
-                        <div style="border-top:1px solid var(--border);padding-top:8px;margin-bottom:8px;">
-                            <label style="font-size:11px;color:var(--text-secondary);display:flex;justify-content:space-between;">
-                                Brightness <span id="dc-bg-bright-val">100%</span>
-                            </label>
-                            <input type="range" id="dc-bg-brightness" min="0" max="100" value="100" oninput="updateBgBrightness(this.value)">
-                        </div>
-                        <div style="border-top:1px solid var(--border);padding-top:8px;">
-                            <label style="font-size:11px;color:var(--text-secondary);display:flex;justify-content:space-between;">
-                                Blur <span id="dc-bg-blur-val">0px</span>
-                            </label>
-                            <input type="range" id="dc-bg-blur" min="0" max="20" value="0" oninput="updateBgBlur(this.value)">
-                        </div>
-                    </div>
+                    </span>
+                    <button class="btn btn-sm" id="dash-add-btn" style="display:none; font-size:12px; padding:4px 12px;" onclick="dashShowAddWidgetModal()">+ Add widget</button>
+                    <button class="btn btn-sm" id="dash-reset-btn" style="display:none; font-size:12px; padding:4px 12px;" onclick="dashResetLayout()">Reset layout</button>
+                    <button class="btn btn-sm" id="dash-cancel-btn" style="display:none; font-size:12px; padding:4px 12px;" onclick="dashCancelLayoutBtn()">Cancel</button>
+                    <button class="btn btn-sm btn-primary" id="dash-save-btn" style="display:none; font-size:12px; padding:4px 12px;" onclick="dashSaveLayoutBtn()">✓ Save changes</button>
+                    <button class="btn btn-sm" id="dash-edit-btn" style="font-size:12px; padding:4px 12px;" onclick="dashToggleEditMode()">✎ Customise</button>
                 </div>
-
-                <!-- Server cards grid -->
-                <div id="datacenter-servers" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:10px;"></div>
+                <div id="dashboard-grid" class="dash-grid"></div>
             </div>
 
             <!-- ═══ Dashboard Page (per-server) ═══ -->

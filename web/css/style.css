@@ -4107,10 +4107,6 @@ body.sidebar-collapsed #task-log-footer {
         white-space: nowrap;
     }
 
-    /* Datacenter top row stacks vertically */
-    .dc-top-row {
-        grid-template-columns: 1fr !important;
-    }
 }
 
 /* ─── Small Mobile (480px) ─── */
@@ -4805,4 +4801,158 @@ body.learn-drawer-open #task-log-footer { right: var(--learn-drawer-w) !importan
        the navigation fallback on narrow screens. */
     body { --app-menubar-h: 0px; }
     .app-menubar { display: none; }
+}
+
+/* ─── Home dashboard — customisable widget grid ─── */
+.dash-grid {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 12px;
+    align-items: start;
+}
+
+.dash-widget {
+    min-width: 0;
+    overflow: hidden;
+}
+
+.dash-widget-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.dash-widget-title {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dash-widget-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.dash-widget-controls {
+    display: none;
+    gap: 3px;
+    margin-left: 8px;
+    flex-shrink: 0;
+}
+
+/* When a widget has no view-mode header buttons, .dash-widget-actions is
+   empty and the controls become the header's right edge in edit mode. */
+.dash-grid.dash-editing .dash-widget-controls {
+    display: flex;
+}
+
+.dash-ctl-btn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 4px;
+    width: 24px;
+    height: 22px;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+}
+
+.dash-ctl-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
+.dash-widget-body {
+    min-width: 0;
+}
+
+/* Bare widgets (stats / servers / search) melt into the page in view mode —
+   they predate the widget system and carry their own card styling inside. */
+.dash-grid:not(.dash-editing) .dash-widget.dash-bare {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    overflow: visible;
+}
+
+.dash-grid:not(.dash-editing) .dash-widget.dash-bare > .dash-widget-header {
+    display: none;
+}
+
+/* Edit mode affordances */
+.dash-grid.dash-editing .dash-widget {
+    outline: 1px dashed var(--border);
+    outline-offset: 2px;
+    cursor: grab;
+}
+
+.dash-grid.dash-editing .dash-widget:active {
+    cursor: grabbing;
+}
+
+.dash-widget.dash-dragging {
+    opacity: 0.4;
+}
+
+.dash-widget.dash-drop-before {
+    box-shadow: 0 -3px 0 0 var(--accent), var(--shadow-sm, 0 0 0 transparent);
+}
+
+.dash-widget.dash-drop-after {
+    box-shadow: 0 3px 0 0 var(--accent), var(--shadow-sm, 0 0 0 transparent);
+}
+
+/* Add-widget catalog modal */
+.dash-add-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+}
+
+.dash-add-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: var(--transition);
+}
+
+.dash-add-tile:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: var(--bg-card-hover, var(--bg-tertiary));
+}
+
+.dash-add-tile:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+/* Widget settings modal labels */
+.dash-cfg-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+/* Narrow screens: every widget goes full width, in layout order. */
+@media (max-width: 900px) {
+    .dash-grid > .dash-widget {
+        grid-column: 1 / -1 !important;
+    }
 }
