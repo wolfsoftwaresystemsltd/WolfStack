@@ -34908,6 +34908,69 @@ async fn system_deps_install(
     }
 }
 
+// ─── Host mail relay (msmtp sendmail shim) ───
+
+/// GET /api/mail-relay/status — report whether THIS node can send host
+/// email (msmtp installed, sendmail owned by us / an MTA / nothing, SMTP
+/// configured). Cross-node calls go via the node proxy.
+async fn mail_relay_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match tokio::task::spawn_blocking(crate::mail_relay::status).await {
+        Ok(s) => HttpResponse::Ok().json(s),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MailRelayEnableRequest {
+    #[serde(default)]
+    force: bool,
+}
+
+/// POST /api/mail-relay/enable — install + configure msmtp as
+/// /usr/sbin/sendmail on THIS node, reusing the configured SMTP relay.
+async fn mail_relay_enable(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<MailRelayEnableRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let force = body.force;
+    match tokio::task::spawn_blocking(move || crate::mail_relay::enable(force)).await {
+        Ok(Ok(r)) => HttpResponse::Ok().json(r),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// POST /api/mail-relay/disable — remove our sendmail shim + msmtprc on
+/// THIS node, restoring any MTA we replaced.
+async fn mail_relay_disable(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match tokio::task::spawn_blocking(crate::mail_relay::disable).await {
+        Ok(Ok(s)) => HttpResponse::Ok().json(s),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MailRelayTestRequest {
+    to: String,
+}
+
+/// POST /api/mail-relay/test — send a test message through the host
+/// sendmail path to prove the relay works end-to-end.
+async fn mail_relay_test(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<MailRelayTestRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let to = body.to.clone();
+    match tokio::task::spawn_blocking(move || crate::mail_relay::test_send(&to)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "message": msg })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
 /// GET /api/danger/pending — list dangerous ops awaiting confirmation
 /// or auto-rollback. Polled by the frontend to render the countdown
 /// banner. No auth required beyond standard — cluster-secret callers
@@ -38736,6 +38799,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // is the first consumer, more groups (VMs, WolfNet) added later.
         .route("/api/system/deps/check",   web::get().to(system_deps_check))
         .route("/api/system/deps/install", web::post().to(system_deps_install))
+        // Host mail relay (msmtp sendmail shim)
+        .route("/api/mail-relay/status",  web::get().to(mail_relay_status))
+        .route("/api/mail-relay/enable",  web::post().to(mail_relay_enable))
+        .route("/api/mail-relay/disable", web::post().to(mail_relay_disable))
+        .route("/api/mail-relay/test",    web::post().to(mail_relay_test))
         // Fleet Logs (loghub) — cluster log aggregation / retention / search.
         .route("/api/logs/entitlement",    web::get().to(logs_entitlement))
         // Ingest carries log batches: lift the 2 MB Json default to 64 MB so

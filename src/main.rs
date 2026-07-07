@@ -65,6 +65,7 @@ mod reverse_proxy;
 mod control_panel;
 mod github_backup;
 mod deps;
+mod mail_relay;
 mod systemcheck;
 mod security;
 mod secret_audit;
