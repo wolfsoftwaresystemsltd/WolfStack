@@ -4280,7 +4280,6 @@ function filterSidebarNodes() {
 //   headerActions(w) — extra always-visible header buttons (HTML string)
 //   configForm(w) / readConfig(w) — settings modal body + apply (may be async;
 //                      readConfig returns an error string or null)
-//   requiresConfig   — open the settings modal right after adding
 
 const DASH_PREF_KEY = 'wolfstack_dashboard';
 const DASH_LAYOUT_VERSION = 1;
@@ -5108,32 +5107,36 @@ async function dashRefreshThreats(body, w) {
     </div>`;
 }
 
-// Fleet threat-intel: /api/threat-intel/fleet-status returns
-// { nodes: [ ThreatIntelStatus{ enabled, state:"off"|"dry-run"|"enforce",
-//   cluster, feed_entry_count, ipset_entry_count, ... } ] } (one per node).
+// Fleet threat-intel: /api/threat-intel/fleet-status returns the fleet-fanout
+// envelope — one FleetNodeResult per node:
+//   { nodes: [ { node_id, hostname, status:"ok"|"failed"|"skipped",
+//               data: ThreatIntelStatus | null, error } ] }
+// where the ThreatIntelStatus (state:"off"|"dry-run"|"enforce", cluster,
+// feed_entry_count, ...) lives under `.data`. Reading the fields off the top
+// level (as this once did) always yields undefined → every count shows 0.
 async function dashRefreshThreatsFleet(body, w) {
     const cfg = (w && w.config) || {};
     const resp = await fetch(apiUrl('/api/threat-intel/fleet-status'));
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
-    let nodes = Array.isArray(data.nodes) ? data.nodes : [];
-    // Narrow to the chosen cluster when scope is a specific cluster.
+    // Keep only nodes that actually returned a status payload.
+    let entries = (Array.isArray(data.nodes) ? data.nodes : []).filter(n => n && n.status === 'ok' && n.data);
     if (cfg.scope === 'cluster') {
         const c = cfg.cluster || dashSelfCluster();
-        nodes = nodes.filter(n => (n.cluster || 'WolfStack') === c);
+        entries = entries.filter(n => (n.data.cluster || 'WolfStack') === c);
     }
-    if (!nodes.length) {
+    if (!entries.length) {
         body.innerHTML = renderEmptyState({ title: 'No data', body: 'Threat-intelligence status for ' + dashScopeLabel(cfg) + ' will appear here.' });
         return;
     }
-    const count = (st) => nodes.filter(n => n.state === st).length;
+    const count = (st) => entries.filter(n => n.data.state === st).length;
     const enforcing = count('enforce'), dry = count('dry-run'), off = count('off');
-    const totalFeed = nodes.reduce((s, n) => s + (n.feed_entry_count || 0), 0);
+    const totalFeed = entries.reduce((s, n) => s + (n.data.feed_entry_count || 0), 0);
     const tile = (v, label, color) => `<div style="text-align:center;padding:10px;background:var(--bg-tertiary);border-radius:8px;">
         <div style="font-size:22px;font-weight:700;font-family:'JetBrains Mono',monospace;${color ? 'color:' + color + ';' : ''}">${v}</div>
         <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">${label}</div></div>`;
     body.innerHTML = `<div style="padding:12px 14px;">
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">${nodes.length} node${nodes.length === 1 ? '' : 's'} · ${Number(totalFeed).toLocaleString()} feed entries</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">${entries.length} node${entries.length === 1 ? '' : 's'} · ${Number(totalFeed).toLocaleString()} feed entries</div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
             ${tile(enforcing, 'Enforcing', 'var(--success)')}
             ${tile(dry, 'Dry run', 'var(--info)')}
@@ -5727,7 +5730,7 @@ const DASH_WIDGETS = {
     },
     weather: {
         name: 'Weather', icon: '⛅', desc: 'Current conditions and today’s range for your location (Open-Meteo).',
-        defW: 3, defH: 1, autoH: true, refreshMs: 900000, requiresConfig: true,
+        defW: 3, defH: 1, autoH: true, refreshMs: 900000,
         build: (body) => { body.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text-muted);">Loading weather…</div>'; },
         refresh: dashRefreshWeather,
         configForm: dashWeatherConfigForm, readConfig: dashWeatherReadConfig,
@@ -5745,14 +5748,14 @@ const DASH_WIDGETS = {
     },
     rss: {
         name: 'RSS feed', icon: '📰', desc: 'Headlines from any RSS or Atom feed.',
-        defW: 4, defH: 2, refreshMs: 300000, requiresConfig: true,
+        defW: 4, defH: 2, refreshMs: 300000,
         build: (body) => { body.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text-muted);">Loading feed…</div>'; },
         refresh: dashRefreshRss,
         configForm: dashRssConfigForm, readConfig: dashRssReadConfig,
     },
     iframe: {
         name: 'Embedded page', icon: '🖼️', desc: 'Embed any page that allows framing — Grafana panels, wikis, dashboards.',
-        defW: 6, defH: 2, noScroll: true, requiresConfig: true,
+        defW: 6, defH: 2, noScroll: true,
         build: dashBuildIframe,
         configForm: dashIframeConfigForm, readConfig: dashIframeReadConfig,
     },
@@ -6191,7 +6194,11 @@ function dashAddWidget(type) {
     dashDismissModal();
     renderDatacenterOverview();
     showToast(def.name + ' added to your dashboard', 'success');
-    if (def.requiresConfig) dashShowConfigModal(w.id);
+    // Any widget with type-specific options (scope, feed URL, server, …) opens
+    // its settings immediately so the operator sets parameters up front rather
+    // than having to find the ⚙ afterwards. Widgets with only a size (map,
+    // bookmarks, stats, servers, notes, AI) are added straight away.
+    if (def.configForm) dashShowConfigModal(w.id);
 }
 
 // ── Per-widget settings modal ──
