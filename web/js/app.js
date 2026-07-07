@@ -1775,10 +1775,35 @@ function wsSwitchNode(nodeId) {
     if (!list.find(x => x.id === nodeId)) return;
     selectServerView(nodeId, wsScopeTargetView());
 }
+// Views that opt into in-place cluster re-scoping. When the shared
+// top-bar cluster selector changes and one of these is the current
+// page, the page re-renders for the new cluster (scope pointed at that
+// cluster's first node, so proxied API calls hit the right cluster)
+// INSTEAD of the default "jump to the cluster's first node" navigation.
+// Key = currentPage id; value = handler(cluster, firstNodeId).
+// WolfHost registers here so its Apps-drawer screen honours the shared
+// selector without needing a second dropdown of its own.
+window.wsClusterScopedViews = window.wsClusterScopedViews || {};
+window.registerClusterScopedView = function (page, handler) {
+    if (page && typeof handler === 'function') window.wsClusterScopedViews[page] = handler;
+};
+
 function wsSwitchCluster(cluster) {
     const list = (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) ? allNodes : [];
     const nodes = wsScopeNodes(list.filter(n => n.node_type !== 'proxmox'), cluster);
     if (!nodes.length) { try { updateClusterPill(); } catch (_) {} return; }
+    // Cluster-scoped page (e.g. WolfHost): re-scope in place instead of
+    // navigating away. Point the scope at this cluster's first node so
+    // apiUrl() proxies the page's calls to the right cluster, refresh the
+    // pill, then let the page re-render for the new cluster.
+    const page = (typeof currentPage !== 'undefined') ? currentPage : '';
+    const handler = window.wsClusterScopedViews[page];
+    if (typeof handler === 'function') {
+        currentNodeId = nodes[0].id;
+        try { updateClusterPill(); } catch (_) {}
+        try { handler(cluster, nodes[0].id); } catch (e) { console.error('cluster-scoped view handler failed:', e); }
+        return;
+    }
     // Spec: changing cluster jumps to that cluster's first node.
     selectServerView(nodes[0].id, wsScopeTargetView());
 }
