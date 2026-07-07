@@ -2105,6 +2105,10 @@ function configuratorApiUrl(path) {
 
 // ─── Page Navigation ───
 function selectView(page) {
+    // Guard against leaving the home dashboard with unsaved widget changes.
+    // If it intercepts, it re-runs this call after the user chooses.
+    if (typeof dashLeaveGuard === 'function' && page !== 'datacenter'
+        && !dashLeaveGuard(() => selectView(page))) return;
     closeSidebarMobile();
     if (typeof fleetLogsStopTail === 'function') fleetLogsStopTail();
     // Close the embedded inbox terminal when leaving the inbox so the
@@ -2214,6 +2218,9 @@ function selectView(page) {
 }
 
 function selectServerView(nodeId, view) {
+    // Guard against leaving the home dashboard with unsaved widget changes.
+    if (typeof dashLeaveGuard === 'function'
+        && !dashLeaveGuard(() => selectServerView(nodeId, view))) return;
     closeSidebarMobile();
     if (typeof fleetLogsStopTail === 'function') fleetLogsStopTail();
     // Close the embedded inbox terminal when leaving the inbox.
@@ -4258,14 +4265,14 @@ function filterSidebarNodes() {
 //
 // Layout schema (version 1):
 //   { "version": 1, "widgets": [ { "id", "type", "w", "h", "config" } ] }
-//   w = column span (one of DASH_WIDTH_STEPS), h = height class 1..3.
+//   w = column span 1..12; h = pixel height, or 'auto' to fit content.
 //
 // Widget registry contract (DASH_WIDGETS[type]):
 //   name/desc/icon   — catalog entry
-//   defW/defH        — default size
+//   defW             — default width (columns); defH — legacy default height class
 //   single           — only one instance allowed (widgets with fixed DOM ids)
 //   bare             — no card chrome in view mode (stats / servers / search)
-//   autoH            — content-sized; height controls hidden
+//   autoH            — default to auto (fit-content) height when first added
 //   noScroll         — body overflow hidden instead of auto (map / iframe)
 //   build(body, w)   — create the widget's DOM once
 //   nodeUpdate(body, w) — repaint from `allNodes` on every /api/nodes poll
@@ -4277,19 +4284,96 @@ function filterSidebarNodes() {
 
 const DASH_PREF_KEY = 'wolfstack_dashboard';
 const DASH_LAYOUT_VERSION = 1;
-const DASH_HEIGHTS = { 1: 220, 2: 320, 3: 460 };   // height class → body px
-const DASH_WIDTH_STEPS = [3, 4, 6, 8, 12];          // allowed column spans
+// Legacy height-class → px map, used only to migrate v1 layouts that stored
+// h as 1/2/3. New layouts store h as a pixel number or the string 'auto'.
+const DASH_HEIGHTS = { 1: 220, 2: 320, 3: 460 };
+const DASH_MIN_W = 1, DASH_MAX_W = 12;              // grid is 12 columns
+const DASH_MIN_H = 120, DASH_MAX_H = 1200;          // body pixel height bounds
+const DASH_H_STEP = 40;                             // arrow-button height step
 
 let dashEditMode = false;
-let dashLayout = null;            // parsed layout, cached
+let dashLayout = null;            // parsed layout, cached (the DRAFT while editing)
+let dashSavedJson = null;         // JSON of the last-saved layout (dirty compare)
 let dashBuiltSignature = null;    // structure of the currently-built shells
 let _dashDragId = null;           // widget id being dragged
 let _dashModalOverlay = null;     // add/config modal overlay element
 let _dashRefreshAt = {};          // widget id → last fetch-refresh (ms)
 let _dashRefreshing = {};         // widget id → in-flight guard
+let _dashLeaveModal = null;       // "unsaved changes" prompt overlay
 
 function dashUid() {
     return 'w' + Math.random().toString(36).slice(2, 10);
+}
+
+// True only for http/https URLs — used to gate any href built from remote or
+// untrusted data (search results, feeds) against javascript:/data: injection.
+function dashSafeHttpUrl(u) {
+    return typeof u === 'string' && /^https?:\/\//i.test(u.trim());
+}
+
+// The self node's cluster — the meaning of "This cluster" for scoped widgets.
+function dashSelfCluster() {
+    const self = allNodes.find(n => n.is_self);
+    return (self && self.cluster_name) || 'WolfStack';
+}
+
+// Online WolfStack (non-Proxmox) nodes, optionally limited to one cluster.
+function dashScopeNodes(cluster) {
+    return allNodes.filter(n =>
+        n.online && n.node_type !== 'proxmox' &&
+        (!cluster || (n.cluster_name || 'WolfStack') === cluster));
+}
+
+// Fan a GET out across a set of nodes (via the node proxy for peers), parse
+// JSON, and hand each node's result + node to `mapFn` which returns an array
+// of rows to concat. Per-node failures are skipped, never fatal.
+async function dashFanout(nodes, path, mapFn) {
+    const results = await Promise.all(nodes.map(async (n) => {
+        try {
+            // Bound each per-node call — without this, one hung peer leaves the
+            // fetch pending forever, and the widget's _dashRefreshing guard
+            // never clears, permanently wedging its refresh.
+            const resp = await fetch(nodeApiUrl(n.id, path), { signal: AbortSignal.timeout(6000) });
+            if (!resp.ok) return [];
+            return mapFn(await resp.json(), n) || [];
+        } catch (_) { return []; }
+    }));
+    return results.flat();
+}
+
+// Fetch an external URL for a widget. Tries the browser directly first
+// (works when the endpoint sends CORS, e.g. Open-Meteo) and falls back to
+// the server-side proxy (needed for RSS feeds, which usually don't). Returns
+// the response body text, or throws with a human-readable message.
+async function dashFetchExternal(url) {
+    try {
+        const direct = await fetch(url, { mode: 'cors', credentials: 'omit' });
+        if (direct.ok) return await direct.text();
+    } catch (_) { /* CORS/network — fall through to the proxy */ }
+    let resp;
+    try {
+        resp = await fetch(apiUrl('/api/dashboard/fetch-proxy?url=' + encodeURIComponent(url)));
+    } catch (e) {
+        throw new Error('Could not reach this URL, and the server proxy is unreachable.');
+    }
+    if (resp.status === 404) {
+        throw new Error('This needs a WolfStack server update (the fetch proxy isn’t available on this server yet).');
+    }
+    if (!resp.ok) {
+        let msg = 'HTTP ' + resp.status;
+        try { const j = await resp.json(); if (j.error) msg = j.error; } catch (_) {}
+        throw new Error(msg);
+    }
+    return await resp.text();
+}
+
+// A labelled <select> for a widget's data scope, used by several config forms.
+function dashScopeField(id, value, opts) {
+    const options = opts.map(o =>
+        `<option value="${o.v}"${o.v === value ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
+    ).join('');
+    return `<label class="dash-cfg-label">Scope</label>
+        <select id="${id}" class="form-control">${options}</select>`;
 }
 
 // The factory default mirrors the classic WolfStack home page exactly:
@@ -4298,10 +4382,10 @@ function dashDefaultLayout() {
     return {
         version: DASH_LAYOUT_VERSION,
         widgets: [
-            { id: dashUid(), type: 'map', w: 4, h: 1, config: {} },
-            { id: dashUid(), type: 'bookmarks', w: 8, h: 1, config: {} },
-            { id: dashUid(), type: 'stats', w: 12, h: 1, config: {} },
-            { id: dashUid(), type: 'servers', w: 12, h: 2, config: {} },
+            { id: dashUid(), type: 'map', w: 4, h: 220, config: {} },
+            { id: dashUid(), type: 'bookmarks', w: 8, h: 220, config: {} },
+            { id: dashUid(), type: 'stats', w: 12, h: 'auto', config: {} },
+            { id: dashUid(), type: 'servers', w: 12, h: 'auto', config: {} },
         ],
     };
 }
@@ -4326,7 +4410,10 @@ function dashLoadLayout() {
                     }
                     return true;
                 });
-                parsed.widgets.forEach(w => { if (!w.config || typeof w.config !== 'object') w.config = {}; });
+                parsed.widgets.forEach(w => {
+                    if (!w.config || typeof w.config !== 'object') w.config = {};
+                    dashNormalizeSize(w);
+                });
                 dashLayout = parsed;
                 return dashLayout;
             }
@@ -4336,8 +4423,34 @@ function dashLoadLayout() {
     return dashLayout;
 }
 
+// Normalise a widget's stored size in place. Width → integer 1..12. Height →
+// either the string 'auto' (fit content) or an integer pixel value; a legacy
+// height-class (1/2/3) is mapped through DASH_HEIGHTS.
+function dashNormalizeSize(w) {
+    const def = DASH_WIDGETS[w.type] || {};
+    let width = parseInt(w.w, 10);
+    if (isNaN(width)) width = def.defW || 6;
+    w.w = Math.max(DASH_MIN_W, Math.min(DASH_MAX_W, width));
+
+    if (w.h === 'auto') return;
+    if (typeof w.h === 'number' && w.h >= 4) {
+        // Already a pixel value.
+        w.h = Math.max(DASH_MIN_H, Math.min(DASH_MAX_H, Math.round(w.h)));
+        return;
+    }
+    // Legacy class (1/2/3) or missing → px, or 'auto' for content-sized widgets.
+    if (DASH_HEIGHTS[w.h]) { w.h = DASH_HEIGHTS[w.h]; return; }
+    w.h = def.autoH ? 'auto' : (DASH_HEIGHTS[def.defH] || 320);
+}
+
 function dashFindWidget(wid) {
     return dashLoadLayout().widgets.find(w => w.id === wid) || null;
+}
+
+// True while editing with changes not yet saved.
+function dashHasUnsavedChanges() {
+    return dashEditMode && dashSavedJson !== null &&
+        JSON.stringify(dashLoadLayout()) !== dashSavedJson;
 }
 
 function dashBody(wid) {
@@ -4550,7 +4663,11 @@ function dashUpdateMetrics(body, w) {
     (m.disks || []).forEach(d => {
         bars += dashBar(d.mount_point || d.name || 'disk', d.usage_percent, formatBytes(d.used_bytes || 0) + ' / ' + formatBytes(d.total_bytes || 0));
     });
-    const load = (m.load_avg || []).map(v => (typeof v === 'number' ? v.toFixed(2) : v)).join(' · ');
+    // load_avg is a { one, five, fifteen } object (LoadAverage in Rust).
+    const la = m.load_avg || {};
+    const load = [la.one, la.five, la.fifteen]
+        .filter(v => typeof v === 'number')
+        .map(v => v.toFixed(2)).join(' · ');
     box.innerHTML = head + bars + (load ? `<div style="font-size:11px;color:var(--text-muted);margin-top:8px;">Load: <span style="font-family:'JetBrains Mono',monospace;">${escapeHtml(load)}</span> — ${m.processes || 0} processes</div>` : '');
 }
 
@@ -4568,14 +4685,28 @@ function dashMetricsReadConfig(w) {
     return null;
 }
 
-// ── Widget: containers (cluster-wide) ──
+// ── Widget: containers (cluster or fleet) ──
 
 async function dashRefreshContainers(body, w) {
-    const resp = await fetch(apiUrl('/api/containers/cluster'));
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    let list = Array.isArray(data) ? data : (data.containers || []);
     const cfg = w.config || {};
+    let list;
+    if (cfg.scope === 'fleet') {
+        // Fan out per cluster: /api/containers/cluster already merges within a
+        // cluster, so hit one representative online node per cluster and merge.
+        const byCluster = {};
+        dashScopeNodes().forEach(n => {
+            const c = n.cluster_name || 'WolfStack';
+            if (!byCluster[c] || n.is_self) byCluster[c] = n;
+        });
+        const reps = Object.values(byCluster);
+        list = await dashFanout(reps, '/api/containers/cluster', (data) =>
+            Array.isArray(data) ? data : (data.containers || []));
+    } else {
+        const resp = await fetch(apiUrl('/api/containers/cluster'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        list = Array.isArray(data) ? data : (data.containers || []);
+    }
     if (cfg.runtime && cfg.runtime !== 'all') list = list.filter(c => c.runtime === cfg.runtime);
     const total = list.length;
     const running = list.filter(c => c.state === 'running').length;
@@ -4588,7 +4719,7 @@ async function dashRefreshContainers(body, w) {
     if (!total) {
         body.innerHTML = renderEmptyState({
             title: 'No containers found',
-            body: 'Docker and LXC containers across the cluster will appear here.',
+            body: (cfg.scope === 'fleet' ? 'Docker and LXC containers across every cluster' : 'Docker and LXC containers across this cluster') + ' will appear here.',
         });
         return;
     }
@@ -4611,7 +4742,10 @@ async function dashRefreshContainers(body, w) {
 function dashContainersConfigForm(w) {
     const cfg = w.config || {};
     const sel = (v, cur) => v === (cur || 'all') ? ' selected' : '';
-    return `<label class="dash-cfg-label">Runtime</label>
+    return dashScopeField('dashcfg-ct-scope', cfg.scope || 'cluster', [
+        { v: 'cluster', label: 'This cluster' },
+        { v: 'fleet', label: 'Fleet (all clusters)' },
+    ]) + `<label class="dash-cfg-label">Runtime</label>
         <select id="dashcfg-ct-runtime" class="form-control">
             <option value="all"${sel('all', cfg.runtime)}>Docker + LXC</option>
             <option value="docker"${sel('docker', cfg.runtime)}>Docker only</option>
@@ -4627,6 +4761,7 @@ function dashContainersConfigForm(w) {
 }
 
 function dashContainersReadConfig(w) {
+    w.config.scope = dashCfgVal('dashcfg-ct-scope') === 'fleet' ? 'fleet' : 'cluster';
     w.config.runtime = dashCfgVal('dashcfg-ct-runtime') || 'all';
     w.config.state = dashCfgVal('dashcfg-ct-state') || 'all';
     w.config.max = dashCfgInt('dashcfg-ct-max', 30, 5, 100);
@@ -4636,10 +4771,28 @@ function dashContainersReadConfig(w) {
 // ── Widget: uptime monitors (status pages) ──
 
 async function dashRefreshUptime(body, w) {
-    const resp = await fetch(apiUrl('/api/statuspage/monitors'));
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    const monitors = data.monitors || [];
+    const cfg = w.config || {};
+    const scope = cfg.scope || 'cluster';
+    let monitors;
+    if (scope === 'fleet') {
+        // Fan monitors out across every online node, dedup by monitor id.
+        const seen = new Set();
+        monitors = (await dashFanout(dashScopeNodes(), '/api/statuspage/monitors',
+            (data) => data.monitors || [])).filter(m => {
+                const id = m.monitor && m.monitor.id;
+                if (!id || seen.has(id)) return false;
+                seen.add(id); return true;
+            });
+    } else {
+        const resp = await fetch(apiUrl('/api/statuspage/monitors'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        monitors = data.monitors || [];
+        if (scope === 'cluster') {
+            const sc = dashSelfCluster();
+            monitors = monitors.filter(m => (m.monitor && (m.monitor.cluster || 'WolfStack')) === sc);
+        }
+    }
     if (!monitors.length) {
         body.innerHTML = renderEmptyState({
             title: 'No uptime monitors yet',
@@ -4665,23 +4818,40 @@ async function dashRefreshUptime(body, w) {
 }
 
 function dashUptimeConfigForm(w) {
-    return `<label class="dash-cfg-label">Max rows</label>
-        <input type="number" id="dashcfg-up-max" class="form-control" min="3" max="100" value="${(w.config && w.config.max) || 20}">`;
+    const cfg = w.config || {};
+    return dashScopeField('dashcfg-up-scope', cfg.scope || 'cluster', [
+        { v: 'cluster', label: 'This cluster' },
+        { v: 'fleet', label: 'Fleet (all clusters)' },
+    ]) + `<label class="dash-cfg-label">Max rows</label>
+        <input type="number" id="dashcfg-up-max" class="form-control" min="3" max="100" value="${cfg.max || 20}">`;
 }
 
 function dashUptimeReadConfig(w) {
+    w.config.scope = dashCfgVal('dashcfg-up-scope') === 'fleet' ? 'fleet' : 'cluster';
     w.config.max = dashCfgInt('dashcfg-up-max', 20, 3, 100);
     return null;
 }
 
-// ── Widget: recent alerts ──
+// ── Widget: recent alerts (node / cluster / fleet) ──
 
 async function dashRefreshAlerts(body, w) {
-    const resp = await fetch(apiUrl('/api/alerts?since=0'));
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    const max = (w.config && w.config.max) || 15;
-    const alerts = (data.alerts || []).slice(-max).reverse();
+    const cfg = w.config || {};
+    const scope = cfg.scope || 'fleet';
+    const max = cfg.max || 15;
+    let alerts;
+    if (scope === 'node') {
+        const resp = await fetch(apiUrl('/api/alerts?since=0'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        alerts = (await resp.json()).alerts || [];
+    } else {
+        const nodes = scope === 'cluster' ? dashScopeNodes(dashSelfCluster()) : dashScopeNodes();
+        alerts = await dashFanout(nodes, '/api/alerts?since=0',
+            (data, n) => (data.alerts || []).map(a => ({ ...a, hostname: a.hostname || n.hostname })));
+    }
+    // Newest first — timestamps are RFC3339 strings, comparable lexically;
+    // fall back to id for entries sharing a timestamp.
+    alerts.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || '') || (b.id || 0) - (a.id || 0));
+    alerts = alerts.slice(0, max);
     if (!alerts.length) {
         body.innerHTML = renderEmptyState({ title: 'No recent alerts', body: 'All quiet — threshold and security alerts will appear here.' });
         return;
@@ -4698,26 +4868,41 @@ async function dashRefreshAlerts(body, w) {
 }
 
 function dashAlertsConfigForm(w) {
-    return `<label class="dash-cfg-label">Max rows</label>
-        <input type="number" id="dashcfg-al-max" class="form-control" min="3" max="100" value="${(w.config && w.config.max) || 15}">`;
+    const cfg = w.config || {};
+    return dashScopeField('dashcfg-al-scope', cfg.scope || 'fleet', [
+        { v: 'node', label: 'This node' },
+        { v: 'cluster', label: 'This cluster' },
+        { v: 'fleet', label: 'Fleet (all clusters)' },
+    ]) + `<label class="dash-cfg-label">Max rows</label>
+        <input type="number" id="dashcfg-al-max" class="form-control" min="3" max="100" value="${cfg.max || 15}">`;
 }
 
 function dashAlertsReadConfig(w) {
+    const s = dashCfgVal('dashcfg-al-scope');
+    w.config.scope = (s === 'node' || s === 'cluster') ? s : 'fleet';
     w.config.max = dashCfgInt('dashcfg-al-max', 15, 3, 100);
     return null;
 }
 
-// ── Widget: recent backups ──
+// ── Widget: recent backups (node / fleet) ──
 
 async function dashRefreshBackups(body, w) {
-    const resp = await fetch(apiUrl('/api/backups'));
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const list = await resp.json();
+    const cfg = w.config || {};
+    const scope = cfg.scope || 'node';
+    let list;
+    if (scope === 'fleet') {
+        list = await dashFanout(dashScopeNodes(), '/api/backups',
+            (data, n) => (Array.isArray(data) ? data : []).map(e => ({ ...e, node_hostname: e.node_hostname || n.hostname })));
+    } else {
+        const resp = await fetch(apiUrl('/api/backups'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        list = await resp.json();
+    }
     if (!Array.isArray(list) || !list.length) {
         body.innerHTML = renderEmptyState({ title: 'No backups yet', body: 'Recent backup jobs and their outcome will appear here.' });
         return;
     }
-    const max = (w.config && w.config.max) || 10;
+    const max = cfg.max || 10;
     const entries = list.slice().sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, max);
     const stColor = (s) => s === 'completed' ? 'var(--success)' : s === 'inprogress' ? 'var(--warning)' : 'var(--danger)';
     const rows = entries.map(e => {
@@ -4726,34 +4911,42 @@ async function dashRefreshBackups(body, w) {
             <span style="width:8px;height:8px;border-radius:50%;background:${stColor(e.status)};flex-shrink:0;"></span>
             <span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${escapeHtml(label)}</span>
             <span style="font-size:9px;padding:1px 5px;border-radius:3px;background:var(--bg-tertiary);color:var(--text-muted);text-transform:uppercase;flex-shrink:0;">${escapeHtml((e.target && e.target.type) || '')}</span>
-            <span style="margin-left:auto;font-size:11px;color:var(--text-muted);flex-shrink:0;">${e.size_bytes ? formatBytes(e.size_bytes) + ' · ' : ''}${escapeHtml(formatRelativeTime(e.created_at))}</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted);flex-shrink:0;">${scope === 'fleet' && e.node_hostname ? escapeHtml(e.node_hostname) + ' · ' : ''}${e.size_bytes ? formatBytes(e.size_bytes) + ' · ' : ''}${escapeHtml(formatRelativeTime(e.created_at))}</span>
         </div>`;
     }).join('');
     body.innerHTML = `<div style="padding:8px 14px;">${rows}</div>`;
 }
 
 function dashBackupsConfigForm(w) {
-    return `<label class="dash-cfg-label">Max rows</label>
-        <input type="number" id="dashcfg-bk-max" class="form-control" min="3" max="50" value="${(w.config && w.config.max) || 10}">`;
+    const cfg = w.config || {};
+    return dashScopeField('dashcfg-bk-scope', cfg.scope || 'node', [
+        { v: 'node', label: 'This node' },
+        { v: 'fleet', label: 'Fleet (all nodes)' },
+    ]) + `<label class="dash-cfg-label">Max rows</label>
+        <input type="number" id="dashcfg-bk-max" class="form-control" min="3" max="50" value="${cfg.max || 10}">`;
 }
 
 function dashBackupsReadConfig(w) {
+    w.config.scope = dashCfgVal('dashcfg-bk-scope') === 'fleet' ? 'fleet' : 'node';
     w.config.max = dashCfgInt('dashcfg-bk-max', 10, 3, 50);
     return null;
 }
 
-// ── Widget: storage usage (all cluster disks) ──
+// ── Widget: storage usage (cluster or fleet disks) ──
 
 function dashBuildStorage(body) {
     body.innerHTML = '<div style="padding:10px 14px;"></div>';
 }
 
-function dashUpdateStorage(body) {
+function dashUpdateStorage(body, w) {
     const box = body.firstElementChild;
     if (!box) return;
+    const scope = (w.config && w.config.scope) || 'fleet';
+    const sc = dashSelfCluster();
     let html = '';
     allNodes.forEach(n => {
         if (!n.online || !n.metrics || !Array.isArray(n.metrics.disks)) return;
+        if (scope === 'cluster' && (n.cluster_name || 'WolfStack') !== sc) return;
         n.metrics.disks.forEach(d => {
             const label = nodeName(n) + ' · ' + (d.mount_point || d.name || 'disk');
             html += dashBar(label, d.usage_percent, formatBytes(d.used_bytes || 0) + ' / ' + formatBytes(d.total_bytes || 0));
@@ -4762,15 +4955,33 @@ function dashUpdateStorage(body) {
     box.innerHTML = html || '<div style="font-size:12px;color:var(--text-muted);padding:8px 0;">No disk metrics available yet.</div>';
 }
 
-// ── Widget: TLS certificates ──
+function dashStorageConfigForm(w) {
+    return dashScopeField('dashcfg-st-scope', (w.config && w.config.scope) || 'fleet', [
+        { v: 'cluster', label: 'This cluster' },
+        { v: 'fleet', label: 'Fleet (all clusters)' },
+    ]);
+}
 
-async function dashRefreshCerts(body) {
-    const resp = await fetch(apiUrl('/api/certificates/list'));
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    const certs = data.certs || [];
+function dashStorageReadConfig(w) {
+    w.config.scope = dashCfgVal('dashcfg-st-scope') === 'cluster' ? 'cluster' : 'fleet';
+    return null;
+}
+
+// ── Widget: TLS certificates (node / fleet) ──
+
+async function dashRefreshCerts(body, w) {
+    const scope = (w.config && w.config.scope) || 'node';
+    let certs;
+    if (scope === 'fleet') {
+        certs = await dashFanout(dashScopeNodes(), '/api/certificates/list',
+            (data, n) => (data.certs || []).map(c => ({ ...c, _host: n.hostname })));
+    } else {
+        const resp = await fetch(apiUrl('/api/certificates/list'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        certs = (await resp.json()).certs || [];
+    }
     if (!certs.length) {
-        body.innerHTML = renderEmptyState({ title: 'No TLS certificates found', body: 'Certificates on this server (custom, certbot, filesystem) will appear here with their expiry.' });
+        body.innerHTML = renderEmptyState({ title: 'No TLS certificates found', body: 'Certificates (custom, certbot, filesystem) will appear here with their expiry.' });
         return;
     }
     const rows = certs.map(c => {
@@ -4789,17 +5000,18 @@ async function dashRefreshCerts(body) {
             }
         }
         return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px;">
-            <span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;" title="${escapeAttr(c.cert_path || '')}">${escapeHtml(c.domain || '?')}</span>
+            <span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;" title="${escapeAttr((c._host ? c._host + ' — ' : '') + (c.cert_path || ''))}">${escapeHtml(c.domain || '?')}</span>
             <span style="font-size:9px;padding:1px 5px;border-radius:3px;background:var(--bg-tertiary);color:var(--text-muted);text-transform:uppercase;flex-shrink:0;">${escapeHtml(c.source || '')}</span>
-            <span style="margin-left:auto;font-size:11px;flex-shrink:0;">${expiryHtml}</span>
+            <span style="margin-left:auto;font-size:11px;flex-shrink:0;">${scope === 'fleet' && c._host ? `<span style="color:var(--text-muted);">${escapeHtml(c._host)} · </span>` : ''}${expiryHtml}</span>
         </div>`;
     }).join('');
     body.innerHTML = `<div style="padding:8px 14px;">${rows}</div>`;
 }
 
-// ── Widget: threat intelligence ──
+// ── Widget: threat intelligence (cluster or fleet) ──
 
-async function dashRefreshThreats(body) {
+async function dashRefreshThreats(body, w) {
+    if ((w.config && w.config.scope) === 'fleet') return dashRefreshThreatsFleet(body);
     const resp = await fetch(apiUrl('/api/threat-intel/status'));
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const s = await resp.json();
@@ -4831,6 +5043,58 @@ async function dashRefreshThreats(body) {
             </div>
         </div>
     </div>`;
+}
+
+// Fleet threat-intel: /api/threat-intel/fleet-status returns
+// { nodes: [ ThreatIntelStatus{ enabled, state:"off"|"dry-run"|"enforce",
+//   cluster, feed_entry_count, ipset_entry_count, ... } ] } (one per node).
+async function dashRefreshThreatsFleet(body) {
+    const resp = await fetch(apiUrl('/api/threat-intel/fleet-status'));
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    if (!nodes.length) {
+        body.innerHTML = renderEmptyState({ title: 'No fleet data', body: 'Threat-intelligence status across the fleet will appear here.' });
+        return;
+    }
+    const count = (st) => nodes.filter(n => n.state === st).length;
+    const enforcing = count('enforce'), dry = count('dry-run'), off = count('off');
+    const totalFeed = nodes.reduce((s, n) => s + (n.feed_entry_count || 0), 0);
+    const tile = (v, label, color) => `<div style="text-align:center;padding:10px;background:var(--bg-tertiary);border-radius:8px;">
+        <div style="font-size:22px;font-weight:700;font-family:'JetBrains Mono',monospace;${color ? 'color:' + color + ';' : ''}">${v}</div>
+        <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">${label}</div></div>`;
+    body.innerHTML = `<div style="padding:12px 14px;">
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">${nodes.length} node${nodes.length === 1 ? '' : 's'} · ${Number(totalFeed).toLocaleString()} feed entries</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+            ${tile(enforcing, 'Enforcing', 'var(--success)')}
+            ${tile(dry, 'Dry run', 'var(--info)')}
+            ${tile(off, 'Off', off ? 'var(--warning)' : '')}
+        </div>
+    </div>`;
+}
+
+function dashThreatsConfigForm(w) {
+    return dashScopeField('dashcfg-th-scope', (w.config && w.config.scope) || 'cluster', [
+        { v: 'cluster', label: 'This node/cluster' },
+        { v: 'fleet', label: 'Fleet (all nodes)' },
+    ]);
+}
+
+function dashThreatsReadConfig(w) {
+    w.config.scope = dashCfgVal('dashcfg-th-scope') === 'fleet' ? 'fleet' : 'cluster';
+    return null;
+}
+
+function dashCertsConfigForm(w) {
+    return dashScopeField('dashcfg-ce-scope', (w.config && w.config.scope) || 'node', [
+        { v: 'node', label: 'This node' },
+        { v: 'fleet', label: 'Fleet (all nodes)' },
+    ]);
+}
+
+function dashCertsReadConfig(w) {
+    w.config.scope = dashCfgVal('dashcfg-ce-scope') === 'fleet' ? 'fleet' : 'node';
+    return null;
 }
 
 // ── Widget: AI assistant ──
@@ -4940,13 +5204,9 @@ async function dashRefreshWeather(body, w) {
     }
     const unitQs = cfg.unit === 'f' ? '&temperature_unit=fahrenheit&wind_speed_unit=mph' : '';
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${cfg.lat}&longitude=${cfg.lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min&forecast_days=1&timezone=auto${unitQs}`;
-    const resp = await fetch(apiUrl('/api/dashboard/fetch-proxy?url=' + encodeURIComponent(url)));
-    if (!resp.ok) {
-        let msg = 'HTTP ' + resp.status;
-        try { const j = await resp.json(); if (j.error) msg = j.error; } catch (_) {}
-        throw new Error(msg);
-    }
-    const data = JSON.parse(await resp.text());
+    // Open-Meteo sends CORS headers, so dashFetchExternal fetches it directly
+    // from the browser (works even when the server has no fetch proxy).
+    const data = JSON.parse(await dashFetchExternal(url));
     const cw = data.current_weather;
     if (!cw) throw new Error('Weather service returned no current conditions');
     const unit = cfg.unit === 'f' ? '°F' : '°C';
@@ -4982,10 +5242,9 @@ async function dashWeatherReadConfig(w) {
     if (!loc) return 'Enter a location first.';
     if (loc !== (w.config.location || '') || typeof w.config.lat !== 'number') {
         const url = 'https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(loc) + '&count=1&language=en&format=json';
-        const resp = await fetch(apiUrl('/api/dashboard/fetch-proxy?url=' + encodeURIComponent(url)));
-        if (!resp.ok) return 'Location lookup failed (HTTP ' + resp.status + ').';
         let data;
-        try { data = JSON.parse(await resp.text()); } catch (_) { return 'Location lookup returned an unreadable response.'; }
+        try { data = JSON.parse(await dashFetchExternal(url)); }
+        catch (e) { return 'Location lookup failed: ' + ((e && e.message) || e); }
         const hit = data.results && data.results[0];
         if (!hit) return 'Location not found — try "City, Country".';
         w.config.location = loc;
@@ -5011,25 +5270,106 @@ const DASH_SEARCH_ENGINES = {
 function dashBuildSearch(body, w) {
     const cfg = w.config || {};
     const engine = DASH_SEARCH_ENGINES[cfg.engine] ? cfg.engine : 'duckduckgo';
-    body.innerHTML = `<form style="display:flex;gap:8px;padding:4px 0;" onsubmit="return dashDoSearch(this, '${escapeAttr(w.id)}')">
-        <input type="search" name="q" class="form-control" style="flex:1;font-size:14px;padding:10px 14px;" placeholder="Search ${escapeAttr(DASH_SEARCH_ENGINES[engine].name)}…" aria-label="Web search">
-        <button type="submit" class="btn btn-primary" style="padding:0 18px;">Search</button>
-    </form>`;
+    body.innerHTML = `<div style="padding:4px 0;">
+        <form style="display:flex;gap:8px;" onsubmit="return dashDoSearch(this, '${escapeAttr(w.id)}')">
+            <input type="search" name="q" class="form-control" style="flex:1;font-size:14px;padding:10px 14px;" placeholder="Search ${escapeAttr(DASH_SEARCH_ENGINES[engine].name)}…" aria-label="Web search">
+            <button type="submit" class="btn btn-primary" style="padding:0 18px;">Search</button>
+        </form>
+        <div data-search-results style="margin-top:10px;"></div>
+    </div>`;
 }
 
+// Submit handler: fetch DuckDuckGo's Instant Answer API (CORS-enabled, no
+// scraping) and render an answer + related links inline, under the box. Also
+// offers an "open full results" link to the chosen engine's real SERP, since
+// the Instant Answer API only covers answers/related-topics, not a full web
+// index. Full-SERP scraping isn't possible — search engines gate it behind
+// bot-detection/CAPTCHA.
 function dashDoSearch(form, wid) {
     const w = dashFindWidget(wid);
     const cfg = (w && w.config) || {};
     const engine = DASH_SEARCH_ENGINES[cfg.engine] ? cfg.engine : 'duckduckgo';
-    let tpl = engine === 'custom' ? (cfg.custom || '') : DASH_SEARCH_ENGINES[engine].url;
+    const tpl = engine === 'custom' ? (cfg.custom || '') : DASH_SEARCH_ENGINES[engine].url;
     const q = (form.q.value || '').trim();
-    if (q && tpl.includes('%s') && /^https?:\/\//.test(tpl)) {
-        window.open(tpl.replace('%s', encodeURIComponent(q)), '_blank', 'noopener');
-        form.q.value = '';
-    } else if (q) {
-        showToast('Search engine URL is not set up — open the widget settings.', 'warning');
-    }
+    if (!q) return false;
+    const fullUrl = (tpl.includes('%s') && /^https?:\/\//.test(tpl))
+        ? tpl.replace('%s', encodeURIComponent(q)) : '';
+    const out = form.parentElement.querySelector('[data-search-results]');
+    if (!out) return false;
+    out.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:6px 0;">Searching…</div>';
+    dashRenderSearchResults(out, q, fullUrl).catch(() => {
+        out.innerHTML = '';
+        dashSearchFullLink(out, q, fullUrl, 'Couldn’t load inline results.');
+    });
     return false;
+}
+
+function dashSearchFullLink(out, q, fullUrl, note) {
+    const line = document.createElement('div');
+    line.style.cssText = 'font-size:12px;color:var(--text-muted);padding:6px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;';
+    if (note) { const n = document.createElement('span'); n.textContent = note; line.appendChild(n); }
+    if (fullUrl) {
+        const a = document.createElement('a');
+        a.href = fullUrl; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        a.style.color = 'var(--accent-light)';
+        a.textContent = 'Open full results ↗';
+        line.appendChild(a);
+    }
+    out.appendChild(line);
+}
+
+async function dashRenderSearchResults(out, q, fullUrl) {
+    const url = 'https://api.duckduckgo.com/?q=' + encodeURIComponent(q) + '&format=json&no_html=1&no_redirect=1&t=wolfstack';
+    const data = JSON.parse(await dashFetchExternal(url));
+    out.innerHTML = '';
+
+    // Instant answer / abstract card.
+    if (data.AbstractText) {
+        const card = document.createElement('div');
+        card.style.cssText = 'padding:8px 10px;background:var(--bg-tertiary);border-radius:8px;margin-bottom:8px;';
+        const h = document.createElement('div');
+        h.style.cssText = 'font-weight:600;font-size:13px;margin-bottom:2px;';
+        h.textContent = data.Heading || q;
+        card.appendChild(h);
+        const t = document.createElement('div');
+        t.style.cssText = 'font-size:12px;color:var(--text-secondary);line-height:1.5;';
+        t.textContent = data.AbstractText;
+        card.appendChild(t);
+        if (dashSafeHttpUrl(data.AbstractURL)) {
+            const src = document.createElement('a');
+            src.href = data.AbstractURL; src.target = '_blank'; src.rel = 'noopener noreferrer';
+            src.style.cssText = 'font-size:11px;color:var(--accent-light);display:inline-block;margin-top:4px;';
+            src.textContent = (data.AbstractSource || 'Source') + ' ↗';
+            card.appendChild(src);
+        }
+        out.appendChild(card);
+    }
+
+    // Flatten related topics (some are grouped under a Topics sub-array).
+    const flat = [];
+    (data.RelatedTopics || []).forEach(t => {
+        if (t.FirstURL && t.Text) flat.push(t);
+        else if (Array.isArray(t.Topics)) t.Topics.forEach(x => { if (x.FirstURL && x.Text) flat.push(x); });
+    });
+    flat.slice(0, 12).forEach(t => {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:5px 0;border-bottom:1px solid var(--border);';
+        // Guard the href: the URL comes from the remote API, so a crafted
+        // javascript:/data: value must not become a clickable link.
+        const safe = dashSafeHttpUrl(t.FirstURL);
+        const a = document.createElement(safe ? 'a' : 'span');
+        if (safe) { a.href = t.FirstURL; a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+        a.style.cssText = 'font-size:12px;color:var(--text-primary);text-decoration:none;font-weight:500;';
+        a.textContent = t.Text;
+        row.appendChild(a);
+        out.appendChild(row);
+    });
+
+    if (!data.AbstractText && !flat.length) {
+        dashSearchFullLink(out, q, fullUrl, 'No inline answer for this query.');
+    } else {
+        dashSearchFullLink(out, q, fullUrl, '');
+    }
 }
 
 function dashSearchConfigForm(w) {
@@ -5059,25 +5399,50 @@ function dashSearchReadConfig(w) {
 
 // ── Widget: notes ──
 
+// Pending note-autosave timers, keyed by widget id. Tracked at module scope
+// so dashSaveEdit can flush them and dashCancelEdit can drop them — otherwise
+// a timer firing after "Cancel" would write reverted-away text back and
+// (edit mode now off) persist it, silently un-discarding the change.
+let _dashNoteTimers = {};
+
+// Write the current textarea contents of every notes widget into the live
+// layout. Called before saving so an un-fired debounce isn't lost.
+function dashFlushNotes() {
+    dashLoadLayout().widgets.forEach(w => {
+        if (w.type !== 'notes') return;
+        const el = document.getElementById('dash-w-' + w.id);
+        const ta = el && el.querySelector('.dash-widget-body textarea');
+        if (ta) { w.config = w.config || {}; w.config.text = ta.value.slice(0, 8000); }
+    });
+    dashClearNoteTimers();
+}
+
+function dashClearNoteTimers() {
+    Object.values(_dashNoteTimers).forEach(t => clearTimeout(t));
+    _dashNoteTimers = {};
+}
+
 function dashBuildNotes(body, w) {
     const ta = document.createElement('textarea');
     ta.maxLength = 8000;
     ta.placeholder = 'Scratch notes — saved to your account automatically.';
     ta.value = (w.config && w.config.text) || '';
     ta.style.cssText = 'width:100%;height:100%;resize:none;border:none;background:transparent;color:var(--text-primary);padding:12px 14px;font-size:13px;line-height:1.5;outline:none;font-family:inherit;display:block;';
-    let timer = null;
     ta.addEventListener('input', () => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => {
-            // Re-resolve the widget by id — dashOnPrefsLoaded() can swap the
-            // whole layout object while this debounce is pending, and writing
-            // through the captured `w` would edit an orphan and silently drop
-            // the note.
+        if (_dashNoteTimers[w.id]) clearTimeout(_dashNoteTimers[w.id]);
+        _dashNoteTimers[w.id] = setTimeout(() => {
+            delete _dashNoteTimers[w.id];
+            // Re-resolve the widget by id — the layout object may have been
+            // swapped (prefs load, enter/exit edit) while this was pending;
+            // writing through the captured `w` would edit an orphan.
             const live = dashFindWidget(w.id);
             if (!live) return;
             live.config = live.config || {};
             live.config.text = ta.value.slice(0, 8000);
-            dashPersist();
+            // In edit mode this stays in the draft (saved on "Save changes");
+            // in view mode it writes straight through.
+            dashCommit();
+            dashSyncEditToolbar();
         }, 800);
     });
     body.appendChild(ta);
@@ -5091,13 +5456,9 @@ async function dashRefreshRss(body, w) {
         body.innerHTML = renderEmptyState({ title: 'No feed configured', body: 'Open the widget settings (⚙) and paste an RSS or Atom feed URL.' });
         return;
     }
-    const resp = await fetch(apiUrl('/api/dashboard/fetch-proxy?url=' + encodeURIComponent(cfg.url)));
-    if (!resp.ok) {
-        let msg = 'HTTP ' + resp.status;
-        try { const j = await resp.json(); if (j.error) msg = j.error; } catch (_) {}
-        throw new Error(msg);
-    }
-    const text = await resp.text();
+    // Most feeds lack CORS, so this normally routes through the server proxy;
+    // dashFetchExternal still tries direct first for the rare CORS-enabled one.
+    const text = await dashFetchExternal(cfg.url);
     const doc = new DOMParser().parseFromString(text, 'text/xml');
     if (doc.querySelector('parsererror')) throw new Error('That URL did not return a valid RSS/Atom feed.');
     // RSS 2.0 <item> first, Atom <entry> fallback.
@@ -5270,21 +5631,24 @@ const DASH_WIDGETS = {
         configForm: dashBackupsConfigForm, readConfig: dashBackupsReadConfig,
     },
     storage: {
-        name: 'Storage usage', icon: '🗄️', desc: 'Disk usage bars for every disk on every online server.',
+        name: 'Storage usage', icon: '🗄️', desc: 'Disk usage bars for disks across this cluster or the fleet.',
         defW: 6, defH: 2,
         build: dashBuildStorage, nodeUpdate: dashUpdateStorage,
+        configForm: dashStorageConfigForm, readConfig: dashStorageReadConfig,
     },
     certs: {
-        name: 'TLS certificates', icon: '🔒', desc: 'Certificates on this server with days until expiry.',
+        name: 'TLS certificates', icon: '🔒', desc: 'Certificates with days until expiry — this node or the fleet.',
         defW: 4, defH: 2, refreshMs: 300000,
         build: (body) => { body.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text-muted);">Loading certificates…</div>'; },
         refresh: dashRefreshCerts,
+        configForm: dashCertsConfigForm, readConfig: dashCertsReadConfig,
     },
     threats: {
-        name: 'Threat intel', icon: '🛡️', desc: 'Blocked-IP counts and enforcement state of the threat feed.',
+        name: 'Threat intel', icon: '🛡️', desc: 'Blocked-IP counts and enforcement state — cluster or fleet.',
         defW: 4, defH: 1, refreshMs: 60000,
         build: (body) => { body.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text-muted);">Loading…</div>'; },
         refresh: dashRefreshThreats,
+        configForm: dashThreatsConfigForm, readConfig: dashThreatsReadConfig,
     },
     ai: {
         name: 'AI assistant', icon: '🤖', desc: 'Assistant status, alerts raised and pending actions.',
@@ -5376,21 +5740,28 @@ function dashApplyChrome() {
         const def = DASH_WIDGETS[w.type];
         const el = document.getElementById('dash-w-' + w.id);
         if (!el || !def) return;
-        const span = DASH_WIDTH_STEPS.includes(w.w) ? w.w : def.defW;
+        const span = Math.max(DASH_MIN_W, Math.min(DASH_MAX_W, parseInt(w.w, 10) || def.defW));
         el.style.gridColumn = 'span ' + span;
         el.draggable = dashEditMode;
         const body = el.querySelector(':scope > .dash-widget-body');
         if (body) {
-            if (def.autoH) {
+            const autoOk = (w.h === 'auto' || typeof w.h !== 'number');
+            if (autoOk && !def.noScroll) {
+                // Content-sized: no fixed height, no scrollbar.
                 body.style.height = '';
                 body.style.overflowY = '';
             } else {
-                const h = DASH_HEIGHTS[w.h] ? w.h : def.defH;
-                body.style.height = DASH_HEIGHTS[h] + 'px';
+                // Fixed pixel height with scrollbars when content overflows.
+                // noScroll widgets (map/iframe) fill the box with no scrollbar
+                // of their own — their content is already sized to 100%, so
+                // they can't be 'auto' (that would collapse to zero height).
+                const px = (typeof w.h === 'number') ? w.h : 300;
+                body.style.height = px + 'px';
                 body.style.overflowY = def.noScroll ? 'hidden' : 'auto';
             }
         }
     });
+    dashSyncEditToolbar();
 }
 
 function dashWidgetTitle(w) {
@@ -5430,13 +5801,13 @@ function dashBuildWidgetShell(w) {
         b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
         return b;
     };
-    if (def.configForm) controls.appendChild(mkBtn('⚙', 'Widget settings', () => dashShowConfigModal(w.id)));
+    // Every widget gets a settings button — it always offers size controls,
+    // plus type-specific options when the widget defines a configForm.
+    controls.appendChild(mkBtn('⚙', 'Widget settings', () => dashShowConfigModal(w.id)));
     controls.appendChild(mkBtn('◂', 'Narrower', () => dashResizeWidget(w.id, -1, 0)));
     controls.appendChild(mkBtn('▸', 'Wider', () => dashResizeWidget(w.id, 1, 0)));
-    if (!def.autoH) {
-        controls.appendChild(mkBtn('▴', 'Shorter', () => dashResizeWidget(w.id, 0, -1)));
-        controls.appendChild(mkBtn('▾', 'Taller', () => dashResizeWidget(w.id, 0, 1)));
-    }
+    controls.appendChild(mkBtn('▴', 'Shorter', () => dashResizeWidget(w.id, 0, -1)));
+    controls.appendChild(mkBtn('▾', 'Taller', () => dashResizeWidget(w.id, 0, 1)));
     controls.appendChild(mkBtn('✕', 'Remove widget', () => dashRemoveWidget(w.id)));
     header.appendChild(controls);
 
@@ -5529,50 +5900,162 @@ setInterval(() => {
     dashTickClocks();
 }, 1000);
 
-// ── Edit mode + mutations ──
+// Warn before a full page unload (tab close / reload / external nav) if the
+// dashboard has unsaved widget changes. In-app navigation is guarded
+// separately by dashLeaveGuard via selectView/selectServerView.
+window.addEventListener('beforeunload', (e) => {
+    if (dashHasUnsavedChanges()) { e.preventDefault(); e.returnValue = ''; }
+});
 
-function dashToggleEditMode() {
-    dashEditMode = !dashEditMode;
-    const btn = document.getElementById('dash-edit-btn');
-    if (btn) {
-        btn.textContent = dashEditMode ? '✓ Done' : '✎ Customise';
-        btn.classList.toggle('btn-primary', dashEditMode);
-    }
-    ['dash-add-btn', 'dash-reset-btn'].forEach(id => {
+// ── Edit mode (draft model) + mutations ──
+//
+// Entering edit mode snapshots the saved layout into dashSavedJson and edits
+// a working copy in place. Nothing touches the server until "Save changes".
+// "Cancel" (or navigating away and choosing Discard) restores the snapshot.
+
+// Commit a mutation: while editing it stays in the in-memory draft (persisted
+// only on Save); outside edit mode it writes straight through.
+function dashCommit() {
+    if (!dashEditMode) dashPersist();
+}
+
+function dashSyncEditToolbar() {
+    const editing = dashEditMode;
+    const editBtn = document.getElementById('dash-edit-btn');
+    if (editBtn) editBtn.style.display = editing ? 'none' : '';
+    ['dash-add-btn', 'dash-reset-btn', 'dash-save-btn', 'dash-cancel-btn'].forEach(id => {
         const b = document.getElementById(id);
-        if (b) b.style.display = dashEditMode ? '' : 'none';
+        if (b) b.style.display = editing ? '' : 'none';
     });
     const hint = document.getElementById('dash-edit-hint');
-    if (hint) hint.style.display = dashEditMode ? '' : 'none';
+    if (hint) hint.style.display = editing ? '' : 'none';
+    const saveBtn = document.getElementById('dash-save-btn');
+    if (saveBtn) {
+        const dirty = dashHasUnsavedChanges();
+        saveBtn.textContent = dirty ? '✓ Save changes' : '✓ Saved';
+        saveBtn.disabled = !dirty;
+    }
+}
+
+function dashEnterEdit() {
+    if (dashEditMode) return;
+    dashEditMode = true;
+    // Snapshot the saved layout so we can diff for "unsaved changes" and
+    // restore it on Cancel. Work on a deep clone so edits don't leak into
+    // the persisted copy until Save.
+    dashSavedJson = JSON.stringify(dashLoadLayout());
+    dashLayout = JSON.parse(dashSavedJson);
     renderDatacenterOverview();
+}
+
+function dashSaveEdit() {
+    if (!dashEditMode) return;
+    dashFlushNotes();   // capture any un-fired note keystroke into the draft
+    dashPersist();
+    dashSavedJson = JSON.stringify(dashLoadLayout());
+    dashEditMode = false;
+    renderDatacenterOverview();
+    showToast('Dashboard saved', 'success');
+}
+
+// Leave edit mode discarding any unsaved changes. `silent` skips the toast
+// (used when there was nothing to discard).
+function dashCancelEdit(silent) {
+    if (!dashEditMode) return;
+    // Drop any pending note-autosave timer BEFORE swapping the layout back —
+    // a late-firing timer would otherwise write the discarded text and persist
+    // it (edit mode is about to be off).
+    dashClearNoteTimers();
+    const hadChanges = dashHasUnsavedChanges();
+    if (dashSavedJson !== null) dashLayout = JSON.parse(dashSavedJson);
+    dashEditMode = false;
+    dashSavedJson = null;
+    renderDatacenterOverview();
+    if (hadChanges && !silent) showToast('Changes discarded', 'info');
+}
+
+// Public button handlers.
+function dashToggleEditMode() { dashEnterEdit(); }     // "Customise" button
+function dashSaveLayoutBtn() { dashSaveEdit(); }
+function dashCancelLayoutBtn() {
+    if (dashHasUnsavedChanges()) {
+        dashPromptUnsaved(
+            () => dashCancelEdit(),          // Discard
+            () => dashSaveEdit(),            // Save
+        );
+    } else {
+        dashCancelEdit(true);
+    }
 }
 
 function dashEnsureEditAndAdd() {
-    if (!dashEditMode) dashToggleEditMode();
+    if (!dashEditMode) dashEnterEdit();
     dashShowAddWidgetModal();
 }
 
-async function dashResetLayout() {
-    if (!(await showConfirm('Reset the dashboard to the default layout? Your current widget arrangement will be replaced.', 'Reset dashboard'))) return;
-    dashLayout = dashDefaultLayout();
-    dashPersist();
-    renderDatacenterOverview();
-    showToast('Dashboard reset to the default layout', 'success');
+// Navigation guard. Call before leaving the datacenter view; returns true if
+// it's safe to proceed now, or false if it intercepted (it will re-run
+// `proceed` after the user resolves the unsaved-changes prompt).
+function dashLeaveGuard(proceed) {
+    if (!(dashEditMode && currentPage === 'datacenter')) return true;
+    if (!dashHasUnsavedChanges()) { dashCancelEdit(true); return true; }
+    dashPromptUnsaved(
+        () => { dashCancelEdit(true); proceed(); },   // Discard & leave
+        () => { dashSaveEdit(); proceed(); },         // Save & leave
+    );
+    return false;
 }
 
+// Three-way "you have unsaved changes" dialog: Save / Discard / Keep editing.
+function dashPromptUnsaved(onDiscard, onSave) {
+    if (_dashLeaveModal) return; // one at a time
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100001;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:440px;width:90%;color:var(--text-primary);';
+    box.innerHTML = `<div style="font-size:15px;font-weight:600;margin-bottom:10px;color:var(--accent-light);">Unsaved dashboard changes</div>
+        <div style="font-size:13px;line-height:1.6;color:var(--text-secondary);margin-bottom:18px;">You’ve changed your dashboard but haven’t saved. What would you like to do?</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+            <button class="btn btn-secondary" id="dash-unsaved-keep">Keep editing</button>
+            <button class="btn" id="dash-unsaved-discard" style="border-color:var(--danger);color:var(--danger);">Discard changes</button>
+            <button class="btn btn-primary" id="dash-unsaved-save">Save changes</button>
+        </div>`;
+    overlay.appendChild(box);
+    (document.fullscreenElement || document.body).appendChild(overlay);
+    _dashLeaveModal = overlay;
+    const close = () => { overlay.remove(); _dashLeaveModal = null; };
+    box.querySelector('#dash-unsaved-keep').onclick = close;
+    box.querySelector('#dash-unsaved-discard').onclick = () => { close(); onDiscard(); };
+    box.querySelector('#dash-unsaved-save').onclick = () => { close(); onSave(); };
+}
+
+async function dashResetLayout() {
+    if (!(await showConfirm('Reset the dashboard to the default layout? This replaces your current widgets (not saved until you press Save changes).', 'Reset dashboard'))) return;
+    dashLayout = dashDefaultLayout();
+    dashCommit();
+    renderDatacenterOverview();
+}
+
+// Adjust size via the header arrows. dw = ±1 column; dh = ±DASH_H_STEP px
+// (a widget on 'auto' height snaps to a sensible fixed height first).
 function dashResizeWidget(wid, dw, dh) {
     const w = dashFindWidget(wid);
     if (!w) return;
-    const def = DASH_WIDGETS[w.type];
-    if (dw) {
-        const cur = DASH_WIDTH_STEPS.indexOf(DASH_WIDTH_STEPS.includes(w.w) ? w.w : def.defW);
-        const next = Math.max(0, Math.min(DASH_WIDTH_STEPS.length - 1, cur + dw));
-        w.w = DASH_WIDTH_STEPS[next];
+    if (dw) w.w = Math.max(DASH_MIN_W, Math.min(DASH_MAX_W, w.w + dw));
+    if (dh) {
+        let cur;
+        if (typeof w.h === 'number') {
+            cur = w.h;
+        } else {
+            // Auto height: start from the widget's actual rendered height so
+            // the first Taller/Shorter click nudges from where it is, not a
+            // hardcoded jump.
+            const body = dashBody(wid);
+            cur = (body && body.clientHeight) ? body.clientHeight : 240;
+        }
+        w.h = Math.max(DASH_MIN_H, Math.min(DASH_MAX_H, cur + dh * DASH_H_STEP));
     }
-    if (dh && !def.autoH) {
-        w.h = Math.max(1, Math.min(3, (DASH_HEIGHTS[w.h] ? w.h : def.defH) + dh));
-    }
-    dashPersist();
+    dashCommit();
     renderDatacenterOverview();
 }
 
@@ -5583,7 +6066,7 @@ async function dashRemoveWidget(wid) {
     if (!(await showConfirm(`Remove the "${def ? def.name : w.type}" widget from your dashboard?`, 'Remove widget'))) return;
     const layout = dashLoadLayout();
     layout.widgets = layout.widgets.filter(x => x.id !== wid);
-    dashPersist();
+    dashCommit();
     renderDatacenterOverview();
 }
 
@@ -5596,7 +6079,7 @@ function dashMoveWidget(dragId, targetId, before) {
     if (to < 0) { layout.widgets.splice(from, 0, moved); return; }
     if (!before) to += 1;
     layout.widgets.splice(to, 0, moved);
-    dashPersist();
+    dashCommit();
     renderDatacenterOverview();
 }
 
@@ -5625,9 +6108,9 @@ function dashAddWidget(type) {
     if (!def) return;
     const layout = dashLoadLayout();
     if (def.single && layout.widgets.some(w => w.type === type)) return;
-    const w = { id: dashUid(), type, w: def.defW, h: def.defH, config: {} };
+    const w = { id: dashUid(), type, w: def.defW, h: def.autoH ? 'auto' : (DASH_HEIGHTS[def.defH] || 320), config: {} };
     layout.widgets.push(w);
-    dashPersist();
+    dashCommit();
     dashDismissModal();
     renderDatacenterOverview();
     showToast(def.name + ' added to your dashboard', 'success');
@@ -5636,17 +6119,42 @@ function dashAddWidget(type) {
 
 // ── Per-widget settings modal ──
 
+// A universal "Size" section every widget's settings modal carries: width in
+// grid columns (1–12) and height (fit-content, or a fixed pixel height that
+// gives the widget a scrollbar when its content overflows).
+function dashSizeFields(w) {
+    const def = DASH_WIDGETS[w.type] || {};
+    const isAuto = w.h === 'auto' || typeof w.h !== 'number';
+    const px = isAuto ? 320 : w.h;
+    let html = `<label class="dash-cfg-label">Width <span style="opacity:0.6;">(grid columns, 1–12)</span></label>
+        <input type="number" id="dashcfg-size-w" class="form-control" min="${DASH_MIN_W}" max="${DASH_MAX_W}" value="${Math.max(DASH_MIN_W, Math.min(DASH_MAX_W, parseInt(w.w, 10) || 6))}">`;
+    // Map/iframe fill their box and can't fit-to-content (that would collapse
+    // them), so they only get a fixed pixel height — no "fit" checkbox.
+    if (!def.noScroll) {
+        html += `<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px;">
+            <input type="checkbox" id="dashcfg-size-auto"${isAuto ? ' checked' : ''} onchange="document.getElementById('dashcfg-size-h').disabled=this.checked"> Fit height to content
+        </label>`;
+    }
+    const startPx = def.noScroll && isAuto ? 300 : px;
+    html += `<label class="dash-cfg-label">Height <span style="opacity:0.6;">(pixels, ${DASH_MIN_H}–${DASH_MAX_H}; scrolls if content is taller)</span></label>
+        <input type="number" id="dashcfg-size-h" class="form-control" min="${DASH_MIN_H}" max="${DASH_MAX_H}" step="${DASH_H_STEP}" value="${startPx}"${!def.noScroll && isAuto ? ' disabled' : ''}>`;
+    return html;
+}
+
 function dashShowConfigModal(wid) {
     const w = dashFindWidget(wid);
     if (!w) return;
     const def = DASH_WIDGETS[w.type];
-    if (!def || !def.configForm) return;
+    if (!def) return;
+    const typeForm = def.configForm ? def.configForm(w) : '';
     const html = `<div style="display:flex;flex-direction:column;gap:8px;">
-        ${def.configForm(w)}
+        ${typeForm}
+        ${typeForm ? '<div style="border-top:1px solid var(--border);margin:6px 0 2px;"></div>' : ''}
+        ${dashSizeFields(w)}
         <div id="dashcfg-error" role="alert" style="display:none;color:var(--danger);font-size:12px;"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;">
             <button class="btn btn-secondary" onclick="dashDismissModal()">Cancel</button>
-            <button class="btn btn-primary" id="dashcfg-save" onclick="dashApplyConfigModal('${escapeAttr(wid)}')">Save</button>
+            <button class="btn btn-primary" id="dashcfg-save" onclick="dashApplyConfigModal('${escapeAttr(wid)}')">Apply</button>
         </div>
     </div>`;
     showModal(html, def.name + ' settings', { noOk: true });
@@ -5658,25 +6166,35 @@ async function dashApplyConfigModal(wid) {
     if (!w) return;
     const def = DASH_WIDGETS[w.type];
     const saveBtn = document.getElementById('dashcfg-save');
-    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Applying…'; }
     // Snapshot so a failed validation can't leave half-applied settings in
     // the live config object (readConfig mutates as it reads).
     w.config = w.config || {};
     const configBefore = JSON.stringify(w.config);
     let err = null;
-    try {
-        err = await def.readConfig(w);
-    } catch (e) {
-        err = (e && e.message) || String(e);
+    if (def.readConfig) {
+        try { err = await def.readConfig(w); }
+        catch (e) { err = (e && e.message) || String(e); }
     }
     if (err) {
         try { w.config = JSON.parse(configBefore); } catch (_) {}
         const box = document.getElementById('dashcfg-error');
         if (box) { box.textContent = err; box.style.display = ''; }
-        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Apply'; }
         return;
     }
-    dashPersist();
+    // Apply the universal size fields.
+    const wCol = parseInt(dashCfgVal('dashcfg-size-w'), 10);
+    if (!isNaN(wCol)) w.w = Math.max(DASH_MIN_W, Math.min(DASH_MAX_W, wCol));
+    const autoEl = document.getElementById('dashcfg-size-auto');
+    if (autoEl && autoEl.checked) {
+        w.h = 'auto';
+    } else {
+        const hPx = parseInt(dashCfgVal('dashcfg-size-h'), 10);
+        w.h = isNaN(hPx) ? (typeof w.h === 'number' ? w.h : 320)
+                         : Math.max(DASH_MIN_H, Math.min(DASH_MAX_H, hPx));
+    }
+    dashCommit();
     dashDismissModal();
     dashRebuildWidget(wid);
 }
@@ -6269,6 +6787,12 @@ function jitterCoords(baseLat, baseLon, hostname) {
 window.addEventListener('hashchange', () => {
     const page = location.hash.replace('#', '') || 'datacenter';
     selectView(page);
+    // If the unsaved-changes guard intercepted, currentPage stays put while
+    // the address bar already moved. Resync the hash (without refiring this
+    // handler) so the route isn't soft-locked on a repeat of the same target.
+    if (currentPage !== page && typeof history.replaceState === 'function') {
+        history.replaceState(null, '', '#' + currentPage);
+    }
 });
 if (location.hash) selectView(location.hash.replace('#', ''));
 
