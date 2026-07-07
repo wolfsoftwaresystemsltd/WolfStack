@@ -202,10 +202,13 @@ pub fn resolve_tier(dm: &PlatformManifest) -> &'static str {
 ///     full stop. Hard-coding a feature whitelist here would mean each
 ///     new feature retroactively breaks existing Enterprise installs
 ///     until a manifest is reissued.
-///   * MSP (formerly Pro) — `plugins`, `api_keys`, `wolfhost`,
-///     `wolfcustom`, `multi_tenancy`, `sso`. The white-label / managed-
-///     service-provider bundle. Pre-rebrand `tier=pro` licences resolve
-///     here too via `resolve_tier`.
+///   * Base — `wolfhost` (managed hosting). Granted on every tier,
+///     including homelab/community, with no licence flag. Graduated
+///     from the MSP bundle when it became a core subsystem.
+///   * MSP (formerly Pro) — `plugins`, `api_keys`, `wolfcustom`,
+///     `multi_tenancy`, `sso`. The white-label / managed-service-
+///     provider bundle. Pre-rebrand `tier=pro` licences resolve here
+///     too via `resolve_tier`.
 ///   * Team — `sso`, `api_keys`. The "missing middle" tier: SMB IT
 ///     teams who need accountability and a real auth story but aren't
 ///     reselling. Plugin distribution and white-label stay MSP-only.
@@ -223,6 +226,14 @@ pub fn has_feature(name: &str) -> bool {
 /// caller-supplied manifest. Split out so unit tests can exercise the
 /// tier-inheritance rules without reading from disk.
 fn manifest_has_feature(dm: &PlatformManifest, name: &str) -> bool {
+    // Base-tier features: available on every tier including
+    // homelab/community, no licence flag required. `wolfhost` moved
+    // here when managed hosting graduated from an MSP-only plugin to a
+    // core, free subsystem — it's now a headline capability of the
+    // base product, not an upsell.
+    if matches!(name, "wolfhost") {
+        return true;
+    }
     if dm.features.iter().any(|f| f == name) {
         return true;
     }
@@ -230,7 +241,7 @@ fn manifest_has_feature(dm: &PlatformManifest, name: &str) -> bool {
         "enterprise" => true,
         "msp" => matches!(
             name,
-            "plugins" | "api_keys" | "wolfhost" | "wolfcustom" | "multi_tenancy" | "sso"
+            "plugins" | "api_keys" | "wolfcustom" | "multi_tenancy" | "sso"
         ),
         "team" => matches!(name, "sso" | "api_keys"),
         _ => false,
@@ -713,7 +724,8 @@ mod tests {
         // Plugin distribution and white-label stay MSP-only.
         assert!(!manifest_has_feature(&m, "plugins"));
         assert!(!manifest_has_feature(&m, "wolfcustom"));
-        assert!(!manifest_has_feature(&m, "wolfhost"));
+        // wolfhost is base-tier (free on every tier), so Team grants it.
+        assert!(manifest_has_feature(&m, "wolfhost"));
         assert!(!manifest_has_feature(&m, "multi_tenancy"));
     }
 
@@ -728,6 +740,18 @@ mod tests {
         let m_with_plugins = dm("homelab", &["plugins"]);
         assert!(manifest_has_feature(&m_with_plugins, "plugins"));
         assert!(!manifest_has_feature(&m_with_plugins, "api_keys"));
+    }
+
+    #[test]
+    fn wolfhost_is_base_tier_on_every_tier() {
+        // Managed hosting graduated from MSP-only plugin to a free core
+        // subsystem — every tier, including homelab/community with no
+        // features, must grant it.
+        for tier in ["enterprise", "msp", "team", "homelab", ""] {
+            let m = dm(tier, &[]);
+            assert!(manifest_has_feature(&m, "wolfhost"),
+                "wolfhost must be granted on tier `{}`", tier);
+        }
     }
 
     #[test]

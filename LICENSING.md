@@ -37,11 +37,17 @@ are gated behind a commercial licence:
 | Feature | Free (noncommercial) | Licence required |
 |---|---|---|
 | Docker / LXC / VM management, clustering, networking, storage, backups, status pages, monitoring, the App Store, WolfNet, WolfRouter… | ✅ | |
+| Managed hosting (WolfHost — customers, plans, billing, customer portal, hosting tools) | ✅ | |
 | API tokens | | Homelab+ |
 | SSO | | Team+ |
 | Plugins | | MSP+ |
 | Multi-tenancy | | MSP+ |
-| White-label / managed-hosting (WolfHost, WolfCustom) | | MSP+ |
+| White-label (WolfCustom) | | MSP+ |
+
+> Managed hosting is **free for everyone** as a feature. Running a hosting
+> business is a commercial use, so a commercial licence is still required for
+> that under the base terms above — but the WolfHost feature itself is no
+> longer tier-gated.
 
 > A licence file is deployed to `/etc/wolfstack/license.key`; the binary
 > validates its signature locally and never phones home for verification.
@@ -55,7 +61,7 @@ licence the binary validates):
 |---|---|---|
 | **Homelab** | Commercial-use right + API tokens | capped |
 | **Team** | + SSO | capped |
-| **MSP** | + plugins, multi-tenancy, white-label / managed hosting | capped |
+| **MSP** | + plugins, multi-tenancy, white-label | capped |
 | **Enterprise** | Everything | unlimited / quoted |
 
 For bespoke SLAs, air-gapped deployment, compliance collateral, custom
