@@ -4368,12 +4368,114 @@ async function dashFetchExternal(url) {
 }
 
 // A labelled <select> for a widget's data scope, used by several config forms.
-function dashScopeField(id, value, opts) {
-    const options = opts.map(o =>
-        `<option value="${o.v}"${o.v === value ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
+// ── Widget data scope: node / cluster / fleet, with a SPECIFIC target ──
+//
+// A scoped widget's `config` carries:
+//   scope   — 'node' | 'cluster' | 'fleet'
+//   node    — a specific node id (used when scope === 'node')
+//   cluster — a specific cluster name (used when scope === 'cluster')
+// A brand-new scoped widget has no scope set and defaults to the whole fleet
+// (the most useful overview on a multi-cluster setup); the operator can then
+// narrow it to ANY specific server or cluster. Widgets saved before this
+// change keep their explicit scope: an old 'node' with no id resolves to the
+// dashboard's own node, an old 'cluster' with no name to its own cluster — so
+// upgrades don't change what an existing widget shows.
+
+const DASH_SCOPE_LABELS = { node: 'A specific server', cluster: 'A specific cluster', fleet: 'Whole fleet (everything)' };
+
+// Widget types that carry a data scope — their title shows the current target
+// (a specific server, a cluster, or the whole fleet) so it's clear at a glance.
+// Declared here (above dashApplyChrome, which reads it) to avoid depending on
+// declaration order.
+const DASH_SCOPED_TYPES = new Set(['containers', 'uptime', 'alerts', 'backups', 'storage', 'certs', 'threats']);
+
+// Render the Scope selector plus the conditional Server / Cluster pickers.
+// `kinds` is the subset of ['node','cluster','fleet'] the widget supports.
+function dashScopeFields(w, kinds) {
+    const cfg = w.config || {};
+    // Default the displayed kind to whatever dashResolveScopeNodes uses for an
+    // unset scope (fleet), so the form and the live data agree before Apply.
+    const kind = kinds.includes(cfg.scope) ? cfg.scope : (kinds.includes('fleet') ? 'fleet' : kinds[0]);
+    const scopeOpts = kinds.map(k =>
+        `<option value="${k}"${k === kind ? ' selected' : ''}>${escapeHtml(DASH_SCOPE_LABELS[k])}</option>`
     ).join('');
-    return `<label class="dash-cfg-label">Scope</label>
-        <select id="${id}" class="form-control">${options}</select>`;
+
+    const nodes = allNodes.filter(n => n.node_type !== 'proxmox');
+    const curNode = cfg.node || (allNodes.find(n => n.is_self) || {}).id || '';
+    const nodeOpts = nodes.map(n =>
+        `<option value="${escapeAttr(n.id)}"${n.id === curNode ? ' selected' : ''}>${escapeHtml(nodeName(n))} — ${escapeHtml(n.cluster_name || 'WolfStack')}</option>`
+    ).join('') || '<option value="">(no servers)</option>';
+
+    const clusters = [...new Set(nodes.map(n => n.cluster_name || 'WolfStack'))];
+    const curCluster = cfg.cluster || dashSelfCluster();
+    const clusterOpts = clusters.map(c =>
+        `<option value="${escapeAttr(c)}"${c === curCluster ? ' selected' : ''}>${escapeHtml(c)}</option>`
+    ).join('');
+
+    let html = `<label class="dash-cfg-label">Show data for</label>
+        <select id="dashcfg-scope" class="form-control" onchange="dashScopeToggle(this.value)">${scopeOpts}</select>`;
+    if (kinds.includes('node')) {
+        html += `<div id="dashcfg-scope-node-row" style="${kind === 'node' ? '' : 'display:none;'}">
+            <label class="dash-cfg-label">Server</label>
+            <select id="dashcfg-scope-node" class="form-control">${nodeOpts}</select>
+        </div>`;
+    }
+    if (kinds.includes('cluster')) {
+        html += `<div id="dashcfg-scope-cluster-row" style="${kind === 'cluster' ? '' : 'display:none;'}">
+            <label class="dash-cfg-label">Cluster</label>
+            <select id="dashcfg-scope-cluster" class="form-control">${clusterOpts}</select>
+        </div>`;
+    }
+    return html;
+}
+
+function dashScopeToggle(kind) {
+    const nr = document.getElementById('dashcfg-scope-node-row');
+    const cr = document.getElementById('dashcfg-scope-cluster-row');
+    if (nr) nr.style.display = kind === 'node' ? '' : 'none';
+    if (cr) cr.style.display = kind === 'cluster' ? '' : 'none';
+}
+
+function dashReadScope(w, kinds) {
+    const s = dashCfgVal('dashcfg-scope');
+    w.config.scope = kinds.includes(s) ? s : kinds[0];
+    if (w.config.scope === 'node') {
+        w.config.node = dashCfgVal('dashcfg-scope-node') || (allNodes.find(n => n.is_self) || {}).id || '';
+    }
+    if (w.config.scope === 'cluster') {
+        w.config.cluster = dashCfgVal('dashcfg-scope-cluster') || dashSelfCluster();
+    }
+}
+
+// The nodes a scoped widget should query. For a specific server we honour the
+// operator's pick even if it's currently offline (the fetch just yields empty,
+// bounded by dashFanout's timeout) rather than silently substituting a
+// different server; only a truly unknown id falls back to self.
+function dashResolveScopeNodes(cfg) {
+    const scope = (cfg && cfg.scope) || 'fleet';
+    if (scope === 'node') {
+        const n = allNodes.find(x => x.id === cfg.node) || allNodes.find(x => x.is_self);
+        return n ? [n] : [];
+    }
+    if (scope === 'cluster') return dashScopeNodes((cfg && cfg.cluster) || dashSelfCluster());
+    return dashScopeNodes();
+}
+
+// True when a scoped widget is showing more than one server (so rows should
+// be labelled with their host).
+function dashScopeIsMulti(cfg) {
+    return (cfg && cfg.scope) !== 'node';
+}
+
+// A short human label for the current scope, shown in the widget header line.
+function dashScopeLabel(cfg) {
+    const scope = (cfg && cfg.scope) || 'fleet';
+    if (scope === 'node') {
+        const n = allNodes.find(x => x.id === cfg.node);
+        return n ? nodeName(n) : 'this server';
+    }
+    if (scope === 'cluster') return 'cluster ' + ((cfg && cfg.cluster) || dashSelfCluster());
+    return 'whole fleet';
 }
 
 // The factory default mirrors the classic WolfStack home page exactly:
@@ -4689,23 +4791,27 @@ function dashMetricsReadConfig(w) {
 
 async function dashRefreshContainers(body, w) {
     const cfg = w.config || {};
+    const nodes = dashResolveScopeNodes(cfg);
     let list;
-    if (cfg.scope === 'fleet') {
-        // Fan out per cluster: /api/containers/cluster already merges within a
-        // cluster, so hit one representative online node per cluster and merge.
+    if (cfg.scope === 'node') {
+        // A single server: query its Docker + LXC endpoints directly, in
+        // parallel (the per-node lists don't carry node_hostname, so tag it in).
+        const tag = (arr, n) => (Array.isArray(arr) ? arr : []).map(c => ({ ...c, node_hostname: c.node_hostname || n.hostname }));
+        const [docker, lxc] = await Promise.all([
+            dashFanout(nodes, '/api/containers/docker', tag),
+            dashFanout(nodes, '/api/containers/lxc', tag),
+        ]);
+        list = docker.concat(lxc);
+    } else {
+        // A cluster or the fleet: /api/containers/cluster already merges within
+        // a cluster, so hit one representative online node per cluster.
         const byCluster = {};
-        dashScopeNodes().forEach(n => {
+        nodes.forEach(n => {
             const c = n.cluster_name || 'WolfStack';
             if (!byCluster[c] || n.is_self) byCluster[c] = n;
         });
-        const reps = Object.values(byCluster);
-        list = await dashFanout(reps, '/api/containers/cluster', (data) =>
+        list = await dashFanout(Object.values(byCluster), '/api/containers/cluster', (data) =>
             Array.isArray(data) ? data : (data.containers || []));
-    } else {
-        const resp = await fetch(apiUrl('/api/containers/cluster'));
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const data = await resp.json();
-        list = Array.isArray(data) ? data : (data.containers || []);
     }
     if (cfg.runtime && cfg.runtime !== 'all') list = list.filter(c => c.runtime === cfg.runtime);
     const total = list.length;
@@ -4719,7 +4825,7 @@ async function dashRefreshContainers(body, w) {
     if (!total) {
         body.innerHTML = renderEmptyState({
             title: 'No containers found',
-            body: (cfg.scope === 'fleet' ? 'Docker and LXC containers across every cluster' : 'Docker and LXC containers across this cluster') + ' will appear here.',
+            body: 'Docker and LXC containers for ' + dashScopeLabel(cfg) + ' will appear here.',
         });
         return;
     }
@@ -4742,10 +4848,7 @@ async function dashRefreshContainers(body, w) {
 function dashContainersConfigForm(w) {
     const cfg = w.config || {};
     const sel = (v, cur) => v === (cur || 'all') ? ' selected' : '';
-    return dashScopeField('dashcfg-ct-scope', cfg.scope || 'cluster', [
-        { v: 'cluster', label: 'This cluster' },
-        { v: 'fleet', label: 'Fleet (all clusters)' },
-    ]) + `<label class="dash-cfg-label">Runtime</label>
+    return dashScopeFields(w, ['node', 'cluster', 'fleet']) + `<label class="dash-cfg-label">Runtime</label>
         <select id="dashcfg-ct-runtime" class="form-control">
             <option value="all"${sel('all', cfg.runtime)}>Docker + LXC</option>
             <option value="docker"${sel('docker', cfg.runtime)}>Docker only</option>
@@ -4761,7 +4864,7 @@ function dashContainersConfigForm(w) {
 }
 
 function dashContainersReadConfig(w) {
-    w.config.scope = dashCfgVal('dashcfg-ct-scope') === 'fleet' ? 'fleet' : 'cluster';
+    dashReadScope(w, ['node', 'cluster', 'fleet']);
     w.config.runtime = dashCfgVal('dashcfg-ct-runtime') || 'all';
     w.config.state = dashCfgVal('dashcfg-ct-state') || 'all';
     w.config.max = dashCfgInt('dashcfg-ct-max', 30, 5, 100);
@@ -4772,26 +4875,18 @@ function dashContainersReadConfig(w) {
 
 async function dashRefreshUptime(body, w) {
     const cfg = w.config || {};
-    const scope = cfg.scope || 'cluster';
-    let monitors;
-    if (scope === 'fleet') {
-        // Fan monitors out across every online node, dedup by monitor id.
-        const seen = new Set();
-        monitors = (await dashFanout(dashScopeNodes(), '/api/statuspage/monitors',
-            (data) => data.monitors || [])).filter(m => {
-                const id = m.monitor && m.monitor.id;
-                if (!id || seen.has(id)) return false;
-                seen.add(id); return true;
-            });
-    } else {
-        const resp = await fetch(apiUrl('/api/statuspage/monitors'));
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const data = await resp.json();
-        monitors = data.monitors || [];
-        if (scope === 'cluster') {
-            const sc = dashSelfCluster();
-            monitors = monitors.filter(m => (m.monitor && (m.monitor.cluster || 'WolfStack')) === sc);
-        }
+    // Fan the monitor list out across the scoped nodes and dedup by id. For a
+    // specific cluster, also filter to monitors tagged with that cluster.
+    const seen = new Set();
+    let monitors = (await dashFanout(dashResolveScopeNodes(cfg), '/api/statuspage/monitors',
+        (data) => data.monitors || [])).filter(m => {
+            const id = m.monitor && m.monitor.id;
+            if (!id || seen.has(id)) return false;
+            seen.add(id); return true;
+        });
+    if (cfg.scope === 'cluster') {
+        const c = cfg.cluster || dashSelfCluster();
+        monitors = monitors.filter(m => (m.monitor && (m.monitor.cluster || 'WolfStack')) === c);
     }
     if (!monitors.length) {
         body.innerHTML = renderEmptyState({
@@ -4819,15 +4914,12 @@ async function dashRefreshUptime(body, w) {
 
 function dashUptimeConfigForm(w) {
     const cfg = w.config || {};
-    return dashScopeField('dashcfg-up-scope', cfg.scope || 'cluster', [
-        { v: 'cluster', label: 'This cluster' },
-        { v: 'fleet', label: 'Fleet (all clusters)' },
-    ]) + `<label class="dash-cfg-label">Max rows</label>
+    return dashScopeFields(w, ['node', 'cluster', 'fleet']) + `<label class="dash-cfg-label">Max rows</label>
         <input type="number" id="dashcfg-up-max" class="form-control" min="3" max="100" value="${cfg.max || 20}">`;
 }
 
 function dashUptimeReadConfig(w) {
-    w.config.scope = dashCfgVal('dashcfg-up-scope') === 'fleet' ? 'fleet' : 'cluster';
+    dashReadScope(w, ['node', 'cluster', 'fleet']);
     w.config.max = dashCfgInt('dashcfg-up-max', 20, 3, 100);
     return null;
 }
@@ -4836,18 +4928,9 @@ function dashUptimeReadConfig(w) {
 
 async function dashRefreshAlerts(body, w) {
     const cfg = w.config || {};
-    const scope = cfg.scope || 'fleet';
     const max = cfg.max || 15;
-    let alerts;
-    if (scope === 'node') {
-        const resp = await fetch(apiUrl('/api/alerts?since=0'));
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        alerts = (await resp.json()).alerts || [];
-    } else {
-        const nodes = scope === 'cluster' ? dashScopeNodes(dashSelfCluster()) : dashScopeNodes();
-        alerts = await dashFanout(nodes, '/api/alerts?since=0',
-            (data, n) => (data.alerts || []).map(a => ({ ...a, hostname: a.hostname || n.hostname })));
-    }
+    let alerts = await dashFanout(dashResolveScopeNodes(cfg), '/api/alerts?since=0',
+        (data, n) => (data.alerts || []).map(a => ({ ...a, hostname: a.hostname || n.hostname })));
     // Newest first — timestamps are RFC3339 strings, comparable lexically;
     // fall back to id for entries sharing a timestamp.
     alerts.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || '') || (b.id || 0) - (a.id || 0));
@@ -4869,17 +4952,12 @@ async function dashRefreshAlerts(body, w) {
 
 function dashAlertsConfigForm(w) {
     const cfg = w.config || {};
-    return dashScopeField('dashcfg-al-scope', cfg.scope || 'fleet', [
-        { v: 'node', label: 'This node' },
-        { v: 'cluster', label: 'This cluster' },
-        { v: 'fleet', label: 'Fleet (all clusters)' },
-    ]) + `<label class="dash-cfg-label">Max rows</label>
+    return dashScopeFields(w, ['node', 'cluster', 'fleet']) + `<label class="dash-cfg-label">Max rows</label>
         <input type="number" id="dashcfg-al-max" class="form-control" min="3" max="100" value="${cfg.max || 15}">`;
 }
 
 function dashAlertsReadConfig(w) {
-    const s = dashCfgVal('dashcfg-al-scope');
-    w.config.scope = (s === 'node' || s === 'cluster') ? s : 'fleet';
+    dashReadScope(w, ['node', 'cluster', 'fleet']);
     w.config.max = dashCfgInt('dashcfg-al-max', 15, 3, 100);
     return null;
 }
@@ -4888,16 +4966,9 @@ function dashAlertsReadConfig(w) {
 
 async function dashRefreshBackups(body, w) {
     const cfg = w.config || {};
-    const scope = cfg.scope || 'node';
-    let list;
-    if (scope === 'fleet') {
-        list = await dashFanout(dashScopeNodes(), '/api/backups',
-            (data, n) => (Array.isArray(data) ? data : []).map(e => ({ ...e, node_hostname: e.node_hostname || n.hostname })));
-    } else {
-        const resp = await fetch(apiUrl('/api/backups'));
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        list = await resp.json();
-    }
+    const multi = dashScopeIsMulti(cfg);
+    const list = await dashFanout(dashResolveScopeNodes(cfg), '/api/backups',
+        (data, n) => (Array.isArray(data) ? data : []).map(e => ({ ...e, node_hostname: e.node_hostname || n.hostname })));
     if (!Array.isArray(list) || !list.length) {
         body.innerHTML = renderEmptyState({ title: 'No backups yet', body: 'Recent backup jobs and their outcome will appear here.' });
         return;
@@ -4911,7 +4982,7 @@ async function dashRefreshBackups(body, w) {
             <span style="width:8px;height:8px;border-radius:50%;background:${stColor(e.status)};flex-shrink:0;"></span>
             <span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${escapeHtml(label)}</span>
             <span style="font-size:9px;padding:1px 5px;border-radius:3px;background:var(--bg-tertiary);color:var(--text-muted);text-transform:uppercase;flex-shrink:0;">${escapeHtml((e.target && e.target.type) || '')}</span>
-            <span style="margin-left:auto;font-size:11px;color:var(--text-muted);flex-shrink:0;">${scope === 'fleet' && e.node_hostname ? escapeHtml(e.node_hostname) + ' · ' : ''}${e.size_bytes ? formatBytes(e.size_bytes) + ' · ' : ''}${escapeHtml(formatRelativeTime(e.created_at))}</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted);flex-shrink:0;">${multi && e.node_hostname ? escapeHtml(e.node_hostname) + ' · ' : ''}${e.size_bytes ? formatBytes(e.size_bytes) + ' · ' : ''}${escapeHtml(formatRelativeTime(e.created_at))}</span>
         </div>`;
     }).join('');
     body.innerHTML = `<div style="padding:8px 14px;">${rows}</div>`;
@@ -4919,15 +4990,12 @@ async function dashRefreshBackups(body, w) {
 
 function dashBackupsConfigForm(w) {
     const cfg = w.config || {};
-    return dashScopeField('dashcfg-bk-scope', cfg.scope || 'node', [
-        { v: 'node', label: 'This node' },
-        { v: 'fleet', label: 'Fleet (all nodes)' },
-    ]) + `<label class="dash-cfg-label">Max rows</label>
+    return dashScopeFields(w, ['node', 'cluster', 'fleet']) + `<label class="dash-cfg-label">Max rows</label>
         <input type="number" id="dashcfg-bk-max" class="form-control" min="3" max="50" value="${cfg.max || 10}">`;
 }
 
 function dashBackupsReadConfig(w) {
-    w.config.scope = dashCfgVal('dashcfg-bk-scope') === 'fleet' ? 'fleet' : 'node';
+    dashReadScope(w, ['node', 'cluster', 'fleet']);
     w.config.max = dashCfgInt('dashcfg-bk-max', 10, 3, 50);
     return null;
 }
@@ -4941,12 +5009,12 @@ function dashBuildStorage(body) {
 function dashUpdateStorage(body, w) {
     const box = body.firstElementChild;
     if (!box) return;
-    const scope = (w.config && w.config.scope) || 'fleet';
-    const sc = dashSelfCluster();
+    // Disk usage already rides in each node's metrics (from /api/nodes), so no
+    // fetch needed — just pick the scoped nodes and read their disks.
+    const ids = new Set(dashResolveScopeNodes(w.config || {}).map(n => n.id));
     let html = '';
     allNodes.forEach(n => {
-        if (!n.online || !n.metrics || !Array.isArray(n.metrics.disks)) return;
-        if (scope === 'cluster' && (n.cluster_name || 'WolfStack') !== sc) return;
+        if (!ids.has(n.id) || !n.online || !n.metrics || !Array.isArray(n.metrics.disks)) return;
         n.metrics.disks.forEach(d => {
             const label = nodeName(n) + ' · ' + (d.mount_point || d.name || 'disk');
             html += dashBar(label, d.usage_percent, formatBytes(d.used_bytes || 0) + ' / ' + formatBytes(d.total_bytes || 0));
@@ -4956,30 +5024,21 @@ function dashUpdateStorage(body, w) {
 }
 
 function dashStorageConfigForm(w) {
-    return dashScopeField('dashcfg-st-scope', (w.config && w.config.scope) || 'fleet', [
-        { v: 'cluster', label: 'This cluster' },
-        { v: 'fleet', label: 'Fleet (all clusters)' },
-    ]);
+    return dashScopeFields(w, ['node', 'cluster', 'fleet']);
 }
 
 function dashStorageReadConfig(w) {
-    w.config.scope = dashCfgVal('dashcfg-st-scope') === 'cluster' ? 'cluster' : 'fleet';
+    dashReadScope(w, ['node', 'cluster', 'fleet']);
     return null;
 }
 
 // ── Widget: TLS certificates (node / fleet) ──
 
 async function dashRefreshCerts(body, w) {
-    const scope = (w.config && w.config.scope) || 'node';
-    let certs;
-    if (scope === 'fleet') {
-        certs = await dashFanout(dashScopeNodes(), '/api/certificates/list',
-            (data, n) => (data.certs || []).map(c => ({ ...c, _host: n.hostname })));
-    } else {
-        const resp = await fetch(apiUrl('/api/certificates/list'));
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        certs = (await resp.json()).certs || [];
-    }
+    const cfg = w.config || {};
+    const multi = dashScopeIsMulti(cfg);
+    const certs = await dashFanout(dashResolveScopeNodes(cfg), '/api/certificates/list',
+        (data, n) => (data.certs || []).map(c => ({ ...c, _host: n.hostname })));
     if (!certs.length) {
         body.innerHTML = renderEmptyState({ title: 'No TLS certificates found', body: 'Certificates (custom, certbot, filesystem) will appear here with their expiry.' });
         return;
@@ -5002,19 +5061,23 @@ async function dashRefreshCerts(body, w) {
         return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px;">
             <span style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;" title="${escapeAttr((c._host ? c._host + ' — ' : '') + (c.cert_path || ''))}">${escapeHtml(c.domain || '?')}</span>
             <span style="font-size:9px;padding:1px 5px;border-radius:3px;background:var(--bg-tertiary);color:var(--text-muted);text-transform:uppercase;flex-shrink:0;">${escapeHtml(c.source || '')}</span>
-            <span style="margin-left:auto;font-size:11px;flex-shrink:0;">${scope === 'fleet' && c._host ? `<span style="color:var(--text-muted);">${escapeHtml(c._host)} · </span>` : ''}${expiryHtml}</span>
+            <span style="margin-left:auto;font-size:11px;flex-shrink:0;">${multi && c._host ? `<span style="color:var(--text-muted);">${escapeHtml(c._host)} · </span>` : ''}${expiryHtml}</span>
         </div>`;
     }).join('');
     body.innerHTML = `<div style="padding:8px 14px;">${rows}</div>`;
 }
 
-// ── Widget: threat intelligence (cluster or fleet) ──
+// ── Widget: threat intelligence (node / cluster / fleet) ──
 
 async function dashRefreshThreats(body, w) {
-    if ((w.config && w.config.scope) === 'fleet') return dashRefreshThreatsFleet(body);
-    const resp = await fetch(apiUrl('/api/threat-intel/status'));
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const s = await resp.json();
+    const cfg = w.config || {};
+    // Only an explicit single-server scope shows one node's own status (the
+    // v4/v6 count shape). Everything else (cluster, fleet, or unset default)
+    // aggregates the per-node fleet-status.
+    if (cfg.scope !== 'node') return dashRefreshThreatsFleet(body, w);
+    const nodes = dashResolveScopeNodes(cfg);
+    const s = (await dashFanout(nodes, '/api/threat-intel/status', (d) => [d]))[0];
+    if (!s) { body.innerHTML = renderEmptyState({ title: 'No data', body: 'Threat-intelligence status will appear here.' }); return; }
     if (!s.enabled) {
         body.innerHTML = renderEmptyState({ title: 'Threat intelligence is off', body: 'Enable it under Fleet Security to block known-bad IPs at the firewall.' });
         return;
@@ -5048,13 +5111,19 @@ async function dashRefreshThreats(body, w) {
 // Fleet threat-intel: /api/threat-intel/fleet-status returns
 // { nodes: [ ThreatIntelStatus{ enabled, state:"off"|"dry-run"|"enforce",
 //   cluster, feed_entry_count, ipset_entry_count, ... } ] } (one per node).
-async function dashRefreshThreatsFleet(body) {
+async function dashRefreshThreatsFleet(body, w) {
+    const cfg = (w && w.config) || {};
     const resp = await fetch(apiUrl('/api/threat-intel/fleet-status'));
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
-    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    let nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    // Narrow to the chosen cluster when scope is a specific cluster.
+    if (cfg.scope === 'cluster') {
+        const c = cfg.cluster || dashSelfCluster();
+        nodes = nodes.filter(n => (n.cluster || 'WolfStack') === c);
+    }
     if (!nodes.length) {
-        body.innerHTML = renderEmptyState({ title: 'No fleet data', body: 'Threat-intelligence status across the fleet will appear here.' });
+        body.innerHTML = renderEmptyState({ title: 'No data', body: 'Threat-intelligence status for ' + dashScopeLabel(cfg) + ' will appear here.' });
         return;
     }
     const count = (st) => nodes.filter(n => n.state === st).length;
@@ -5074,26 +5143,20 @@ async function dashRefreshThreatsFleet(body) {
 }
 
 function dashThreatsConfigForm(w) {
-    return dashScopeField('dashcfg-th-scope', (w.config && w.config.scope) || 'cluster', [
-        { v: 'cluster', label: 'This node/cluster' },
-        { v: 'fleet', label: 'Fleet (all nodes)' },
-    ]);
+    return dashScopeFields(w, ['node', 'cluster', 'fleet']);
 }
 
 function dashThreatsReadConfig(w) {
-    w.config.scope = dashCfgVal('dashcfg-th-scope') === 'fleet' ? 'fleet' : 'cluster';
+    dashReadScope(w, ['node', 'cluster', 'fleet']);
     return null;
 }
 
 function dashCertsConfigForm(w) {
-    return dashScopeField('dashcfg-ce-scope', (w.config && w.config.scope) || 'node', [
-        { v: 'node', label: 'This node' },
-        { v: 'fleet', label: 'Fleet (all nodes)' },
-    ]);
+    return dashScopeFields(w, ['node', 'cluster', 'fleet']);
 }
 
 function dashCertsReadConfig(w) {
-    w.config.scope = dashCfgVal('dashcfg-ce-scope') === 'fleet' ? 'fleet' : 'node';
+    dashReadScope(w, ['node', 'cluster', 'fleet']);
     return null;
 }
 
@@ -5743,6 +5806,18 @@ function dashApplyChrome() {
         const span = Math.max(DASH_MIN_W, Math.min(DASH_MAX_W, parseInt(w.w, 10) || def.defW));
         el.style.gridColumn = 'span ' + span;
         el.draggable = dashEditMode;
+        // Refresh scoped-widget titles every render — they depend on
+        // `allNodes`, which is often still empty when the shell is first built,
+        // so the initial title can read "this server" until the node list
+        // arrives. (Restricted to scoped types so it can't clobber the RSS
+        // widget's feed-derived title, which lives only in the DOM.)
+        if (DASH_SCOPED_TYPES.has(w.type)) {
+            const titleEl = el.querySelector(':scope > .dash-widget-header > .dash-widget-title');
+            if (titleEl) {
+                const t = dashWidgetTitle(w);
+                if (titleEl.textContent !== t) titleEl.textContent = t;
+            }
+        }
         const body = el.querySelector(':scope > .dash-widget-body');
         if (body) {
             const autoOk = (w.h === 'auto' || typeof w.h !== 'number');
@@ -5769,7 +5844,9 @@ function dashWidgetTitle(w) {
     if ((w.type === 'rss' || w.type === 'iframe') && w.config && w.config.title) return w.config.title;
     if (w.type === 'weather' && w.config && w.config.location_name) return 'Weather — ' + w.config.location_name;
     if (w.type === 'map') return 'Infrastructure';
-    return def ? def.name : w.type;
+    const base = def ? def.name : w.type;
+    if (DASH_SCOPED_TYPES.has(w.type)) return base + ' — ' + dashScopeLabel(w.config || {});
+    return base;
 }
 
 function dashBuildWidgetShell(w) {
