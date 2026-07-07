@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.26: dashboard widgets can target a specific server or cluster** _(2026-07-07 — [`24a32bd8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/24a32bd8009386001314c2ba3f3fd632512ba747))_
 - **v25.2.25: dashboard editing model, free sizing, fleet scopes, inline search** _(2026-07-07 — [`6a595ec9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6a595ec9a0ecd34218d7f1c4257856b4e2621870))_
 - **v25.2.24: customisable home dashboard — per-user widget grid** _(2026-07-07 — [`d9565d84`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d9565d840808bd5cd96864320461f002c93bbf54))_
 - **v25.2.23: sort the Apps & Tools drawer tiles alphabetically** _(2026-07-07 — [`1f81ebeb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1f81ebeb23699d4a2888ed2197cc8f3ff6c2782f))_
