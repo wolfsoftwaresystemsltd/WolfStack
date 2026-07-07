@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WolfHost — Customer Portal</title>
+    <link rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌐</text></svg>">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="portal.css">
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="login-screen">
+        <div class="login-container">
+            <div class="login-brand">
+                <div class="login-logo">🌐</div>
+                <h1 class="login-title" id="login-company">WolfHost</h1>
+                <p class="login-subtitle">Customer Portal</p>
+            </div>
+            <form id="login-form" onsubmit="return portalLogin(event)">
+                <div class="form-group">
+                    <label for="login-email">Email Address</label>
+                    <input type="email" id="login-email" class="form-input" placeholder="you@example.com" required autocomplete="email">
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" class="form-input" placeholder="Enter your password" required autocomplete="current-password">
+                </div>
+                <div id="login-error" class="login-error" style="display:none"></div>
+                <button type="submit" class="btn-login" id="login-btn">Sign In</button>
+            </form>
+            <div class="login-footer">
+                Powered by <strong>WolfHost</strong> &mdash; Wolf Software Systems Ltd
+            </div>
+        </div>
+    </div>
+
+    <!-- App Shell -->
+    <div id="app-shell" style="display:none">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-brand">
+                <span class="brand-icon">🌐</span>
+                <span class="brand-name" id="portal-company">WolfHost</span>
+            </div>
+            <nav class="sidebar-nav">
+                <a class="nav-link active" data-view="dashboard" onclick="portalView('dashboard')"><span class="nav-icon">📊</span> Dashboard</a>
+                <a class="nav-link" data-view="apps" onclick="portalView('apps')"><span class="nav-icon">🛍️</span> Apps</a>
+                <a class="nav-link" data-view="websites" onclick="portalView('websites')"><span class="nav-icon">🌍</span> Websites</a>
+                <a class="nav-link" data-view="ftp" onclick="portalView('ftp')"><span class="nav-icon">📁</span> FTP Accounts</a>
+                <a class="nav-link" data-view="ssl" onclick="portalView('ssl')"><span class="nav-icon">🔒</span> SSL Certificates</a>
+                <a class="nav-link" data-view="databases" onclick="portalView('databases')"><span class="nav-icon">🗃️</span> Databases</a>
+                <a class="nav-link" data-view="email" onclick="portalView('email')"><span class="nav-icon">📧</span> Email</a>
+                <a class="nav-link" data-view="files" onclick="portalView('files')"><span class="nav-icon">📂</span> File Manager</a>
+                <a class="nav-link" data-view="backups" onclick="portalView('backups')"><span class="nav-icon">💾</span> Backups</a>
+                <a class="nav-link" data-view="usage" onclick="portalView('usage')"><span class="nav-icon">📈</span> Usage</a>
+                <a class="nav-link" data-view="da-tools" onclick="portalView('da-tools')"><span class="nav-icon">🛠️</span> Hosting Tools</a>
+                <div class="nav-divider"></div>
+                <a class="nav-link" data-view="support" onclick="portalView('support')"><span class="nav-icon">🎫</span> Support</a>
+                <a class="nav-link" data-view="billing" onclick="portalView('billing')"><span class="nav-icon">💳</span> Billing</a>
+                <a class="nav-link" data-view="settings" onclick="portalView('settings')"><span class="nav-icon">⚙️</span> Settings</a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info" id="user-info"></div>
+                <button class="btn-logout" onclick="portalLogout()">Sign Out</button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-bar">
+                <button class="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+                <h2 id="page-title">Dashboard</h2>
+            </header>
+            <div class="content-area" id="content-area">
+                <div style="text-align:center;padding:60px;color:var(--text-muted)">Loading...</div>
+            </div>
+        </main>
+    </div>
+
+    <script src="portal.js"></script>
+</body>
+</html>

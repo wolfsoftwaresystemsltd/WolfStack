@@ -79,6 +79,7 @@
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
     <script src="/js/vendor/three.min.js?v=15.10.7a" defer></script>
     <link rel="stylesheet" id="main-css" href="/css/style.css?v=16.11.0">
+    <link rel="stylesheet" href="/css/wolfhost.css">
     <link rel="stylesheet" href="/css/xterm.min.css?v=16.11.0"
         media="print" onload="this.media='all'" />
     <script>document.getElementById('main-css').href='/css/style.css?v='+Date.now();</script>
@@ -2984,6 +2985,11 @@
         </div>
 
         <!-- ═══ Control Panel Page ═══ -->
+        <!-- ═══ WolfHost Page (managed web hosting — built-in subsystem) ═══ -->
+        <div id="page-wolfhost" class="page-view" style="display:none;">
+            <div id="wolfhost-content" style="padding:4px;">Loading WolfHost…</div>
+        </div>
+
         <div id="page-control-panel" class="page-view" style="display:none;">
             <div class="card" style="margin-bottom:16px;">
                 <div class="card-body" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
@@ -10459,6 +10465,7 @@ region = us-east-1"></textarea>
         <script>document.write('<script src="/js/icons-clean.js?v=' + Date.now() + '"><\/script>');</script>
         <script>document.write('<script src="/js/app.js?v=' + Date.now() + '"><\/script>');</script>
         <script>document.write('<script src="/js/wolfrouter.js?v=' + Date.now() + '"><\/script>');</script>
+        <script>document.write('<script src="/js/wolfhost.js?v=' + Date.now() + '"><\/script>');</script>
         <script>
             // Check auth on page load
             fetch('/api/auth/check')

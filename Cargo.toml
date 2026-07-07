@@ -1,6 +1,6 @@
 [package]
 name = "wolfstack"
-version = "25.2.21"
+version = "25.2.22"
 edition = "2024"
 authors = ["Wolf Software Systems Ltd"]
 description = "Server management platform for the Wolf software suite"
@@ -86,6 +86,14 @@ tokio-postgres = { version = "0.7", features = ["runtime"] }
 deadpool-postgres = "0.14"
 sqlparser = "0.52"
 async-stream = "0.3.6"
+# WolfHost subsystem (merged from the former plugin)
+actix-cors = "0.7"
+argon2 = "0.5"
+password-hash = "0.5"
+sqlx = { version = "0.8", features = ["runtime-tokio", "mysql"], default-features = false }
+log = "0.4"
+tokio-stream = "0.1"
+futures-core = "0.3"
 
 [workspace]
 

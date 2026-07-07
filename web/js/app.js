@@ -2137,7 +2137,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync' };
+    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', wolfhost: 'WolfHost' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -2215,6 +2215,8 @@ function selectView(page) {
         fleetLogsInit();
     } else if (page === 'learn') {
         learnInit();
+    } else if (page === 'wolfhost') {
+        if (typeof wolfhostInit === 'function') wolfhostInit();
     }
 
     // Restore task log toggle button when leaving topology
@@ -69415,6 +69417,10 @@ window.predTermClose = predTermClose;
 // drawer.
 
 const APP_DRAWER_TILES = [
+    {
+        id: 'wolfhost', icon: '', name: 'WolfHost',
+        desc: 'Managed web hosting — customers, plans, billing, domains, email, SSL, and a white-label customer portal. Free, built in.',
+    },
     {
         id: 'learn', icon: '', name: 'Courses',
         desc: 'Calm, step-by-step courses — pick your level: Getting Started, Going Further, or Defend Your Systems. Start anywhere.',

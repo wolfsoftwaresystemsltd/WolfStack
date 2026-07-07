@@ -49,6 +49,7 @@ mod icons;
 mod tui;
 mod wolfflow;
 mod wolfagents;
+mod wolfhost;
 mod discord_bot;
 mod telegram_bot;
 mod whatsapp_bot;
@@ -3916,6 +3917,21 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             installer::find_tls_certificate(cli.tls_domain.as_deref())
         };
 
+        // WolfHost subsystem: build its state, then start the customer
+        // portal as its own bound server + background tasks. The admin API
+        // is registered on the main app(s) below via configure_admin. The
+        // portal serves untrusted public customers, so it stays a separate
+        // server rather than sharing this process's main port.
+        let wolfhost_cfg = wolfhost::config::WolfHostConfig::load();
+        let wolfhost_portal_port = wolfhost_cfg.portal_port;
+        // Portal static assets ship with WolfStack (web/wolfhost-portal),
+        // not the old plugin path.
+        let wolfhost_portal_dir = format!("{}/wolfhost-portal", web_dir);
+        let wolfhost_state = wolfhost::build_state(wolfhost_cfg).await;
+        let wolfhost_data = web::Data::new(wolfhost_state.clone());
+        let wolfhost_data2 = wolfhost_data.clone();
+        wolfhost::spawn_portal(wolfhost_state.clone(), wolfhost_portal_port, wolfhost_portal_dir).await;
+
         // Try to load TLS config using OpenSSL — fall back to HTTP if anything goes wrong
         let ssl_builder = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
             use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
@@ -3993,6 +4009,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     // Compressed it's ~10x smaller and far less reset-prone.
                     .wrap(actix_web::middleware::Compress::default())
                     .app_data(app_state.clone())
+                    .app_data(wolfhost_data.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                     .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
                     // Cache-Control: no-cache on every response that doesn't set
@@ -4005,7 +4022,8 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     // means revalidate-always: unchanged files are still cheap
                     // 304s via ETag; changed files arrive immediately.
                     .wrap(actix_web::middleware::DefaultHeaders::new().add(("Cache-Control", "no-cache")))
-                    .configure(api::configure);
+                    .configure(api::configure)
+                    .configure(wolfhost::configure_admin);
                 if agent_mode {
                     app.default_service(web::to(agent_index_handler))
                 } else {
@@ -4043,12 +4061,14 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                             // (app.js is ~3.9 MB uncompressed otherwise).
                             .wrap(actix_web::middleware::Compress::default())
                             .app_data(app_state2.clone())
+                            .app_data(wolfhost_data2.clone())
                             .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                             .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
                             // Same stale-UI guard as the primary listeners — see
                             // the comment there (Gary KO4BSR 2026-06-10).
                             .wrap(actix_web::middleware::DefaultHeaders::new().add(("Cache-Control", "no-cache")))
-                            .configure(api::configure);
+                            .configure(api::configure)
+                            .configure(wolfhost::configure_admin);
                         if agent_mode {
                             app.default_service(web::to(agent_index_handler))
                         } else {
@@ -4134,6 +4154,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     // Compressed it's ~10x smaller and far less reset-prone.
                     .wrap(actix_web::middleware::Compress::default())
                     .app_data(app_state.clone())
+                    .app_data(wolfhost_data.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
                     .app_data(actix_web::web::PayloadConfig::new(2 * 1024 * 1024 * 1024))
                     // Cache-Control: no-cache on every response that doesn't set
@@ -4146,7 +4167,8 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     // means revalidate-always: unchanged files are still cheap
                     // 304s via ETag; changed files arrive immediately.
                     .wrap(actix_web::middleware::DefaultHeaders::new().add(("Cache-Control", "no-cache")))
-                    .configure(api::configure);
+                    .configure(api::configure)
+                    .configure(wolfhost::configure_admin);
                 if agent_mode {
                     app.default_service(web::to(agent_index_handler))
                 } else {
