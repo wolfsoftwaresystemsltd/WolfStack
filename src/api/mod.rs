@@ -22821,6 +22821,133 @@ pub async fn ping(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse 
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
 
+// ─── Home-dashboard widget fetch proxy ───
+
+/// Pooled client for the home-dashboard widget fetch proxy (RSS feeds,
+/// Open-Meteo weather). Separate from API_HTTP_CLIENT because that client
+/// is tuned for inter-node calls: it accepts invalid TLS certs (self-signed
+/// cluster peers) and pins IPv4 — both wrong for arbitrary public endpoints.
+static DASH_FETCH_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(2)
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .user_agent(concat!("WolfStack/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+
+#[derive(Deserialize)]
+pub struct DashboardFetchQuery {
+    pub url: String,
+}
+
+/// Extract the host portion of an http(s) URL without pulling in the `url`
+/// crate: strip the scheme, cut the authority at the first `/`, `?` or `#`,
+/// drop any userinfo, then strip the port (bracket-aware for IPv6 literals).
+fn dash_fetch_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = if let Some(stripped) = host_port.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() { None } else { Some(host.to_ascii_lowercase()) }
+}
+
+/// GET /api/dashboard/fetch-proxy?url=… — server-side fetch for home-dashboard
+/// widgets (RSS feeds, Open-Meteo weather/geocoding). Exists because most
+/// third-party feeds send no CORS headers, so the browser cannot fetch them
+/// directly from the dashboard origin.
+///
+/// Guard rails:
+/// - Auth required. Reaching internal hosts through this is equivalent to what
+///   an authenticated operator can already do via status-page monitors and
+///   webhook targets, so no additional network allow-list is applied.
+/// - http/https only, 15s total deadline, response capped at 1 MiB.
+/// - The body is ALWAYS returned as `text/plain` + `nosniff`, never the
+///   upstream content type — otherwise navigating to this URL with an
+///   attacker-chosen `url` would render arbitrary HTML under our origin.
+pub async fn dashboard_fetch_proxy(
+    req: HttpRequest, state: web::Data<AppState>, q: web::Query<DashboardFetchQuery>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let url = q.url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "error": "Only http:// and https:// URLs can be fetched" }));
+    }
+    // Defence-in-depth: refuse link-local IP literals (169.254.0.0/16 — the
+    // cloud metadata range — and IPv6 fe80::/10). No real RSS feed or weather
+    // API lives there, and it keeps this endpoint from becoming a metadata-
+    // credential oracle on cloud-hosted nodes. Loopback and RFC1918 stay
+    // reachable ON PURPOSE: homelab operators legitimately point the RSS
+    // widget at LAN services (FreshRSS, a local Grafana), and an
+    // authenticated WolfStack operator already has a full host console, so
+    // blocking private ranges would cost real functionality without removing
+    // any capability. Hostnames are not resolved here — this is a tripwire
+    // for the common probe, not a DNS-rebinding-proof boundary.
+    let host = match dash_fetch_host(url) {
+        Some(h) => h,
+        None => {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({ "error": "URL has no host" }));
+        }
+    };
+    let link_local = host.parse::<std::net::IpAddr>().ok().map(|ip| match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        // fe80::/10 — first 10 bits 1111 1110 10
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }).unwrap_or(false);
+    if link_local {
+        return HttpResponse::Forbidden()
+            .json(serde_json::json!({ "error": "Link-local addresses cannot be fetched" }));
+    }
+    const MAX_BYTES: usize = 1024 * 1024;
+    let mut resp = match DASH_FETCH_CLIENT
+        .get(url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::BadGateway()
+                .json(serde_json::json!({ "error": format!("Fetch failed: {e}") }));
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        return HttpResponse::BadGateway()
+            .json(serde_json::json!({ "error": format!("Upstream returned HTTP {}", status.as_u16()) }));
+    }
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > MAX_BYTES {
+                    return HttpResponse::BadGateway()
+                        .json(serde_json::json!({ "error": "Response exceeds the 1 MiB proxy limit" }));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return HttpResponse::BadGateway()
+                    .json(serde_json::json!({ "error": format!("Read failed: {e}") }));
+            }
+        }
+    }
+    HttpResponse::Ok()
+        .insert_header(("X-Content-Type-Options", "nosniff"))
+        .content_type("text/plain; charset=utf-8")
+        .body(body)
+}
+
 // ─── Per-user interface lock (idle lock + PIN) ───
 //
 // A soft, client-enforced screen lock: after `idle_minutes` of inactivity
@@ -39248,6 +39375,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/user/preferences", web::patch().to(user_prefs_patch))
         // Lightweight liveness probe for the connection-loss banner
         .route("/api/ping", web::get().to(ping))
+        // Home-dashboard widget fetch proxy (RSS / weather — no CORS upstream)
+        .route("/api/dashboard/fetch-proxy", web::get().to(dashboard_fetch_proxy))
         // Per-user interface lock (idle lock + PIN)
         .route("/api/user/lock", web::get().to(user_lock_get))
         .route("/api/user/lock", web::post().to(user_lock_save))
@@ -40598,6 +40727,46 @@ pub fn configure_statuspage_only(cfg: &mut web::ServiceConfig) {
         .route("/", web::get().to(statuspage_public_index))
         .route("/status", web::get().to(statuspage_public_index))
         .route("/status/{slug}", web::get().to(statuspage_public_page_dedicated));
+}
+
+#[cfg(test)]
+mod dash_fetch_host_tests {
+    use super::dash_fetch_host;
+
+    #[test]
+    fn plain_hosts_ports_paths_and_userinfo() {
+        assert_eq!(dash_fetch_host("https://example.com/feed.xml"), Some("example.com".into()));
+        assert_eq!(dash_fetch_host("http://example.com:8080/x?y=1"), Some("example.com".into()));
+        assert_eq!(dash_fetch_host("https://user:pw@Example.COM/rss"), Some("example.com".into()));
+        assert_eq!(dash_fetch_host("http://169.254.169.254/latest/meta-data/"), Some("169.254.169.254".into()));
+    }
+
+    #[test]
+    fn ipv6_literals_are_bracket_stripped() {
+        assert_eq!(dash_fetch_host("http://[fe80::1]/"), Some("fe80::1".into()));
+        assert_eq!(dash_fetch_host("http://[2001:db8::2]:8443/path"), Some("2001:db8::2".into()));
+    }
+
+    #[test]
+    fn hostless_and_schemeless_urls_are_rejected() {
+        assert_eq!(dash_fetch_host("https:///path-only"), None);
+        assert_eq!(dash_fetch_host("example.com/no-scheme"), None);
+        assert_eq!(dash_fetch_host("http://@/"), None);
+    }
+
+    #[test]
+    fn link_local_detection_matches_handler_logic() {
+        // Mirror of the handler's parse + range check.
+        let is_ll = |host: &str| host.parse::<std::net::IpAddr>().ok().map(|ip| match ip {
+            std::net::IpAddr::V4(v4) => v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        }).unwrap_or(false);
+        assert!(is_ll("169.254.169.254"));
+        assert!(is_ll("fe80::1"));
+        assert!(!is_ll("192.168.1.10"));   // RFC1918 intentionally allowed
+        assert!(!is_ll("127.0.0.1"));      // loopback intentionally allowed
+        assert!(!is_ll("feeds.bbci.co.uk"));
+    }
 }
 
 #[cfg(test)]
