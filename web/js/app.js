@@ -37199,6 +37199,7 @@ function openAiSettings() {
 
 async function loadAiConfig() {
     populateAiCliNodes();
+    if (typeof mailRelayInit === 'function') mailRelayInit();
     try {
         var resp = await fetch(aiNodeUrl('/api/ai/config'));
         var cfg = await resp.json();
@@ -37470,6 +37471,139 @@ async function saveAiConfig() {
         }
     } catch (e) {
         showModal('Error: ' + e.message);
+    }
+}
+
+// ─── Host mail relay (msmtp sendmail shim) ───
+// Lets host services send email through the configured SMTP relay. Per-node:
+// the server dropdown targets any WolfStack node via the node proxy.
+function mailRelayInit() {
+    const sel = document.getElementById('mr-node-select');
+    if (!sel) return;
+    const nodes = allNodes.filter(n => n.node_type !== 'proxmox');
+    const prev = sel.value;
+    sel.innerHTML = nodes.map(n =>
+        `<option value="${escapeAttr(n.id)}"${n.is_self ? ' selected' : ''}>${escapeHtml(nodeName(n))}${n.is_self ? ' (this node)' : ''}</option>`
+    ).join('') || '<option value="">(no servers)</option>';
+    if (prev && nodes.some(n => n.id === prev)) sel.value = prev;
+    mailRelayLoadStatus();
+}
+
+async function mailRelayLoadStatus() {
+    const sel = document.getElementById('mr-node-select');
+    const statusEl = document.getElementById('mr-status');
+    const warnEl = document.getElementById('mr-warning');
+    const enableBtn = document.getElementById('mr-enable-btn');
+    const disableBtn = document.getElementById('mr-disable-btn');
+    if (!sel || !statusEl) return;
+    const nid = sel.value;
+    statusEl.textContent = 'Loading…';
+    if (warnEl) warnEl.style.display = 'none';
+    try {
+        const resp = await fetch(nodeApiUrl(nid, '/api/mail-relay/status'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const s = await resp.json();
+        let line;
+        if (s.relay_active) {
+            line = '✅ Active — host services on this server send email via the WolfStack relay (msmtp → ' + escapeHtml(s.smtp_host || 'your SMTP') + ').';
+        } else if (s.sendmail === 'other') {
+            line = 'This server already has its own mail server (' + escapeHtml(s.sendmail_target || 'existing MTA') + '). Enabling will ask you to confirm replacing it.';
+        } else if (!s.smtp_configured) {
+            line = '⚠ No SMTP relay configured yet — fill in the SMTP settings above and Save, then enable the relay.';
+        } else {
+            line = 'Not enabled. Host services on this server currently have no way to send email.';
+        }
+        statusEl.innerHTML = line + ` <span style="color:var(--text-muted);">(${escapeHtml(s.distro || '')}, msmtp ${s.msmtp_installed ? 'installed' : 'not installed'})</span>`;
+        if (warnEl) {
+            if (s.warning) { warnEl.textContent = '⚠ ' + s.warning; warnEl.style.display = ''; }
+            else warnEl.style.display = 'none';
+        }
+        if (enableBtn) {
+            enableBtn.textContent = s.relay_active ? 'Re-apply relay' : 'Enable relay';
+            enableBtn.disabled = !s.smtp_configured && !s.relay_active;
+        }
+        if (disableBtn) disableBtn.style.display = s.relay_active ? '' : 'none';
+    } catch (e) {
+        statusEl.textContent = 'Could not read mail-relay status: ' + ((e && e.message) || e);
+    }
+}
+
+async function mailRelayEnable(force) {
+    const sel = document.getElementById('mr-node-select');
+    const out = document.getElementById('mr-output');
+    if (!sel) return;
+    const nid = sel.value;
+    const btn = document.getElementById('mr-enable-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+    try {
+        const resp = await fetch(nodeApiUrl(nid, '/api/mail-relay/enable'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ force: !!force }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            // The backend refuses to clobber an existing MTA unless forced —
+            // offer that explicitly rather than failing silently.
+            if (!force && /already has a mail transfer agent|Refusing to replace/i.test(data.error || '')) {
+                if (await showConfirm((data.error || '') + '\n\nReplace it with the WolfStack relay? The existing sendmail is backed up first.', 'Replace existing mail server?')) {
+                    return mailRelayEnable(true);
+                }
+            } else {
+                showToast(data.error || 'Failed to enable mail relay', 'error');
+                if (out) { out.style.display = ''; out.textContent = data.error || ''; }
+            }
+            return;
+        }
+        showToast(data.message || 'Host mail relay enabled', 'success');
+        if (out && data.install_output) { out.style.display = ''; out.textContent = data.install_output.trim(); }
+        else if (out) out.style.display = 'none';
+        mailRelayLoadStatus();
+    } catch (e) {
+        showToast('Failed: ' + ((e && e.message) || e), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Enable relay'; }
+    }
+}
+
+async function mailRelayDisable() {
+    const sel = document.getElementById('mr-node-select');
+    if (!sel) return;
+    if (!(await showConfirm('Disable the WolfStack host mail relay on this server? Host services will lose the ability to send email (unless another MTA is present). Any mail server we replaced is restored.', 'Disable mail relay'))) return;
+    try {
+        const resp = await fetch(nodeApiUrl(sel.value, '/api/mail-relay/disable'), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed to disable', 'error'); return; }
+        showToast('Host mail relay disabled', 'success');
+        mailRelayLoadStatus();
+    } catch (e) { showToast('Failed: ' + ((e && e.message) || e), 'error'); }
+}
+
+async function mailRelayTest() {
+    const sel = document.getElementById('mr-node-select');
+    const toEl = document.getElementById('mr-test-to');
+    const out = document.getElementById('mr-output');
+    if (!sel || !toEl) return;
+    const to = toEl.value.trim();
+    if (!to) { showToast('Enter a recipient address for the test', 'warning'); return; }
+    const btn = document.getElementById('mr-test-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+    try {
+        const resp = await fetch(nodeApiUrl(sel.value, '/api/mail-relay/test'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast('Test failed', 'error');
+            if (out) { out.style.display = ''; out.textContent = data.error || 'Test failed'; }
+        } else {
+            showToast(data.message || 'Test message sent', 'success');
+            if (out) { out.style.display = ''; out.textContent = data.message || 'Sent.'; }
+        }
+    } catch (e) {
+        showToast('Failed: ' + ((e && e.message) || e), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Send test'; }
     }
 }
 

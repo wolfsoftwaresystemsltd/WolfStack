@@ -6557,6 +6557,31 @@
                                     </div>
                                 </div>
 
+                                <!-- ─── Host mail relay ─── -->
+                                <h4 style="margin:24px 0 6px 0;font-size:14px;color:var(--accent-light);">Host mail relay</h4>
+                                <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;line-height:1.5;">
+                                    WolfStack sends its own alert email directly over SMTP — this is separate.
+                                    Turn this on so <strong>host services</strong> (cron jobs, PHP <code>mail()</code>,
+                                    monitoring scripts) that expect a local <code>/usr/sbin/sendmail</code> can send
+                                    through the SMTP relay above. It installs <code>msmtp</code> (no daemon, no open
+                                    ports) and won't replace an existing mail server unless you force it.
+                                </p>
+                                <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:10px;padding:16px;">
+                                    <div class="form-group" style="margin-bottom:12px;">
+                                        <label>Server</label>
+                                        <select id="mr-node-select" class="form-control" onchange="mailRelayLoadStatus()"></select>
+                                    </div>
+                                    <div id="mr-status" style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Loading…</div>
+                                    <div id="mr-warning" role="alert" style="display:none;font-size:12px;color:var(--warning);margin-bottom:12px;"></div>
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                                        <button class="btn btn-primary btn-sm" id="mr-enable-btn" onclick="mailRelayEnable(false)">Enable relay</button>
+                                        <button class="btn btn-sm" id="mr-disable-btn" onclick="mailRelayDisable()" style="display:none;">Disable</button>
+                                        <input type="email" id="mr-test-to" class="form-control" placeholder="you@example.com" style="max-width:220px;">
+                                        <button class="btn btn-sm" id="mr-test-btn" onclick="mailRelayTest()">Send test</button>
+                                    </div>
+                                    <pre id="mr-output" style="display:none;margin-top:12px;font-size:11px;background:var(--bg-tertiary);padding:10px;border-radius:6px;max-height:160px;overflow:auto;white-space:pre-wrap;"></pre>
+                                </div>
+
                                 <h4 style="margin:20px 0 12px 0;font-size:14px;color:var(--accent-light);">Recent
                                     Alerts
                                 </h4>

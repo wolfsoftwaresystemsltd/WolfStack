@@ -183,11 +183,30 @@ pub const DNS_DEPS: &[&Dep] = &[
     },
 ];
 
+/// Host mail-relay deps. msmtp is a tiny SMTP client (no listening
+/// daemon); the `mail_relay` module points it at the operator's
+/// configured SMTP relay and symlinks it in as /usr/sbin/sendmail so
+/// host services (cron, PHP mail(), monitoring scripts) can send mail.
+pub const MAIL_DEPS: &[&Dep] = &[
+    &Dep {
+        id: "msmtp",
+        label: "msmtp (sendmail-compatible SMTP relay client)",
+        binaries: &["msmtp"],
+        apt: Some("msmtp"),
+        dnf: Some("msmtp"),
+        pacman: Some("msmtp"),
+        apk: Some("msmtp"),
+        zypper: Some("msmtp"),
+        rationale: "Lets host services send email through your configured SMTP relay. No daemon, no open ports.",
+    },
+];
+
 /// Lookup a dep group by id. Keeps the API surface tiny — the frontend
 /// sends a group name, we answer with the registry.
 pub fn group(name: &str) -> Option<&'static [&'static Dep]> {
     match name {
         "dns" => Some(DNS_DEPS),
+        "mail" => Some(MAIL_DEPS),
         _ => None,
     }
 }
@@ -346,6 +365,12 @@ pub(crate) fn is_root() -> bool {
     // trivially-valid return type. We avoid pulling in the `nix` crate
     // just for this one call.
     unsafe { libc::geteuid() == 0 }
+}
+
+/// Public wrapper around distro detection for callers that only want the
+/// (distro, pkg_mgr) pair to display in a status view.
+pub fn detect_for_status() -> (String, PkgMgr) {
+    detect_distro_and_pkgmgr()
 }
 
 /// Read /etc/os-release and map ID / ID_LIKE to a pkg manager. Returns
