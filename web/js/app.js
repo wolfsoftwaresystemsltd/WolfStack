@@ -2128,7 +2128,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', wolfhost: 'WolfHost' };
+    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', wolfhost: 'WolfHost', exposure: 'Internet Exposure' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -2208,6 +2208,8 @@ function selectView(page) {
         learnInit();
     } else if (page === 'wolfhost') {
         if (typeof wolfhostInit === 'function') wolfhostInit();
+    } else if (page === 'exposure') {
+        if (typeof exposureLoad === 'function') exposureLoad();
     }
 
     // Restore task log toggle button when leaving topology
@@ -7622,6 +7624,20 @@ function setupCanvas(canvasId) {
     return { canvas, ctx, rect, dpr };
 }
 
+// Visible empty-state for a history chart that has too few points to plot
+// (fresh page load, backend just restarted, or history fetch failed). A
+// silently blank canvas reads as "broken" — say what's happening instead.
+// Clears the hover metadata so the tooltip can't show a previous node's
+// values over an empty chart.
+function drawChartEmptyState(canvas, ctx, rect) {
+    canvas._chartMeta = null;
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = '12px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Collecting data…', rect.width / 2, rect.height / 2);
+}
+
 function drawGrid(ctx, padding, w, h) {
     ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 1;
@@ -7688,7 +7704,7 @@ function drawChart(canvasId, fullData, strokeColor, fillColor) {
     const { canvas, ctx, rect } = setup;
 
     const data = sliceForRange(fullData);
-    if (!data || data.length < 2) return;
+    if (!data || data.length < 2) { drawChartEmptyState(canvas, ctx, rect); return; }
 
     const padding = { top: 20, right: 10, bottom: 30, left: 40 };
     const w = rect.width - padding.left - padding.right;
@@ -7742,7 +7758,7 @@ function drawNetChart(canvasId, fullData) {
     const { canvas, ctx, rect } = setup;
 
     const rawData = sliceForRange(fullData);
-    if (!rawData || rawData.length < 3) return;
+    if (!rawData || rawData.length < 3) { drawChartEmptyState(canvas, ctx, rect); return; }
 
     // Calculate rates (bytes/sec)
     const rates = [];
@@ -7754,7 +7770,7 @@ function drawNetChart(canvasId, fullData) {
             tx: Math.max(0, (rawData[i].tx_bytes - rawData[i - 1].tx_bytes) / dt)
         });
     }
-    if (rates.length < 2) return;
+    if (rates.length < 2) { drawChartEmptyState(canvas, ctx, rect); return; }
 
     const padding = { top: 20, right: 10, bottom: 30, left: 55 };
     const w = rect.width - padding.left - padding.right;
@@ -7851,6 +7867,15 @@ function drawMultiLineChart(canvasId, legendId, historyMap) {
     const setup = setupCanvas(canvasId);
     if (!setup) return;
     const { canvas, ctx, rect } = setup;
+
+    // No series has enough points to plot — show the collecting state
+    // instead of an empty grid with a legend and no lines.
+    if (!Object.values(historyMap).some(d => d && d.length >= 2)) {
+        const emptyLegend = document.getElementById(legendId);
+        if (emptyLegend) emptyLegend.innerHTML = '';
+        drawChartEmptyState(canvas, ctx, rect);
+        return;
+    }
 
     const padding = { top: 20, right: 10, bottom: 30, left: 40 };
     const w = rect.width - padding.left - padding.right;
@@ -37607,6 +37632,152 @@ async function mailRelayTest() {
     }
 }
 
+// ─── Internet Exposure ───
+// One page: set a wildcard zone once, then flip on public URLs for
+// specific workloads. Everything talks to /api/exposure/*.
+let _expZone = '';
+
+async function exposureLoad() {
+    // Ingress node dropdown from the live node list.
+    const ing = document.getElementById('exp-ingress');
+    if (ing) {
+        const nodes = allNodes.filter(n => n.node_type !== 'proxmox');
+        ing.innerHTML = nodes.map(n =>
+            `<option value="${escapeAttr(n.id)}">${escapeHtml(nodeName(n))}${n.is_self ? ' (this node)' : ''}</option>`
+        ).join('') || '<option value="">(no servers)</option>';
+    }
+    try {
+        const resp = await fetch(apiUrl('/api/exposure/status'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const s = await resp.json();
+        const cfg = s.config || {};
+        _expZone = cfg.zone || '';
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+        set('exp-zone', cfg.zone);
+        set('exp-cert', cfg.cert_path);
+        set('exp-key', cfg.key_path);
+        if (ing && cfg.ingress_node_id) ing.value = cfg.ingress_node_id;
+        else if (ing && s.self_node_id) ing.value = s.self_node_id;
+        const hint = document.getElementById('exp-setup-hint');
+        if (hint) {
+            hint.innerHTML = s.ready
+                ? `✅ Zone <code>${escapeHtml(cfg.zone)}</code> is set. Exposed workloads get <code>&lt;name&gt;.${escapeHtml(cfg.zone)}</code>.${cfg.cert_path ? '' : ' <span style="color:var(--warning);">No TLS cert set — URLs will be plain HTTP until you add one.</span>'}`
+                : 'Set your wildcard zone below to start exposing workloads.';
+        }
+        exposureRenderList(s.entries || []);
+    } catch (e) {
+        const list = document.getElementById('exp-list');
+        if (list) list.innerHTML = `<div style="color:var(--danger);font-size:12px;">Could not load exposure status: ${escapeHtml((e && e.message) || String(e))}</div>`;
+    }
+    exposureOnKindChange();
+}
+
+function exposureRenderList(entries) {
+    const list = document.getElementById('exp-list');
+    if (!list) return;
+    if (!entries.length) {
+        list.innerHTML = renderEmptyState({ title: 'Nothing exposed', body: 'Exposed workloads and their public URLs will appear here. Nothing is on the internet until you add it above.' });
+        return;
+    }
+    list.innerHTML = `<table class="data-table" style="width:100%;font-size:13px;">
+        <thead><tr><th>URL</th><th>Workload</th><th>Upstream</th><th>TLS</th><th></th></tr></thead>
+        <tbody>${entries.map(e => `<tr>
+            <td><a href="${escapeAttr(e.url)}" target="_blank" rel="noopener" style="color:var(--accent-light);">${escapeHtml(e.url)}</a></td>
+            <td>${escapeHtml(e.workload_kind)}${e.workload_ref ? ' · ' + escapeHtml(e.workload_ref) : ''} :${e.port}</td>
+            <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted);">${escapeHtml(e.upstream)}</td>
+            <td>${e.tls ? '🔒' : '<span style="color:var(--warning);">http</span>'}</td>
+            <td style="text-align:right;"><button class="btn btn-sm" style="color:var(--danger);" onclick="exposureUnexpose('${escapeAttr(e.subdomain)}')">Remove</button></td>
+        </tr>`).join('')}</tbody></table>`;
+}
+
+async function exposureSaveZone() {
+    const body = {
+        zone: (document.getElementById('exp-zone') || {}).value || '',
+        ingress_node_id: (document.getElementById('exp-ingress') || {}).value || '',
+        cert_path: (document.getElementById('exp-cert') || {}).value || '',
+        key_path: (document.getElementById('exp-key') || {}).value || '',
+    };
+    try {
+        const resp = await fetch(apiUrl('/api/exposure/zone'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed to save zone', 'error'); return; }
+        showToast('Zone saved', 'success');
+        exposureLoad();
+    } catch (e) { showToast('Failed: ' + ((e && e.message) || e), 'error'); }
+}
+
+function exposureOnKindChange() {
+    const kind = (document.getElementById('exp-add-kind') || {}).value || 'docker';
+    const sel = document.getElementById('exp-add-ref-select');
+    const inp = document.getElementById('exp-add-ref-input');
+    const label = document.getElementById('exp-add-ref-label');
+    if (kind === 'manual') {
+        if (sel) sel.style.display = 'none';
+        if (inp) inp.style.display = '';
+        if (label) label.textContent = 'IP / hostname';
+    } else {
+        if (sel) sel.style.display = '';
+        if (inp) inp.style.display = 'none';
+        if (label) label.textContent = kind === 'docker' ? 'Container' : 'LXC container';
+        exposurePopulateRefSelect(kind);
+    }
+}
+
+async function exposurePopulateRefSelect(kind) {
+    const sel = document.getElementById('exp-add-ref-select');
+    if (!sel) return;
+    try {
+        const resp = await fetch(apiUrl('/api/containers/cluster'));
+        const data = resp.ok ? await resp.json() : [];
+        const list = (Array.isArray(data) ? data : (data.containers || []))
+            .filter(c => c.runtime === kind);
+        sel.innerHTML = list.length
+            ? list.map(c => `<option value="${escapeAttr(c.name)}">${escapeHtml(c.name)}${c.node_hostname ? ' · ' + escapeHtml(c.node_hostname) : ''}</option>`).join('')
+            : `<option value="">(no ${kind} containers)</option>`;
+    } catch (e) { sel.innerHTML = '<option value="">(couldn’t load)</option>'; }
+}
+
+async function exposureExpose() {
+    const kind = (document.getElementById('exp-add-kind') || {}).value || 'docker';
+    const ref = kind === 'manual'
+        ? (document.getElementById('exp-add-ref-input') || {}).value || ''
+        : (document.getElementById('exp-add-ref-select') || {}).value || '';
+    const port = parseInt((document.getElementById('exp-add-port') || {}).value, 10) || 0;
+    const sub = (document.getElementById('exp-add-sub') || {}).value || '';
+    if (!sub.trim()) { showToast('Enter a subdomain', 'warning'); return; }
+    if (!ref.trim()) { showToast(kind === 'manual' ? 'Enter an IP/hostname' : 'Pick a container', 'warning'); return; }
+    if (!port) { showToast('Enter the port', 'warning'); return; }
+    try {
+        const resp = await fetch(apiUrl('/api/exposure/expose'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subdomain: sub.trim(), workload_kind: kind, workload_ref: ref.trim(), port }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed to expose', 'error'); return; }
+        showToast('Exposed at ' + (data.url || sub), 'success');
+        // Surface router warnings (most importantly "no runtime active — start
+        // nginx or wolfproxy") so the operator knows if the URL won't serve yet.
+        (data.warnings || []).forEach(w => showToast(w, 'warning', 8000));
+        const subEl = document.getElementById('exp-add-sub'); if (subEl) subEl.value = '';
+        exposureLoad();
+    } catch (e) { showToast('Failed: ' + ((e && e.message) || e), 'error'); }
+}
+
+async function exposureUnexpose(sub) {
+    if (!(await showConfirm(`Take down the public URL for "${sub}"? The workload keeps running; it just stops being reachable from the internet.`, 'Remove exposure'))) return;
+    try {
+        const resp = await fetch(apiUrl('/api/exposure/unexpose'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subdomain: sub }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { showToast(data.error || 'Failed to remove', 'error'); return; }
+        showToast('Exposure removed', 'success');
+        exposureLoad();
+    } catch (e) { showToast('Failed: ' + ((e && e.message) || e), 'error'); }
+}
+
 async function loadAiStatus() {
     try {
         var resp = await fetch(aiNodeUrl('/api/ai/status'));
@@ -48833,6 +49004,11 @@ const WOLFFN_EVENTS = [
     { id: 'node_online', label: 'Node came online' },
     { id: 'backup_completed', label: 'Backup completed' },
     { id: 'backup_failed', label: 'Backup failed' },
+    { id: 'monitor_down', label: 'Status monitor went down' },
+    { id: 'monitor_up', label: 'Status monitor recovered' },
+    { id: 'container_failover', label: 'WolfRun failover (standby promoted)' },
+    { id: 'container_updated', label: 'Container image updated' },
+    { id: 'container_update_failed', label: 'Container image update failed' },
 ];
 
 const WOLFFN_STARTER = {
@@ -75340,6 +75516,7 @@ function fleetMenuGroups() {
                 { label: 'Storage Array', action: go('array') },
                 { label: 'Shares', action: () => showSharesForCluster(fleetMenuDefaultCluster()) },
                 { label: 'Cluster Browser', action: go('cluster-browser') },
+                { label: 'Internet Exposure', action: go('exposure') },
             ],
         },
         {

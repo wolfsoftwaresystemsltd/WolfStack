@@ -907,6 +907,7 @@ mod tests {
             access: Default::default(),
             description: String::new(),
             updated_at: String::new(),
+            exposure: None,
         };
         let s = snap("a", &[
             ("a", "1.1.1.1", true),

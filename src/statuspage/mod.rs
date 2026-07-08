@@ -296,6 +296,12 @@ pub struct StatusPageState {
     pub results: RwLock<HashMap<String, VecDeque<CheckResult>>>,
     /// Daily uptime aggregation per monitor ID
     pub daily_uptime: RwLock<HashMap<String, VecDeque<DailyUptime>>>,
+    /// Monitor ID → unix time it was observed entering Down. Presence in
+    /// the map = this node currently considers the monitor down; drives
+    /// the WolfFunctions monitor_down/monitor_up trigger events. In-memory
+    /// only: after a restart the node re-observes an ongoing outage and
+    /// re-fires monitor_down once, which beats persisting per-check state.
+    pub down_since: RwLock<HashMap<String, u64>>,
 }
 
 impl StatusPageState {
@@ -307,6 +313,7 @@ impl StatusPageState {
             config: RwLock::new(config),
             results: RwLock::new(HashMap::new()),
             daily_uptime: RwLock::new(daily_uptime),
+            down_since: RwLock::new(HashMap::new()),
         }
     }
 
@@ -764,6 +771,79 @@ pub async fn run_checks(state: &Arc<StatusPageState>) {
 
     // Auto-create/resolve incidents on each page
     auto_manage_incidents(state);
+
+    // WolfFunctions monitor_down / monitor_up trigger events
+    fire_monitor_transition_events(state, &monitors);
+}
+
+/// Fire WolfFunctions trigger events on monitor state transitions.
+///
+/// Every node runs its own checks, so every node detects the transition;
+/// dispatch uses `force_local=false` so only the cluster leader actually
+/// invokes subscribed functions — same dedupe as node_offline/online.
+///
+/// Latch semantics: a monitor is "down" from the moment it computes
+/// `MonitorStatus::Down` (3 consecutive failures) until it computes `Up`.
+/// Degraded (1-2 failures) and Unknown never change the latch, so a flap
+/// through Degraded during recovery can't strand the latch or double-fire.
+fn fire_monitor_transition_events(state: &Arc<StatusPageState>, monitors: &[Monitor]) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // (monitor, went_down, downtime_secs) — collected under the lock,
+    // fired after it's released.
+    let mut transitions: Vec<(Monitor, bool, u64)> = Vec::new();
+    {
+        let mut down_since = state.down_since.write().unwrap();
+        // Deleted/disabled monitors: drop their latch so the map can't
+        // grow unbounded and a re-enabled monitor starts fresh.
+        down_since.retain(|id, _| monitors.iter().any(|m| &m.id == id));
+        for monitor in monitors {
+            let status = state.monitor_status(&monitor.id);
+            match status {
+                MonitorStatus::Down => {
+                    if !down_since.contains_key(&monitor.id) {
+                        down_since.insert(monitor.id.clone(), now);
+                        transitions.push((monitor.clone(), true, 0));
+                    }
+                }
+                MonitorStatus::Up => {
+                    if let Some(since) = down_since.remove(&monitor.id) {
+                        transitions.push((monitor.clone(), false, now.saturating_sub(since)));
+                    }
+                }
+                MonitorStatus::Degraded | MonitorStatus::Unknown => {}
+            }
+        }
+    }
+    for (monitor, went_down, downtime_secs) in transitions {
+        let (event, payload) = if went_down {
+            (
+                crate::wolffunctions::TriggerEvent::MonitorDown,
+                serde_json::json!({
+                    "monitor_id": monitor.id,
+                    "monitor_name": monitor.name,
+                    "cluster": monitor.cluster,
+                    "check": monitor.check,
+                    "status": "down",
+                }),
+            )
+        } else {
+            (
+                crate::wolffunctions::TriggerEvent::MonitorUp,
+                serde_json::json!({
+                    "monitor_id": monitor.id,
+                    "monitor_name": monitor.name,
+                    "cluster": monitor.cluster,
+                    "check": monitor.check,
+                    "status": "up",
+                    "downtime_secs": downtime_secs,
+                }),
+            )
+        };
+        crate::wolffunctions::fire_event_global(event, payload, false);
+    }
 }
 
 async fn run_http_check(url: &str, expected_status: u16, timeout: std::time::Duration) -> (bool, Option<String>) {
