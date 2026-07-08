@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.31: five new WolfFunctions trigger events + performance-history charts sized sanely (RutgerDiehard)** _(2026-07-08 — [`c5d28855`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c5d2885520ee87b1e3b099c389fb6e01fd5a2f79))_
+- **v25.2.30: Internet Exposure — one page to give a workload a public URL** _(2026-07-08 — [`c4309665`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c43096652fe0e7514f575e6f82ad75d51743bee6))_
 - **v25.2.29: host mail relay — let host services send email via msmtp** _(2026-07-07 — [`f60d4cf3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f60d4cf3ebce9a1c3ff1f22932b567eda8d53184))_
 - **v25.2.28: fix blank performance-history charts on remote server dashboards (RutgerDiehard)** _(2026-07-07 — [`617f1998`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/617f1998c3f7a3bd4bf4472f941becf710ac4492))_
 - **v25.2.27: fix fleet threat-intel widget showing zeros; prompt for widget params on add** _(2026-07-07 — [`63c37e71`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/63c37e7163bd6223d858577a2527464f3d670c9c))_
