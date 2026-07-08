@@ -1054,6 +1054,25 @@ pub fn find_tls_certificate(domain: Option<&str>) -> Option<(String, String)> {
 
 /// List ALL TLS certificates on this server
 /// Uses the same discovery methods as find_tls_certificate but collects everything
+/// Read a PEM certificate and return its notAfter as
+/// "YYYY-MM-DD HH:MM:SS+00:00" (UTC) — the same leading-timestamp shape
+/// the certbot expiry lines carry, which is what the dashboard widget
+/// and Certificates page parse to colour days-remaining. Native parse
+/// via the vendored openssl crate (no `openssl` CLI dependency), so it
+/// works on minimal hosts too. None when the file is unreadable or not
+/// a valid certificate.
+fn cert_expiry_string(cert_path: &str) -> Option<String> {
+    let pem = std::fs::read(cert_path).ok()?;
+    let cert = openssl::x509::X509::from_pem(&pem).ok()?;
+    // Asn1Time has no direct epoch accessor; diff from the UNIX epoch
+    // gives whole days + leftover seconds.
+    let epoch = openssl::asn1::Asn1Time::from_unix(0).ok()?;
+    let diff = epoch.diff(cert.not_after()).ok()?;
+    let secs = diff.days as i64 * 86_400 + diff.secs as i64;
+    let dt = chrono::DateTime::from_timestamp(secs, 0)?;
+    Some(dt.format("%Y-%m-%d %H:%M:%S+00:00").to_string())
+}
+
 pub fn list_certificates() -> serde_json::Value {
     let mut results = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1073,6 +1092,7 @@ pub fn list_certificates() -> serde_json::Value {
                 "domain": label,
                 "cert_path": cert_path,
                 "key_path": key_path,
+                "expiry": cert_expiry_string(cert_path),
                 "source": "custom",
                 "valid": true,
             }));
@@ -1109,6 +1129,7 @@ pub fn list_certificates() -> serde_json::Value {
             "domain": domain,
             "cert_path": cert_path,
             "key_path": key_path,
+            "expiry": cert_expiry_string(cert_path),
             "source": "filesystem",
             "valid": true,
         }));
@@ -1123,6 +1144,7 @@ pub fn list_certificates() -> serde_json::Value {
             "domain": label,
             "cert_path": cert_path,
             "key_path": key_path,
+            "expiry": cert_expiry_string(cert_path),
             "source": "proxmox",
             "valid": true,
         }));
