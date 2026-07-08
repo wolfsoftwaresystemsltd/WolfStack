@@ -115,6 +115,27 @@ pub struct HttpProxy {
     pub description: String,
     #[serde(default)]
     pub updated_at: String,
+
+    /// Set when this proxy was auto-created by the Internet Exposure
+    /// feature. Records the workload it fronts so the exposure reconcile
+    /// can refresh the upstream IP when the workload restarts or migrates
+    /// to another node. `None` for operator-created proxies (the whole
+    /// existing surface), which the exposure reconcile never touches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<ExposureSource>,
+}
+
+/// What an exposure proxy points at, so its upstream can be re-resolved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExposureSource {
+    /// "docker" | "lxc" | "manual". `manual` upstreams (a fixed IP:port,
+    /// e.g. a VM the operator addressed by hand) are never re-resolved.
+    pub workload_kind: String,
+    /// Container name for docker/lxc; empty for manual.
+    #[serde(default)]
+    pub workload_ref: String,
+    /// The workload port the upstream targets.
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

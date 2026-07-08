@@ -6875,10 +6875,171 @@ fn cluster_guard_existing_subnet_route(state: &S, query: &TopologyQuery, route_i
     cluster_guard_node_id(state, query, inner.as_deref())
 }
 
+// ─── Internet Exposure ───────────────────────────────────────────────
+//
+// One page to give a workload a public URL on a wildcard zone. Exposing
+// a workload creates an `expose-<subdomain>` HttpProxy pointed at the
+// ingress node; because the router config is cluster-replicated + rendered
+// on the target node, the URL works cluster-wide and survives moves.
+
+/// GET /api/exposure/status — zone config + every currently exposed
+/// workload with its URL.
+pub async fn exposure_status(req: HttpRequest, state: S) -> HttpResponse {
+    auth_or_return!(req, state);
+    let cfg = crate::exposure::ExposureConfig::load();
+    let entries: Vec<serde_json::Value> = {
+        let rcfg = state.router.config.read().unwrap();
+        rcfg.http_proxies.iter()
+            .filter(|p| p.id.starts_with(crate::exposure::ID_PREFIX))
+            .map(|p| {
+                let src = p.exposure.clone().unwrap_or_else(|| crate::networking::router::http_proxy::ExposureSource {
+                    workload_kind: "manual".into(), workload_ref: String::new(), port: 0,
+                });
+                serde_json::json!({
+                    "subdomain": p.id.strip_prefix(crate::exposure::ID_PREFIX).unwrap_or(&p.id),
+                    "url": crate::exposure::public_url(&cfg, p),
+                    "server_name": p.server_names.first().cloned().unwrap_or_default(),
+                    "upstream": p.upstreams.first().map(|u| u.url.clone()).unwrap_or_default(),
+                    "workload_kind": src.workload_kind,
+                    "workload_ref": src.workload_ref,
+                    "port": src.port,
+                    "tls": p.tls.is_some(),
+                    "enabled": p.enabled,
+                })
+            })
+            .collect()
+    };
+    HttpResponse::Ok().json(serde_json::json!({
+        "config": cfg,
+        "ready": cfg.is_ready(),
+        "self_node_id": crate::agent::self_node_id(),
+        "entries": entries,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ExposureZoneRequest {
+    pub zone: String,
+    #[serde(default)]
+    pub ingress_node_id: String,
+    #[serde(default)]
+    pub cert_path: String,
+    #[serde(default)]
+    pub key_path: String,
+    #[serde(default)]
+    pub cert_name: String,
+}
+
+/// POST /api/exposure/zone — set the wildcard zone / ingress / cert once.
+pub async fn exposure_set_zone(req: HttpRequest, state: S, body: web::Json<ExposureZoneRequest>) -> HttpResponse {
+    auth_or_return!(req, state);
+    let b = body.into_inner();
+    let zone = b.zone.trim().trim_start_matches('*').trim_start_matches('.').to_ascii_lowercase();
+    if zone.is_empty() || !zone.contains('.') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Enter a valid zone like apps.example.com" }));
+    }
+    let ingress = if b.ingress_node_id.trim().is_empty() {
+        crate::agent::self_node_id()
+    } else {
+        b.ingress_node_id.trim().to_string()
+    };
+    let cfg = crate::exposure::ExposureConfig {
+        zone,
+        ingress_node_id: ingress,
+        cert_path: b.cert_path.trim().to_string(),
+        key_path: b.key_path.trim().to_string(),
+        cert_name: b.cert_name.trim().to_string(),
+    };
+    if let Err(e) = cfg.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "config": cfg, "ready": cfg.is_ready() }))
+}
+
+#[derive(Deserialize)]
+pub struct ExposureAddRequest {
+    pub subdomain: String,
+    pub workload_kind: String,          // docker | lxc | manual
+    #[serde(default)]
+    pub workload_ref: String,           // container name, or IP/host for manual
+    pub port: u16,
+}
+
+/// POST /api/exposure/expose — publish a workload on `<subdomain>.<zone>`.
+pub async fn exposure_add(req: HttpRequest, state: S, body: web::Json<ExposureAddRequest>) -> HttpResponse {
+    auth_or_return!(req, state);
+    let b = body.into_inner();
+    let cfg = crate::exposure::ExposureConfig::load();
+    if !cfg.is_ready() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Set up the wildcard zone first (top of this page)."
+        }));
+    }
+    let subdomain = match crate::exposure::normalise_subdomain(&b.subdomain) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    let upstream = match crate::exposure::resolve_upstream(&b.workload_kind, &b.workload_ref, b.port) {
+        Ok(u) => u,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    let proxy = crate::exposure::build_proxy(&cfg, &subdomain, &b.workload_kind, &b.workload_ref, b.port, &upstream);
+    let proxies = {
+        let mut rcfg = state.router.config.write().unwrap();
+        rcfg.http_proxies.retain(|p| p.id != proxy.id);
+        rcfg.http_proxies.push(proxy.clone());
+        if let Err(e) = rcfg.save() {
+            return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+        }
+        rcfg.http_proxies.clone()
+    };
+    let warnings = crate::networking::router::http_proxy::apply_for_node(&proxies, &crate::agent::self_node_id());
+    replicate_config_to_cluster(state);
+    HttpResponse::Ok().json(serde_json::json!({
+        "url": crate::exposure::public_url(&cfg, &proxy),
+        "upstream": upstream,
+        "warnings": warnings,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ExposureRemoveRequest {
+    pub subdomain: String,
+}
+
+/// POST /api/exposure/unexpose — take a workload's URL down.
+pub async fn exposure_remove(req: HttpRequest, state: S, body: web::Json<ExposureRemoveRequest>) -> HttpResponse {
+    auth_or_return!(req, state);
+    let id = format!("{}{}", crate::exposure::ID_PREFIX, body.subdomain.trim().to_ascii_lowercase());
+    let proxies = {
+        let mut rcfg = state.router.config.write().unwrap();
+        let before = rcfg.http_proxies.len();
+        rcfg.http_proxies.retain(|p| p.id != id);
+        if rcfg.http_proxies.len() == before {
+            return HttpResponse::NotFound().json(serde_json::json!({ "error": "No such exposure." }));
+        }
+        if let Err(e) = rcfg.save() {
+            return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+        }
+        rcfg.http_proxies.clone()
+    };
+    // apply_for_node prunes orphaned confs only while the node still has a
+    // live bucket; explicitly drop this one so removing the last exposure
+    // still tears the route down.
+    let warnings = crate::networking::router::http_proxy::apply_for_node(&proxies, &crate::agent::self_node_id());
+    crate::exposure::cleanup_local_conf(&id);
+    replicate_config_to_cluster(state);
+    HttpResponse::Ok().json(serde_json::json!({ "removed": id, "warnings": warnings }))
+}
+
 // ─── Mount ───
 
 pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
     cfg
+        .route("/api/exposure/status",    web::get().to(exposure_status))
+        .route("/api/exposure/zone",      web::post().to(exposure_set_zone))
+        .route("/api/exposure/expose",    web::post().to(exposure_add))
+        .route("/api/exposure/unexpose",  web::post().to(exposure_remove))
         .route("/api/router/topology", web::get().to(get_topology))
         .route("/api/router/topology-local", web::get().to(get_topology_local))
         .route("/api/router/preflight", web::get().to(preflight))

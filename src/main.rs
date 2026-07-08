@@ -65,6 +65,7 @@ mod reverse_proxy;
 mod control_panel;
 mod github_backup;
 mod deps;
+mod exposure;
 mod mail_relay;
 mod systemcheck;
 mod security;
@@ -2382,6 +2383,40 @@ async fn main() -> std::io::Result<()> {
         // Background: cluster browser session reconciliation (every 60s)
         // — prunes ghost sessions whose container died.
         tokio::spawn(cluster_browser::run_reconcile_loop());
+
+        // Background: Internet Exposure — refresh each exposed workload's
+        // upstream IP so its public URL keeps working after the workload
+        // restarts or gets a new address. Uses the cached container list
+        // (no shell-out) so the config lock is held only briefly; only
+        // re-renders nginx when an upstream actually changed.
+        {
+            let router = app_state.router.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    let router = router.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let self_id = crate::agent::self_node_id();
+                        let changed = {
+                            let mut cfg = router.config.write().unwrap();
+                            let mut proxies = cfg.http_proxies.clone();
+                            if crate::exposure::reconcile_upstreams(&mut proxies) {
+                                cfg.http_proxies = proxies.clone();
+                                let _ = cfg.save();
+                                Some(proxies)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(proxies) = changed {
+                            crate::networking::router::http_proxy::apply_for_node(&proxies, &self_id);
+                        }
+                    })
+                    .await;
+                }
+            });
+        }
 
         // Background: WolfFlow scheduler (every 60s)
         {
