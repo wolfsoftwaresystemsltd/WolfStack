@@ -169,8 +169,29 @@ pub fn query_ups(target: &str) -> Result<UpsLiveStatus, String> {
         .output()
         .map_err(|e| format!("upsc not runnable: {}", e))?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if err.is_empty() { "upsc failed".to_string() } else { err });
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // upsc prints informational TLS chatter to stderr ("Init SSL…",
+        // "SSL handshake done…") before the real failure, which it
+        // formats as "Error: <reason>" (nut clients/upsc.c fatalx
+        // paths). Surface just the reason, not the noise wall.
+        let err = stderr.lines().rev()
+            .find_map(|l| l.trim().strip_prefix("Error: "))
+            .map(str::to_string)
+            .unwrap_or_else(|| stderr.trim().to_string());
+        if err.is_empty() {
+            return Err("upsc failed".to_string());
+        }
+        // A bare "Unknown error" is upsc's translation of an ERR reply
+        // token it doesn't recognise (nut clients/upsclient.c
+        // upscli_errcheck) — in practice a NUT server whose UPS name or
+        // hostname configuration doesn't match what we asked for.
+        return Err(if err == "Unknown error" {
+            "the NUT server replied with an error upsc does not recognise (\"Unknown error\") — \
+             check that the target is name@host with the exact UPS name, and that the \
+             hostname configured on the NUT server itself matches".to_string()
+        } else {
+            err
+        });
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let get = |key: &str| -> Option<String> {
