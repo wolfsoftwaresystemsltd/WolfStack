@@ -133,6 +133,13 @@ pub enum TriggerEvent {
     ContainerUpdated,
     /// Image watcher update attempt failed or was rolled back.
     ContainerUpdateFailed,
+    /// UPS lost mains power (transition onto battery).
+    UpsOnBattery,
+    /// UPS back on mains after an outage.
+    UpsOnline,
+    /// A UPS staged-shutdown threshold fired (payload names the stage
+    /// percent and its actions) — hook custom wind-down logic here.
+    UpsStageFired,
     /// Catch-all for event names this build doesn't know. A newer peer
     /// can sync a function subscribed to an event added after this
     /// release; mapping it here keeps the whole sync payload decodable

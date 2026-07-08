@@ -201,12 +201,32 @@ pub const MAIL_DEPS: &[&Dep] = &[
     },
 ];
 
+/// UPS monitoring dep. The staged-shutdown engine only READS UPS state
+/// via `upsc` — operators run upsd/upsmon/drivers themselves, so the
+/// client tools are all WolfStack needs. Package names verified per
+/// distro: Debian/Fedora split the client out as nut-client (upsc lives
+/// there); Arch, Alpine and openSUSE ship a single `nut` package.
+pub const UPS_DEPS: &[&Dep] = &[
+    &Dep {
+        id: "upsc",
+        label: "NUT client tools (upsc)",
+        binaries: &["upsc"],
+        apt: Some("nut-client"),
+        dnf: Some("nut-client"),
+        pacman: Some("nut"),
+        apk: Some("nut"),
+        zypper: Some("nut"),
+        rationale: "Reads UPS status from your NUT server so WolfStack can stage shutdowns on battery.",
+    },
+];
+
 /// Lookup a dep group by id. Keeps the API surface tiny — the frontend
 /// sends a group name, we answer with the registry.
 pub fn group(name: &str) -> Option<&'static [&'static Dep]> {
     match name {
         "dns" => Some(DNS_DEPS),
         "mail" => Some(MAIL_DEPS),
+        "ups" => Some(UPS_DEPS),
         _ => None,
     }
 }

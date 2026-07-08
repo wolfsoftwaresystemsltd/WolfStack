@@ -38,8 +38,10 @@ const SENDMAIL: &str = "/usr/sbin/sendmail";
 const SENDMAIL_BAK: &str = "/usr/sbin/sendmail.wolfstack-bak";
 
 /// Locate a binary without shelling out to `which` — minimal hosts and
-/// containers often don't ship the `which` command at all.
-fn which(bin: &str) -> Option<String> {
+/// containers often don't ship the `which` command at all. Public
+/// because other host-integration modules (ups) probe binaries the
+/// same way.
+pub fn which(bin: &str) -> Option<String> {
     // Common absolute locations first (fast, and covers empty $PATH).
     for dir in ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"] {
         let p = format!("{dir}/{bin}");

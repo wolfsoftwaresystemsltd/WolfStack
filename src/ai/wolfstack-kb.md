@@ -118,7 +118,7 @@ Lambda-style functions instead of provisioning a container/VM. Definitions repli
 - **Runtimes**: Python 3.12 (`def handler(event, context)`) and Node 22 (`exports.handler = async (event, context)`) — exactly two
 - **Sandbox**: gVisor `runsc` is primary (auto-downloaded from Google's release bucket, sha512-verified); config-driven Docker fallback ("reduced isolation"). Per-node ExecutionMode Auto|Gvisor|Docker in local.json. **Docker is required even in gVisor mode** — rootfs images are built via `docker pull/export`
 - **Placement**: `replicas` = number of NODES keeping warm copies (default 2, capped at capable-node count; 0 = scale-from-zero); `max_per_node` burst instances (default 4) reaped after 300s idle. Leader ranks nodes by load score; failover cold-starts locally as last resort
-- **Triggers**: (1) public URL `/fn/{slug}` (opt-in per function, rate-limited 60/min/node); (2) interval schedules (min 60s, leader-fired); (3) ten internal events: alert_fired, node_offline, node_online, backup_completed, backup_failed, monitor_down, monitor_up (status-page monitor transitions), container_failover (WolfRun standby promoted), container_updated, container_update_failed (image watcher)
+- **Triggers**: (1) public URL `/fn/{slug}` (opt-in per function, rate-limited 60/min/node); (2) interval schedules (min 60s, leader-fired); (3) thirteen internal events: alert_fired, node_offline, node_online, backup_completed, backup_failed, monitor_down, monitor_up (status-page monitor transitions), container_failover (WolfRun standby promoted), container_updated, container_update_failed (image watcher), ups_on_battery, ups_online, ups_stage_fired (UPS power engine)
 - **Limits**: memory 32–8192 MB (default 128), timeout 1–900s (default 30, bounds the handler call; cold-start has a separate 90s budget)
 - **`/fn/{slug}` responses** use AWS Lambda proxy-integration semantics: handler returns `{statusCode, headers, body, isBase64Encoded}` → honoured (framing headers dropped, header names case-deduped); any other return value is JSON-encoded with 200. `multiValueHeaders` NOT supported. Event = `{trigger:"http", method, query, body, source_ip}`
 - **AI codegen**: describe the function in the editor → `POST /api/wolffunctions/ai-generate` drafts code via the configured AI provider; nothing deploys until saved
@@ -676,6 +676,7 @@ Startup-hang class (fixed v25.2.8–.11): journal stops right after "Public IP:"
 - **"Plug a USB device into my Home Assistant VM on another node"** → WolfUSB
 - **"Run a container on whichever node is free"** → WolfRun
 - **"Public status page for my apps"** → Status Pages
+- **"Shut things down cleanly when my UPS is on battery"** → UPS Power (per-server page; reads any existing NUT setup via `upsc`, never touches NUT config; staged shutdown: at ≤X% battery stop VMs/containers, at ≤Y% stop shares, at ≤Z% power off; fires ups_on_battery/ups_online/ups_stage_fired WolfFunctions events + alerts; also a home-dashboard widget)
 - **"Manage Kubernetes from WolfStack"** → WolfKube
 - **"See all my web services in one place"** → Cluster Browser; **"see every workload in one table"** → Control Panel
 - **"Search logs across all my nodes"** → Fleet Logs (loghub — enable it first, it's off by default)

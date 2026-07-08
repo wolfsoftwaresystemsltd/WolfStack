@@ -67,6 +67,7 @@ mod github_backup;
 mod deps;
 mod exposure;
 mod mail_relay;
+mod ups;
 mod systemcheck;
 mod security;
 mod secret_audit;
@@ -785,12 +786,14 @@ async fn main() -> std::io::Result<()> {
 
         // Create app state
         let monitor_arc = Arc::new(Mutex::new(mon));
+        let ups_state = Arc::new(ups::UpsState::new());
         let app_state = web::Data::new(api::AppState {
             monitor: monitor_arc.clone(),
             metrics_history: Mutex::new(monitoring::MetricsHistory::new()),
             cluster: cluster.clone(),
             sessions: sessions.clone(),
             vms: Mutex::new(vms_manager),
+            ups: ups_state.clone(),
             cluster_secret: cluster_secret.clone(),
             join_token: api::load_join_token(),
             one_time_join_tokens: Arc::new(cluster_join::OneTimeTokens::new()),
@@ -3711,6 +3714,20 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     wolfrun::broadcast_to_cluster(&wolfrun_bg, &wolfrun_cluster, &wolfrun_secret).await;
                 }
                 tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+        });
+
+        // Background: UPS staged-shutdown engine. Polls `upsc` at the
+        // operator-configured interval; a disabled/unconfigured engine
+        // costs one small config read per tick. Runs on EVERY node —
+        // each host winds down its own workloads on ITS battery.
+        let ups_bg = ups_state.clone();
+        let ups_app = app_state.clone().into_inner();
+        tokio::spawn(async move {
+            loop {
+                ups::engine_tick(&ups_bg, &ups_app).await;
+                let poll = ups::UpsConfig::load().poll_secs.clamp(5, 300);
+                tokio::time::sleep(Duration::from_secs(poll)).await;
             }
         });
 

@@ -236,6 +236,8 @@ pub struct AppState {
     pub cluster: Arc<ClusterState>,
     pub sessions: Arc<SessionManager>,
     pub vms: std::sync::Mutex<crate::vms::manager::VmManager>,
+    /// UPS staged-shutdown engine runtime (live status, latches, log).
+    pub ups: Arc<crate::ups::UpsState>,
     pub cluster_secret: String,
     pub join_token: String,
     /// Pending one-time, short-TTL join tokens (cluster-join hardening).
@@ -34910,6 +34912,79 @@ async fn system_deps_install(
 
 // ─── Host mail relay (msmtp sendmail shim) ───
 
+// ═══════════════════════════════════════════════
+// ─── UPS power management ───
+// ═══════════════════════════════════════════════
+
+/// GET /api/ups/status — everything the UPS page needs in one call:
+/// tool availability, local UPS names, saved config, the engine's last
+/// live reading/error, outage latches, and the persisted action log
+/// (newest first, capped for the wire).
+async fn ups_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (installed, local_upses) = tokio::task::spawn_blocking(|| {
+        let installed = crate::ups::upsc_installed();
+        let local = if installed { crate::ups::list_local_upses() } else { Vec::new() };
+        (installed, local)
+    }).await.unwrap_or((false, Vec::new()));
+    let config = crate::ups::UpsConfig::load();
+    let rt = state.ups.runtime.read().unwrap();
+    let mut log: Vec<crate::ups::UpsLogEntry> = rt.log.iter().rev().take(50).cloned().collect();
+    log.shrink_to_fit();
+    let mut fired: Vec<u8> = rt.fired.iter().copied().collect();
+    fired.sort_unstable_by(|a, b| b.cmp(a));
+    HttpResponse::Ok().json(serde_json::json!({
+        "installed": installed,
+        "local_upses": local_upses,
+        "config": config,
+        "live": rt.last_status,
+        "last_error": rt.last_error,
+        "on_battery_since": rt.on_battery_since,
+        "fired_stages": fired,
+        "log": log,
+    }))
+}
+
+/// POST /api/ups/config — save the staged-shutdown config. Input is
+/// clamped by UpsConfig::sanitize (poll bounds, % caps, empty stages
+/// dropped, stages sorted).
+async fn ups_save_config(req: HttpRequest, state: web::Data<AppState>, body: web::Json<crate::ups::UpsConfig>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut config = body.into_inner();
+    config.sanitize();
+    match config.save() {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "config": config })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpsPollBody {
+    /// Target to test; empty/absent = the saved config's target.
+    #[serde(default)]
+    ups: String,
+}
+
+/// POST /api/ups/poll — immediate `upsc` read of the given (or saved)
+/// target so the operator can test connectivity before enabling.
+async fn ups_poll_now(req: HttpRequest, state: web::Data<AppState>, body: web::Json<UpsPollBody>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let target = if body.ups.trim().is_empty() {
+        crate::ups::UpsConfig::load().ups
+    } else {
+        body.ups.trim().to_string()
+    };
+    if target.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "no UPS target configured" }));
+    }
+    let t = target.clone();
+    match tokio::task::spawn_blocking(move || crate::ups::query_ups(&t)).await {
+        Ok(Ok(live)) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "ups": target, "live": live })),
+        Ok(Err(e)) => HttpResponse::Ok().json(serde_json::json!({ "success": false, "ups": target, "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
 /// GET /api/mail-relay/status — report whether THIS node can send host
 /// email (msmtp installed, sendmail owned by us / an MTA / nothing, SMTP
 /// configured). Cross-node calls go via the node proxy.
@@ -38800,6 +38875,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/system/deps/check",   web::get().to(system_deps_check))
         .route("/api/system/deps/install", web::post().to(system_deps_install))
         // Host mail relay (msmtp sendmail shim)
+        .route("/api/ups/status", web::get().to(ups_status))
+        .route("/api/ups/config", web::post().to(ups_save_config))
+        .route("/api/ups/poll",   web::post().to(ups_poll_now))
         .route("/api/mail-relay/status",  web::get().to(mail_relay_status))
         .route("/api/mail-relay/enable",  web::post().to(mail_relay_enable))
         .route("/api/mail-relay/disable", web::post().to(mail_relay_disable))
