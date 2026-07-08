@@ -174,6 +174,7 @@ Lambda-style functions instead of provisioning a container/VM. Definitions repli
 - Scheduled backups with multiple destination types
 - Docker: commit + save + volume backup; LXC: full container backup; VM: disk image backup
 - **Seven destination types**: Local, S3, Remote (another WolfStack node), WolfDisk, PBS (Proxmox Backup Server, including `pbs_file_level` pxar mode), NFS, SMB/CIFS
+- **PBS file-level (pxar)** applies to Docker, native LXC, system folders AND (v25.2.35) WolfStack config backups — PBS's own UI can then browse a snapshot and restore a single file. Config snapshots are per-node (`host/wolfstack-config-<hostname>`). VMs and Proxmox LXC can't (disk image / block rootfs) — the backup log states the fallback reason explicitly. WolfStack's own restore of a file-level config snapshot applies the usual same-/new-machine rules; per-FILE restore is done in the PBS UI
 - NFS/SMB backups mount the share idempotently under /mnt/wolfstack-backup/ and write through like Local
 - SMB fields on BackupStorage: smb_source (//server/share or \\server\share — normalised), smb_subpath, smb_username, smb_password, smb_domain, smb_options. Defaults to SMB 3.0.
 - NFS fields: nfs_source (server:/export), nfs_options (defaults to rw,soft,timeo=50)
@@ -199,6 +200,25 @@ Lambda-style functions instead of provisioning a container/VM. Definitions repli
 - Threshold alerting with email notifications
 - Discord, Slack, Telegram webhook support
 - Alert cooldown to prevent spam
+
+## Host mail relay (v25.2.29+)
+Gives HOST software (cron MAILTO, PHP mail(), monitoring scripts, app-store apps) a working `/usr/sbin/sendmail` on nodes with no MTA — distinct from WolfStack's own alert email (which speaks SMTP directly).
+- Settings → AI & Email → Host Mail Relay card, with a per-node server picker. Enable installs `msmtp` on demand, writes `/etc/msmtprc` from the SMTP settings already configured for alert email, symlinks `/usr/sbin/sendmail` → msmtp
+- SAFETY: refuses to replace an existing MTA (Postfix/Exim/…) unless forced; the real sendmail is backed up and restored on disable. Requires SMTP configured first
+- `/etc/msmtprc` is host-readable (0644) so www-data etc. can send — recommend a dedicated relay credential, not a personal mailbox password
+- Endpoints: `/api/mail-relay/{status,enable,disable,test}`
+
+## UPS Power (NUT integration + staged shutdown) — v25.2.33+
+Per-server page (server tree → UPS Power). Reads any existing NUT setup via `upsc` — WolfStack NEVER writes/manages NUT config (operators run upsd/upsmon/drivers themselves). What it adds over plain NUT: a staged, workload-aware wind-down on battery.
+- **Target**: `myups` (local upsd) or `myups@host[:port]` (remote, port 3493 default). Poll 5–300s (default 15). Test-connection button does an immediate read; failures show the actual reason (v25.2.34: TLS chatter filtered out; bare "Unknown error" from upsc = the NUT server sent an unrecognised ERR reply — check exact UPS name AND the NUT server's own hostname config)
+- **Stages**: rows of "at ≤X% battery run these actions". Recommended one-click layout 60/40/20. Actions in order: stop VMs (managed via qm/virsh/native + sweep of unmanaged guests), stop containers (docker + pct + lxc-*), stop shares (samba/NFS units, both spellings; mounted network FS untouched), shutdown host (systemctl poweroff, fallback shutdown -h)
+- **Engine rules**: fires ONLY on live on-battery data (stale/unreadable data never acts); each stage fires once per outage (latched by threshold, cleared when mains returns); multiple thresholds crossed in one poll run gentle→harsh; boot-while-on-battery fires all due stages
+- **Action log** persisted to `/var/lib/wolfstack/ups-log.json` on EVERY entry — survives the shutdown the engine causes; shown on the page after the outage
+- **Faceplate UI**: live UPS front panel (status LEDs, green/amber/red LCD with charge/runtime/load, 10-segment battery bar, one switched outlet group per stage — red = that stage shed its load). NO COMMS when unreadable, SETUP when unconfigured. Also a home-dashboard widget (one per server)
+- Alerts on on-battery/restored/stage-fired; WolfFunctions events ups_on_battery/ups_online/ups_stage_fired
+- Missing `upsc` → one-click "Install NUT client tools" (nut-client on apt/dnf, nut on pacman/apk/zypper). Config `/etc/wolfstack/ups.json`
+- If a driver reports no battery.charge, %-keyed stages cannot fire (logged once per outage)
+- Known hardware quirk: UniFi UPS Tower's built-in NUT server can require a login for reads (plain upsc can't authenticate) and sends nonstandard replies — disable its login requirement and use the exact UPS name from the UniFi console
 
 ## App Store
 - **~530 one-click applications**
@@ -367,6 +387,14 @@ Per-proxy "Resilience" strategy for how internet traffic reaches a WolfStack pro
 - Cloud infra tokens stored in the cloud-providers store (encrypted at rest)
 - Endpoints: `/api/edge/cloud-providers*`, `/api/edge/cloudflare-tunnel/install/{proxy_id}`
 
+## Internet Exposure (public URLs for workloads) — v25.2.30+
+One page (Storage & Network → Internet Exposure) to give any Docker/LXC container or manual IP:port a public HTTPS URL under a wildcard zone — the fly.io-style "expose a workload, get a URL" flow. Everything is OPT-IN per workload; nothing is public until exposed.
+- **Setup once**: zone (e.g. apps.example.com) + ONE wildcard DNS record (`*.zone` → ingress node's public IP) + ingress node choice + TLS cert (picker lists the ingress node's certs with expiry, or manual paths). Ingress needs the WolfRouter HTTP proxy runtime (nginx/wolfproxy) — the page warns if not running
+- **Expose**: pick a container from the cluster-wide dropdown (or manual IP:port), choose subdomain + backend port; optional "backend speaks HTTPS". URL live on ingress reload
+- **Under the hood**: exposures are auto-managed WolfRouter HttpProxy entries (id prefix `expose-`) — same nginx/wolfproxy render+reload+TLS pipeline; WolfRouter config is cluster-replicated so entries survive workload moves; a 30s reconciler refreshes the upstream IP when a container restarts/moves
+- **Cross-node rule**: container bridge IPs are only reachable when the hosting node IS the ingress; otherwise the workload needs a host-published port (-p) — upstream becomes hostingnode:hostport — or a manual IP. Unpublished cross-node expose returns an explanatory error, not a broken route
+- v1 scope: single ingress node per zone, HTTP(S) host-routing only (raw TCP/UDP → use a port mapping). Endpoints: `/api/exposure/{status,zone,expose,unexpose}`
+
 ## Fleet Logs (loghub — centralized logging)
 - Native, dependency-free cluster log aggregation: every enabled node runs a shipper that tails journald (+ optional Docker/LXC logs), **redacts secrets** (key=value secrets, Bearer/Authorization, AWS keys, PEM blocks, JWTs, plus operator regexes), and forwards to a designated **hub node** which stores compressed date-segmented JSONL and answers searches
 - **Off by default** (opt-in per node). Config `/etc/wolfstack/loghub.json`: retention 14 days, max 10 GiB, min-free 10%
@@ -511,6 +539,13 @@ This is the answer to "how do I connect from my office / phone / laptop to my Wo
 - Single view of every VM/LXC/Docker container across all nodes; group by Node/Type/Status/Cluster or drag-drop **Custom groups**
 - Custom groups persist server-side (`/etc/wolfstack/control-panel.json`); vanished workloads render as "stale"
 - Endpoints under `/api/control-panel/…` (inventory, groups CRUD, members)
+
+## Home dashboard (customisable widget home) — v25.2.24+
+The home "Datacenter" view is a per-user, 12-column widget grid. Default layout is identical to the classic home; Customise enters a DRAFT edit mode (drag reorder, resize 1–12 cols + px/auto height, per-widget ⚙ config; Save changes / Cancel; leaving with unsaved changes prompts).
+- **20 widget types**: servers, cluster stats, infrastructure map, bookmarks, server resources (live gauges), containers, uptime monitors, recent alerts, recent backups, storage usage, TLS certificates, UPS power (live faceplate per server), threat intel, AI assistant, clock, weather (Open-Meteo, no key), web search (DDG/Google/Brave/custom, inline instant answers), notes, RSS feed, embedded page (iframe)
+- **Fleet scopes** on infra widgets (containers/uptime/alerts/backups/storage/certs/threats): this cluster, a named cluster, or the whole fleet (parallel per-node fan-out)
+- Layout persists per user server-side (`/etc/wolfstack/user-prefs/<user>.json` via /api/user/preferences) — follows the user across browsers. Background image upload retained
+- External fetches (weather/RSS) try direct browser fetch, falling back to `GET /api/dashboard/fetch-proxy` (authed, http(s)-only, refuses link-local/metadata IPs, 1 MiB cap)
 
 ## Configurator (form-based config for Wolf components)
 - Structured config UIs: **WolfProxy** (nginx sites — CRUD/enable/disable/test/reload/error-log/generate/bootstrap), **WolfServe** (Apache vhosts + modules), **WolfDisk/WolfScale** (structured TOML editing with validate/repair)
@@ -676,6 +711,9 @@ Startup-hang class (fixed v25.2.8–.11): journal stops right after "Public IP:"
 - **"Plug a USB device into my Home Assistant VM on another node"** → WolfUSB
 - **"Run a container on whichever node is free"** → WolfRun
 - **"Public status page for my apps"** → Status Pages
+- **"Give this container a public URL / put my app on the internet"** → Internet Exposure (Storage & Network; one wildcard DNS record + ingress node, then expose per workload)
+- **"Customise my home page / add widgets"** → Home dashboard (Customise button on the home view; 20 widget types incl. weather, RSS, notes, UPS)
+- **"Cron / PHP / my app can't send email from the host"** → Host Mail Relay (Settings → AI & Email; installs msmtp as /usr/sbin/sendmail using the alert-email SMTP settings)
 - **"Shut things down cleanly when my UPS is on battery"** → UPS Power (per-server page; reads any existing NUT setup via `upsc`, never touches NUT config; staged shutdown: at ≤X% battery stop VMs/containers, at ≤Y% stop shares, at ≤Z% power off; fires ups_on_battery/ups_online/ups_stage_fired WolfFunctions events + alerts; also a home-dashboard widget)
 - **"Manage Kubernetes from WolfStack"** → WolfKube
 - **"See all my web services in one place"** → Cluster Browser; **"see every workload in one table"** → Control Panel
