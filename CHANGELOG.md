@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.36: AI knowledge base refresh (UPS Power, Internet Exposure, home dashboard, mail relay, PBS config pxar)** _(2026-07-08 — [`31d13c27`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/31d13c27383b82d6ec434653bc5224581df387c3))_
+- **v25.2.36: AI knowledge base — UPS Power, Internet Exposure, home dashboard, mail relay, PBS config pxar** _(2026-07-08 — [`f685455a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f685455a030266995b80c4320fc71dab26116626))_
 - **v25.2.35: config backups honor PBS file-level pxar (wabil)** _(2026-07-08 — [`afefabbd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/afefabbd4542382d78114f688b96daf3f00e15d8))_
 - **v25.2.35: config backups honor PBS file-level (pxar) — single-file browse/restore in PBS (wabil)** _(2026-07-08 — [`e0cdd527`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e0cdd5279d652294028d4f350d2b8e12a35c394b))_
 - **v25.2.34: clearer UPS test-failure messages (klas)** _(2026-07-08 — [`76b4cfb6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/76b4cfb6c7cf4e694a8fa5515f8ebe12bbaf4e35))_
