@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.34: clearer UPS test-failure messages (klas)** _(2026-07-08 — [`76b4cfb6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/76b4cfb6c7cf4e694a8fa5515f8ebe12bbaf4e35))_
+- **v25.2.34: clearer UPS test-failure messages — surface upsc's Error line, explain "Unknown error" (klas)** _(2026-07-08 — [`280ffdb2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/280ffdb225811536411aa77649408274d393f64a))_
 - **v25.2.33: UPS Power — NUT integration with staged battery shutdown (klas)** _(2026-07-08 — [`495af838`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/495af8384d7a485f2fe65c132a6328c0acec3b4d))_
 - **v25.2.32: TLS certificate expiry for Proxmox (and all scanned) certs (klas/RutgerDiehard fleet)** _(2026-07-08 — [`7d05041c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7d05041c1706756dc3ff456ae5e9356c0d9f3a67))_
 - **v25.2.31: five new WolfFunctions trigger events + performance-history charts sized sanely (RutgerDiehard)** _(2026-07-08 — [`c5d28855`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c5d2885520ee87b1e3b099c389fb6e01fd5a2f79))_
