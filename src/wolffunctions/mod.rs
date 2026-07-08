@@ -122,6 +122,24 @@ pub enum TriggerEvent {
     NodeOnline,
     BackupCompleted,
     BackupFailed,
+    /// Status-page monitor entered Down (3 consecutive check failures).
+    MonitorDown,
+    /// Status-page monitor recovered from Down back to Up.
+    MonitorUp,
+    /// WolfRun promoted a standby after an instance failed.
+    ContainerFailover,
+    /// Image watcher recreated a container on a new image digest
+    /// (auto-apply, manual API apply, or WolfFlow step).
+    ContainerUpdated,
+    /// Image watcher update attempt failed or was rolled back.
+    ContainerUpdateFailed,
+    /// Catch-all for event names this build doesn't know. A newer peer
+    /// can sync a function subscribed to an event added after this
+    /// release; mapping it here keeps the whole sync payload decodable
+    /// instead of rejecting every function in the cluster. Never fired,
+    /// never offered in the UI.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A schedule trigger. v1 is interval-based (fires every `interval_secs`,

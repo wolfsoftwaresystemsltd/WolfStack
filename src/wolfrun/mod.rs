@@ -2163,7 +2163,7 @@ pub async fn check_failover(
                     .map(|n| n.hostname.clone())
                     .unwrap_or_else(|| failed.node_id.clone());
 
-                wolfrun.add_failover_event(FailoverEvent {
+                let failover_event = FailoverEvent {
                     timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
                     service_id: service.id.clone(),
                     service_name: service.name.clone(),
@@ -2172,7 +2172,16 @@ pub async fn check_failover(
                     container_name: standby.container_name.clone(),
                     detail: format!("Standby '{}' promoted — replacing failed '{}'",
                         standby.container_name, failed.container_name),
-                });
+                };
+                // WolfFunctions container_failover trigger. force_local:
+                // failover runs on exactly one node (the leader), so the
+                // observation already happens once per cluster.
+                crate::wolffunctions::fire_event_global(
+                    crate::wolffunctions::TriggerEvent::ContainerFailover,
+                    serde_json::to_value(&failover_event).unwrap_or_default(),
+                    true,
+                );
+                wolfrun.add_failover_event(failover_event);
 
                 tracing::info!("WolfRun failover: successfully promoted '{}' on {}",
                     standby.container_name, standby_node.hostname);

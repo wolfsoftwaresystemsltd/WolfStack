@@ -7624,6 +7624,20 @@ function setupCanvas(canvasId) {
     return { canvas, ctx, rect, dpr };
 }
 
+// Visible empty-state for a history chart that has too few points to plot
+// (fresh page load, backend just restarted, or history fetch failed). A
+// silently blank canvas reads as "broken" — say what's happening instead.
+// Clears the hover metadata so the tooltip can't show a previous node's
+// values over an empty chart.
+function drawChartEmptyState(canvas, ctx, rect) {
+    canvas._chartMeta = null;
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = '12px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Collecting data…', rect.width / 2, rect.height / 2);
+}
+
 function drawGrid(ctx, padding, w, h) {
     ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 1;
@@ -7690,7 +7704,7 @@ function drawChart(canvasId, fullData, strokeColor, fillColor) {
     const { canvas, ctx, rect } = setup;
 
     const data = sliceForRange(fullData);
-    if (!data || data.length < 2) return;
+    if (!data || data.length < 2) { drawChartEmptyState(canvas, ctx, rect); return; }
 
     const padding = { top: 20, right: 10, bottom: 30, left: 40 };
     const w = rect.width - padding.left - padding.right;
@@ -7744,7 +7758,7 @@ function drawNetChart(canvasId, fullData) {
     const { canvas, ctx, rect } = setup;
 
     const rawData = sliceForRange(fullData);
-    if (!rawData || rawData.length < 3) return;
+    if (!rawData || rawData.length < 3) { drawChartEmptyState(canvas, ctx, rect); return; }
 
     // Calculate rates (bytes/sec)
     const rates = [];
@@ -7756,7 +7770,7 @@ function drawNetChart(canvasId, fullData) {
             tx: Math.max(0, (rawData[i].tx_bytes - rawData[i - 1].tx_bytes) / dt)
         });
     }
-    if (rates.length < 2) return;
+    if (rates.length < 2) { drawChartEmptyState(canvas, ctx, rect); return; }
 
     const padding = { top: 20, right: 10, bottom: 30, left: 55 };
     const w = rect.width - padding.left - padding.right;
@@ -7853,6 +7867,15 @@ function drawMultiLineChart(canvasId, legendId, historyMap) {
     const setup = setupCanvas(canvasId);
     if (!setup) return;
     const { canvas, ctx, rect } = setup;
+
+    // No series has enough points to plot — show the collecting state
+    // instead of an empty grid with a legend and no lines.
+    if (!Object.values(historyMap).some(d => d && d.length >= 2)) {
+        const emptyLegend = document.getElementById(legendId);
+        if (emptyLegend) emptyLegend.innerHTML = '';
+        drawChartEmptyState(canvas, ctx, rect);
+        return;
+    }
 
     const padding = { top: 20, right: 10, bottom: 30, left: 40 };
     const w = rect.width - padding.left - padding.right;
@@ -48981,6 +49004,11 @@ const WOLFFN_EVENTS = [
     { id: 'node_online', label: 'Node came online' },
     { id: 'backup_completed', label: 'Backup completed' },
     { id: 'backup_failed', label: 'Backup failed' },
+    { id: 'monitor_down', label: 'Status monitor went down' },
+    { id: 'monitor_up', label: 'Status monitor recovered' },
+    { id: 'container_failover', label: 'WolfRun failover (standby promoted)' },
+    { id: 'container_updated', label: 'Container image updated' },
+    { id: 'container_update_failed', label: 'Container image update failed' },
 ];
 
 const WOLFFN_STARTER = {

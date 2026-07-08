@@ -703,6 +703,40 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
 /// `config.update_history` regardless of outcome so the operator has
 /// a full audit trail.
 pub fn perform_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> ImageUpdateEvent {
+    let event = run_update_blocking(container_name, config);
+
+    // WolfFunctions container_updated / container_update_failed triggers.
+    // Two outcomes are deliberate non-events: a passive-policy refusal
+    // (nothing was attempted) and the already-at-latest short circuit
+    // (Completed + error set, no recreate happened). force_local: the
+    // update runs on exactly this node.
+    let passive_refusal = config.policy_for(container_name).is_passive();
+    let noop = event.status == ImageUpdateStatus::Completed && event.error.is_some();
+    if !passive_refusal && !noop {
+        let trigger = match event.status {
+            ImageUpdateStatus::Completed =>
+                Some(crate::wolffunctions::TriggerEvent::ContainerUpdated),
+            ImageUpdateStatus::Failed | ImageUpdateStatus::RolledBack =>
+                Some(crate::wolffunctions::TriggerEvent::ContainerUpdateFailed),
+            // In-flight statuses can't be returned — every exit path
+            // sets Completed, RolledBack, or Failed — but a payload-only
+            // match arm is cheaper than asserting that here.
+            _ => None,
+        };
+        if let Some(trigger) = trigger {
+            crate::wolffunctions::fire_event_global(
+                trigger,
+                serde_json::to_value(&event).unwrap_or_default(),
+                true,
+            );
+        }
+    }
+    event
+}
+
+/// The actual update pipeline — see `perform_update_blocking` (the public
+/// wrapper that also fires WolfFunctions trigger events) for the step list.
+fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> ImageUpdateEvent {
     let event_id = format!("evt-{}", uuid::Uuid::new_v4().simple());
     let started_at_rfc = chrono::Utc::now().to_rfc3339();
     let policy = config.policy_for(container_name);

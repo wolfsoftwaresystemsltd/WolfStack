@@ -669,6 +669,7 @@ mod tests {
             access: AccessControl::default(),
             description: String::new(),
             updated_at: String::new(),
+            exposure: None,
         }
     }
 

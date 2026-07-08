@@ -2542,7 +2542,7 @@ async fn main() -> std::io::Result<()> {
                                         tokio::task::spawn_blocking(move || {
                                             iw::perform_update_blocking(&name, &cfg)
                                         }).await.unwrap_or_else(|join_err| {
-                                            iw::ImageUpdateEvent {
+                                            let event = iw::ImageUpdateEvent {
                                                 id: format!("evt-join-{}", chrono::Utc::now().timestamp()),
                                                 container_name: fallback_name,
                                                 image: String::new(),
@@ -2552,7 +2552,16 @@ async fn main() -> std::io::Result<()> {
                                                 status: iw::ImageUpdateStatus::Failed,
                                                 timestamp: chrono::Utc::now().to_rfc3339(),
                                                 error: Some(format!("worker join failed: {}", join_err)),
-                                            }
+                                            };
+                                            // The wrapper inside perform_update_blocking never
+                                            // returned, so it fired nothing — a joined-failed
+                                            // update is still an update failure.
+                                            wolffunctions::fire_event_global(
+                                                wolffunctions::TriggerEvent::ContainerUpdateFailed,
+                                                serde_json::to_value(&event).unwrap_or_default(),
+                                                true,
+                                            );
+                                            event
                                         })
                                     }));
                                 }
