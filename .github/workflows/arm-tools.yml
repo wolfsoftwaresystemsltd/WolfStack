@@ -46,39 +46,51 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Clone Proxmox source (retry — git.proxmox.com resets large clones)
+      - name: Clone Proxmox sources (proxmox-backup + sibling crates)
         run: |
           set -euo pipefail
           # git.proxmox.com's smart-http throttles/resets big clones from CI
-          # egress ("Recv failure: Connection reset by peer" mid-transfer). Give
-          # git a large buffer + a low-speed timeout, and retry with backoff —
-          # the reset is transient, a retry gets through.
+          # egress ("Recv failure: Connection reset by peer"). Large buffer +
+          # low-speed timeout + retry with backoff — the reset is transient.
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 120
-          n=0
-          until git clone --depth 1 --single-branch \
-                https://git.proxmox.com/git/proxmox-backup.git src; do
-            n=$((n + 1))
-            if [ "$n" -ge 5 ]; then echo "clone failed after $n attempts"; exit 1; fi
-            echo "clone attempt $n failed — retrying in $((n * 20))s"
-            rm -rf src; sleep $((n * 20))
-          done
+          clone() {
+            local url="$1" dir="$2" n=0
+            until git clone --depth 1 --single-branch "$url" "$dir"; do
+              n=$((n + 1))
+              if [ "$n" -ge 5 ]; then echo "clone $dir failed after $n attempts"; exit 1; fi
+              echo "clone $dir attempt $n failed — retrying in $((n * 20))s"
+              rm -rf "$dir"; sleep $((n * 20))
+            done
+          }
+          # proxmox-backup's crates-io deps on Proxmox's OWN crates (pathpatterns,
+          # pxar, proxmox-*) aren't published to crates.io — its packaging
+          # resolves them from sibling checkouts via a [patch.crates-io] block.
+          # Clone that same set of official git.proxmox.com repos as siblings so
+          # the patch (uncommented in the build step) points at real paths.
+          clone https://git.proxmox.com/git/proxmox-backup.git proxmox-backup
+          clone https://git.proxmox.com/git/proxmox.git proxmox
+          clone https://git.proxmox.com/git/pxar.git pxar
+          clone https://git.proxmox.com/git/pathpatterns.git pathpatterns
+          clone https://git.proxmox.com/git/proxmox-fuse.git proxmox-fuse
 
       - name: Build proxmox-backup-client (aarch64)
         run: |
           set -euo pipefail
-          # Proxmox's repo pins crates-io to a Debian-vendored registry
-          # (/usr/share/cargo/registry) that only exists in their packaging
-          # environment, so a plain checkout can't resolve dependencies against
-          # it ("failed to read root of directory source"). Drop the
-          # source-replacement config so cargo fetches from the real crates.io.
-          rm -f src/.cargo/config.toml src/.cargo/config
-          # Build only the client bin — the wider workspace pulls in server
-          # crates we don't need. Mirrors setup.sh's on-device fallback.
-          ( cd src && cargo build --release --bin proxmox-backup-client )
-          test -x src/target/release/proxmox-backup-client
-          cp src/target/release/proxmox-backup-client "$GITHUB_WORKSPACE/proxmox-backup-client-aarch64"
+          cd proxmox-backup
+          echo "── [patch.crates-io] block BEFORE uncommenting ──"
+          sed -n '/patch\.crates-io/,/^$/p' Cargo.toml || true
+          # Uncomment the [patch.crates-io] block (Proxmox ships it commented for
+          # their vendored build) so cargo resolves their crates from the sibling
+          # ../proxmox, ../pxar, ../pathpatterns, ../proxmox-fuse checkouts.
+          sed -i '/^# *\[patch\.crates-io\]/,/^[^#]/ s/^# \{0,1\}//' Cargo.toml
+          echo "── [patch.crates-io] block AFTER uncommenting ──"
+          sed -n '/patch\.crates-io/,/^$/p' Cargo.toml || true
+          # rust-toolchain.toml (if present) pins the compiler; rustup honours it.
+          cargo build --release --bin proxmox-backup-client
+          test -x target/release/proxmox-backup-client
+          cp target/release/proxmox-backup-client "$GITHUB_WORKSPACE/proxmox-backup-client-aarch64"
 
       - name: Verify it runs + checksum
         run: |
