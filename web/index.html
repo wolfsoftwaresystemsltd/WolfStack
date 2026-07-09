@@ -4993,12 +4993,12 @@
                     <table class="data-table" id="docker-table-view">
                         <thead>
                             <tr>
-                                <th>Name</th>
-                                <th>Image</th>
-                                <th>Status</th>
+                                <th data-sortcol="name" onclick="setListSort('docker','name')" style="cursor:pointer;user-select:none;" title="Sort by name">Name<span class="sort-arrow"></span></th>
+                                <th data-sortcol="image" onclick="setListSort('docker','image')" style="cursor:pointer;user-select:none;" title="Sort by image">Image<span class="sort-arrow"></span></th>
+                                <th data-sortcol="status" onclick="setListSort('docker','status')" style="cursor:pointer;user-select:none;" title="Sort by status">Status<span class="sort-arrow"></span></th>
                                 <th>IP Address</th>
                                 <th>Ports</th>
-                                <th>Autostart</th>
+                                <th data-sortcol="autostart" onclick="setListSort('docker','autostart')" style="cursor:pointer;user-select:none;" title="Sort by autostart">Autostart<span class="sort-arrow"></span></th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
@@ -5244,11 +5244,11 @@
                     <table class="data-table" id="lxc-table-view">
                         <thead>
                             <tr>
-                                <th>Name</th>
-                                <th>Version</th>
-                                <th>State</th>
+                                <th data-sortcol="name" onclick="setListSort('lxc','name')" style="cursor:pointer;user-select:none;" title="Sort by name">Name<span class="sort-arrow"></span></th>
+                                <th data-sortcol="version" onclick="setListSort('lxc','version')" style="cursor:pointer;user-select:none;" title="Sort by version">Version<span class="sort-arrow"></span></th>
+                                <th data-sortcol="status" onclick="setListSort('lxc','status')" style="cursor:pointer;user-select:none;" title="Sort by state">State<span class="sort-arrow"></span></th>
                                 <th>IP Address</th>
-                                <th>Autostart</th>
+                                <th data-sortcol="autostart" onclick="setListSort('lxc','autostart')" style="cursor:pointer;user-select:none;" title="Sort by autostart">Autostart<span class="sort-arrow"></span></th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
@@ -5302,12 +5302,12 @@
                     <table class="data-table" id="vms-table-view">
                         <thead>
                             <tr>
-                                <th>Name</th>
-                                <th>Status</th>
+                                <th data-sortcol="name" onclick="setListSort('vm','name')" style="cursor:pointer;user-select:none;" title="Sort by name">Name<span class="sort-arrow"></span></th>
+                                <th data-sortcol="status" onclick="setListSort('vm','status')" style="cursor:pointer;user-select:none;" title="Sort by status">Status<span class="sort-arrow"></span></th>
                                 <th>CPU/RAM</th>
                                 <th>WolfNet IP</th>
                                 <th>VNC</th>
-                                <th>Autostart</th>
+                                <th data-sortcol="autostart" onclick="setListSort('vm','autostart')" style="cursor:pointer;user-select:none;" title="Sort by autostart">Autostart<span class="sort-arrow"></span></th>
                                 <th>Actions</th>
                             </tr>
                         </thead>
