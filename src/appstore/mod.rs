@@ -7322,6 +7322,50 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
             vm: None, user_inputs: vec![],
         },
 
+        // Stalwart — modern all-in-one mail server (SMTP/IMAP/POP3/JMAP/
+        // ManageSieve) in a single Rust binary. Ports, volumes and the
+        // recovery-admin env are from the official docker docs
+        // (stalw.art/docs/install/platform/docker). STALWART_RECOVERY_ADMIN
+        // sets the initial admin up front (admin:<password>) instead of
+        // making the operator grep the bootstrap password out of the logs.
+        AppManifest {
+            id: "stalwart".into(),
+            name: "Stalwart Mail Server".into(),
+            icon: "📬".into(),
+            category: "Communication".into(),
+            description: "All-in-one secure mail server — SMTP, IMAP, POP3, JMAP & ManageSieve in one Rust binary".into(),
+            website: Some("https://stalw.art".into()),
+            docker: Some(DockerTarget {
+                image: "stalwartlabs/stalwart:latest".into(),
+                // HTTPS/admin+JMAP, HTTP admin, SMTP (25/587/465),
+                // IMAP (143/993), POP3 (110/995), ManageSieve (4190).
+                ports: vec![
+                    "443:443".into(), "8080:8080".into(),
+                    "25:25".into(), "587:587".into(), "465:465".into(),
+                    "143:143".into(), "993:993".into(),
+                    "110:110".into(), "995:995".into(),
+                    "4190:4190".into(),
+                ],
+                env: vec!["STALWART_RECOVERY_ADMIN=admin:${ADMIN_PASSWORD}".into()],
+                volumes: vec![
+                    "stalwart_etc:/etc/stalwart".into(),
+                    "stalwart_data:/var/lib/stalwart".into(),
+                ],
+                sidecars: vec![], seed_files: vec![], cmd: vec![],
+            }),
+            lxc: None, bare_metal: None,
+            vm: None,
+            user_inputs: vec![UserInput {
+                id: "ADMIN_PASSWORD".into(),
+                label: "Admin Password".into(),
+                input_type: "password".into(),
+                default: None,
+                required: true,
+                placeholder: Some("Password for the 'admin' account".into()),
+                options: vec![],
+            }],
+        },
+
         AppManifest {
             id: "gotify".into(),
             name: "Gotify".into(),
