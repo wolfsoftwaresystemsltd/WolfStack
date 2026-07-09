@@ -46,10 +46,28 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Build proxmox-backup-client (aarch64) from Proxmox source
+      - name: Clone Proxmox source (retry — git.proxmox.com resets large clones)
         run: |
           set -euo pipefail
-          git clone --depth 1 https://git.proxmox.com/git/proxmox-backup.git src
+          # git.proxmox.com's smart-http throttles/resets big clones from CI
+          # egress ("Recv failure: Connection reset by peer" mid-transfer). Give
+          # git a large buffer + a low-speed timeout, and retry with backoff —
+          # the reset is transient, a retry gets through.
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 120
+          n=0
+          until git clone --depth 1 --single-branch \
+                https://git.proxmox.com/git/proxmox-backup.git src; do
+            n=$((n + 1))
+            if [ "$n" -ge 5 ]; then echo "clone failed after $n attempts"; exit 1; fi
+            echo "clone attempt $n failed — retrying in $((n * 20))s"
+            rm -rf src; sleep $((n * 20))
+          done
+
+      - name: Build proxmox-backup-client (aarch64)
+        run: |
+          set -euo pipefail
           # Build only the client bin — the wider workspace pulls in server
           # crates we don't need. Mirrors setup.sh's on-device fallback.
           ( cd src && cargo build --release --bin proxmox-backup-client )
