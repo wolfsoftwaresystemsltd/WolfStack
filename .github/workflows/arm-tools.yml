@@ -81,10 +81,12 @@ jobs:
           cd proxmox-backup
           echo "── [patch.crates-io] block BEFORE uncommenting ──"
           sed -n '/patch\.crates-io/,/^$/p' Cargo.toml || true
-          # Uncomment the [patch.crates-io] block (Proxmox ships it commented for
-          # their vendored build) so cargo resolves their crates from the sibling
-          # ../proxmox, ../pxar, ../pathpatterns, ../proxmox-fuse checkouts.
-          sed -i '/^# *\[patch\.crates-io\]/,/^[^#]/ s/^# \{0,1\}//' Cargo.toml
+          # Uncomment the ENTRIES under [patch.crates-io] (the header line itself
+          # is not commented — only the `#pbs-api-types = { path = ... }` etc.
+          # lines are). This points Proxmox's own crates at the sibling
+          # ../proxmox, ../pxar, ../pathpatterns, ../proxmox-fuse checkouts. Range
+          # runs from the header to the next [section] (or EOF).
+          sed -i '/^\[patch\.crates-io\]/,/^\[/ { /^#/ s/^#[[:space:]]*// }' Cargo.toml
           echo "── [patch.crates-io] block AFTER uncommenting ──"
           sed -n '/patch\.crates-io/,/^$/p' Cargo.toml || true
           # rust-toolchain.toml (if present) pins the compiler; rustup honours it.
