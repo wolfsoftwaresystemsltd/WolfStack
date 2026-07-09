@@ -102,6 +102,9 @@ jobs:
           cargo build --release -p proxmox-backup-client --bin proxmox-backup-client
           test -x target/release/proxmox-backup-client
           cp target/release/proxmox-backup-client "$GITHUB_WORKSPACE/proxmox-backup-client-aarch64"
+          # Strip debug symbols to roughly halve the download (dynamically
+          # linked, so stripping is safe).
+          strip "$GITHUB_WORKSPACE/proxmox-backup-client-aarch64" || true
 
       - name: Verify it runs + checksum
         run: |

@@ -1087,39 +1087,52 @@ pbs_build_from_source() {
             || echo "  ⚠ Some build deps may be missing — continuing anyway"
     fi
 
-    local src="${CUSTOM_INSTALL_DIR:-/var/cache/wolfstack}/proxmox-backup-src"
-    rm -rf "$src"
-    mkdir -p "$(dirname "$src")"
+    local workdir="${CUSTOM_INSTALL_DIR:-/var/cache/wolfstack}/proxmox-backup-src"
+    rm -rf "$workdir"; mkdir -p "$workdir"
 
-    # git.proxmox.com's smart-http can reset a large clone mid-transfer; retry
-    # with backoff (the reset is transient — a retry gets through).
-    local clone_ok="" cn=0
-    while [ "$cn" -lt 4 ]; do
-        if git clone --depth 1 --single-branch https://git.proxmox.com/git/proxmox-backup.git "$src" 2>&1 | tail -3; then
-            clone_ok=1; break
-        fi
-        cn=$((cn + 1)); rm -rf "$src"
-        [ "$cn" -lt 4 ] && { echo "  clone attempt $cn failed — retrying in $((cn * 15))s"; sleep $((cn * 15)); }
-    done
-    if [ -z "$clone_ok" ]; then
-        echo "  ✗ Could not clone proxmox-backup source from git.proxmox.com"
-        rm -rf "$src"
+    # proxmox-backup builds against Proxmox's OWN crates (pathpatterns, pxar,
+    # proxmox-*) resolved from SIBLING checkouts via a [patch.crates-io] block —
+    # they're not on crates.io. So a single-repo clone can NEVER build it (this
+    # is why the old on-device fallback silently always failed — 2026-07-09). We
+    # need all five repos at a COORDINATED commit set (HEAD is not always in
+    # sync — e.g. a crate proxmox-backup expects can be missing from proxmox's
+    # tip). Pin to a known-good set (kept in step with .github/workflows/
+    # arm-tools.yml). git.proxmox.com allows SHA-specific depth-1 fetches, so
+    # each is a small transfer; retry on the transient "connection reset".
+    _pbs_fetch_pinned() {
+        local url="$1" dir="$2" sha="$3" n=0
+        rm -rf "$workdir/$dir"; mkdir -p "$workdir/$dir"
+        ( cd "$workdir/$dir" && git init -q && git remote add origin "$url" )
+        while [ "$n" -lt 5 ]; do
+            if ( cd "$workdir/$dir" && git fetch --depth 1 origin "$sha" 2>/dev/null && git checkout -q FETCH_HEAD ); then
+                return 0
+            fi
+            n=$((n + 1))
+            [ "$n" -lt 5 ] && { echo "  fetch $dir attempt $n failed — retrying in $((n * 15))s"; sleep $((n * 15)); }
+        done
+        return 1
+    }
+    if ! _pbs_fetch_pinned https://git.proxmox.com/git/proxmox-backup.git proxmox-backup 79bee229d155eed18834cd12b7b101ac27808b64 \
+       || ! _pbs_fetch_pinned https://git.proxmox.com/git/proxmox.git        proxmox        99c5453fbd9856b6cffdd0227a535d23f258fd93 \
+       || ! _pbs_fetch_pinned https://git.proxmox.com/git/pxar.git           pxar           091a8a382d0d6fc71025351fb35c51b1f3b0074d \
+       || ! _pbs_fetch_pinned https://git.proxmox.com/git/pathpatterns.git   pathpatterns   42e5e96e30297da878a4d4b3a7fa52b65c1be0ab \
+       || ! _pbs_fetch_pinned https://git.proxmox.com/git/proxmox-fuse.git   proxmox-fuse   258788a3d66f7a77040a480170fff9890d4939aa; then
+        echo "  ✗ Could not fetch the proxmox source repos from git.proxmox.com"
+        rm -rf "$workdir"
         return 1
     fi
 
-    # Proxmox's repo pins crates-io to a Debian-vendored registry
-    # (/usr/share/cargo/registry) that only exists in their packaging
-    # environment; without it a plain checkout can't resolve dependencies
-    # ("failed to read root of directory source"). Drop the source-replacement
-    # config so cargo fetches from the real crates.io. (This is why the
-    # on-device build never actually succeeded before — 2026-07-09.)
+    local src="$workdir/proxmox-backup"
+    # Two things together (BOTH required): drop the Debian vendored-registry
+    # source replacement so third-party crates come from real crates.io, and
+    # uncomment the [patch.crates-io] entries so Proxmox's own crates come from
+    # the sibling checkouts.
     rm -f "$src/.cargo/config.toml" "$src/.cargo/config"
+    sed -i '/^\[patch\.crates-io\]/,/^\[/ { /^#/ s/^#[[:space:]]*// }' "$src/Cargo.toml"
 
-    # Build only the client crate. The wider workspace pulls in PBS-server
-    # crates (proxmox-backup-server, daemons, web UI assets) that need
-    # extra build infrastructure we don't want to drag in for the client.
-    # Re-use the swap created earlier in the wolfstack source-build block
-    # if memory is tight (1GB Pi 3, 2GB Pi 4).
+    # The client bin is the workspace member package `proxmox-backup-client`
+    # (not a default-run member) — build it with -p. Limit to one job when
+    # memory is tight (1GB Pi 3, 2GB Pi 4).
     local cargo_jobs=""
     local total_kb
     total_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
@@ -1128,22 +1141,22 @@ pbs_build_from_source() {
         echo "  Low memory detected — limiting build to one job"
     fi
 
-    if ! ( cd "$src" && cargo build --release $cargo_jobs --bin proxmox-backup-client ) 2>&1 | tail -15; then
+    if ! ( cd "$src" && cargo build --release $cargo_jobs -p proxmox-backup-client --bin proxmox-backup-client ) 2>&1 | tail -15; then
         echo "  ✗ cargo build failed — see output above"
         echo "    The proxmox-backup workspace can be sensitive to system library"
         echo "    versions. If openssl-sys, libfuse-sys, or proxmox-* crates"
         echo "    failed, install the matching -devel/-dev packages and re-run."
-        rm -rf "$src"
+        rm -rf "$workdir"
         return 1
     fi
 
     if [ -x "$src/target/release/proxmox-backup-client" ]; then
         install -m 0755 "$src/target/release/proxmox-backup-client" /usr/local/bin/proxmox-backup-client
         echo "  ✓ proxmox-backup-client built and installed to /usr/local/bin/"
-        rm -rf "$src"
+        rm -rf "$workdir"
         return 0
     fi
-    rm -rf "$src"
+    rm -rf "$workdir"
     return 1
 }
 
