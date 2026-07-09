@@ -1091,11 +1091,29 @@ pbs_build_from_source() {
     rm -rf "$src"
     mkdir -p "$(dirname "$src")"
 
-    if ! git clone --depth 1 https://git.proxmox.com/git/proxmox-backup.git "$src" 2>&1 | tail -3; then
+    # git.proxmox.com's smart-http can reset a large clone mid-transfer; retry
+    # with backoff (the reset is transient — a retry gets through).
+    local clone_ok="" cn=0
+    while [ "$cn" -lt 4 ]; do
+        if git clone --depth 1 --single-branch https://git.proxmox.com/git/proxmox-backup.git "$src" 2>&1 | tail -3; then
+            clone_ok=1; break
+        fi
+        cn=$((cn + 1)); rm -rf "$src"
+        [ "$cn" -lt 4 ] && { echo "  clone attempt $cn failed — retrying in $((cn * 15))s"; sleep $((cn * 15)); }
+    done
+    if [ -z "$clone_ok" ]; then
         echo "  ✗ Could not clone proxmox-backup source from git.proxmox.com"
         rm -rf "$src"
         return 1
     fi
+
+    # Proxmox's repo pins crates-io to a Debian-vendored registry
+    # (/usr/share/cargo/registry) that only exists in their packaging
+    # environment; without it a plain checkout can't resolve dependencies
+    # ("failed to read root of directory source"). Drop the source-replacement
+    # config so cargo fetches from the real crates.io. (This is why the
+    # on-device build never actually succeeded before — 2026-07-09.)
+    rm -f "$src/.cargo/config.toml" "$src/.cargo/config"
 
     # Build only the client crate. The wider workspace pulls in PBS-server
     # crates (proxmox-backup-server, daemons, web UI assets) that need

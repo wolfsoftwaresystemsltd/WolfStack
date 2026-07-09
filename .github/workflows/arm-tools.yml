@@ -68,6 +68,12 @@ jobs:
       - name: Build proxmox-backup-client (aarch64)
         run: |
           set -euo pipefail
+          # Proxmox's repo pins crates-io to a Debian-vendored registry
+          # (/usr/share/cargo/registry) that only exists in their packaging
+          # environment, so a plain checkout can't resolve dependencies against
+          # it ("failed to read root of directory source"). Drop the
+          # source-replacement config so cargo fetches from the real crates.io.
+          rm -f src/.cargo/config.toml src/.cargo/config
           # Build only the client bin — the wider workspace pulls in server
           # crates we don't need. Mirrors setup.sh's on-device fallback.
           ( cd src && cargo build --release --bin proxmox-backup-client )
