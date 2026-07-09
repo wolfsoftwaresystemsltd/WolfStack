@@ -841,10 +841,21 @@ pbs_detect_codename() {
 }
 
 # Helper: extract proxmox-backup-client binary from Debian .deb
-# Used on non-Debian systems (Fedora, Arch fallback, openSUSE)
+# Used on non-Debian systems (Fedora, Arch fallback, openSUSE).
 pbs_extract_from_deb() {
     local codename="$1"
     local arch="${2:-amd64}"
+    # Upstream Proxmox publishes the .deb for amd64 ONLY, and an extracted
+    # binary has to match the host CPU — so this only makes sense on an amd64
+    # host. Refuse on every other arch so the caller falls through to the
+    # source build instead of installing an unrunnable amd64 binary (the Arch
+    # path used to hardcode `amd64` here and would do exactly that on arm64).
+    # This is what makes the "don't pull the amd64 binary on non-amd64" rule
+    # uniform across every distro path, not just apt.
+    case "$HOST_ARCH" in
+        x86_64|amd64) ;;
+        *) return 1 ;;
+    esac
     local tmp
     tmp=$(mktemp -d)
     local base_url="http://download.proxmox.com/debian/pbs/dists/${codename}/pbs-no-subscription/binary-${arch}/"
@@ -883,26 +894,49 @@ if command -v proxmox-backup-client >/dev/null 2>&1; then
 
 elif command -v apt-get >/dev/null 2>&1; then
     # ─── Debian / Ubuntu / Proxmox VE ──────────────────────────────────────
-    CODENAME=$(pbs_detect_codename)
-    echo "  Using Proxmox PBS repo for: $CODENAME"
-    mkdir -p /etc/apt/sources.list.d /etc/apt/trusted.gpg.d
-    echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" > /etc/apt/sources.list.d/pbs-client.list
-    curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-${CODENAME}.gpg" \
-        -o "/etc/apt/trusted.gpg.d/proxmox-release-${CODENAME}.gpg" 2>/dev/null || true
+    # The Proxmox PBS repo publishes ONLY binary-amd64 packages. Adding it to
+    # an arm64/armhf host writes a repo that serves NOTHING for this arch and
+    # makes every later `apt-get update` warn about the missing
+    # binary-<arch>/Packages file — a dead repo left behind forever. So only
+    # add the repo (and try the apt install) on amd64; other arches skip it and
+    # fall through to the source build below, which never touches apt sources.
+    case "$HOST_ARCH" in
+        x86_64|amd64)
+            CODENAME=$(pbs_detect_codename)
+            echo "  Using Proxmox PBS repo for: $CODENAME"
+            mkdir -p /etc/apt/sources.list.d /etc/apt/trusted.gpg.d
+            echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" > /etc/apt/sources.list.d/pbs-client.list
+            curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-${CODENAME}.gpg" \
+                -o "/etc/apt/trusted.gpg.d/proxmox-release-${CODENAME}.gpg" 2>/dev/null || true
 
-    if apt-get update -qq 2>/dev/null && apt-get install -y proxmox-backup-client 2>/dev/null; then
-        echo "✓ proxmox-backup-client installed from $CODENAME repo"
-        pbs_install_success=true
-    elif [ "$CODENAME" != "bookworm" ]; then
-        echo "  ⚠ $CODENAME install failed — trying bookworm repo"
-        echo "deb http://download.proxmox.com/debian/pbs bookworm pbs-no-subscription" > /etc/apt/sources.list.d/pbs-client.list
-        curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg" \
-            -o "/etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg" 2>/dev/null || true
-        if apt-get update -qq 2>/dev/null && apt-get install -y proxmox-backup-client 2>/dev/null; then
-            echo "✓ proxmox-backup-client installed from bookworm repo"
-            pbs_install_success=true
-        fi
-    fi
+            if apt-get update -qq 2>/dev/null && apt-get install -y proxmox-backup-client 2>/dev/null; then
+                echo "✓ proxmox-backup-client installed from $CODENAME repo"
+                pbs_install_success=true
+            elif [ "$CODENAME" != "bookworm" ]; then
+                echo "  ⚠ $CODENAME install failed — trying bookworm repo"
+                echo "deb http://download.proxmox.com/debian/pbs bookworm pbs-no-subscription" > /etc/apt/sources.list.d/pbs-client.list
+                curl -fsSL "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg" \
+                    -o "/etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg" 2>/dev/null || true
+                if apt-get update -qq 2>/dev/null && apt-get install -y proxmox-backup-client 2>/dev/null; then
+                    echo "✓ proxmox-backup-client installed from bookworm repo"
+                    pbs_install_success=true
+                fi
+            fi
+            # If BOTH amd64 attempts failed (transient network / repo outage),
+            # remove the repo we just added rather than leaving a source that
+            # yielded no working client — a later `apt install
+            # proxmox-backup-client` from a re-run is cleaner than a dangling
+            # entry. The repo is re-added next run if still wanted.
+            if [ "$pbs_install_success" != "true" ]; then
+                rm -f /etc/apt/sources.list.d/pbs-client.list
+                echo "  ⚠ proxmox-backup-client install failed — removed the PBS apt source (nothing installed from it)"
+            fi
+            ;;
+        *)
+            echo "  ℹ Proxmox's PBS apt repo has no packages for $HOST_ARCH (it publishes amd64 only)."
+            echo "    Not adding it to /etc/apt/sources.list.d — using the source build below instead."
+            ;;
+    esac
 
 elif command -v pacman >/dev/null 2>&1; then
     # ─── Arch / CachyOS / Manjaro ──────────────────────────────────────────
