@@ -46,34 +46,33 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Clone Proxmox sources (proxmox-backup + sibling crates)
+      - name: Clone Proxmox sources at a coordinated commit set
         run: |
           set -euo pipefail
-          # git.proxmox.com's smart-http throttles/resets big clones from CI
-          # egress ("Recv failure: Connection reset by peer"). Large buffer +
-          # low-speed timeout + retry with backoff — the reset is transient.
           git config --global http.postBuffer 524288000
-          git config --global http.lowSpeedLimit 1000
-          git config --global http.lowSpeedTime 120
-          clone() {
-            local url="$1" dir="$2" n=0
-            until git clone --depth 1 --single-branch "$url" "$dir"; do
+          # proxmox-backup resolves Proxmox's OWN crates (pathpatterns, pxar,
+          # proxmox-*) from sibling checkouts via [patch.crates-io] — they aren't
+          # on crates.io. Cloning all five at HEAD is NOT coordinated (a crate
+          # proxmox-backup expects can be absent from proxmox's tip — e.g.
+          # "no matching package named proxmox-syslog-api"). So pin every repo to
+          # a known-consistent commit set (from the maintained community arm64
+          # build). git.proxmox.com allows SHA-specific depth-1 fetches, so this
+          # stays a small transfer. Bump these together when refreshing.
+          fetch_pinned() {
+            local url="$1" dir="$2" sha="$3" n=0
+            rm -rf "$dir"; mkdir -p "$dir"
+            ( cd "$dir" && git init -q && git remote add origin "$url" )
+            until ( cd "$dir" && git fetch --depth 1 origin "$sha" && git checkout -q FETCH_HEAD ); do
               n=$((n + 1))
-              if [ "$n" -ge 5 ]; then echo "clone $dir failed after $n attempts"; exit 1; fi
-              echo "clone $dir attempt $n failed — retrying in $((n * 20))s"
-              rm -rf "$dir"; sleep $((n * 20))
+              if [ "$n" -ge 5 ]; then echo "fetch $dir failed after $n attempts"; exit 1; fi
+              echo "fetch $dir attempt $n failed — retrying in $((n * 15))s"; sleep $((n * 15))
             done
           }
-          # proxmox-backup's crates-io deps on Proxmox's OWN crates (pathpatterns,
-          # pxar, proxmox-*) aren't published to crates.io — its packaging
-          # resolves them from sibling checkouts via a [patch.crates-io] block.
-          # Clone that same set of official git.proxmox.com repos as siblings so
-          # the patch (uncommented in the build step) points at real paths.
-          clone https://git.proxmox.com/git/proxmox-backup.git proxmox-backup
-          clone https://git.proxmox.com/git/proxmox.git proxmox
-          clone https://git.proxmox.com/git/pxar.git pxar
-          clone https://git.proxmox.com/git/pathpatterns.git pathpatterns
-          clone https://git.proxmox.com/git/proxmox-fuse.git proxmox-fuse
+          fetch_pinned https://git.proxmox.com/git/proxmox-backup.git proxmox-backup 79bee229d155eed18834cd12b7b101ac27808b64
+          fetch_pinned https://git.proxmox.com/git/proxmox.git        proxmox        99c5453fbd9856b6cffdd0227a535d23f258fd93
+          fetch_pinned https://git.proxmox.com/git/pxar.git           pxar           091a8a382d0d6fc71025351fb35c51b1f3b0074d
+          fetch_pinned https://git.proxmox.com/git/pathpatterns.git   pathpatterns   42e5e96e30297da878a4d4b3a7fa52b65c1be0ab
+          fetch_pinned https://git.proxmox.com/git/proxmox-fuse.git   proxmox-fuse   258788a3d66f7a77040a480170fff9890d4939aa
 
       - name: Build proxmox-backup-client (aarch64)
         run: |
