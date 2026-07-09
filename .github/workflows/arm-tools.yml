@@ -95,8 +95,11 @@ jobs:
           sed -i '/^\[patch\.crates-io\]/,/^\[/ { /^#/ s/^#[[:space:]]*// }' Cargo.toml
           echo "── [patch.crates-io] block AFTER uncommenting ──"
           sed -n '/patch\.crates-io/,/^$/p' Cargo.toml || true
-          # rust-toolchain.toml (if present) pins the compiler; rustup honours it.
-          cargo build --release --bin proxmox-backup-client
+          # The client bin lives in the workspace member package
+          # `proxmox-backup-client` (not a default-run member), so target it
+          # explicitly with -p. rust-toolchain.toml (if present) pins the
+          # compiler; rustup honours it.
+          cargo build --release -p proxmox-backup-client --bin proxmox-backup-client
           test -x target/release/proxmox-backup-client
           cp target/release/proxmox-backup-client "$GITHUB_WORKSPACE/proxmox-backup-client-aarch64"
 
