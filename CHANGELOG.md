@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.44: trim vault secret values + honest compose-editor Save wording** _(2026-07-10 — [`7db4fedc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7db4fedcae6deac86f66bdea23e1962615a327ee))_
+- **v25.2.44: trim vault secret values + honest compose-editor 'Save' wording** _(2026-07-10 — [`d7a8139a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d7a8139a17fa5a9a0d74f7b6317f39746a1bbc71))_
 - **v25.2.43: dashboard save keeps edit mode + sort keeps update badges** _(2026-07-10 — [`4c8022ec`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4c8022ec1db198651c65f955e34a83c8b1058dc5))_
 - **v25.2.43: dashboard save keeps you in edit mode + sort no longer wipes update badges** _(2026-07-10 — [`3e44ba7f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3e44ba7fdfca05dbecaf03fa8b42e017cfd8a675))_
 - **v25.2.42: Predictive Inbox AUTOFIX actually upgrades + modal/progress/cancel** _(2026-07-10 — [`0e9ff801`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0e9ff801912ced7b82d879c848917ed35d51b899))_
