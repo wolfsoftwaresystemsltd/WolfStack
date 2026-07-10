@@ -647,7 +647,8 @@ fn synthesise_compose_template(app_id: &str, d: &DockerTarget) -> String {
     out.push_str("# Auto-generated docker-compose.yml for ");
     out.push_str(app_id);
     out.push_str(".\n");
-    out.push_str("# Edit freely — saving re-runs `docker compose up -d`.\n");
+    out.push_str("# Edit freely. Save writes this file; click \"Up\" in Compose Stacks\n");
+    out.push_str("# to apply it (`docker compose up -d`) and inject any vault secrets.\n");
     out.push_str("services:\n");
 
     // Main service.

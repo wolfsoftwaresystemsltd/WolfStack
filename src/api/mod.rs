@@ -34178,14 +34178,21 @@ async fn secrets_save(
     let mut secrets = load_secrets();
     let now = now_iso();
 
+    // Trim the value the same way we trim the key. A pasted credential or
+    // token almost always carries a trailing newline (copied from a
+    // terminal / password manager), which then gets injected into the
+    // container verbatim — the value LOOKS correct everywhere it's shown but
+    // downstream auth fails with no visible cause. `trim()` only touches
+    // leading/trailing whitespace, so internal structure (e.g. multi-line
+    // PEM bodies) is preserved.
     if let Some(existing) = secrets.iter_mut().find(|s| s.key == key) {
-        if let Some(ref v) = body.value { existing.value = v.clone(); }
+        if let Some(ref v) = body.value { existing.value = v.trim().to_string(); }
         if let Some(ref d) = body.description { existing.description = d.clone(); }
         existing.updated = now;
     } else {
         secrets.push(SecretEntry {
             key: key.clone(),
-            value: body.value.clone().unwrap_or_default(),
+            value: body.value.as_deref().unwrap_or("").trim().to_string(),
             description: body.description.clone().unwrap_or_default(),
             created: now.clone(),
             updated: now,
