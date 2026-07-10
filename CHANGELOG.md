@@ -8,6 +8,12 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.41: sortable Docker/LXC/VM lists now discoverable (Rutger)** _(2026-07-10 — [`cd767b23`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cd767b23ff795291cce0de03dfe5a1c984aad14e))_
+- **v25.2.41: sortable Docker/LXC/VM lists now discoverable — visible sort indicators on every column + a sort control in card view (Rutger)** _(2026-07-10 — [`aed27a93`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aed27a9392338aead5a2b2400320875c2a64196b))_
+- **v25.2.40: click-to-sort container/VM columns + prebuilt arm64 PBS client** _(2026-07-09 — [`89d8604f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/89d8604f95447f6944a8d5e3ce855b9d71f9e48e))_
+- **v25.2.40: click-to-sort columns for Docker, LXC and VM lists (Rutger)** _(2026-07-09 — [`37ae5c68`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/37ae5c6873c5a6014a718524472634abd7afb563))_
+- **v25.2.39: Stalwart app + sidebar host sort by visible name** _(2026-07-09 — [`5ec4df1b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5ec4df1b06324ebfb6e25a32f208ccc6e6a4b3d4))_
+- **v25.2.39: Stalwart Mail Server in the app store + sidebar sorts hosts by their visible name** _(2026-07-09 — [`cf14b6a1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cf14b6a1bebf38094b5b0fed97413d017d844bef))_
 - **v25.2.38: HA hosting tiers — node roles + DNS/Postgres/mail/site-failover (NoroNetwork)** _(2026-07-09 — [`aff60cba`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aff60cbac9145ff650f72fb77a3eeaed154cb6bc))_
 - **v25.2.38: HA hosting tiers — node roles + DNS/Postgres/mail/site-failover (NoroNetwork)** _(2026-07-09 — [`eb98ccb8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/eb98ccb8f55906b2b59093e97dae0745c9ab30aa))_
 - **v25.2.37: threat-intel 6h feed refresh, Firefox chart fix, Internet Exposure v2** _(2026-07-09 — [`066775e3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/066775e37911587a2810170387dfe43d6ef98b3b))_
