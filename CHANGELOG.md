@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.43: dashboard save keeps edit mode + sort keeps update badges** _(2026-07-10 — [`4c8022ec`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4c8022ec1db198651c65f955e34a83c8b1058dc5))_
+- **v25.2.43: dashboard save keeps you in edit mode + sort no longer wipes update badges** _(2026-07-10 — [`3e44ba7f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3e44ba7fdfca05dbecaf03fa8b42e017cfd8a675))_
 - **v25.2.42: Predictive Inbox AUTOFIX actually upgrades + modal/progress/cancel** _(2026-07-10 — [`0e9ff801`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0e9ff801912ced7b82d879c848917ed35d51b899))_
 - **v25.2.42: Predictive Inbox AUTOFIX actually upgrades + styled modal, progress bar, cancel** _(2026-07-10 — [`439443d0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/439443d04d07378fc6a2e30e0b168bf1e725d4bb))_
 - **v25.2.41: sortable Docker/LXC/VM lists now discoverable (Rutger)** _(2026-07-10 — [`cd767b23`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cd767b23ff795291cce0de03dfe5a1c984aad14e))_
