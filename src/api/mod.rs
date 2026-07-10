@@ -29137,28 +29137,12 @@ pub async fn predictive_proposal_command(
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let (id, idx) = path.into_inner();
 
-    // 1. Try local store.
-    let local_p: Option<crate::predictive::Proposal> = {
-        let store = state.predictive_proposals.read()
-            .unwrap_or_else(|e| e.into_inner());
-        store.get(&id).cloned()
+    let t = match resolve_proposal_target(&id, &state).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
     };
 
-    // 2. If not local, fan out to online peers — the Inbox aggregates
-    //    proposals from every cluster node, so the operator can click
-    //    Run on a finding that lives on a peer. The local store on
-    //    THIS node won't have it; fetch via X-WolfStack-Secret.
-    let p = match local_p {
-        Some(p) => p,
-        None => match fetch_proposal_from_peers(&id, &state).await {
-            Some(p) => p,
-            None => return HttpResponse::NotFound().json(serde_json::json!({
-                "error": "proposal not found",
-            })),
-        },
-    };
-
-    let cmds = match &p.remediation {
+    let cmds = match &t.proposal.remediation {
         crate::predictive::RemediationPlan::Manual { commands, .. } => commands,
         _ => return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "proposal has no Manual remediation commands",
@@ -29168,6 +29152,55 @@ pub async fn predictive_proposal_command(
         return HttpResponse::NotFound().json(serde_json::json!({
             "error": "command index out of range",
         }));
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "command": command,
+        "console_type": t.console_type,
+        "console_name": t.console_name,
+        "remote_node_id": t.remote_node_id,
+        "node_hostname": t.node_hostname,
+        "title": t.proposal.title,
+    }))
+}
+
+/// A proposal plus its resolved console target — the shared result of
+/// looking a proposal up (locally, then across peers) and mapping its
+/// scope to a console session. Both the per-index `command` endpoint
+/// and the `autofix-command` endpoint need exactly this, so it lives
+/// in one place rather than being duplicated.
+struct ResolvedProposalTarget {
+    proposal: crate::predictive::Proposal,
+    console_type: String,
+    console_name: String,
+    remote_node_id: Option<String>,
+    node_hostname: String,
+}
+
+/// Look a proposal up (local store first, then fan out to online peers
+/// — the Inbox aggregates proposals from every cluster node) and
+/// resolve its console target. On failure returns a ready-to-send
+/// error response.
+async fn resolve_proposal_target(
+    id: &str,
+    state: &web::Data<AppState>,
+) -> Result<ResolvedProposalTarget, HttpResponse> {
+    // 1. Try local store.
+    let local_p: Option<crate::predictive::Proposal> = {
+        let store = state.predictive_proposals.read()
+            .unwrap_or_else(|e| e.into_inner());
+        store.get(id).cloned()
+    };
+
+    // 2. If not local, fan out to online peers via X-WolfStack-Secret.
+    let p = match local_p {
+        Some(p) => p,
+        None => match fetch_proposal_from_peers(id, state).await {
+            Some(p) => p,
+            None => return Err(HttpResponse::NotFound().json(serde_json::json!({
+                "error": "proposal not found",
+            }))),
+        },
     };
 
     // Resolve the console target from scope.resource_id. The format
@@ -29193,18 +29226,127 @@ pub async fn predictive_proposal_command(
     // Friendly hostname for the UI — `console_name` for `host`
     // targets is the literal string "host" (the resolver returns
     // it that way so the WS path is `/ws/console/host/host`), not
-    // a hostname the operator would recognise. Look up the actual
-    // node and prefer its hostname; fall back to the node id only
-    // if cluster state hasn't seen the node yet.
-    let node_hostname = resolve_node_hostname(&state, &p.scope.node_id);
+    // a hostname the operator would recognise.
+    let node_hostname = resolve_node_hostname(state, &p.scope.node_id);
+
+    Ok(ResolvedProposalTarget { proposal: p, console_type, console_name, remote_node_id, node_hostname })
+}
+
+/// Finding types AUTOFIX may compose a runnable command for. These are
+/// the only proposals whose remediation `commands` are a self-contained
+/// package-update recipe that is safe to join and run unattended. Every
+/// OTHER finding type's commands can include review/inspect steps or
+/// state-changing actions that must be approved consciously (e.g. a
+/// tamper-baseline reseed, a `docker system prune`), so they are never
+/// eligible for the join-and-run path — the endpoint refuses them.
+/// Mirrors `PRED_AUTOFIX_TYPES` in web/js/app.js; the gate lives on
+/// BOTH sides so a direct API call can't bypass the client filter.
+const AUTOFIX_FINDING_TYPES: [&str; 2] = [
+    crate::predictive::vulnerability::FINDING_TYPE, // host_security_updates_pending
+    crate::predictive::osv::FINDING_TYPE,           // osv_vulnerability_detected
+];
+
+/// Build the single shell command AUTOFIX runs for a proposal.
+///
+/// PRECONDITION: only called for a finding type in
+/// [`AUTOFIX_FINDING_TYPES`], whose analyzers emit plain single-line
+/// commands. The comment filter below drops any `#`-prefixed ENTRY
+/// wholesale, which is correct for those inputs (the only comment line
+/// they emit is the OSV "ecosystem not recognised" placeholder, a pure
+/// comment with nothing to run). It must not be handed a multi-line
+/// entry that packs a comment and a real command into one string.
+///
+/// The analyzer's remediation `commands` are an ORDERED RECIPE, not a
+/// menu — e.g. apt security updates emit `[apt-get update, apt-get -s
+/// upgrade | grep -i security, apt-get upgrade -y]`: refresh the index,
+/// preview, then apply. Running only `commands[0]` (as the old autofix
+/// did) therefore just refreshed the package index and never upgraded
+/// anything — the exact bug operators hit.
+///
+/// So join every runnable line into one sequential script and export
+/// `DEBIAN_FRONTEND=noninteractive` up front so an unattended apt run
+/// never blocks on a conffile / service-restart prompt (harmless on
+/// non-apt hosts). Sequenced with `;` not `&&` because an intermediate
+/// diagnostic line (the `apt-get -s upgrade | grep …` preview) exits
+/// non-zero when it finds nothing and must not abort the apply.
+///
+/// Returns `None` when the recipe is comment-only (e.g. the OSV
+/// "ecosystem not recognised" placeholder) — nothing to run.
+fn compose_autofix_command(commands: &[String]) -> Option<String> {
+    let runnable: Vec<&str> = commands
+        .iter()
+        .map(|c| c.trim())
+        .inspect(|c| {
+            // Tripwire for the single-line PRECONDITION above: the
+            // `starts_with('#')` filter drops a comment ENTRY wholesale,
+            // which silently loses a real command if some future
+            // eligible analyzer ever packs `"# note\n<cmd>"` into one
+            // entry (as tamper_detection does — currently not eligible).
+            // Fail loudly in debug/test builds if that day comes.
+            debug_assert!(!c.contains('\n'), "autofix recipe entry has an embedded newline: {c:?}");
+        })
+        .filter(|c| !c.is_empty() && !c.starts_with('#'))
+        .collect();
+    if runnable.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "export DEBIAN_FRONTEND=noninteractive ; {}",
+        runnable.join(" ; ")
+    ))
+}
+
+/// GET /api/proposals/{id}/autofix-command — return the SINGLE composed
+/// command AUTOFIX runs, plus the resolved console target. Unlike
+/// `/command/{idx}` (which returns one line of the recipe verbatim),
+/// this joins the analyzer's whole remediation recipe into one
+/// sequential non-interactive script so the actual upgrade step runs.
+/// Auth-gated; the command is composed from the analyzer's on-disk
+/// proposal store, never from user input.
+pub async fn predictive_proposal_autofix_command(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let id = path.into_inner();
+
+    let t = match resolve_proposal_target(&id, &state).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+
+    // SECURITY (A01): the join-and-run path is only valid for the
+    // package-update finding types. Refuse everything else server-side
+    // so a hand-crafted request can't get a runnable script composed for
+    // a proposal whose commands include review/inspect or state-changing
+    // steps. The client applies the same allow-list, but the client is
+    // not the trust boundary.
+    if !AUTOFIX_FINDING_TYPES.contains(&t.proposal.finding_type.as_str()) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "this finding type is not eligible for autofix",
+        }));
+    }
+
+    let cmds = match &t.proposal.remediation {
+        crate::predictive::RemediationPlan::Manual { commands, .. } => commands,
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "proposal has no Manual remediation commands",
+        })),
+    };
+    let Some(command) = compose_autofix_command(cmds) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "proposal has no runnable autofix command",
+        }));
+    };
 
     HttpResponse::Ok().json(serde_json::json!({
         "command": command,
-        "console_type": console_type,
-        "console_name": console_name,
-        "remote_node_id": remote_node_id,
-        "node_hostname": node_hostname,
-        "title": p.title,
+        "console_type": t.console_type,
+        "console_name": t.console_name,
+        "remote_node_id": t.remote_node_id,
+        "node_hostname": t.node_hostname,
+        "title": t.proposal.title,
     }))
 }
 
@@ -40298,6 +40440,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/proposals/run-now", web::post().to(predictive_proposals_run_now))
         .route("/api/proposals/{id}", web::get().to(predictive_proposal_get))
         .route("/api/proposals/{id}/command/{idx}", web::get().to(predictive_proposal_command))
+        .route("/api/proposals/{id}/autofix-command", web::get().to(predictive_proposal_autofix_command))
         .route("/api/proposals/{id}/console-target", web::get().to(predictive_proposal_console_target))
         .route("/api/proposals/{id}/history", web::get().to(predictive_proposal_history))
         .route("/api/proposals/{id}/snooze", web::post().to(predictive_proposal_snooze))
@@ -42220,5 +42363,79 @@ mod target_admin_verification_tests {
         // A user that exists in neither the WolfStack store nor /etc/shadow
         // with a random password must not authenticate.
         assert!(!verify_target_admin("definitely-not-a-real-user-xyz", "nope"));
+    }
+}
+
+#[cfg(test)]
+mod autofix_command_tests {
+    use super::compose_autofix_command;
+
+    #[test]
+    fn apt_recipe_runs_the_upgrade_not_just_update() {
+        // The exact apt security-updates recipe from vulnerability.rs. The
+        // old autofix ran only commands[0] (`apt-get update`) and never
+        // upgraded. The composed command MUST include the upgrade.
+        let cmds = vec![
+            "apt-get update".to_string(),
+            "apt-get -s upgrade | grep -i security".to_string(),
+            "apt-get upgrade -y".to_string(),
+        ];
+        let out = compose_autofix_command(&cmds).expect("runnable");
+        assert!(out.contains("apt-get upgrade -y"), "must run the upgrade: {out}");
+        assert!(out.contains("apt-get update"), "must refresh first: {out}");
+        assert!(out.starts_with("export DEBIAN_FRONTEND=noninteractive ;"), "non-interactive: {out}");
+        // Sequenced with `;` so the grep preview exiting non-zero can't abort
+        // the apply.
+        assert!(!out.contains("&&"), "no && (preview line exits non-zero): {out}");
+    }
+
+    #[test]
+    fn dnf_single_line_recipe_composes() {
+        let cmds = vec![
+            "dnf check-update --security".to_string(),
+            "dnf upgrade --security -y".to_string(),
+        ];
+        let out = compose_autofix_command(&cmds).expect("runnable");
+        assert!(out.contains("dnf upgrade --security -y"), "{out}");
+    }
+
+    #[test]
+    fn comment_only_recipe_has_no_runnable_command() {
+        // The OSV "ecosystem not recognised" placeholder is a single
+        // `#`-comment line — there is nothing to auto-run.
+        let cmds = vec![
+            "# No bulk command — patch each CVE individually.".to_string(),
+        ];
+        assert!(compose_autofix_command(&cmds).is_none());
+    }
+
+    #[test]
+    fn empty_recipe_has_no_runnable_command() {
+        assert!(compose_autofix_command(&[]).is_none());
+    }
+
+    #[test]
+    fn leading_comment_is_stripped_but_real_commands_kept() {
+        let cmds = vec![
+            "# preamble".to_string(),
+            "apt-get update".to_string(),
+            "apt-get upgrade -y".to_string(),
+        ];
+        let out = compose_autofix_command(&cmds).expect("runnable");
+        assert!(!out.contains("# preamble"), "comment stripped: {out}");
+        assert!(out.contains("apt-get upgrade -y"), "{out}");
+    }
+
+    #[test]
+    fn autofix_allow_list_is_exactly_the_two_update_findings() {
+        // The server-side gate must accept exactly the package-update
+        // finding types and nothing else — a non-update finding must
+        // never reach compose_autofix_command().
+        use super::AUTOFIX_FINDING_TYPES;
+        assert!(AUTOFIX_FINDING_TYPES.contains(&"host_security_updates_pending"));
+        assert!(AUTOFIX_FINDING_TYPES.contains(&"osv_vulnerability_detected"));
+        assert!(!AUTOFIX_FINDING_TYPES.contains(&"tamper_detection"));
+        assert!(!AUTOFIX_FINDING_TYPES.contains(&"disk_fill_eta"));
+        assert_eq!(AUTOFIX_FINDING_TYPES.len(), 2);
     }
 }
