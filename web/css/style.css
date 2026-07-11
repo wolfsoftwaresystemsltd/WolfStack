@@ -4956,3 +4956,69 @@ body.learn-drawer-open #task-log-footer { right: var(--learn-drawer-w) !importan
         grid-column: 1 / -1 !important;
     }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Network Map — observed, read-only cluster network view.
+   Theme-driven: every colour comes from a CSS variable so it tracks
+   the active theme (dark / light / trek). No hardcoded hex.
+   ═══════════════════════════════════════════════════════════════ */
+.nm-legend { display:flex; flex-wrap:wrap; gap:16px; align-items:center; margin-bottom:14px;
+    padding:10px 14px; background:var(--bg-tertiary); border:1px solid var(--border);
+    border-radius:var(--radius-sm); font-size:11px; color:var(--text-secondary); }
+.nm-legend-item { display:inline-flex; align-items:center; gap:6px; }
+.nm-legend .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
+
+.nm-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(460px, 1fr)); gap:16px; align-items:start; }
+.nm-node { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; }
+.nm-node-head { display:flex; align-items:center; gap:9px; margin-bottom:12px; }
+.nm-node-head .dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+.nm-node-name { font-weight:700; font-size:15px; color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.nm-tag { font-size:10px; padding:1px 6px; border-radius:4px; background:var(--bg-tertiary); color:var(--text-muted); flex-shrink:0; }
+.nm-wn-chip { margin-left:auto; font-size:11px; padding:2px 8px; border-radius:999px; background:var(--bg-tertiary); color:var(--accent); border:1px solid var(--accent); white-space:nowrap; }
+
+/* Internet-path chain: 🌐 Internet ▸ gateway ▸ WAN nic ▸ ● node */
+.nm-edge { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:10px; }
+.nm-edge .arrow { color:var(--text-muted); font-size:13px; line-height:1; }
+.nm-pill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:var(--radius-sm);
+    border:1px solid var(--border); background:var(--bg-tertiary); font-size:12px; color:var(--text-primary); }
+.nm-pill.wan { border-color:var(--warning); }
+.nm-pill.host { background:var(--bg-secondary); font-weight:600; }
+.nm-pill .sub { color:var(--text-secondary); }
+
+/* Tree: a spine down the node's fabric with a branch to each bridge / overlay / interface group */
+.nm-tree { position:relative; margin-left:5px; padding-left:20px; }
+.nm-tree::before { content:""; position:absolute; left:0; top:3px; bottom:16px; width:2px; background:var(--border); border-radius:2px; }
+.nm-branch { position:relative; margin-bottom:12px; }
+.nm-branch:last-child { margin-bottom:0; }
+.nm-branch::before { content:""; position:absolute; left:-20px; top:16px; width:18px; height:2px; background:var(--border); border-radius:2px; }
+
+.nm-zone { border:1px solid var(--border); border-left:3px solid var(--zaccent, var(--info));
+    border-radius:var(--radius-sm); background:var(--bg-tertiary); padding:10px 12px; }
+.nm-zone.lan { --zaccent: var(--info); }
+.nm-zone.overlay { --zaccent: var(--accent); }
+.nm-zone-head { display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; color:var(--text-primary); }
+.nm-zone-head .ip { margin-left:auto; font-size:11px; color:var(--text-secondary); font-variant-numeric:tabular-nums; font-weight:400; }
+.nm-zone-body { display:flex; flex-direction:column; gap:5px; margin-top:8px; }
+.nm-zone-empty { font-size:12px; color:var(--text-muted); margin-top:6px; }
+
+.nm-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-muted); margin-bottom:6px; }
+
+.nm-dev { display:flex; align-items:center; gap:7px; padding:5px 9px; border-radius:var(--radius-sm);
+    background:var(--bg-card); border:1px solid var(--border); font-size:12px; }
+.nm-dev .name { font-weight:600; color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.nm-dev .ip { margin-left:auto; flex-shrink:0; color:var(--text-secondary); font-variant-numeric:tabular-nums; }
+.nm-dev .ip.none { color:var(--text-muted); }
+.nm-managed { color:var(--success); font-size:11px; flex-shrink:0; }
+
+.nm-iface { display:flex; align-items:center; gap:7px; padding:5px 9px; border-radius:var(--radius-sm);
+    background:var(--bg-card); border:1px solid var(--border); border-left:3px solid var(--raccent, var(--info)); font-size:12px; }
+.nm-iface .name { font-weight:600; color:var(--text-primary); }
+.nm-iface .role { font-size:10px; text-transform:uppercase; letter-spacing:0.4px; color:var(--raccent, var(--info)); }
+.nm-iface .addr { margin-left:auto; color:var(--text-secondary); font-variant-numeric:tabular-nums; }
+.nm-iface.wan { --raccent: var(--warning); }
+.nm-iface.lan { --raccent: var(--info); }
+.nm-iface.wolfnet { --raccent: var(--accent); }
+.nm-iface.management { --raccent: var(--info); }
+.nm-iface.unused { --raccent: var(--text-muted); }
+.nm-down { color:var(--danger); font-size:10px; }
+.nm-stub { padding:18px; text-align:center; color:var(--text-muted); font-size:13px; background:var(--bg-tertiary); border-radius:var(--radius-sm); }
