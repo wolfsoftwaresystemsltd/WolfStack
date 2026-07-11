@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.50: harden VM ISO path validation (arg-injection)** _(2026-07-11 — [`bac9b42c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bac9b42c73d82b24c30e18dd208d4c59d1e1bd87))_
+- **v25.2.50: reject comma/control chars in VM ISO paths (qm/virt-install/qemu arg-injection hardening)** _(2026-07-11 — [`733ff2b9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/733ff2b9c46468174a51380207e9000b5a2d8721))_
 - **v25.2.49: read-only file browser + Browse button for VM ISO field (klas)** _(2026-07-11 — [`5d4ea612`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5d4ea61247e9a7ec655c2ec8970df979646dedd8))_
 - **v25.2.49: file browser + Browse button for the VM ISO field (klas)** _(2026-07-11 — [`03b8fdaf`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/03b8fdaf3736ae6c9a7f57faaf1e4626f1f716d8))_
 - **v25.2.48: TPM 2.0 + UEFI Secure Boot toggles for VMs (Windows 11)** _(2026-07-11 — [`10112636`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1011263653e0cdc5d80f1deb5192230ecc47cf7c))_
