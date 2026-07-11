@@ -1826,6 +1826,34 @@
             </div>
         </div>
 
+        <!-- ═══ Network Map (per-cluster, observed, READ-ONLY) ═══ -->
+        <div id="page-network-map" class="page-view" style="display:none;">
+            <div class="card"
+                style="margin-bottom:20px; background:linear-gradient(135deg, rgba(59,130,246,0.12), rgba(16,185,129,0.08)); border-color:rgba(59,130,246,0.25);">
+                <div class="card-body"
+                    style="display:flex; align-items:center; justify-content:space-between; padding:24px 28px; flex-wrap:wrap; gap:16px;">
+                    <div style="display:flex; align-items:center; gap:18px;">
+                        <div
+                            style="width:56px; height:56px; background:linear-gradient(135deg,#3b82f6,#10b981); border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:28px; box-shadow:0 4px 20px rgba(59,130,246,0.3);">
+                            <span class="ws-icon-clean-wrap" data-icon="map"></span></div>
+                        <div>
+                            <h2 style="font-size:22px; margin-bottom:4px; color:var(--text-primary); font-weight:700;">
+                                Network Map <span id="network-map-cluster-label"
+                                    style="font-size:14px; font-weight:400; color:var(--text-secondary);"></span></h2>
+                            <p style="color:var(--text-secondary); font-size:13px; margin:0;">Observed reality across the cluster — what's actually on the wire, how it connects, and the path out to the internet.</p>
+                        </div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                        <span title="This view only reads — it never changes your network."
+                            style="display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; letter-spacing:0.4px; text-transform:uppercase; padding:5px 10px; border-radius:999px; background:rgba(16,185,129,0.15); color:#34d399; border:1px solid rgba(16,185,129,0.3);">
+                            <span style="width:7px;height:7px;border-radius:50%;background:#34d399;display:inline-block;"></span>Observed · read-only</span>
+                        <button class="btn btn-sm" onclick="loadNetworkMap()" title="Re-read the cluster now" style="font-size:12px; padding:5px 12px;">↻ Refresh</button>
+                    </div>
+                </div>
+            </div>
+            <div id="network-map-content"></div>
+        </div>
+
         <div id="page-wolfrun" class="page-view" style="display:none;">
             <!-- Header -->
             <div class="card"

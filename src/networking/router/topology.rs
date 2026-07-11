@@ -557,13 +557,44 @@ pub fn compute_local(
     // Operates on the live `state.config` so the in-memory view
     // stays consistent with what the API endpoints read; persistence
     // is gated inside `ensure_default_zones` on `state.may_save()`.
+    //
+    // `ensure_default_zones` is the ONLY step that can persist; the VM
+    // walk can also self-heal a stale pause marker. The healing build
+    // (`passive=false`) keeps both; the observed Network Map calls
+    // `compute_local_passive` (`passive=true`) which does neither.
     let _ = ensure_default_zones(state, node_id);
+    build_topology(node_id, node_name, config, /*passive=*/false)
+}
 
+/// Read-only topology build — identical to [`compute_local`] but does
+/// NO writes: it skips `ensure_default_zones` (config persistence) AND
+/// uses the read-only VM listing (no stale-pause-marker self-heal).
+/// Every step is a passive read: `ip`/`docker`/`lxc` enumeration,
+/// `/proc` and `/sys` reads, and cached gateway discovery. The observed
+/// **Network Map** uses this so it can be honestly promised as
+/// side-effect-free.
+pub fn compute_local_passive(
+    node_id: &str,
+    node_name: &str,
+    config: &RouterConfig,
+) -> NodeTopology {
+    build_topology(node_id, node_name, config, /*passive=*/true)
+}
+
+/// Shared topology build for both [`compute_local`] (healing) and
+/// [`compute_local_passive`] (read-only). `passive` selects the VM
+/// listing: read-only (no marker self-heal) vs the normal healing list.
+fn build_topology(
+    node_id: &str,
+    node_name: &str,
+    config: &RouterConfig,
+    passive: bool,
+) -> NodeTopology {
     let bps = sample_bps();
     let interfaces = walk_interfaces(&bps, config, node_id);
     let bridges = walk_bridges(config, node_id);
     let vlans = walk_vlans();
-    let vms = walk_vms(node_id);
+    let vms = walk_vms(node_id, passive);
     let containers = walk_containers(node_id);
     let lan_segments = config.lans.iter()
         .filter(|l| l.node_id == node_id)
@@ -770,12 +801,14 @@ fn walk_vlans() -> Vec<VlanState> {
     out
 }
 
-fn walk_vms(node_id: &str) -> Vec<DeviceAttachment> {
+fn walk_vms(node_id: &str, passive: bool) -> Vec<DeviceAttachment> {
     // VmConfig has a `host_id` field that records which node owns the
     // VM. Filter to only this node's VMs so the cluster view doesn't
     // duplicate every VM under every node.
     let vmm = crate::vms::manager::VmManager::new();
-    let configs = vmm.list_vms();
+    // `passive` (observed Network Map) uses the read-only listing so it
+    // never self-heals a stale pause marker on disk.
+    let configs = if passive { vmm.list_vms_readonly() } else { vmm.list_vms() };
     configs.into_iter()
         .filter(|c| c.host_id.as_deref().map(|h| h == node_id).unwrap_or(true))
         .map(|c| {

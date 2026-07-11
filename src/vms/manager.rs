@@ -827,16 +827,27 @@ impl VmManager {
     }
 
     pub fn list_vms(&self) -> Vec<VmConfig> {
+        self.list_vms_impl(/*heal=*/true)
+    }
+
+    /// Read-only VM enumeration — identical to [`list_vms`] but performs
+    /// NO disk writes (it never self-heals stale pause markers). For the
+    /// observed Network Map, whose whole promise is side-effect-free reads.
+    pub fn list_vms_readonly(&self) -> Vec<VmConfig> {
+        self.list_vms_impl(/*heal=*/false)
+    }
+
+    fn list_vms_impl(&self, heal: bool) -> Vec<VmConfig> {
         // On Proxmox, discover VMs via qm list
         if containers::is_proxmox() {
             let mut vms = self.qm_list_all();
-            self.annotate_paused(&mut vms);
+            self.annotate_paused_impl(&mut vms, heal);
             return vms;
         }
         // On libvirt, discover VMs via virsh
         if containers::is_libvirt() {
             let mut vms = self.virsh_list_all();
-            self.annotate_paused(&mut vms);
+            self.annotate_paused_impl(&mut vms, heal);
             return vms;
         }
 
@@ -881,7 +892,7 @@ impl VmManager {
                 vms.push(vm);
             }
         }
-        self.annotate_paused(&mut vms);
+        self.annotate_paused_impl(&mut vms, heal);
         vms
     }
 
@@ -4671,16 +4682,18 @@ impl VmManager {
     }
 
     /// Set `vm.paused` for each VM from the marker file. paused implies
-    /// running — a marker for a no-longer-running VM is ignored (and
-    /// cleared on its next start/stop). Called once per list, after the
-    /// per-backend discovery has set `running`.
-    fn annotate_paused(&self, vms: &mut [VmConfig]) {
+    /// running — a marker for a no-longer-running VM is ignored. When
+    /// `heal` is true a stale marker (VM no longer running) is deleted so
+    /// it doesn't sit on disk; the observed Network Map passes `heal=false`
+    /// so its "read-only" listing never writes. Called once per list, after
+    /// the per-backend discovery has set `running`.
+    fn annotate_paused_impl(&self, vms: &mut [VmConfig], heal: bool) {
         for vm in vms.iter_mut() {
             let marker = self.paused_marker_path(&vm.name);
             if marker.exists() {
                 if vm.running {
                     vm.paused = true;
-                } else {
+                } else if heal {
                     // Stale marker for a VM that's no longer running (host
                     // reboot, external kill) — self-heal so it doesn't sit on
                     // disk and the UI never offers Resume on a dead VM.

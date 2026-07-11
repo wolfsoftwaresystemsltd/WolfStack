@@ -13959,6 +13959,64 @@ pub async fn net_list_interfaces(req: HttpRequest, state: web::Data<AppState>) -
     HttpResponse::Ok().json(networking::list_interfaces())
 }
 
+/// GET /api/network-map — this node's OBSERVED network view for the
+/// read-only cluster Network Map. Returns the passive topology (bridges,
+/// interfaces, VLANs, VMs + containers with their IPs and attachments,
+/// discovered gateways) plus the node's WolfNet overlay IP and the set
+/// of container names WolfStack itself manages (so the UI can mark
+/// managed-vs-foreign). The frontend fans this out to every node in a
+/// cluster (directly for self, via the node proxy for peers) and draws
+/// the cluster-wide picture.
+///
+/// STRICTLY READ-ONLY: builds via `compute_local_passive` (no zone
+/// persistence) and `wolfnet_status` (a passive `ip addr` read). It
+/// discovers, it never changes anything — the promise the map is built
+/// on for beginner homelabbers.
+pub async fn network_map(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    let cfg = state.router.config.read().unwrap().clone();
+    let self_id = crate::agent::self_node_id();
+    let node_name = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| self_id.clone());
+
+    // Subprocess-heavy passive reads (ip/docker/lxc enumeration,
+    // gateway discovery, wolfnet interface read) go on the blocking pool.
+    let self_id_for_block = self_id.clone();
+    let blocking = web::block(move || {
+        let topo = crate::networking::router::topology::compute_local_passive(
+            &self_id_for_block, &node_name, &cfg,
+        );
+        let wn = crate::containers::wolfnet_status(&[]);
+        (topo, wn)
+    }).await;
+
+    let (topo, wn) = match blocking {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("network-map build failed: {}", e) })),
+    };
+
+    // Managed-vs-foreign: a container is WolfStack-managed iff the
+    // WolfRun store has a service instance for its name. In-memory
+    // lookup, no subprocess — safe outside the blocking pool.
+    let managed_names: Vec<String> = topo.containers.iter()
+        .filter(|c| !state.wolfrun.services_managing(&c.name).is_empty())
+        .map(|c| c.name.clone())
+        .collect();
+
+    let wolfnet_ip = if wn.available && !wn.ip.is_empty() { Some(wn.ip) } else { None };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "node_id": self_id,
+        "topology": topo,
+        "managed_names": managed_names,
+        "wolfnet_ip": wolfnet_ip,
+    }))
+}
+
 /// GET /api/networking/dns — get DNS configuration
 pub async fn net_get_dns(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
@@ -40023,6 +40081,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/files/lxc/write", web::post().to(files_lxc_write))
         // Networking
         .route("/api/networking/interfaces", web::get().to(net_list_interfaces))
+        .route("/api/network-map", web::get().to(network_map))
         .route("/api/networking/bridges", web::get().to(net_list_bridges))
         .route("/api/networking/lan-bridge", web::post().to(net_lan_bridge_create))
         .route("/api/networking/lan-bridge/confirm", web::post().to(net_lan_bridge_confirm))
