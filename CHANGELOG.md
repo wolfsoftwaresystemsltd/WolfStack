@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.47: Network Map — theme colours + tree/flow diagram + icon fix** _(2026-07-11 — [`3bcf4d1d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3bcf4d1d31cef37c97171ec6243114dbc0485866))_
+- **v25.2.47: Network Map — theme-driven colours + real tree/flow diagram + fix menu icon** _(2026-07-11 — [`d1459935`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d1459935ad43297c56b19c5d29cc6bfcae382f64))_
 - **v25.2.46: Network Map — read-only, cluster-wide, observed network view** _(2026-07-11 — [`dfa85922`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dfa8592237302a521c8e5103057d9b0bdbb4c84f))_
 - **v25.2.46: Network Map — read-only, cluster-wide, observed network view (beta preview)** _(2026-07-11 — [`919291b3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/919291b3e027e56cd47033ab57289454d2753402))_
 - **v25.2.45: cluster node-count badge no longer hidden behind the status dot** _(2026-07-11 — [`bcf849c5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bcf849c5f865135e82618d95cb6f42a392c72a4c))_
