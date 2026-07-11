@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.49: read-only file browser + Browse button for VM ISO field (klas)** _(2026-07-11 — [`5d4ea612`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5d4ea61247e9a7ec655c2ec8970df979646dedd8))_
+- **v25.2.49: file browser + Browse button for the VM ISO field (klas)** _(2026-07-11 — [`03b8fdaf`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/03b8fdaf3736ae6c9a7f57faaf1e4626f1f716d8))_
 - **v25.2.48: TPM 2.0 + UEFI Secure Boot toggles for VMs (Windows 11)** _(2026-07-11 — [`10112636`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1011263653e0cdc5d80f1deb5192230ecc47cf7c))_
 - **v25.2.48: TPM 2.0 + UEFI Secure Boot toggles for VMs (Windows 11)** _(2026-07-11 — [`a9920c96`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a9920c96acbe7cfb0b4448ae9f92dac8e2e847f0))_
 - **v25.2.47: Network Map — theme colours + tree/flow diagram + icon fix** _(2026-07-11 — [`3bcf4d1d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3bcf4d1d31cef37c97171ec6243114dbc0485866))_
