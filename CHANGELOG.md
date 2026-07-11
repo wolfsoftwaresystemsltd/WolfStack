@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.46: Network Map — read-only, cluster-wide, observed network view** _(2026-07-11 — [`dfa85922`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dfa8592237302a521c8e5103057d9b0bdbb4c84f))_
+- **v25.2.46: Network Map — read-only, cluster-wide, observed network view (beta preview)** _(2026-07-11 — [`919291b3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/919291b3e027e56cd47033ab57289454d2753402))_
 - **v25.2.45: cluster node-count badge no longer hidden behind the status dot** _(2026-07-11 — [`bcf849c5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bcf849c5f865135e82618d95cb6f42a392c72a4c))_
 - **v25.2.45: cluster node-count badge no longer hidden behind the status dot** _(2026-07-11 — [`71940bf9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/71940bf93bb9214a7513656b3c3353727cafba8b))_
 - **v25.2.44: trim vault secret values + honest compose-editor Save wording** _(2026-07-10 — [`7db4fedc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7db4fedcae6deac86f66bdea23e1962615a327ee))_
