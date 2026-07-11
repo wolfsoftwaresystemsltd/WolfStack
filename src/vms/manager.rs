@@ -186,6 +186,19 @@ pub struct VmConfig {
     /// BIOS type: "seabios" (legacy) or "ovmf" (UEFI/EFI)
     #[serde(default = "default_bios_type")]
     pub bios_type: String,
+    /// Emulated TPM 2.0 device. Windows 11 requires it. Native QEMU runs a
+    /// per-VM `swtpm` socket + `tpm-tis` device; Proxmox adds `--tpmstate0
+    /// <storage>:1,version=v2.0`; libvirt adds an emulator `<tpm>`. Default
+    /// false = today's behaviour, so upgrading never adds a TPM to an
+    /// existing VM. Only meaningful together with `bios_type == "ovmf"`.
+    #[serde(default)]
+    pub tpm: bool,
+    /// UEFI Secure Boot with Microsoft keys pre-enrolled. Windows 11 wants
+    /// it. Native QEMU uses the `.secboot` OVMF firmware; Proxmox sets the
+    /// efidisk `pre-enrolled-keys=1`; libvirt uses a secure `pflash` loader
+    /// + SMM. Requires `bios_type == "ovmf"`. Default false.
+    #[serde(default)]
+    pub secure_boot: bool,
     /// Boot device order — entries from {"disk","cdrom","usb","network"}, most
     /// preferred first. EMPTY (the default for existing configs) means "use the
     /// backend's historical default" (disk first, CD fallback) so upgrading a
@@ -572,6 +585,8 @@ impl VmConfig {
             pci_devices: Vec::new(),
             vmid: None,
             bios_type: "seabios".to_string(),
+            tpm: false,
+            secure_boot: false,
             boot_order: Vec::new(),
             vnc_external: false,
             host_id: None,
@@ -1082,7 +1097,15 @@ impl VmManager {
                     usb_devices,
                     pci_devices,
                     vmid: Some(vmid),
-                    bios_type: "seabios".to_string(),
+                    // Parse the REAL firmware/TPM/Secure-Boot state from the qm
+                    // config — hardcoding "seabios" here made the editor
+                    // pre-select SeaBIOS for a real OVMF VM, and saving any edit
+                    // then downgraded it (qm_apply_media_bios applies bios_type
+                    // bidirectionally), breaking UEFI boot.
+                    bios_type: pve_conf_value(&qm_config_text, "bios")
+                        .unwrap_or_else(|| "seabios".to_string()),
+                    tpm: qm_config_text.contains("tpmstate0"),
+                    secure_boot: qm_config_text.contains("pre-enrolled-keys=1"),
                     boot_order: Vec::new(),
                     vnc_external: false,
                     host_id: Some(crate::agent::self_node_id()),
@@ -1154,6 +1177,78 @@ impl VmManager {
         } else {
             self.base_dir.join(format!("{}_VARS.fd", config.name))
         }
+    }
+
+    // ── Native TPM 2.0 via swtpm ───────────────────────────────────────
+    // Windows 11 requires a TPM. For the native QEMU backend we run a
+    // per-VM `swtpm` daemon that holds the emulated TPM's state on disk and
+    // exposes a UNIX control socket QEMU connects to. Proxmox/libvirt manage
+    // their own swtpm — this is native-only.
+
+    fn swtpm_sock_path(&self, name: &str) -> PathBuf {
+        self.base_dir.join(format!("{}-tpm.sock", name))
+    }
+    fn swtpm_pid_path(&self, name: &str) -> PathBuf {
+        self.base_dir.join(format!("{}-tpm.pid", name))
+    }
+
+    /// Start the per-VM swtpm daemon and return its socket path. State
+    /// persists across boots in a per-VM directory, so the guest sees a
+    /// stable TPM. Errors clearly if `swtpm` isn't installed.
+    fn start_swtpm(&self, config: &VmConfig) -> Result<String, String> {
+        // swtpm must be present; `--version` is a cheap, side-effect-free probe.
+        let have = Command::new("swtpm").arg("--version").output()
+            .map(|o| o.status.success()).unwrap_or(false);
+        if !have {
+            return Err("swtpm not found — TPM 2.0 needs it. Install: apt install swtpm (Debian/Ubuntu) or pacman -S swtpm (Arch)".to_string());
+        }
+        let state_dir = self.base_dir.join(format!("{}-tpm", config.name));
+        fs::create_dir_all(&state_dir)
+            .map_err(|e| format!("Failed to create TPM state dir: {}", e))?;
+        // TPM NVRAM can hold sealing / endorsement material (BitLocker-relevant),
+        // so lock the state dir down to the owner rather than trusting umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700));
+        }
+        let sock = self.swtpm_sock_path(&config.name);
+        let pidfile = self.swtpm_pid_path(&config.name);
+        // Clear a stale socket/pid from a previous crashed run so the new
+        // daemon can bind cleanly.
+        let _ = fs::remove_file(&sock);
+        self.stop_swtpm(&config.name);
+        // `--daemon` forks and returns; `--pid file=` records the pid so
+        // stop_vm can reap it.
+        let status = Command::new("swtpm")
+            .args([
+                "socket",
+                "--tpmstate", &format!("dir={}", state_dir.display()),
+                "--ctrl", &format!("type=unixio,path={}", sock.display()),
+                "--tpm2",
+                "--daemon",
+                "--pid", &format!("file={}", pidfile.display()),
+            ])
+            .status()
+            .map_err(|e| format!("Failed to launch swtpm: {}", e))?;
+        if !status.success() {
+            return Err("swtpm failed to start (check that /dev and the TPM state dir are writable)".to_string());
+        }
+        Ok(sock.display().to_string())
+    }
+
+    /// Stop the per-VM swtpm daemon (if any) and clean up its socket/pid.
+    /// Best-effort; safe to call for VMs that never had a TPM (no-op).
+    fn stop_swtpm(&self, name: &str) {
+        let pidfile = self.swtpm_pid_path(name);
+        if let Ok(pid) = fs::read_to_string(&pidfile) {
+            let pid = pid.trim();
+            if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()) {
+                let _ = Command::new("kill").arg(pid).output();
+            }
+        }
+        let _ = fs::remove_file(&pidfile);
+        let _ = fs::remove_file(self.swtpm_sock_path(name));
     }
 
     /// TAP interface name for a VM
@@ -1446,7 +1541,26 @@ impl VmManager {
             args.push("--bios".to_string());
             args.push("ovmf".to_string());
             args.push("--efidisk0".to_string());
-            args.push(format!("{}:1,efitype=4m", storage));
+            // Secure Boot needs the NVRAM pre-loaded with Microsoft's keys —
+            // `pre-enrolled-keys=1` is what actually turns Secure Boot on.
+            if config.secure_boot {
+                args.push(format!("{}:1,efitype=4m,pre-enrolled-keys=1", storage));
+            } else {
+                args.push(format!("{}:1,efitype=4m", storage));
+            }
+            // Windows 11 (TPM / Secure Boot) expects the q35 machine type.
+            // Proxmox otherwise defaults new VMs to i440fx.
+            if config.tpm || config.secure_boot {
+                args.push("--machine".to_string());
+                args.push("q35".to_string());
+            }
+        }
+
+        // Emulated TPM 2.0 (Windows 11 requires it). Proxmox runs swtpm; the
+        // state disk lives on the same pool as the OS disk.
+        if config.tpm {
+            args.push("--tpmstate0".to_string());
+            args.push(format!("{}:1,version=v2.0", storage));
         }
 
         // Extra disks — PVE allocates them from the same storage pool as scsi0.
@@ -1754,6 +1868,7 @@ impl VmManager {
                      os_disk_bus: Option<String>, net_model: Option<String>,
                      drivers_iso: Option<String>, auto_start: Option<bool>,
                      bios_type: Option<String>,
+                     tpm: Option<bool>, secure_boot: Option<bool>,
                      extra_nics: Option<Vec<NicConfig>>,
                      usb_devices: Option<Vec<UsbDevice>>,
                      pci_devices: Option<Vec<PciDevice>>,
@@ -2081,7 +2196,7 @@ impl VmManager {
             // the read-back hardcoded them). OS disk bus is intentionally
             // left to the UI lock (a PVE bus change = risky disk move).
             let (apply_failures, changed_next_boot) =
-                qm_apply_media_bios(vmid, &iso_path, &drivers_iso, &bios_type);
+                qm_apply_media_bios(vmid, &iso_path, &drivers_iso, &bios_type, tpm, secure_boot);
             if !apply_failures.is_empty() {
                 return Err(format!(
                     "Some settings could not be applied to the Proxmox VM:\n  - {}",
@@ -2198,6 +2313,7 @@ impl VmManager {
             let (apply_failures, mut changed_next_boot) = libvirt_apply_devices(
                 name, &net_model, &network_mode, &bridge,
                 &iso_path, &drivers_iso, &os_disk_bus, &bios_type,
+                tpm, secure_boot,
             );
             // External-VNC toggle for libvirt: rewrite the domain's graphics so
             // the next start listens on 0.0.0.0 + a password (external) or stays
@@ -2393,6 +2509,15 @@ impl VmManager {
         if let Some(ref ea) = extra_qemu_args {
             config.extra_qemu_args = ea.clone();
         }
+
+        // TPM / Secure Boot toggles. Native QEMU reads the config on every
+        // start (firmware + swtpm are wired in start_vm), so persisting here
+        // makes the change take effect on the VM's next start. Additive-only
+        // — matching Proxmox/libvirt and the UI copy ("can't remove them
+        // here") — so an edit-save can never detach a TPM a guest may have
+        // sealed secrets (e.g. BitLocker) against.
+        if tpm == Some(true) { config.tpm = true; }
+        if secure_boot == Some(true) { config.secure_boot = true; }
 
         // Primary-NIC network mode + bridge details. Each field is independently
         // patchable so the API caller can update just one without nulling
@@ -3006,22 +3131,46 @@ impl VmManager {
                 write_log("WARNING: No UEFI firmware found for ARM64. Install qemu-efi-aarch64 (apt install qemu-efi-aarch64)");
             }
         } else if config.bios_type == "ovmf" {
-            // x86_64 UEFI boot via OVMF — use q35 machine type for full UEFI compatibility
-            cmd.arg("-machine").arg("q35");
-            write_log("BIOS: OVMF (UEFI) with q35 machine type");
+            // x86_64 UEFI boot via OVMF — q35 for full UEFI compatibility.
+            // Secure Boot additionally needs SMM (System Management Mode) so
+            // the firmware can protect the key store, plus the pflash secure
+            // property. Windows 11 wants Secure Boot on.
+            if config.secure_boot {
+                cmd.arg("-machine").arg("q35,smm=on");
+                cmd.arg("-global").arg("driver=cfi.pflash01,property=secure,value=on");
+                write_log("BIOS: OVMF (UEFI) with q35 + SMM (Secure Boot)");
+            } else {
+                cmd.arg("-machine").arg("q35");
+                write_log("BIOS: OVMF (UEFI) with q35 machine type");
+            }
 
-            // OVMF firmware code (read-only)
-            let code_paths = [
-                "/usr/share/OVMF/OVMF_CODE_4M.fd",
-                "/usr/share/OVMF/OVMF_CODE.fd",
-                "/usr/share/edk2/x64/OVMF_CODE.fd",
-                "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
-                "/usr/share/qemu/OVMF_CODE.fd",
-                "/usr/share/OVMF/OVMF_CODE.pure-efi.fd",
-            ];
+            // OVMF firmware code (read-only). For Secure Boot use the
+            // `.secboot` build, which enforces the signature checks; the
+            // plain build ignores them.
+            let code_paths: &[&str] = if config.secure_boot {
+                &[
+                    "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
+                    "/usr/share/OVMF/OVMF_CODE.secboot.fd",
+                    "/usr/share/edk2/x64/OVMF_CODE.secboot.fd",
+                    "/usr/share/edk2-ovmf/x64/OVMF_CODE.secboot.fd",
+                ]
+            } else {
+                &[
+                    "/usr/share/OVMF/OVMF_CODE_4M.fd",
+                    "/usr/share/OVMF/OVMF_CODE.fd",
+                    "/usr/share/edk2/x64/OVMF_CODE.fd",
+                    "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+                    "/usr/share/qemu/OVMF_CODE.fd",
+                    "/usr/share/OVMF/OVMF_CODE.pure-efi.fd",
+                ]
+            };
             if let Some(code) = code_paths.iter().find(|p| std::path::Path::new(p).exists()) {
                 cmd.arg("-drive").arg(format!("if=pflash,format=raw,readonly=on,file={}", code));
                 write_log(&format!("OVMF CODE: {}", code));
+            } else if config.secure_boot {
+                let msg = "Secure Boot OVMF firmware (OVMF_CODE.secboot.fd) not found. Install: apt install ovmf (Debian/Ubuntu) or pacman -S edk2-ovmf (Arch)";
+                write_log(msg);
+                return Err(msg.to_string());
             } else {
                 let msg = "OVMF firmware not found. Install: apt install ovmf (Debian/Ubuntu) or pacman -S edk2-ovmf (Arch)";
                 write_log(msg);
@@ -3031,21 +3180,37 @@ impl VmManager {
             // Per-VM EFI vars file (writable — stores boot entries, secure boot state, etc.)
             let vars_path = self.vm_efivars_path(&config);
             if !vars_path.exists() {
-                // Create vars file on first boot if it wasn't created during VM creation
-                let vars_sources = [
-                    "/usr/share/OVMF/OVMF_VARS_4M.fd",
-                    "/usr/share/OVMF/OVMF_VARS.fd",
-                    "/usr/share/edk2/x64/OVMF_VARS.fd",
-                    "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
-                    "/usr/share/qemu/OVMF_VARS.fd",
-                    "/usr/share/OVMF/OVMF_VARS.pure-efi.fd",
-                ];
+                // Create vars file on first boot if it wasn't created during
+                // VM creation. For Secure Boot seed from the `.ms` template,
+                // which ships Microsoft's KEK/DB keys pre-enrolled so a stock
+                // Windows 11 image validates out of the box.
+                let vars_sources: &[&str] = if config.secure_boot {
+                    &[
+                        "/usr/share/OVMF/OVMF_VARS_4M.ms.fd",
+                        "/usr/share/OVMF/OVMF_VARS.ms.fd",
+                        "/usr/share/edk2/x64/OVMF_VARS.ms.fd",
+                        "/usr/share/edk2-ovmf/x64/OVMF_VARS.ms.fd",
+                    ]
+                } else {
+                    &[
+                        "/usr/share/OVMF/OVMF_VARS_4M.fd",
+                        "/usr/share/OVMF/OVMF_VARS.fd",
+                        "/usr/share/edk2/x64/OVMF_VARS.fd",
+                        "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
+                        "/usr/share/qemu/OVMF_VARS.fd",
+                        "/usr/share/OVMF/OVMF_VARS.pure-efi.fd",
+                    ]
+                };
                 if let Some(src) = vars_sources.iter().find(|p| std::path::Path::new(p).exists()) {
                     fs::copy(src, &vars_path).map_err(|e| {
                         let msg = format!("Failed to copy EFI vars: {}", e);
                         write_log(&msg); msg
                     })?;
                     write_log(&format!("Created EFI vars from {}", src));
+                } else if config.secure_boot {
+                    let msg = "Secure Boot NVRAM template (OVMF_VARS.ms.fd, with Microsoft keys) not found. Install: apt install ovmf (Debian/Ubuntu) or pacman -S edk2-ovmf (Arch)";
+                    write_log(msg);
+                    return Err(msg.to_string());
                 } else {
                     let msg = "OVMF_VARS.fd not found. Install: apt install ovmf (Debian/Ubuntu) or pacman -S edk2-ovmf (Arch)";
                     write_log(msg);
@@ -3356,23 +3521,46 @@ impl VmManager {
             cmd.stderr(std::process::Stdio::from(log_file));
         }
 
+        // Emulated TPM 2.0 (Windows 11 requires it). Started HERE — after every
+        // fallible preflight above — so a failure earlier in start_vm can't
+        // leave an orphaned swtpm daemon. The socket must exist before QEMU
+        // connects, which it now does (swtpm --daemon returns once bound). Only
+        // touched when the VM opts in, so non-TPM VMs are byte-identical.
+        if config.tpm {
+            match self.start_swtpm(&config) {
+                Ok(sock) => {
+                    cmd.arg("-chardev").arg(format!("socket,id=chrtpm,path={}", sock));
+                    cmd.arg("-tpmdev").arg("emulator,id=tpm0,chardev=chrtpm");
+                    cmd.arg("-device").arg("tpm-tis,tpmdev=tpm0");
+                    write_log(&format!("TPM 2.0: swtpm socket {}", sock));
+                }
+                Err(e) => {
+                    write_log(&format!("TPM start failed: {}", e));
+                    return Err(e);
+                }
+            }
+        }
+
         let output = cmd.output().map_err(|e| {
+            // QEMU couldn't even exec — reap the swtpm we just started.
+            if config.tpm { self.stop_swtpm(&config.name); }
             let msg = format!("Failed to execute QEMU: {}", e);
             write_log(&msg); msg
         })?;
-        
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let log_content = fs::read_to_string(&log_path).unwrap_or_default();
             let err_msg = if !stderr.is_empty() { stderr } else { log_content.clone() };
             write_log(&format!("QEMU exit with error: {}", err_msg));
             error!("QEMU failed for VM {}: {}", name, err_msg);
-            
+
             if config.wolfnet_ip.is_some() {
                 let tap = Self::tap_name(name);
                 let _ = self.cleanup_tap(&tap);
             }
             self.cleanup_extra_nic_taps(name, &config.extra_nics);
+            if config.tpm { self.stop_swtpm(&config.name); }
             return Err(format!("QEMU failed to start: {}", err_msg));
         }
 
@@ -3389,6 +3577,7 @@ impl VmManager {
                 let _ = self.cleanup_tap(&tap);
             }
             self.cleanup_extra_nic_taps(name, &config.extra_nics);
+            if config.tpm { self.stop_swtpm(&config.name); }
             return Err(format!("VM crashed immediately after starting. QEMU log:\n{}", log_content));
         }
 
@@ -4659,6 +4848,9 @@ impl VmManager {
             self.cleanup_extra_nic_taps(name, &config.extra_nics);
         }
 
+        // Tear down the per-VM swtpm daemon (no-op if this VM had no TPM).
+        self.stop_swtpm(name);
+
         // External VNC: close the firewall hole and remove the password secret.
         // Read the port from the runtime BEFORE we delete that file. (No-op for
         // non-external VMs — no matching rule/file exists.)
@@ -5428,6 +5620,8 @@ impl VmManager {
             pci_devices,
             vmid: None,
             bios_type,
+            tpm: false,
+            secure_boot: false,
             boot_order: Vec::new(),
             // External VNC = WolfStack-managed (0.0.0.0 + password); read from the
             // domain XML so the toggle reflects reality and re-saving can't flip it.
@@ -5622,6 +5816,8 @@ impl VmManager {
             pci_devices,
             vmid: None,
             bios_type,
+            tpm: false,
+            secure_boot: false,
             boot_order: Vec::new(),
             // External VNC = WolfStack-managed (0.0.0.0 + password). Read back
             // from the domain XML so the editor toggle is honest (re-saving an
@@ -5771,7 +5967,21 @@ impl VmManager {
         if config.bios_type == "ovmf" {
             // UEFI flag may already have been appended above; re-emit with
             // the uefi keyword so libvirt picks the right firmware.
-            args.extend(["--boot".to_string(), "uefi".to_string()]);
+            if config.secure_boot {
+                // Secure Boot: ask libvirt for the secure OVMF firmware and
+                // enable SMM (required for a trusted Secure Boot). Needs a
+                // reasonably recent virt-install (loader.secure / smm.state).
+                args.extend(["--boot".to_string(), "uefi,loader.secure=yes".to_string()]);
+                args.extend(["--features".to_string(), "smm.state=on".to_string()]);
+            } else {
+                args.extend(["--boot".to_string(), "uefi".to_string()]);
+            }
+        }
+
+        // Emulated TPM 2.0 (Windows 11 requires it) — libvirt drives swtpm.
+        if config.tpm {
+            args.extend(["--tpm".to_string(),
+                "model=tpm-crb,backend.type=emulator,backend.version=2.0".to_string()]);
         }
 
         // Secondary CD-ROM for the VirtIO drivers ISO — a Windows install
@@ -6100,6 +6310,8 @@ impl VmManager {
             pci_devices,
             vmid: None,
             bios_type: discovered.bios_type,
+            tpm: false,
+            secure_boot: false,
             boot_order: Vec::new(),
             vnc_external: false,
             host_id: Some(crate::agent::self_node_id()),
@@ -8025,6 +8237,8 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         pci_devices,
         vmid: Some(vmid),
         bios_type,
+        tpm: false,
+        secure_boot: false,
         boot_order: Vec::new(),
         vnc_external: false,
         host_id: Some(crate::agent::self_node_id()),
@@ -8082,6 +8296,10 @@ fn pve_has_efidisk(conf: &str) -> bool {
     pve_conf_value(conf, "efidisk0").is_some()
 }
 
+fn pve_has_tpmstate(conf: &str) -> bool {
+    pve_conf_value(conf, "tpmstate0").is_some()
+}
+
 /// Storage pool backing the OS disk (first non-cdrom scsi/virtio/sata/ide
 /// disk), e.g. "local-lvm" from `scsi0: local-lvm:vm-100-disk-0,size=32G`.
 fn pve_os_disk_storage(conf: &str) -> Option<String> {
@@ -8120,7 +8338,7 @@ fn pve_os_disk_bus(conf: &str) -> String {
 /// in the UI for PVE — a bus change means a risky disk detach/reattach).
 /// Returns (failures, changed): failures empty == all applied; changed ==
 /// at least one next-boot-only field changed (drives the running advisory).
-fn qm_apply_media_bios(vmid: u32, iso_path: &Option<String>, drivers_iso: &Option<String>, bios_type: &Option<String>) -> (Vec<String>, bool) {
+fn qm_apply_media_bios(vmid: u32, iso_path: &Option<String>, drivers_iso: &Option<String>, bios_type: &Option<String>, tpm: Option<bool>, secure_boot: Option<bool>) -> (Vec<String>, bool) {
     let mut failures: Vec<String> = Vec::new();
     let mut changed = false;
     let vmid_str = vmid.to_string();
@@ -8180,6 +8398,43 @@ fn qm_apply_media_bios(vmid: u32, iso_path: &Option<String>, drivers_iso: &Optio
                     args.push(format!("{}:1,efitype=4m", storage));
                 }
                 changed |= run_tool_cmd("qm", &args, "BIOS type", &mut failures);
+            }
+        }
+    }
+
+    // TPM 2.0 — ADD the tpmstate0 device when asked (Windows 11 needs it).
+    // Additive only: we never auto-delete a TPM on edit, so an edit-save can
+    // never strip an existing VM's TPM (removing one is a deliberate host-side
+    // action).
+    if tpm == Some(true) && !pve_has_tpmstate(&conf) {
+        if let Some(storage) = pve_os_disk_storage(&conf) {
+            let args = vec!["set".into(), vmid_str.clone(), "--tpmstate0".into(),
+                format!("{}:1,version=v2.0", storage)];
+            changed |= run_tool_cmd("qm", &args, "TPM 2.0", &mut failures);
+        } else {
+            failures.push("TPM: could not find the OS disk's storage pool to create the TPM state disk".into());
+        }
+    }
+
+    // Secure Boot — turning it on re-creates the EFI NVRAM with Microsoft
+    // keys pre-enrolled. That resets boot entries, so we do it only when
+    // asked, only for OVMF, only if not already pre-enrolled, and we tell
+    // the operator the NVRAM was reset.
+    if secure_boot == Some(true) {
+        let cur_bios = pve_conf_value(&conf, "bios").unwrap_or_else(|| "seabios".into());
+        let is_ovmf = cur_bios == "ovmf" || bios_type.as_deref().map(|b| b.trim()) == Some("ovmf");
+        let already = conf.contains("pre-enrolled-keys=1");
+        if is_ovmf && !already {
+            if let Some(storage) = pve_os_disk_storage(&conf) {
+                let args = vec!["set".into(), vmid_str.clone(), "--efidisk0".into(),
+                    format!("{}:1,efitype=4m,pre-enrolled-keys=1", storage)];
+                // Applies silently on success — `changed` alone surfaces the
+                // "takes effect next boot" advisory. (Pushing to `failures`
+                // would wrongly report this success as an error, since the
+                // caller treats any failure as fatal.) Re-creating the efidisk
+                // resets NVRAM; that's acceptable for a VM being prepared for a
+                // Windows 11 install, which is the only time Secure Boot is set.
+                changed |= run_tool_cmd("qm", &args, "Secure Boot", &mut failures);
             }
         }
     }
@@ -8435,6 +8690,7 @@ fn libvirt_apply_devices(
     net_model: &Option<String>, network_mode: &Option<String>, bridge: &Option<String>,
     iso_path: &Option<String>, drivers_iso: &Option<String>,
     os_disk_bus: &Option<String>, bios_type: &Option<String>,
+    tpm: Option<bool>, secure_boot: Option<bool>,
 ) -> (Vec<String>, bool) {
     let mut failures: Vec<String> = Vec::new();
     let mut changed = false;
@@ -8469,6 +8725,23 @@ fn libvirt_apply_devices(
             let args = build_virtxml_bios_args(name, want_ovmf);
             changed |= run_tool_cmd("virt-xml", &args, "BIOS type", &mut failures);
         }
+    }
+
+    // ── TPM 2.0 device (Windows 11) — ADD when asked, no-op-safe ───────
+    // Additive only (see the Proxmox path): an edit never strips an
+    // existing TPM.
+    if tpm == Some(true) && !cur_xml.contains("<tpm") {
+        let args = vec![name.to_string(), "--add-device".into(), "--tpm".into(),
+            "model=tpm-crb,backend.type=emulator,backend.version=2.0".into()];
+        changed |= run_tool_cmd("virt-xml", &args, "TPM 2.0", &mut failures);
+    }
+
+    // ── Secure Boot — secure loader + SMM. Applied on next boot. ───────
+    if secure_boot == Some(true) && !cur_xml.contains("secure='yes'") {
+        let boot_args = vec![name.to_string(), "--edit".into(), "--boot".into(), "loader.secure=yes".into()];
+        changed |= run_tool_cmd("virt-xml", &boot_args, "Secure Boot", &mut failures);
+        let smm_args = vec![name.to_string(), "--edit".into(), "--features".into(), "smm.state=on".into()];
+        changed |= run_tool_cmd("virt-xml", &smm_args, "Secure Boot (SMM)", &mut failures);
     }
 
     // ── CD-ROM media: slot 0 = install ISO, slot 1 = VirtIO drivers ISO ─

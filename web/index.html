@@ -10294,6 +10294,18 @@ region = us-east-1"></textarea>
                             <small style="color:var(--text-muted);">UEFI required for modern OSes, GPT disks, and Secure Boot. Legacy BIOS for older systems.</small>
                         </div>
                         <div class="form-group" style="margin-top:12px;">
+                            <label>Windows 11 / trusted boot</label>
+                            <div style="display:flex; flex-direction:column; gap:7px;">
+                                <label style="display:flex; align-items:center; gap:8px; font-weight:400; cursor:pointer; margin:0;">
+                                    <input type="checkbox" id="new-vm-tpm" onchange="if(this.checked){document.getElementById('new-vm-bios-type').value='ovmf';}"> TPM 2.0 (emulated)
+                                </label>
+                                <label style="display:flex; align-items:center; gap:8px; font-weight:400; cursor:pointer; margin:0;">
+                                    <input type="checkbox" id="new-vm-secure-boot" onchange="if(this.checked){document.getElementById('new-vm-bios-type').value='ovmf';}"> UEFI Secure Boot
+                                </label>
+                            </div>
+                            <small style="color:var(--text-muted);">Windows 11 requires both, plus UEFI firmware — ticking either switches BIOS to OVMF automatically.</small>
+                        </div>
+                        <div class="form-group" style="margin-top:12px;">
                             <label>Boot order</label>
                             <div style="display:flex; gap:6px; flex-wrap:wrap;">
                                 <select id="new-vm-boot-0" class="form-control" style="font-size:12px; width:auto; padding:3px 6px;"><option value="">—</option><option value="disk">Disk</option><option value="cdrom">CD-ROM</option><option value="usb">USB</option><option value="network">Network</option></select>

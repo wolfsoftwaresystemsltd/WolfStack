@@ -266,6 +266,12 @@ struct CreateVmRequest {
     /// BIOS type: "seabios" (legacy) or "ovmf" (UEFI/EFI)
     #[serde(default = "default_bios_type")]
     bios_type: String,
+    /// Emulated TPM 2.0 (Windows 11 requires it). See `VmConfig::tpm`.
+    #[serde(default)]
+    tpm: bool,
+    /// UEFI Secure Boot with MS keys pre-enrolled. See `VmConfig::secure_boot`.
+    #[serde(default)]
+    secure_boot: bool,
     /// Boot device order — see `VmConfig::boot_order`. Empty = backend default.
     #[serde(default)]
     boot_order: Vec<String>,
@@ -328,6 +334,15 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     config.net_model = body.net_model.clone();
     config.drivers_iso = body.drivers_iso.clone();
     config.bios_type = body.bios_type.clone();
+    config.tpm = body.tpm;
+    config.secure_boot = body.secure_boot;
+    // TPM / Secure Boot only make sense with UEFI — Secure Boot is silently
+    // ignored on SeaBIOS and a TPM without q35/OVMF is pointless. Enforce it
+    // here so a direct API call can't produce a half-configured VM (the UI
+    // already nudges the firmware dropdown to OVMF).
+    if config.tpm || config.secure_boot {
+        config.bios_type = "ovmf".to_string();
+    }
     config.boot_order = body.boot_order.clone();
     config.vnc_external = body.vnc_external;
     config.notes = body.notes.clone();
@@ -412,6 +427,10 @@ struct UpdateVmRequest {
     drivers_iso: Option<String>,
     auto_start: Option<bool>,
     bios_type: Option<String>,
+    /// Emulated TPM 2.0 toggle. See `VmConfig::tpm`.
+    tpm: Option<bool>,
+    /// UEFI Secure Boot toggle. See `VmConfig::secure_boot`.
+    secure_boot: Option<bool>,
     boot_order: Option<Vec<String>>,
     vnc_external: Option<bool>,
     extra_nics: Option<Vec<super::manager::NicConfig>>,
@@ -450,6 +469,7 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
                             body.os_disk_bus.clone(), body.net_model.clone(),
                             body.drivers_iso.clone(), body.auto_start,
                             body.bios_type.clone(),
+                            body.tpm, body.secure_boot,
                             body.extra_nics.clone(),
                             body.usb_devices.clone(),
                             body.pci_devices.clone(),
