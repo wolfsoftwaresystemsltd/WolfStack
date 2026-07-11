@@ -310,12 +310,41 @@ struct CreateVmRequest {
 
 fn default_bios_type() -> String { "seabios".to_string() }
 
+/// Reject media (ISO) paths that could break out of the comma-delimited
+/// argument syntax the hypervisors use, or smuggle control characters.
+/// `None`/empty is allowed (= no media / detach). Returns a ready 400 on
+/// rejection. This is the single boundary guard covering all three
+/// backends — safer than trying to comma-escape per-tool (their escaping
+/// rules differ and aren't all reliable).
+fn validate_media_path(path: Option<&str>, field: &str) -> Result<(), HttpResponse> {
+    let p = match path { Some(p) => p, None => return Ok(()) };
+    if p.contains(',') {
+        return Err(HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("{} can't contain a comma — the hypervisor reads it as a config separator. Rename the file or move it to a comma-free folder.", field)
+        })));
+    }
+    if p.chars().any(|c| c.is_control()) {
+        return Err(HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("{} contains an invalid (control) character.", field)
+        })));
+    }
+    Ok(())
+}
+
 fn default_os_bus() -> String { "virtio".to_string() }
 
 async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json<CreateVmRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    // Media paths are embedded in comma-delimited hypervisor args
+    // (qm `--ideN <path>,media=cdrom`, virt-install `--disk ...,path=<path>`,
+    // qemu `-drive file=<path>,...`), so a comma in the path would be parsed
+    // as an extra config option — reject it at the boundary.
+    if let Err(resp) = validate_media_path(body.iso_path.as_deref(), "ISO path") { return resp; }
+    if let Err(resp) = validate_media_path(body.drivers_iso.as_deref(), "VirtIO drivers ISO path") { return resp; }
+
     let manager = state.vms.lock().unwrap();
-    
+
     let mut config = VmConfig::new(
         body.name.clone(),
         body.cpus,
@@ -453,6 +482,11 @@ struct UpdateVmRequest {
 async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateVmRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+
+    // Media paths go into comma-delimited hypervisor args — reject a comma
+    // (config-separator injection) or control chars at the boundary.
+    if let Err(resp) = validate_media_path(body.iso_path.as_deref(), "ISO path") { return resp; }
+    if let Err(resp) = validate_media_path(body.drivers_iso.as_deref(), "VirtIO drivers ISO path") { return resp; }
 
     // Validate network_mode at the boundary (same as CreateVmRequest).
     if let Some(ref nm) = body.network_mode {
@@ -2058,5 +2092,28 @@ async fn adopt_libvirt(req: HttpRequest, state: web::Data<AppState>, body: web::
             "vm": config,
         })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[cfg(test)]
+mod media_path_validation_tests {
+    use super::validate_media_path;
+
+    #[test]
+    fn allows_clean_paths_and_empty() {
+        assert!(validate_media_path(Some("/mnt/wolfstack/nas/win11.iso"), "ISO").is_ok());
+        assert!(validate_media_path(Some("/var/lib/vz/template/iso/ubuntu-24.04.iso"), "ISO").is_ok());
+        assert!(validate_media_path(None, "ISO").is_ok());
+        assert!(validate_media_path(Some(""), "ISO").is_ok());
+    }
+
+    #[test]
+    fn rejects_comma_injection_and_control_chars() {
+        // Comma = qm/virt-install/qemu config separator → injection vector.
+        assert!(validate_media_path(Some("/mnt/nas/Windows 10, 22H2.iso"), "ISO").is_err());
+        assert!(validate_media_path(Some("/x.iso,media=disk,cache=none"), "ISO").is_err());
+        // Control chars / newline never belong in a media path.
+        assert!(validate_media_path(Some("/mnt/nas/a\nb.iso"), "ISO").is_err());
+        assert!(validate_media_path(Some("/mnt/nas/a\0b.iso"), "ISO").is_err());
     }
 }
