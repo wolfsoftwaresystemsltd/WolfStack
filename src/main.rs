@@ -2514,7 +2514,11 @@ async fn main() -> std::io::Result<()> {
                     let config = iw::ImageWatcherConfig::load();
                     if config.enabled {
                         // ── CHECK pass ──
-                        let results = iw::check_all_containers(&config).await;
+                        // Honour per-container check frequency: pass the last
+                        // results so containers still within their interval
+                        // are carried forward, not re-queried.
+                        let prev = { iw_cache.read().unwrap().clone() };
+                        let (results, checked_now) = iw::check_due_containers(&config, &prev).await;
                         {
                             let mut cache = iw_cache.write().unwrap();
                             for r in &results {
@@ -2531,6 +2535,11 @@ async fn main() -> std::io::Result<()> {
                             let pending: Vec<String> = results.iter()
                                 .filter(|r| r.update_available && r.error.is_none())
                                 .map(|r| r.container_name.clone())
+                                // ONLY containers re-queried this pass — a
+                                // carried-forward (stale) "update available"
+                                // must never re-apply, or a failed auto-update
+                                // would retry on every loop wake.
+                                .filter(|name| checked_now.contains(name))
                                 .filter(|name| config.policy_for(name).is_auto_apply())
                                 .collect();
                             if !pending.is_empty() {
@@ -2589,6 +2598,23 @@ async fn main() -> std::io::Result<()> {
                                         events.push(ev);
                                     }
                                 }
+                                // A completed apply means the local image now
+                                // matches remote — clear the cached "update
+                                // available" flag. Otherwise a container whose
+                                // next per-container check isn't due yet would
+                                // be carried forward as still-needing-update
+                                // and re-applied on every loop tick.
+                                {
+                                    let mut cache = iw_cache.write().unwrap();
+                                    for ev in &events {
+                                        if matches!(ev.status, iw::ImageUpdateStatus::Completed) {
+                                            if let Some(r) = cache.get_mut(&ev.container_name) {
+                                                r.update_available = false;
+                                                r.last_checked = chrono::Utc::now().to_rfc3339();
+                                            }
+                                        }
+                                    }
+                                }
                                 // Persist the audit trail. Reload the
                                 // config fresh because the apply pass
                                 // can take minutes and the operator
@@ -2609,7 +2635,12 @@ async fn main() -> std::io::Result<()> {
                             }
                         }
                     }
-                    let interval = config.check_interval_secs.max(300);
+                    // Wake as often as the most-frequently-checked container
+                    // needs (the shortest of the global + per-container
+                    // intervals, floored at 60s). Containers not yet due are
+                    // skipped cheaply inside check_due_containers, so a short
+                    // tick doesn't mean extra registry traffic.
+                    let interval = config.min_effective_interval_secs();
                     tokio::time::sleep(Duration::from_secs(interval)).await;
                 }
             });

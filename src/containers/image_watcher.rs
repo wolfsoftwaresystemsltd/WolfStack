@@ -101,6 +101,38 @@ impl ImageWatcherConfig {
         }
     }
 
+    /// How often to check a specific container, in seconds: its own
+    /// `check_interval_secs` override if set, else the global interval.
+    /// The global keeps its historical 300s floor (so installs that never
+    /// set an override behave exactly as before); an explicit per-container
+    /// override may go as low as 60s (registry-protection floor) so an
+    /// operator can watch a fast-moving image more closely.
+    pub fn effective_interval_secs(&self, container_name: &str) -> u64 {
+        match self.container_policies.get(container_name)
+            .and_then(|p| p.check_interval_secs)
+            .filter(|&s| s > 0)
+        {
+            Some(s) => s.max(60),
+            None => self.check_interval_secs.max(300),
+        }
+    }
+
+    /// The shortest effective interval across the global setting and every
+    /// per-container override — i.e. how often the background loop must
+    /// wake to honour the most-frequently-checked container. Passive
+    /// (Ignore/Pinned) containers are skipped: they're never checked, so
+    /// their override must not drag the whole loop's cadence down.
+    pub fn min_effective_interval_secs(&self) -> u64 {
+        let mut m = self.check_interval_secs.max(300);
+        for p in self.container_policies.values() {
+            if p.is_passive() { continue; }
+            if let Some(s) = p.check_interval_secs {
+                if s > 0 { m = m.min(s.max(60)); }
+            }
+        }
+        m
+    }
+
     /// True when the auto-apply window is currently open. With no
     /// schedule configured, the window is always open (apply
     /// immediately on detection). With a cron set, the window opens
@@ -176,6 +208,13 @@ pub struct ContainerUpdatePolicy {
     pub health_check_timeout_secs: u64,
     #[serde(default = "default_true")]
     pub auto_rollback: bool,
+    /// How often to check THIS container for an image update, in seconds.
+    /// `None` (or 0) means "use the global `check_interval_secs`". Lets an
+    /// operator watch a fast-moving image hourly while a stable one is
+    /// checked once a day, per container/compose service. Floored to 60s
+    /// when applied so a typo can't hammer registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_interval_secs: Option<u64>,
 }
 
 fn default_notify_only() -> UpdatePolicy { UpdatePolicy::NotifyOnly }
@@ -191,6 +230,7 @@ impl Default for ContainerUpdatePolicy {
             health_check: true,
             health_check_timeout_secs: default_health_check_timeout(),
             auto_rollback: true,
+            check_interval_secs: None,
         }
     }
 }
@@ -959,7 +999,32 @@ fn wait_for_healthy(container_name: &str, timeout_secs: u64) -> bool {
 
 /// Check all running Docker containers for available image updates.
 /// Containers with an `Ignore` policy are skipped.
+/// Check EVERY eligible container now, ignoring per-container frequency.
+/// Used by manual / WolfFlow-triggered checks where "check now" means all.
 pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheckResult> {
+    check_containers_impl(config, &std::collections::HashMap::new()).await.0
+}
+
+/// Check only the containers whose per-container interval has elapsed since
+/// their last result in `prev`; carry forward the cached result for the
+/// rest. Used by the background loop so each container is polled on its own
+/// cadence (its `check_interval_secs` override, or the global default).
+///
+/// Returns `(all results, set of names actually re-checked this pass)`. The
+/// caller MUST gate the auto-apply pass on that set — a carried-forward
+/// (stale) `update_available=true` must never re-trigger an apply, or a
+/// failed auto-update would retry on every loop wake.
+pub async fn check_due_containers(
+    config: &ImageWatcherConfig,
+    prev: &std::collections::HashMap<String, ImageCheckResult>,
+) -> (Vec<ImageCheckResult>, std::collections::HashSet<String>) {
+    check_containers_impl(config, prev).await
+}
+
+async fn check_containers_impl(
+    config: &ImageWatcherConfig,
+    prev: &std::collections::HashMap<String, ImageCheckResult>,
+) -> (Vec<ImageCheckResult>, std::collections::HashSet<String>) {
     // List all running container names (async exec — see get_local_digest)
     let output = match tokio::process::Command::new("docker")
         .args(["ps", "--format", "{{.Names}}"])
@@ -972,11 +1037,11 @@ pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheck
                 "docker ps failed: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             );
-            return Vec::new();
+            return (Vec::new(), std::collections::HashSet::new());
         }
         Err(e) => {
             error!("Failed to run docker ps: {}", e);
-            return Vec::new();
+            return (Vec::new(), std::collections::HashSet::new());
         }
     };
 
@@ -986,7 +1051,11 @@ pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheck
         .filter(|l| !l.is_empty())
         .collect();
 
+    let now = chrono::Utc::now();
     let mut results = Vec::new();
+    // Names re-queried this pass (not carried forward, not passive). Only
+    // these may drive the auto-apply pass.
+    let mut checked_now: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for name in &names {
         // Skip passive policies (Ignore + Pinned). Passive == the
@@ -1000,6 +1069,26 @@ pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheck
             continue;
         }
 
+        // Per-container check frequency: if `prev` holds a result that's
+        // still within this container's interval, carry it forward rather
+        // than hitting the registry again. `prev` is empty for a
+        // check-all, so that path always re-checks.
+        if let Some(cached) = prev.get(name) {
+            let interval = config.effective_interval_secs(name);
+            let still_fresh = chrono::DateTime::parse_from_rfc3339(&cached.last_checked)
+                .ok()
+                .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds())
+                .map(|elapsed| elapsed >= 0 && (elapsed as u64) < interval)
+                .unwrap_or(false);
+            if still_fresh {
+                results.push(cached.clone());
+                continue;
+            }
+        }
+
+        // Re-querying the registry now → this is a fresh result, eligible to
+        // drive an auto-apply.
+        checked_now.insert(name.clone());
         match check_container_update(name).await {
             Ok(result) => results.push(result),
             Err(e) => {
@@ -1017,7 +1106,7 @@ pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheck
         }
     }
 
-    results
+    (results, checked_now)
 }
 
 // ═══════════════════════════════════════════════
@@ -1027,6 +1116,60 @@ pub async fn check_all_containers(config: &ImageWatcherConfig) -> Vec<ImageCheck
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_container_check_interval_overrides_global() {
+        let mut cfg = ImageWatcherConfig::default();
+        cfg.check_interval_secs = 3600; // global 1h
+
+        // No override → global.
+        assert_eq!(cfg.effective_interval_secs("nginx"), 3600);
+
+        // Override for one container.
+        let mut fast = ContainerUpdatePolicy::default();
+        fast.check_interval_secs = Some(900); // 15 min
+        cfg.container_policies.insert("nginx".into(), fast);
+        assert_eq!(cfg.effective_interval_secs("nginx"), 900);
+        assert_eq!(cfg.effective_interval_secs("other"), 3600); // still global
+
+        // The loop must wake as often as the fastest container.
+        assert_eq!(cfg.min_effective_interval_secs(), 900);
+
+        // A silly-small value is floored to 60s (registry protection).
+        let mut tiny = ContainerUpdatePolicy::default();
+        tiny.check_interval_secs = Some(5);
+        cfg.container_policies.insert("db".into(), tiny);
+        assert_eq!(cfg.effective_interval_secs("db"), 60);
+        assert_eq!(cfg.min_effective_interval_secs(), 60);
+
+        // Explicit 0 (or None) means "use global", not "check constantly".
+        let mut zero = ContainerUpdatePolicy::default();
+        zero.check_interval_secs = Some(0);
+        cfg.container_policies.insert("z".into(), zero);
+        assert_eq!(cfg.effective_interval_secs("z"), 3600);
+
+        // The global interval keeps its historical 300s floor for
+        // no-override containers (no regression for a small global setting).
+        let mut cfg2 = ImageWatcherConfig::default();
+        cfg2.check_interval_secs = 120;
+        assert_eq!(cfg2.effective_interval_secs("any"), 300);
+        assert_eq!(cfg2.min_effective_interval_secs(), 300);
+
+        // A passive (Pinned) container's fast override must NOT drag the
+        // whole loop's cadence down — it's never checked anyway.
+        let mut pinned = ContainerUpdatePolicy::default();
+        pinned.policy = UpdatePolicy::Pinned;
+        pinned.pinned_to = Some("1.2.3".into());
+        pinned.check_interval_secs = Some(60);
+        cfg2.container_policies.insert("frozen".into(), pinned);
+        assert_eq!(cfg2.min_effective_interval_secs(), 300);
+
+        // The override round-trips through JSON (the wire the PUT uses).
+        let json = serde_json::to_string(&cfg2.container_policies["frozen"]).unwrap();
+        assert!(json.contains("\"check_interval_secs\":60"));
+        let back: ContainerUpdatePolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.check_interval_secs, Some(60));
+    }
 
     #[test]
     fn parse_official_image() {
@@ -1142,6 +1285,7 @@ mod tests {
                 health_check: true,
                 health_check_timeout_secs: 120,
                 auto_rollback: false,
+                check_interval_secs: None,
             },
         );
         config.update_history.push(ImageUpdateEvent {
