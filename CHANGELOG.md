@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.51: per-container Docker image-update check frequency (klas)** _(2026-07-12 — [`7d8ecba1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7d8ecba1dcd0deebc3f21747945c0ec096c7be36))_
+- **v25.2.51: per-container Docker image-update check frequency (klas)** _(2026-07-12 — [`8d5c803b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d5c803bc8b9c60c443d789807b3be2beba9b003))_
 - **v25.2.50: harden VM ISO path validation (arg-injection)** _(2026-07-11 — [`bac9b42c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bac9b42c73d82b24c30e18dd208d4c59d1e1bd87))_
 - **v25.2.50: reject comma/control chars in VM ISO paths (qm/virt-install/qemu arg-injection hardening)** _(2026-07-11 — [`733ff2b9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/733ff2b9c46468174a51380207e9000b5a2d8721))_
 - **v25.2.49: read-only file browser + Browse button for VM ISO field (klas)** _(2026-07-11 — [`5d4ea612`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5d4ea61247e9a7ec655c2ec8970df979646dedd8))_
