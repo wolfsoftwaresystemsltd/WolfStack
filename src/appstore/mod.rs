@@ -7399,7 +7399,12 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 env: vec![],
                 volumes: vec!["ntfy_cache:/var/cache/ntfy".into(), "ntfy_etc:/etc/ntfy".into()],
                 sidecars: vec![],
-                seed_files: vec![], cmd: vec![],
+                seed_files: vec![],
+                // The image's ENTRYPOINT is bare `ntfy` — with no
+                // command it prints help and exits 0, so the container
+                // died instantly as previously shipped (verified live
+                // 2026-07-13, ntfy 2.26.0). `serve` starts the server.
+                cmd: vec!["serve".into()],
             }),
             lxc: None, bare_metal: None,
             vm: None, user_inputs: vec![],

@@ -57,6 +57,17 @@
     --accent: #dc2626;
     --accent-light: #f87171;
     --accent-glow: rgba(220, 38, 38, 0.15);
+    /* `--accent-primary` is an alias for `--accent`. Inline styles in
+       index.html / app.js (~11 sites: deprecation-banner Dismiss, WolfAgents
+       tabs, exposure-URL copy button, threat-feed links…) reference
+       `var(--accent-primary)`, which was never defined — those backgrounds
+       computed to transparent and text fell back to inherit. Same alias
+       pattern as `--text` / `--bg-tertiary` above. `--accent-primary-15`
+       (MySQL-editor active-row highlight, app.js) was likewise undefined —
+       its intent (accent at ~15% alpha) is exactly what --accent-glow is,
+       and all 19 themes define --accent-glow. */
+    --accent-primary: var(--accent);
+    --accent-primary-15: var(--accent-glow);
     --success: #10b981;
     --success-bg: rgba(16, 185, 129, 0.1);
     --warning: #f59e0b;
@@ -4263,6 +4274,38 @@ body.sidebar-collapsed #task-log-footer {
    Built to de-overwhelm first-time operators. Theme-aware via the
    shared CSS variables, responsive, no external dependencies.
    ───────────────────────────────────────────────────────────── */
+
+/* ── Theme-driven banner skins ──
+   Colour skins for the page-level banners (update, deprecation, secret
+   audit, stale-data, connection-lost, cluster-block). Layout stays inline
+   at each call site; colour lives here so every theme's --warning/--danger
+   tokens drive the look. Contrast verified ≥ WCAG AA across all 19 themes:
+   #111 on --warning ≥ 5.9:1, #fff on the 60%-black danger mix ≥ 6.3:1,
+   --text-primary on the tinted skins ≥ 8:1. Coloured text on its own tint
+   fails AA on the light themes (~3.3:1) — keep body text --text-primary. */
+.ws-banner-warning {
+    background: var(--warning-bg);
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+    color: var(--text-primary);
+}
+.ws-banner-danger {
+    background: var(--danger-bg);
+    border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
+    color: var(--text-primary);
+}
+/* Solid bar for critical fixed banners (connection lost, cluster-block).
+   Darkening the theme's danger hue with 40% black guarantees white text
+   passes AA whatever the theme picks for --danger. */
+.ws-banner-critical {
+    background: color-mix(in srgb, var(--danger) 60%, #000);
+    color: #fff;
+}
+#update-banner {
+    background: linear-gradient(180deg, color-mix(in srgb, var(--warning) 85%, #fff), var(--warning));
+    border: 1px solid color-mix(in srgb, var(--warning) 70%, #000);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.2) inset, 0 2px 6px rgba(0, 0, 0, 0.25);
+    color: #111;
+}
 
 /* Dashboard "start here" banner */
 .learn-banner {
