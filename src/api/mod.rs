@@ -28537,6 +28537,39 @@ pub async fn alerts_config_save(req: HttpRequest, state: web::Data<AppState>, bo
     if let Some(s) = v.get("twilio_whatsapp_from").and_then(|v| v.as_str()) {
         config.twilio_whatsapp_from = s.trim().to_string();
     }
+    // ntfy server — plain config (not a secret). Blank resets to the
+    // public instance so a cleared field can't leave the channel
+    // pointing at "".
+    if let Some(s) = v.get("ntfy_server").and_then(|v| v.as_str()) {
+        let trimmed = s.trim().trim_end_matches('/');
+        config.ntfy_server = if trimmed.is_empty() {
+            "https://ntfy.sh".to_string()
+        } else {
+            trimmed.to_string()
+        };
+    }
+    // ntfy topic + token: masked in to_masked_json (on the public
+    // server the topic name IS the credential), so same write-only
+    // shape as discord_bot_token — only overwrite on non-empty input
+    // so a save with the field blank keeps the stored value.
+    if let Some(t) = v.get("ntfy_topic").and_then(|v| v.as_str()) {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            config.ntfy_topic = trimmed.to_string();
+        }
+    }
+    if let Some(t) = v.get("ntfy_token").and_then(|v| v.as_str()) {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            config.ntfy_token = trimmed.to_string();
+        }
+    }
+    // Explicit disconnect — distinct from "left blank" above. The UI's
+    // "Disable ntfy" button sends this to clear the channel.
+    if v.get("ntfy_clear").and_then(|v| v.as_bool()) == Some(true) {
+        config.ntfy_topic = String::new();
+        config.ntfy_token = String::new();
+    }
 
     match config.save() {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "saved": true })),

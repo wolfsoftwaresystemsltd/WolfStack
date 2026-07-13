@@ -269,9 +269,7 @@
         <div class="sidebar-footer">
             <button id="update-banner" type="button" onclick="triggerUpgrade()"
                  style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:8px;
-                 background:linear-gradient(180deg,#f59e0b,#d97706);border:1px solid #b45309;
-                 box-shadow:0 1px 0 rgba(255,255,255,0.2) inset,0 2px 6px rgba(0,0,0,0.25);
-                 font-size:12px;font-weight:600;color:#111;text-align:center;cursor:pointer;
+                 font-size:12px;font-weight:600;text-align:center;cursor:pointer;
                  width:100%;letter-spacing:0.2px;transition:transform 0.08s ease,filter 0.12s ease;"
                  onmouseover="this.style.filter='brightness(1.08)'" onmouseout="this.style.filter=''"
                  onmousedown="this.style.transform='translateY(1px)'" onmouseup="this.style.transform=''">
@@ -398,7 +396,7 @@
         </header>
 
         <!-- Deprecation banner: legacy Proxmox API integration -->
-        <div id="deprecated-pve-banner" style="display:none; margin:12px 16px 0; padding:14px 18px; background:rgba(234,179,8,0.12); border:1px solid rgba(234,179,8,0.4); border-radius:8px; color:var(--text-primary);">
+        <div id="deprecated-pve-banner" class="ws-banner-warning" style="display:none; margin:12px 16px 0; padding:14px 18px; border-radius:8px;">
             <div style="display:flex; align-items:flex-start; gap:12px;">
                 <div style="font-size:20px; line-height:1;"><span class="ws-icon-clean-wrap" data-icon="warning"></span></div>
                 <div style="flex:1; font-size:13px; line-height:1.5;">
@@ -6221,6 +6219,36 @@
                                         chat ID</small>
                                 </div>
 
+                                <h4 style="margin:16px 0 12px 0; font-size:14px; color:var(--accent-light);">ntfy push (phone / desktop)</h4>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <!-- Button is a SIBLING of the label, not a child: a button inside
+                                         a label becomes the label's implicit control, so clicking the
+                                         label text would fire the disable action. -->
+                                    <div style="display:flex; justify-content:space-between; align-items:baseline;">
+                                        <label style="margin:0;">ntfy Topic</label>
+                                        <button type="button" id="alerting-ntfy-clear" onclick="clearNtfyChannel()"
+                                            style="display:none; background:transparent; border:none; color:var(--danger); font-size:12px; cursor:pointer; padding:0;">Disable ntfy</button>
+                                    </div>
+                                    <input type="text" id="alerting-ntfy-topic" class="form-control"
+                                        placeholder="e.g. wolfstack-a8f2c91d — pick something unguessable">
+                                    <small style="color:var(--text-muted);">Install the free
+                                        <a href="https://ntfy.sh/" target="_blank" rel="noopener" style="color:var(--accent-primary);">ntfy</a>
+                                        app (iOS / Android), subscribe to the same topic, done. On the public
+                                        ntfy.sh server the topic name is effectively the password — anyone who
+                                        knows it can read your alerts, so make it long and random.</small>
+                                </div>
+                                <div class="form-group" style="margin-bottom:12px;">
+                                    <label>ntfy Server</label>
+                                    <input type="text" id="alerting-ntfy-server" class="form-control"
+                                        placeholder="https://ntfy.sh">
+                                    <small style="color:var(--text-muted);">Leave as ntfy.sh, or point at a self-hosted server — the server root only, no path</small>
+                                </div>
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label>ntfy Access Token <span style="color:var(--text-muted); font-weight:400;">(optional)</span></label>
+                                    <input type="password" id="alerting-ntfy-token" class="form-control"
+                                        placeholder="tk_… — only for reserved topics / self-hosted auth">
+                                </div>
+
                                 <div class="form-group" style="margin-bottom:16px; padding:12px; background:var(--bg-input); border:1px solid var(--border); border-radius:8px;">
                                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer; margin:0;">
                                         <input type="checkbox" id="alerting-telegram-receiver" style="width:16px;height:16px;">
@@ -6346,7 +6374,7 @@
                                             value="simple" checked style="margin-top:3px;width:16px;height:16px;cursor:pointer;">
                                         <span>
                                             <strong style="display:block;">Simple <span style="color:var(--text-muted);font-weight:400;">(recommended)</span></strong>
-                                            <span style="color:var(--text-muted);">Only push when something looks like a real compromise: crypto miner running, suspicious binary in /tmp or /dev/shm, outbound scan from this host. Internet-background noise (failed SSH logins, "we blocked another IP", threshold breaches, config recommendations) is suppressed — visible on the dashboard, no email/Discord/Slack/Telegram push.</span>
+                                            <span style="color:var(--text-muted);">Only push when something looks like a real compromise: crypto miner running, suspicious binary in /tmp or /dev/shm, outbound scan from this host. Internet-background noise (failed SSH logins, "we blocked another IP", threshold breaches, config recommendations) is suppressed — visible on the dashboard, no email/Discord/Slack/Telegram/ntfy push.</span>
                                         </span>
                                     </label>
                                     <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;">

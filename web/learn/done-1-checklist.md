@@ -28,7 +28,7 @@ Security isn't optional once a machine is reachable. Tick these off and you've s
 
 ## Staying ahead of trouble
 
-- [ ] I set up **alerts** to one channel I actually check (Discord / Slack / Telegram)
+- [ ] I set up **alerts** to one channel I actually check (Discord / Slack / Telegram / ntfy)
 - [ ] I clicked **Send Test Alert** and the message arrived
 - [ ] *(Optional)* I put up a public **status page**
 - [ ] *(Optional)* I put an app on a **real domain with HTTPS**

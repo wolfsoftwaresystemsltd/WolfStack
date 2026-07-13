@@ -15,6 +15,7 @@ WolfStack can send alerts to the places you already check. Fill in whichever you
 - **Discord Webhook URL** — in Discord: *Server Settings → Integrations → Webhooks*, create one, paste the URL.
 - **Slack Webhook URL** — from *api.slack.com/apps → Incoming Webhooks*.
 - **Telegram** — paste a **Telegram Bot Token** (from `@BotFather`) and your **Telegram Chat ID** (from `@userinfobot`).
+- **ntfy** — the easiest route to real push notifications on your phone: install the free [ntfy](https://ntfy.sh/) app (iOS/Android), pick a long random **topic** name, enter the same topic here. No account needed on the public ntfy.sh server — but the topic name is effectively a password, so make it unguessable. Self-hosted ntfy servers work too (set the server URL and, if needed, an access token).
 
 > Most people pick **one** channel they actually look at. If you live in Discord, just do Discord. The goal is that the alert reaches *you*, wherever you already are.
 
@@ -36,6 +37,6 @@ Click **Save Settings**, then click **Send Test Alert**. A test message should a
 ## ✓ What you just learned
 
 - **Settings → Alerts → Notifications** is where alerts are configured.
-- Add **one** channel you actually check (Discord / Slack / Telegram).
+- Add **one** channel you actually check (Discord / Slack / Telegram / ntfy).
 - Thresholds default to **90%**; verbosity **Simple** is the sane start.
 - Always click **Send Test Alert** and confirm it arrives before trusting it.

@@ -101,6 +101,7 @@
 ## Alerting
 - Threshold alerting with email notifications
 - Discord, Slack, Telegram webhook support
+- ntfy push notifications to phone/desktop (ntfy.sh or self-hosted server; topic + optional access token; Compromise alerts sent at max priority)
 - Alert cooldown to prevent spam
 
 ## App Store

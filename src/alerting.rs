@@ -258,6 +258,25 @@ pub struct AlertConfig {
     #[serde(default)]
     pub twilio_whatsapp_from: String,
 
+    /// ntfy server base URL — https://ntfy.sh (the public instance)
+    /// or a self-hosted server. Kept separate from the topic so
+    /// self-hosters only change one field.
+    #[serde(default = "default_ntfy_server")]
+    pub ntfy_server: String,
+    /// ntfy topic. Empty = channel off (the backward-compat default
+    /// for configs written before this field existed). On the public
+    /// ntfy.sh server the topic name is effectively the password —
+    /// anyone who knows it can subscribe — so it's masked in
+    /// `to_masked_json()` like the webhook URLs are.
+    #[serde(default)]
+    pub ntfy_topic: String,
+    /// ntfy access token for reserved topics / self-hosted servers
+    /// with auth (`Authorization: Bearer …`). Optional — the public
+    /// server needs none. Write-only from the UI, masked like
+    /// `discord_bot_token`.
+    #[serde(default)]
+    pub ntfy_token: String,
+
     // ── Threshold rules ──
     #[serde(default = "default_cpu_threshold")]
     pub cpu_threshold: f32,     // percentage (0-100)
@@ -469,6 +488,7 @@ fn default_container_mem_threshold() -> f32 { 90.0 }
 fn default_check_interval() -> u64 { 60 }
 fn default_security_scan_interval() -> u64 { 4 * 60 * 60 }
 fn default_cooldown_secs() -> u64 { 900 }
+fn default_ntfy_server() -> String { "https://ntfy.sh".to_string() }
 
 impl AlertCategory {
     /// Lowercase tag used when (de)serialising the `suppress_categories`
@@ -519,6 +539,9 @@ impl Default for AlertConfig {
             twilio_account_sid: String::new(),
             twilio_auth_token: String::new(),
             twilio_whatsapp_from: String::new(),
+            ntfy_server: default_ntfy_server(),
+            ntfy_topic: String::new(),
+            ntfy_token: String::new(),
         }
     }
 }
@@ -598,6 +621,7 @@ impl AlertConfig {
         !self.discord_webhook.is_empty()
             || !self.slack_webhook.is_empty()
             || (!self.telegram_bot_token.is_empty() && !self.telegram_chat_id.is_empty())
+            || !self.ntfy_topic.is_empty()
     }
 
     /// Return a JSON representation with secrets masked
@@ -611,6 +635,10 @@ impl AlertConfig {
             "has_discord": !self.discord_webhook.is_empty(),
             "has_slack": !self.slack_webhook.is_empty(),
             "has_telegram": !self.telegram_bot_token.is_empty() && !self.telegram_chat_id.is_empty(),
+            "ntfy_server": self.ntfy_server,
+            "ntfy_topic": mask_secret(&self.ntfy_topic),
+            "has_ntfy": !self.ntfy_topic.is_empty(),
+            "has_ntfy_token": !self.ntfy_token.is_empty(),
             "cpu_threshold": self.cpu_threshold,
             "memory_threshold": self.memory_threshold,
             "disk_threshold": self.disk_threshold,
@@ -764,7 +792,7 @@ pub async fn send_node_alert(
         cluster_name, hostname, when, body,
     );
 
-    // Webhook channels (Discord / Slack / Telegram).
+    // Push channels (Discord / Slack / Telegram / ntfy).
     if alert_cfg.enabled && alert_cfg.has_channels() {
         send_alert(&alert_cfg, category, &full_title, &full_body).await;
     }
@@ -901,6 +929,16 @@ pub async fn send_alert(config: &AlertConfig, category: AlertCategory, title: &s
             warn!("Telegram alert failed: {}", e);
         }
     }
+
+    // ntfy — priority 5 (max) for Compromise so the phone breaks
+    // through Do-Not-Disturb where the user has configured that;
+    // everything else at the ntfy default of 3.
+    if !config.ntfy_topic.is_empty() {
+        let priority: u8 = if category == AlertCategory::Compromise { 5 } else { 3 };
+        if let Err(e) = send_ntfy(&config.ntfy_server, &config.ntfy_topic, &config.ntfy_token, title, message, priority).await {
+            warn!("ntfy alert failed: {}", e);
+        }
+    }
 }
 
 /// Send a test notification to all configured channels
@@ -920,6 +958,10 @@ pub async fn send_test(config: &AlertConfig) -> Vec<(String, Result<(), String>)
     if !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty() {
         let r = send_telegram(&config.telegram_bot_token, &config.telegram_chat_id, title, message).await;
         results.push(("telegram".to_string(), r));
+    }
+    if !config.ntfy_topic.is_empty() {
+        let r = send_ntfy(&config.ntfy_server, &config.ntfy_topic, &config.ntfy_token, title, message, 3).await;
+        results.push(("ntfy".to_string(), r));
     }
 
     results
@@ -1016,9 +1058,93 @@ async fn send_telegram(bot_token: &str, chat_id: &str, title: &str, message: &st
     }
 }
 
+// ── ntfy push (phone/desktop) ──
+// Source: https://docs.ntfy.sh/publish/#publish-as-json — POST the
+// JSON body to the server ROOT (topic goes in the body, not the URL).
+// The header-based publish (`PUT /<topic>` + `X-Title`) is deliberately
+// NOT used: HTTP header values are latin-1 and our alert titles carry
+// emoji (⚠/✅/🧪), which JSON fields handle as native UTF-8. Priority
+// is the documented 1–5 scale (3 = ntfy default, 5 = max/urgent).
+// Auth (reserved topics / self-hosted): `Authorization: Bearer <token>`.
+async fn send_ntfy(server: &str, topic: &str, token: &str, title: &str, message: &str, priority: u8) -> Result<(), String> {
+    let client = &*ALERT_CLIENT;
+
+    // Older configs saved before the field existed deserialize to the
+    // default via serde, but guard anyway so an empty string saved by
+    // hand never produces a request to "".
+    let base = server.trim().trim_end_matches('/');
+    let url = if base.is_empty() { "https://ntfy.sh".to_string() } else { base.to_string() };
+
+    let payload = serde_json::json!({
+        "topic": topic,
+        "title": title,
+        "message": message,
+        "priority": priority,
+    });
+
+    let mut req = client.post(&url).json(&payload);
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+
+    let status = resp.status();
+    // Drain the body so the socket returns to the keep-alive pool
+    // (same reasoning as send_discord above).
+    let body = resp.bytes().await.unwrap_or_default();
+    if status.is_success() {
+        Ok(())
+    } else {
+        // ntfy returns a JSON error object with a human-readable
+        // "error" field (e.g. bad topic name, auth required) — surface
+        // it so the Test button tells the operator what to fix.
+        let detail = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+            .unwrap_or_default();
+        if detail.is_empty() {
+            Err(format!("ntfy HTTP {}", status))
+        } else {
+            Err(format!("ntfy HTTP {}: {}", status, detail))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ntfy channel contract: topic empty = channel off; topic set =
+    /// counts as a channel; topic is masked in the UI JSON (on the
+    /// public server the topic name IS the credential) and the token
+    /// is never returned at all.
+    #[test]
+    fn ntfy_channel_counts_and_masks() {
+        let mut cfg = AlertConfig::default();
+        assert!(!cfg.has_channels());
+        cfg.ntfy_topic = "wolfstack-secret-topic".to_string();
+        cfg.ntfy_token = "tk_abc123def456".to_string();
+        assert!(cfg.has_channels());
+
+        let j = cfg.to_masked_json();
+        assert_eq!(j["has_ntfy"], true);
+        assert_eq!(j["has_ntfy_token"], true);
+        assert_eq!(j["ntfy_server"], "https://ntfy.sh");
+        assert_ne!(j["ntfy_topic"], "wolfstack-secret-topic");
+        assert!(j.get("ntfy_token").is_none(), "token must never reach the frontend");
+    }
+
+    /// Golden rule: a config written before the ntfy fields existed
+    /// must load with the channel off and the server defaulted.
+    #[test]
+    fn ntfy_fields_default_for_old_configs() {
+        let old = r#"{"enabled":true,"discord_webhook":"https://discord.example/hook"}"#;
+        let cfg: AlertConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.ntfy_server, "https://ntfy.sh");
+        assert!(cfg.ntfy_topic.is_empty());
+        assert!(cfg.ntfy_token.is_empty());
+        assert!(cfg.has_channels(), "discord webhook still counts");
+    }
 
     /// Simple mode is the new default; the regression we are most
     /// worried about is a future edit changing which categories pass
