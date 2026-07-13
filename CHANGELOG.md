@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.52: release supply-chain pinning — cross rev+locked, build images by digest, all GitHub Actions SHA-pinned** _(2026-07-13 — [`0a64b6d8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0a64b6d8fc70fc89025f0b6bc8de0277736bb2cd))_
 - **v25.2.51: per-container Docker image-update check frequency (klas)** _(2026-07-12 — [`7d8ecba1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7d8ecba1dcd0deebc3f21747945c0ec096c7be36))_
 - **v25.2.51: per-container Docker image-update check frequency (klas)** _(2026-07-12 — [`8d5c803b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d5c803bc8b9c60c443d789807b3be2beba9b003))_
 - **v25.2.50: harden VM ISO path validation (arg-injection)** _(2026-07-11 — [`bac9b42c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bac9b42c73d82b24c30e18dd208d4c59d1e1bd87))_
