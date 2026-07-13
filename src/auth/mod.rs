@@ -144,6 +144,25 @@ pub fn verify_target_admin(username: &str, password: &str) -> bool {
     false
 }
 
+/// Session-based admin resolution — the same rules as
+/// `verify_target_admin` but WITHOUT a password (the session cookie
+/// already proved identity at login):
+///   • WolfStack account → must have `role == "admin"`. Authoritative:
+///     a same-named system account must not bypass the role check.
+///   • Otherwise (Linux session user) → root or sudo/wheel member.
+/// Used by the per-user mutation endpoints (create/delete user,
+/// password/email/2FA changes) so a viewer-role session can't repoint
+/// another user's credentials, while Linux-admin sessions — the
+/// bootstrap path that creates the first WolfStack users — keep
+/// working.
+pub fn session_user_is_admin(username: &str) -> bool {
+    let store = users::UserStore::load();
+    if let Some(u) = store.find(username) {
+        return u.role == "admin";
+    }
+    linux_user_is_privileged(username)
+}
+
 /// True if a Linux account is `root` or belongs to the `sudo` / `wheel`
 /// group — the conventional "can administer this host" set across Debian
 /// (`sudo`) and RHEL/Arch (`wheel`). Reads /etc/group + /etc/passwd; if
@@ -2304,6 +2323,15 @@ impl PasswordResetTokens {
     pub fn cleanup(&self) {
         let mut tokens = self.tokens.write().unwrap();
         tokens.retain(|_, t| t.created.elapsed() < RESET_TOKEN_LIFETIME);
+    }
+
+    /// Drop any outstanding tokens for a user. Called when the user's
+    /// email or password is changed by an operator — a code that went
+    /// to the OLD address must not stay redeemable for its remaining
+    /// lifetime.
+    pub fn invalidate_user(&self, username: &str) {
+        let mut tokens = self.tokens.write().unwrap();
+        tokens.retain(|_, t| t.username != username);
     }
 }
 

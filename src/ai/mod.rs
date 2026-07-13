@@ -3718,11 +3718,21 @@ pub(crate) fn build_smtp_mailer(config: &AiConfig) -> Result<lettre::SmtpTranspo
 }
 
 pub fn send_alert_email(config: &AiConfig, subject: &str, body: &str) -> Result<(), String> {
+    send_text_email(config, &config.email_to, "WolfStack AI", subject, body)
+}
+
+/// Send a plain-text email to a SPECIFIC recipient. Password-reset
+/// codes must go to the requesting user's own address — the
+/// forgot-password flow previously routed them through
+/// send_alert_email(), which always mails the site-wide alert inbox
+/// (`email_to`), i.e. the wrong recipient AND a reset-code disclosure
+/// to whoever reads that mailbox (found in review, 2026-07-13).
+pub fn send_text_email(config: &AiConfig, to: &str, from_name: &str, subject: &str, body: &str) -> Result<(), String> {
     use lettre::{Message, Transport};
 
     let email = Message::builder()
-        .from(resolve_from_mailbox(config, "WolfStack AI")?)
-        .to(config.email_to.parse().map_err(|e| format!("Email to: {}", e))?)
+        .from(resolve_from_mailbox(config, from_name)?)
+        .to(to.parse().map_err(|e| format!("Email to: {}", e))?)
         .subject(subject)
         .body(body.to_string())
         .map_err(|e| format!("Email build: {}", e))?;

@@ -2544,7 +2544,9 @@ pub async fn forgot_password(state: web::Data<AppState>, body: web::Json<serde_j
         username, token
     );
 
-    match crate::ai::send_alert_email(&config, subject, &body_text) {
+    // To the USER's address — send_alert_email would mail the site-wide
+    // alert inbox instead (wrong recipient + code disclosure).
+    match crate::ai::send_text_email(&config, &user.email, "WolfStack", subject, &body_text) {
         Ok(()) => generic_ok,
         Err(e) => {
             tracing::warn!("Failed to send password reset email: {}", e);
@@ -2614,9 +2616,15 @@ pub async fn save_auth_config(req: HttpRequest, state: web::Data<AppState>, body
 
 /// GET /api/auth/users — list all WolfStack users (hides password hashes and TOTP secrets)
 pub async fn list_users(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    // Admins see the full list; everyone else sees only their own
+    // entry — a viewer session must not enumerate other users' email
+    // addresses and 2FA posture (information disclosure).
+    let caller_is_admin = crate::auth::session_user_is_admin(&caller);
     let store = crate::auth::users::UserStore::load();
-    let users: Vec<serde_json::Value> = store.users.iter().map(|u| {
+    let users: Vec<serde_json::Value> = store.users.iter()
+        .filter(|u| caller_is_admin || u.username == caller)
+        .map(|u| {
         serde_json::json!({
             "username": u.username,
             "role": u.role,
@@ -2631,7 +2639,8 @@ pub async fn list_users(req: HttpRequest, state: web::Data<AppState>) -> HttpRes
 
 /// POST /api/auth/users — create a new WolfStack user
 pub async fn create_user(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    if let Err(resp) = require_admin(&caller) { return resp; }
 
     let username = body["username"].as_str().unwrap_or("").trim().to_string();
     let password = body["password"].as_str().unwrap_or("");
@@ -2651,6 +2660,11 @@ pub async fn create_user(req: HttpRequest, state: web::Data<AppState>, body: web
     };
 
     let email = body["email"].as_str().unwrap_or("").trim().to_string();
+    // Same rules as change_user_email — an unvalidated stored address
+    // would become an SMTP header-injection vector via the reset email.
+    if let Err(e) = validate_email_loose(&email) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": e}));
+    }
 
     // Allowed clusters — comma-free list from the create form. Empty =
     // see-everything (matches the existing default for legacy users);
@@ -2695,7 +2709,8 @@ pub async fn create_user(req: HttpRequest, state: web::Data<AppState>, body: web
 
 /// DELETE /api/auth/users/{username} — delete a WolfStack user
 pub async fn delete_user(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    if let Err(resp) = require_admin(&caller) { return resp; }
     let username = path.into_inner();
     let mut store = crate::auth::users::UserStore::load();
     match store.remove(&username) {
@@ -2709,10 +2724,38 @@ pub async fn delete_user(req: HttpRequest, state: web::Data<AppState>, path: web
     }
 }
 
+/// Admin-or-self gate for per-user mutation endpoints (password,
+/// email, 2FA) — a viewer-role session must not be able to repoint
+/// another user's credentials (privilege escalation → account
+/// takeover). Admin-ness via `auth::session_user_is_admin`, which
+/// also recognises privileged LINUX sessions (root / sudo / wheel) —
+/// the bootstrap path that manages WolfStack users in the first place.
+fn require_admin_or_self(caller: &str, target: &str) -> Result<(), HttpResponse> {
+    if caller == target || crate::auth::session_user_is_admin(caller) {
+        Ok(())
+    } else {
+        Err(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Only admin users can modify other users"
+        })))
+    }
+}
+
+/// Admin-only gate (user create / delete).
+fn require_admin(caller: &str) -> Result<(), HttpResponse> {
+    if crate::auth::session_user_is_admin(caller) {
+        Ok(())
+    } else {
+        Err(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Only admin users can manage users"
+        })))
+    }
+}
+
 /// POST /api/auth/users/{username}/password — change password
 pub async fn change_user_password(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
     let username = path.into_inner();
+    if let Err(resp) = require_admin_or_self(&caller, &username) { return resp; }
     let new_password = body["password"].as_str().unwrap_or("");
     if new_password.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Password required"}));
@@ -2729,6 +2772,8 @@ pub async fn change_user_password(req: HttpRequest, state: web::Data<AppState>, 
             user.password_hash = password_hash;
             match store.save() {
                 Ok(()) => {
+                    // Outstanding reset codes die with the old password.
+                    state.password_reset_tokens.invalidate_user(&username);
                     trigger_control_plane_push(&state);
                     HttpResponse::Ok().json(serde_json::json!({"success": true}))
                 }
@@ -2739,10 +2784,65 @@ pub async fn change_user_password(req: HttpRequest, state: web::Data<AppState>, 
     }
 }
 
+/// POST /api/auth/users/{username}/email — set (or clear) the email
+/// address used by the forgot-password flow. Until now the WolfUser
+/// email field existed but nothing could write it, so password reset
+/// silently had nobody to mail (Paul, 2026-07-13). Empty email = clear
+/// (reset-by-email off for that user).
+pub async fn change_user_email(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    let username = path.into_inner();
+    if let Err(resp) = require_admin_or_self(&caller, &username) { return resp; }
+    let email = body["email"].as_str().unwrap_or("").trim().to_string();
+
+    if let Err(e) = validate_email_loose(&email) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": e}));
+    }
+
+    let mut store = crate::auth::users::UserStore::load();
+    match store.find_mut(&username) {
+        Some(user) => {
+            user.email = email;
+            match store.save() {
+                Ok(()) => {
+                    // A reset code that went to the OLD address must not
+                    // stay redeemable.
+                    state.password_reset_tokens.invalidate_user(&username);
+                    trigger_control_plane_push(&state);
+                    HttpResponse::Ok().json(serde_json::json!({"success": true}))
+                }
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+            }
+        }
+        None => HttpResponse::NotFound().json(serde_json::json!({"error": "User not found"})),
+    }
+}
+
+/// Light-touch email validation shared by user create + email update —
+/// enough to catch typos and block header-injection (whitespace incl.
+/// CR/LF) without rejecting valid unusual addresses. Empty = allowed
+/// (clears the address / opts out of reset-by-email).
+fn validate_email_loose(email: &str) -> Result<(), String> {
+    if email.is_empty() {
+        return Ok(());
+    }
+    let parts: Vec<&str> = email.split('@').collect();
+    if email.len() > 254
+        || email.chars().any(|c| c.is_whitespace())
+        || parts.len() != 2
+        || parts[0].is_empty()
+        || parts[1].is_empty()
+    {
+        return Err("That doesn't look like a valid email address".to_string());
+    }
+    Ok(())
+}
+
 /// POST /api/auth/users/{username}/2fa/setup — generate a new TOTP secret (not yet confirmed)
 pub async fn setup_2fa(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
     let username = path.into_inner();
+    if let Err(resp) = require_admin_or_self(&caller, &username) { return resp; }
     let store = crate::auth::users::UserStore::load();
     if store.find(&username).is_none() {
         return HttpResponse::NotFound().json(serde_json::json!({"error": "User not found"}));
@@ -2759,8 +2859,9 @@ pub async fn setup_2fa(req: HttpRequest, state: web::Data<AppState>, path: web::
 
 /// POST /api/auth/users/{username}/2fa/confirm — verify a TOTP code and enable 2FA
 pub async fn confirm_2fa(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
     let username = path.into_inner();
+    if let Err(resp) = require_admin_or_self(&caller, &username) { return resp; }
     let code = body["code"].as_str().unwrap_or("");
     let secret = body["secret"].as_str().unwrap_or("");
 
@@ -2807,10 +2908,10 @@ pub async fn update_user_clusters(
     if !crate::compat::platform_ready() {
         return HttpResponse::NotFound().finish();
     }
-    let store = crate::auth::users::UserStore::load();
-    let caller_is_admin = store.find(&caller)
-        .map(|u| u.role == "admin").unwrap_or(false);
-    if !caller_is_admin {
+    // session_user_is_admin also recognises privileged Linux sessions
+    // (root/sudo/wheel) — the previous store-only lookup rejected them
+    // even though they're the accounts that bootstrap WolfStack users.
+    if !crate::auth::session_user_is_admin(&caller) {
         return HttpResponse::Forbidden().json(serde_json::json!({
             "error": "Only admin users can change cluster access"
         }));
@@ -2843,8 +2944,9 @@ pub async fn update_user_clusters(
 
 /// POST /api/auth/users/{username}/2fa/disable — disable 2FA for a user
 pub async fn disable_2fa(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
     let username = path.into_inner();
+    if let Err(resp) = require_admin_or_self(&caller, &username) { return resp; }
     let mut store = crate::auth::users::UserStore::load();
     match store.find_mut(&username) {
         Some(user) => {
@@ -39794,6 +39896,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/users", web::post().to(create_user))
         .route("/api/auth/users/{username}", web::delete().to(delete_user))
         .route("/api/auth/users/{username}/password", web::post().to(change_user_password))
+        .route("/api/auth/users/{username}/email", web::post().to(change_user_email))
         .route("/api/auth/users/{username}/2fa/setup", web::post().to(setup_2fa))
         .route("/api/auth/users/{username}/2fa/confirm", web::post().to(confirm_2fa))
         .route("/api/auth/users/{username}/2fa/disable", web::post().to(disable_2fa))
