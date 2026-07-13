@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.56: user email management — password reset actually works + user-endpoint hardening** _(2026-07-13 — [`34556e86`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/34556e86fb9d5c4dd4045df5c0dc6af8b4b0c694))_
 - **v25.2.55: Send Test Alert saves first + real failure details (klas); reset-password diagnostics** _(2026-07-13 — [`50d3eba6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/50d3eba6e7fa2872ce5290ec81a5e5983c831172))_
 - **v25.2.54: random ntfy topic generator button (klas)** _(2026-07-13 — [`ee7711a6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ee7711a66d3abd9a060e04cdcf59e32b70ebb9d6))_
 - **v25.2.53: ntfy mobile push notifications + theme-driven top banners** _(2026-07-13 — [`486757f7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/486757f7545c7c9b416ab43e15e25f60bd558cd0))_
