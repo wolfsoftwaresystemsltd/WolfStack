@@ -759,6 +759,19 @@ pub struct FeedTestResult {
     pub error: Option<String>,
 }
 
+/// (kept_entries, auto_allowlisted, skipped_by_allow) from the most
+/// recent ipset sync. Doubles as the log-dedup memory for the sync's
+/// state-change logging and as the source for the dashboard value
+/// receipt's "IPs blocked right now" figure.
+static LAST_SYNC: std::sync::Mutex<Option<(usize, usize, u32)>> = std::sync::Mutex::new(None);
+
+/// Entry count currently enforced in the threat-intel ipset — `None`
+/// until the first enforcement sync of this process (enforcement off,
+/// or not yet ticked). In-memory read; safe to call from handlers.
+pub fn last_synced_blocklist_len() -> Option<usize> {
+    LAST_SYNC.lock().unwrap_or_else(|e| e.into_inner()).map(|(kept, _, _)| kept)
+}
+
 pub fn test_feed_blocking() -> FeedTestResult {
     let url = FEED_URL.to_string();
     let started = std::time::Instant::now();
@@ -987,8 +1000,6 @@ fn sync_ipset_to_feed() -> RemediationOutcome {
     // INFO when the counts actually change (or on the first sync after
     // start), DEBUG for the steady state.
     {
-        static LAST_SYNC: std::sync::Mutex<Option<(usize, usize, u32)>> =
-            std::sync::Mutex::new(None);
         let mut last = LAST_SYNC.lock().unwrap_or_else(|e| e.into_inner());
         let now = (kept, auto_count, skipped_by_allow);
         if *last != Some(now) {
