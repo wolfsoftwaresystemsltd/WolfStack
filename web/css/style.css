@@ -4307,6 +4307,92 @@ body.sidebar-collapsed #task-log-footer {
     color: #111;
 }
 
+/* ── Mobile row drawers (klas) ──
+   ≤768px: Docker/LXC/VM tables condense to name + status; the row's
+   secondary columns hide and the action icons move into a tap-to-open
+   drawer with text labels. Desktop unchanged. Column indices match the
+   static <thead> markup in index.html — change both together. */
+@media (max-width: 768px) {
+    /* Docker: keep Name(1) + Status(3) */
+    #docker-table-view th:nth-child(2), #docker-table-view td:nth-child(2):not([colspan]),
+    #docker-table-view th:nth-child(4), #docker-table-view td:nth-child(4),
+    #docker-table-view th:nth-child(5), #docker-table-view td:nth-child(5),
+    #docker-table-view th:nth-child(6), #docker-table-view td:nth-child(6),
+    /* LXC: keep Name(1) + State(3) */
+    #lxc-table-view th:nth-child(2), #lxc-table-view td:nth-child(2):not([colspan]),
+    #lxc-table-view th:nth-child(4), #lxc-table-view td:nth-child(4),
+    #lxc-table-view th:nth-child(5), #lxc-table-view td:nth-child(5),
+    /* VMs: keep Name(1) + Status(2) */
+    #vms-table-view th:nth-child(3), #vms-table-view td:nth-child(3):not([colspan]),
+    #vms-table-view th:nth-child(4), #vms-table-view td:nth-child(4),
+    #vms-table-view th:nth-child(5), #vms-table-view td:nth-child(5),
+    #vms-table-view th:nth-child(6), #vms-table-view td:nth-child(6),
+    /* Action icon cells hide on all three — the drawer replaces them */
+    #docker-table-view .ws-actions-cell, #docker-table-view th:last-child,
+    #lxc-table-view .ws-actions-cell, #lxc-table-view th:last-child,
+    #vms-table-view .ws-actions-cell, #vms-table-view th:last-child {
+        display: none;
+    }
+    /* Tap affordance: chevron on the status cell, rotates when open */
+    #docker-table-view tbody tr[data-name] td:nth-child(3)::after,
+    #lxc-table-view tbody tr[data-name] td:nth-child(3)::after,
+    #vms-table-view tbody tr[data-name] td:nth-child(2)::after {
+        content: '▸';
+        float: right;
+        color: var(--text-muted);
+        transition: var(--transition);
+    }
+    #docker-table-view tbody tr.ws-mobile-open td:nth-child(3)::after,
+    #lxc-table-view tbody tr.ws-mobile-open td:nth-child(3)::after,
+    #vms-table-view tbody tr.ws-mobile-open td:nth-child(2)::after {
+        content: '▾';
+        color: var(--accent-light);
+    }
+    tr[data-name] { cursor: pointer; }
+}
+.ws-mobile-drawer td {
+    padding: 8px 10px 12px;
+    background: var(--bg-secondary);
+    border-top: none;
+}
+.ws-mobile-drawer-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 6px;
+    animation: wsDrawerIn 0.18s ease-out;
+}
+@keyframes wsDrawerIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.ws-mobile-action {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 6px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    font-family: inherit;
+    text-decoration: none;
+}
+.ws-mobile-action:active { background: var(--bg-card-hover); }
+.ws-mobile-action-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.2;
+    text-align: center;
+}
+.ws-mobile-action-disabled {
+    opacity: 0.35;
+    pointer-events: none;
+}
+
 /* ── Value receipt card ──
    Dashboard support ask backed by the install's own numbers. Same
    visual family as .learn-banner; all colour from theme tokens. */
