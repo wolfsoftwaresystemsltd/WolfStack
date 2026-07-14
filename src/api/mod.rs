@@ -33508,6 +33508,80 @@ fn is_supporter(
     (false, "none")
 }
 
+/// GET /api/value-receipt — the numbers behind the dashboard "value
+/// receipt" support card: how long this install has been running and
+/// what it's watching right now. Everything comes from in-memory state
+/// except the install-date marker (tiny file, read on the blocking
+/// pool). Stats that don't apply are omitted (null) — the frontend
+/// renders only what exists, never a fake zero.
+async fn value_receipt(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+
+    let install_epoch = match web::block(install_date_epoch).await {
+        Ok(v) => v,
+        Err(_) => None,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let install_days = install_epoch.map(|e| now.saturating_sub(e) / 86_400);
+
+    let (nodes_total, nodes_online, docker, lxc, vms, compose) = {
+        let nodes = state.cluster.nodes.read().unwrap();
+        let mut online = 0u32;
+        let (mut d, mut l, mut v, mut c) = (0u32, 0u32, 0u32, 0u32);
+        for n in nodes.values() {
+            if n.online { online += 1; }
+            d += n.docker_count;
+            l += n.lxc_count;
+            v += n.vm_count;
+            c += n.compose_count;
+        }
+        (nodes.len() as u32, online, d, l, v, c)
+    };
+
+    let monitors = state.statuspage.config.read().map(|c| c.monitors.len()).unwrap_or(0);
+    let blocked_now = crate::predictive::threat_intel::last_synced_blocklist_len();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "install_days": install_days,
+        "nodes_total": nodes_total,
+        "nodes_online": nodes_online,
+        "docker": docker,
+        "lxc": lxc,
+        "vms": vms,
+        "compose": compose,
+        "monitors": monitors,
+        "blocked_now": blocked_now,
+    }))
+}
+
+/// Read (or backfill) the install-date marker. Installs that predate
+/// the marker get their true-ish age from the oldest mtime among
+/// long-lived config files — node_id and ports.json are written once
+/// at first startup — and the result is persisted so the age is
+/// stable from then on. Returns None only when nothing is readable
+/// (the frontend then skips the age-gated card entirely — fail quiet,
+/// never fail loud on a goodwill feature).
+fn install_date_epoch() -> Option<u64> {
+    const MARKER: &str = "/etc/wolfstack/install_date";
+    if let Ok(s) = std::fs::read_to_string(MARKER) {
+        if let Ok(v) = s.trim().parse::<u64>() {
+            return Some(v);
+        }
+    }
+    let oldest = ["/etc/wolfstack/node_id", "/etc/wolfstack/ports.json", "/etc/wolfstack/join-token"]
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .filter_map(|m| m.modified().ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .min()?;
+    let _ = std::fs::write(MARKER, oldest.to_string());
+    Some(oldest)
+}
+
 /// GET /api/supporter/status — drives the login-time support nag. Reports
 /// whether this install supports WolfStack by any means (licence, paying
 /// Patreon pledge, or GitHub Sponsor self-attest) so the frontend can decide
@@ -41077,6 +41151,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // share patreon.json for historical reasons.
         .route("/api/sponsor/github", web::post().to(set_github_sponsor))
         .route("/api/supporter/status", web::get().to(supporter_status))
+        .route("/api/value-receipt", web::get().to(value_receipt))
         .route("/api/patreon/disconnect", web::post().to(patreon_disconnect))
         // Icon Packs
         .route("/api/icon-packs", web::get().to(icon_packs_list))

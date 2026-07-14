@@ -439,6 +439,12 @@
                     <button type="button" class="learn-banner-dismiss" onclick="dismissLearnBanner()" title="Dismiss" aria-label="Dismiss getting started banner">&times;</button>
                 </div>
 
+                <!-- Value receipt: after 30+ days, non-supporters see their
+                     install's own numbers + a sponsor ask. Populated by
+                     maybeShowValueReceipt(); hidden for supporters, snoozed
+                     90 days on dismiss. -->
+                <div id="dc-value-receipt" style="display:none;" role="region" aria-label="Support WolfStack"></div>
+
                 <!-- Customisable home dashboard. Widget shells are built by
                      ensureDashboardGrid() in app.js from the per-user layout
                      stored in the wolfstack_dashboard preference (synced
