@@ -216,9 +216,29 @@ fn save_installed(apps: &[InstalledApp]) {
 // ─── Public API ───
 
 /// List all available apps, optionally filtered by query and/or category
+/// Build-once cache of the catalogue. The catalogue is immutable
+/// static data, but `built_in_catalogue()` constructs 533 manifests —
+/// thousands of heap allocations and a ~332 KB stack frame on aarch64
+/// (measured in the shipped v25.2.56 binary with objdump). The list
+/// endpoint used to rebuild it 534× PER REQUEST (once for the list +
+/// once per app via has_compose_template → get_app): ~4.5 million
+/// allocations of synchronous work ON the async worker thread. Fast
+/// desktops hid it (~0.3 s); on small ARM boards it blocked the event
+/// loop long enough that the connection died mid-response and Chrome
+/// reported "Failed to fetch" (xavierasx's NanoPi R3S, 2026-07-14).
+static CATALOGUE: std::sync::LazyLock<Vec<AppManifest>> =
+    std::sync::LazyLock::new(built_in_catalogue);
+
+/// The full catalogue, built once per process.
+pub fn catalogue() -> &'static [AppManifest] {
+    &CATALOGUE
+}
+
 pub fn list_apps(query: Option<&str>, category: Option<&str>) -> Vec<AppManifest> {
-    let catalogue = built_in_catalogue();
-    catalogue.into_iter().filter(|app| {
+    // Filter FIRST, clone only the matches — the unfiltered case still
+    // clones all 533, but that's one clone per request, not 534 full
+    // catalogue rebuilds (see CATALOGUE above).
+    catalogue().iter().filter(|app| {
         let q_match = query.map_or(true, |q| {
             let q = q.to_lowercase();
             app.name.to_lowercase().contains(&q) ||
@@ -229,12 +249,12 @@ pub fn list_apps(query: Option<&str>, category: Option<&str>) -> Vec<AppManifest
             c.eq_ignore_ascii_case("all") || app.category.eq_ignore_ascii_case(c)
         });
         q_match && c_match
-    }).collect()
+    }).cloned().collect()
 }
 
 /// Get a single app by ID
 pub fn get_app(id: &str) -> Option<AppManifest> {
-    built_in_catalogue().into_iter().find(|a| a.id == id)
+    catalogue().iter().find(|a| a.id == id).cloned()
 }
 
 /// List installed apps
@@ -628,9 +648,13 @@ pub fn resolve_compose_template(app_id: &str) -> Option<String> {
 
 /// True when the given app has compose available (hand-crafted or
 /// synthesisable). Used by the frontend-facing manifest to surface a
-/// "Deploy with Compose" option.
+/// "Deploy with Compose" option. Mirrors resolve_compose_template's
+/// semantics (handcrafted, else any Docker target synthesises) without
+/// building the template string or cloning the manifest — this runs
+/// once per app in the list endpoint's annotation loop.
 pub fn has_compose_template(app_id: &str) -> bool {
-    resolve_compose_template(app_id).is_some()
+    handcrafted_compose_template(app_id).is_some()
+        || catalogue().iter().any(|a| a.id == app_id && a.docker.is_some())
 }
 
 /// Generate a minimal docker-compose.yml from a DockerTarget. Covers
@@ -4920,26 +4944,10 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
         },
 
 
-        AppManifest {
-            id: "uptime-kuma".into(),
-            name: "Uptime Kuma".into(),
-            icon: "📈".into(),
-            category: "Monitoring".into(),
-            description: "Self-hosted monitoring tool like UptimeRobot".into(),
-            website: Some("https://uptime.kuma.pet".into()),
-            docker: Some(DockerTarget {
-                image: "louislam/uptime-kuma:1".into(),
-                ports: vec!["3002:3001".into()],
-                env: vec![],
-                volumes: vec!["uptime_kuma_data:/app/data".into()],
-                sidecars: vec![],
-                seed_files: vec![], cmd: vec![],
-            }),
-            lxc: None,
-            bare_metal: None,
-            vm: None, user_inputs: vec![],
-        },
-
+        // (duplicate Uptime Kuma entry removed — there's one further
+        // down under "Trending & Self-Hosted Favourites" with Docker +
+        // LXC install paths. This Docker-only copy shadowed it via
+        // get_app's first-match and rendered twice in the store UI.)
 
         // (duplicate Vaultwarden entry removed — there's one further
         // down with Docker + LXC install paths.)
@@ -9937,6 +9945,36 @@ mod tests {
     /// catches a future manifest edit that breaks the compose path
     /// for even one app. LXC-only / bare-metal / VM-only apps are
     /// expected to return None.
+    /// Catalogue ids must be unique: get_app resolves by first-match,
+    /// has_compose_template scans all matches, and the list UI renders
+    /// every entry — a duplicate id makes those three disagree and
+    /// shows twice in the store (Uptime Kuma shipped duplicated until
+    /// v25.2.57).
+    #[test]
+    fn catalogue_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        let dupes: Vec<&str> = catalogue().iter()
+            .filter(|a| !seen.insert(a.id.as_str()))
+            .map(|a| a.id.as_str())
+            .collect();
+        assert!(dupes.is_empty(), "duplicate catalogue ids: {:?}", dupes);
+    }
+
+    /// has_compose_template (and the inlined expression in the list
+    /// endpoint) is an optimised mirror of resolve_compose_template —
+    /// lock the equivalence so a future change to resolution rules
+    /// can't silently diverge from the fast path.
+    #[test]
+    fn has_compose_template_matches_resolver() {
+        for app in catalogue() {
+            let fast = has_compose_template(&app.id);
+            let canonical = resolve_compose_template(&app.id).is_some();
+            assert_eq!(fast, canonical, "divergence for app '{}'", app.id);
+            let inlined = handcrafted_compose_template(&app.id).is_some() || app.docker.is_some();
+            assert_eq!(inlined, canonical, "inlined divergence for app '{}'", app.id);
+        }
+    }
+
     #[test]
     fn every_docker_app_has_compose_template() {
         let mut missing: Vec<String> = Vec::new();

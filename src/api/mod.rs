@@ -25005,13 +25005,20 @@ pub async fn appstore_list(
     let apps = appstore::list_apps(q, cat);
     // Annotate each app with `compose_available` so the install modal
     // can show the Docker Compose option without a second lookup.
+    // Computed from the manifest already in hand (handcrafted template
+    // or any Docker target — resolve_compose_template's exact
+    // semantics): the old has_compose_template call here rebuilt the
+    // ENTIRE catalogue per app, 534 rebuilds per request, which
+    // blocked the async worker for seconds on small ARM boards.
     let annotated: Vec<serde_json::Value> = apps.iter().map(|app| {
         let mut obj = match serde_json::to_value(app) {
             Ok(serde_json::Value::Object(m)) => m,
             _ => serde_json::Map::new(),
         };
+        let compose_available = appstore::handcrafted_compose_template(&app.id).is_some()
+            || app.docker.is_some();
         obj.insert("compose_available".to_string(),
-                   serde_json::Value::Bool(appstore::has_compose_template(&app.id)));
+                   serde_json::Value::Bool(compose_available));
         serde_json::Value::Object(obj)
     }).collect();
     HttpResponse::Ok().json(serde_json::json!({ "apps": annotated }))
