@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.60: mobile action drawers for Docker/LXC/VM rows (klas)** _(2026-07-14 — [`32a66fd4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/32a66fd4439279f952119598af846560a317bf73))_
 - **v25.2.59: value-receipt sponsor card + icon-theme revert fix (Rutger)** _(2026-07-14 — [`eed3761b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/eed3761bc25a47d3c6ed25c1ceea26b285acfe27))_
 - **v25.2.58: file-transfer handlers off the async workers (sync-in-async sweep, phase 1a)** _(2026-07-14 — [`f5b1386e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f5b1386e0815fff507d79bc3f7e26cdaf548e05c))_
 - **v25.2.57: App Store loads on slow ARM boards — catalogue built once, not 534×/request (xavierasx)** _(2026-07-14 — [`afadbfef`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/afadbfefa5d7f4f37abce37e0d7f401ed68640c4))_
