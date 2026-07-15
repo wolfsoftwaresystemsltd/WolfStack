@@ -28,8 +28,16 @@ struct PackageMapping {
     /// 1:1 to a row in this table.
     logical: &'static str,
     /// What the caller cares about (`crontab`, `qemu-system-x86_64`).
-    /// Used for the post-install `command -v` verification.
+    /// Used for the post-install `command -v` verification. Empty for
+    /// packages that ship no binary (firmware blobs like OVMF) — those
+    /// are verified via `verify_files` instead.
     binary: &'static str,
+    /// Firmware/data packages (OVMF) install FILES, not a command on
+    /// PATH, so `command -v` can't verify them. When non-empty, the
+    /// package counts as installed if ANY of these paths exists. A
+    /// package may set both (a binary AND files); either satisfying
+    /// counts as present.
+    verify_files: &'static [&'static str],
     /// Per-distro package name. None means the package isn't available
     /// on that distro and we should refuse the install.
     debian: Option<&'static str>,
@@ -63,6 +71,7 @@ const PACKAGES: &[PackageMapping] = &[
         // /usr/bin/crontab. busybox-suid also provides crontab but
         // dcron is the standard package operators install.
         alpine: Some("dcron"),
+        verify_files: &[],
         service_unit: Some("cronie.service"),
     },
     PackageMapping {
@@ -73,6 +82,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("tcpdump"),
         suse: Some("tcpdump"),
         alpine: Some("tcpdump"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -87,6 +97,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("traceroute"),
         suse: Some("traceroute"),
         alpine: Some("traceroute"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -97,6 +108,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("conntrack-tools"),
         suse: Some("conntrack-tools"),
         alpine: Some("conntrack-tools"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -107,6 +119,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("iptables"),
         suse: Some("iptables"),
         alpine: Some("iptables"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -117,6 +130,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("dnsmasq"),
         suse: Some("dnsmasq"),
         alpine: Some("dnsmasq"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -129,6 +143,61 @@ const PACKAGES: &[PackageMapping] = &[
         // Alpine ships qemu-system-x86_64 as its own package; the
         // qemu meta-package doesn't exist.
         alpine: Some("qemu-system-x86_64"),
+        verify_files: &[],
+        service_unit: None,
+    },
+    PackageMapping {
+        // qemu-img — creates/converts VM disks (native VM path). On
+        // Debian/Ubuntu this is a SEPARATE package from qemu-system-x86
+        // (`qemu-utils`); installing the emulator alone leaves disk
+        // creation broken, a common surprise on minimal Ubuntu.
+        logical: "qemu-img",
+        binary: "qemu-img",
+        debian: Some("qemu-utils"),
+        rhel: Some("qemu-img"),
+        // Arch ships qemu-img inside qemu-base/qemu-full; the qemu entry
+        // already pulls qemu-full, so this resolves there.
+        arch: Some("qemu-img"),
+        suse: Some("qemu-tools"),
+        alpine: Some("qemu-img"),
+        verify_files: &[],
+        service_unit: None,
+    },
+    PackageMapping {
+        // swtpm — emulated TPM 2.0 for Windows 11 VMs (native path).
+        // Not shipped by default on Ubuntu server; VM start fails
+        // without it when the TPM toggle is on (masterpier, 2026-07-15).
+        logical: "swtpm",
+        binary: "swtpm",
+        debian: Some("swtpm"),
+        rhel: Some("swtpm"),
+        arch: Some("swtpm"),
+        suse: Some("swtpm"),
+        alpine: Some("swtpm"),
+        verify_files: &[],
+        service_unit: None,
+    },
+    PackageMapping {
+        // OVMF — UEFI firmware for EFI/Secure-Boot VMs (Windows 11
+        // wants it). Ships firmware .fd blobs, NOT a binary, so it's
+        // verified by file existence. Paths mirror the native launcher's
+        // OVMF_CODE search list (vms/manager.rs); any present = installed.
+        logical: "ovmf",
+        binary: "",
+        verify_files: &[
+            "/usr/share/OVMF/OVMF_CODE_4M.fd",
+            "/usr/share/OVMF/OVMF_CODE.fd",
+            "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
+            "/usr/share/OVMF/OVMF_CODE.secboot.fd",
+            "/usr/share/edk2/x64/OVMF_CODE.fd",
+            "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+            "/usr/share/qemu/OVMF_CODE.fd",
+        ],
+        debian: Some("ovmf"),
+        rhel: Some("edk2-ovmf"),
+        arch: Some("edk2-ovmf"),
+        suse: Some("qemu-ovmf-x86_64"),
+        alpine: Some("ovmf"),
         service_unit: None,
     },
     PackageMapping {
@@ -139,6 +208,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("libvirt"),
         suse: Some("libvirt-client"),
         alpine: Some("libvirt-client"),
+        verify_files: &[],
         service_unit: Some("libvirtd.service"),
     },
     PackageMapping {
@@ -149,6 +219,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("openssh"),
         suse: Some("openssh"),
         alpine: Some("openssh-server"),
+        verify_files: &[],
         service_unit: Some("sshd.service"),
     },
     PackageMapping {
@@ -159,6 +230,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("wireguard-tools"),
         suse: Some("wireguard-tools"),
         alpine: Some("wireguard-tools"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -169,6 +241,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("nftables"),
         suse: Some("nftables"),
         alpine: Some("nftables"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -180,6 +253,7 @@ const PACKAGES: &[PackageMapping] = &[
         suse: Some("bind-utils"),
         // Alpine names it bind-tools (NOT bind-utils).
         alpine: Some("bind-tools"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -193,6 +267,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("ipset"),
         suse: Some("ipset"),
         alpine: Some("ipset"),
+        verify_files: &[],
         service_unit: None,
     },
     PackageMapping {
@@ -209,6 +284,7 @@ const PACKAGES: &[PackageMapping] = &[
         arch: Some("glusterfs"),
         suse: Some("glusterfs"),
         alpine: Some("glusterfs"),
+        verify_files: &[],
         service_unit: Some("glusterd"),
     },
 ];
@@ -259,6 +335,7 @@ fn resolve(pkg: &PackageMapping, distro: DistroFamily) -> Option<&'static str> {
 /// can tell the caller whether the package manager actually delivered
 /// the binary they asked for).
 fn binary_present(name: &str) -> bool {
+    if name.is_empty() { return false; }
     Command::new("sh")
         .args(["-c", &format!("command -v {}", name)])
         .stdout(std::process::Stdio::null())
@@ -266,6 +343,13 @@ fn binary_present(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Is this package present? Binary on PATH OR any `verify_files` path
+/// exists (firmware packages like OVMF have no binary). Either counts.
+fn mapping_present(pkg: &PackageMapping) -> bool {
+    binary_present(pkg.binary)
+        || pkg.verify_files.iter().any(|p| std::path::Path::new(p).exists())
 }
 
 /// Install a logical package by its WolfStack-internal name (e.g.
@@ -285,12 +369,13 @@ pub fn install(logical: &str) -> Result<InstallReport, String> {
 
     // Already installed? Avoid the package-manager round-trip and the
     // confusing "X is up to date" output that comes back as success.
-    if binary_present(mapping.binary) {
+    if mapping_present(mapping) {
         return Ok(InstallReport {
             package: logical.to_string(),
             binary: mapping.binary.to_string(),
             success: true,
-            message: format!("{} is already installed", mapping.binary),
+            message: format!("{} is already installed",
+                if mapping.binary.is_empty() { logical } else { mapping.binary }),
             service_started: mapping.service_unit.map(svc_active),
         });
     }
@@ -326,12 +411,13 @@ pub fn install(logical: &str) -> Result<InstallReport, String> {
             cmd, out.status.code(), trimmed.trim()));
     }
 
-    // Verify the binary actually appeared. Some package managers report
-    // success even when the binary lives elsewhere (different name).
-    if !binary_present(mapping.binary) {
+    // Verify the package actually delivered (binary on PATH, or a
+    // firmware file for blob packages). Some package managers report
+    // success even when the payload lands somewhere unexpected.
+    if !mapping_present(mapping) {
         return Err(format!(
-            "{} reported success but '{}' is still not on PATH — installed package: {}",
-            cmd, mapping.binary, resolved));
+            "{} reported success but '{}' is still not present — installed package: {}",
+            cmd, if mapping.binary.is_empty() { logical } else { mapping.binary }, resolved));
     }
 
     // Enable + start the daemon if there is one. Failures here are
@@ -357,6 +443,23 @@ fn svc_active(unit: &str) -> bool {
     Command::new("systemctl")
         .args(["is-active", "--quiet", unit])
         .status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Presence check for a logical package by name, for callers that want
+/// to know "is this installed?" without attempting an install (the VM
+/// prerequisites preflight). `None` = unknown logical name; `Some(bool)`
+/// = present / absent on this host.
+pub fn is_present(logical: &str) -> Option<bool> {
+    lookup(logical).map(mapping_present)
+}
+
+/// True if this host CAN install `logical` — i.e. the package is mapped
+/// for the detected distro. Lets the UI show "install" only where it'll
+/// actually work, and a manual-hint elsewhere.
+pub fn is_installable(logical: &str) -> bool {
+    lookup(logical)
+        .and_then(|m| resolve(m, detect_distro()))
+        .is_some()
 }
 
 #[cfg(test)]
@@ -415,5 +518,34 @@ mod tests {
         assert_eq!(resolve(pkg, DistroFamily::Arch),   Some("bind"));
         assert_eq!(resolve(pkg, DistroFamily::Suse),   Some("bind-utils"));
         assert_eq!(pkg.binary, "dig");
+    }
+
+    /// VM prerequisites (masterpier): the New VM preflight looks up
+    /// these logical names; a dropped row would silently break the
+    /// one-click installs. swtpm + qemu-img are binary-verified; OVMF
+    /// is FILE-verified (firmware blob, no binary) — assert its
+    /// verify_files are set and its binary is empty, and that every
+    /// distro resolves a package name.
+    #[test]
+    fn vm_prereq_packages_present_and_mapped() {
+        for logical in &["qemu", "qemu-img", "swtpm", "ovmf"] {
+            let pkg = PACKAGES.iter().find(|p| p.logical == *logical)
+                .unwrap_or_else(|| panic!("VM prereq logical {:?} missing from PACKAGES", logical));
+            for d in [DistroFamily::Debian, DistroFamily::RedHat, DistroFamily::Arch, DistroFamily::Suse, DistroFamily::Alpine] {
+                assert!(resolve(pkg, d).is_some(), "{} unmapped for {:?}", logical, d);
+            }
+        }
+        let ovmf = PACKAGES.iter().find(|p| p.logical == "ovmf").unwrap();
+        assert!(ovmf.binary.is_empty(), "ovmf must be file-verified, not binary");
+        assert!(!ovmf.verify_files.is_empty(), "ovmf must list firmware paths");
+        assert_eq!(resolve(ovmf, DistroFamily::Debian), Some("ovmf"));
+        assert_eq!(resolve(ovmf, DistroFamily::Arch), Some("edk2-ovmf"));
+        // qemu-img is a distinct package from qemu on Debian (qemu-utils).
+        let qi = PACKAGES.iter().find(|p| p.logical == "qemu-img").unwrap();
+        assert_eq!(resolve(qi, DistroFamily::Debian), Some("qemu-utils"));
+        assert_eq!(qi.binary, "qemu-img");
+        // is_present/is_installable public API works for these.
+        assert!(is_present("ovmf").is_some());
+        assert!(is_present("nonexistent-pkg").is_none());
     }
 }

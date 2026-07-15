@@ -10327,7 +10327,7 @@ region = us-east-1"></textarea>
                     <div class="vm-tab-page" id="vm-tab-3" style="display:none;">
                         <div class="form-group">
                             <label>BIOS Type</label>
-                            <select id="new-vm-bios-type" class="form-control" style="font-size:13px;">
+                            <select id="new-vm-bios-type" class="form-control" style="font-size:13px;" onchange="if(typeof vmPrereqRefresh==='function')vmPrereqRefresh();">
                                 <option value="seabios">SeaBIOS (Legacy)</option>
                                 <option value="ovmf">OVMF (UEFI/EFI)</option>
                             </select>
@@ -10337,13 +10337,21 @@ region = us-east-1"></textarea>
                             <label>Windows 11 / trusted boot</label>
                             <div style="display:flex; flex-direction:column; gap:7px;">
                                 <label style="display:flex; align-items:center; gap:8px; font-weight:400; cursor:pointer; margin:0;">
-                                    <input type="checkbox" id="new-vm-tpm" onchange="if(this.checked){document.getElementById('new-vm-bios-type').value='ovmf';}"> TPM 2.0 (emulated)
+                                    <input type="checkbox" id="new-vm-tpm" onchange="if(this.checked){document.getElementById('new-vm-bios-type').value='ovmf';} if(typeof vmPrereqRefresh==='function')vmPrereqRefresh();"> TPM 2.0 (emulated)
                                 </label>
                                 <label style="display:flex; align-items:center; gap:8px; font-weight:400; cursor:pointer; margin:0;">
-                                    <input type="checkbox" id="new-vm-secure-boot" onchange="if(this.checked){document.getElementById('new-vm-bios-type').value='ovmf';}"> UEFI Secure Boot
+                                    <input type="checkbox" id="new-vm-secure-boot" onchange="if(this.checked){document.getElementById('new-vm-bios-type').value='ovmf';} if(typeof vmPrereqRefresh==='function')vmPrereqRefresh();"> UEFI Secure Boot
                                 </label>
                             </div>
                             <small style="color:var(--text-muted);">Windows 11 requires both, plus UEFI firmware — ticking either switches BIOS to OVMF automatically.</small>
+                        </div>
+                        <!-- VM host readiness preflight (masterpier): shows which
+                             host components this VM needs and offers one-click
+                             install of anything missing, before the VM can fail
+                             to start. Populated by vmPrereqRefresh(). -->
+                        <div class="form-group" id="vm-prereq-panel" style="margin-top:12px; display:none;">
+                            <label>System readiness</label>
+                            <div id="vm-prereq-body" style="border:1px solid var(--border); border-radius:8px; padding:10px 12px; background:var(--bg-input); font-size:12.5px;"></div>
                         </div>
                         <div class="form-group" style="margin-top:12px;">
                             <label>Boot order</label>

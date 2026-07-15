@@ -6,3 +6,4 @@ pub mod manager;
 pub mod api;
 pub mod passthrough;
 pub mod vlan_learner;
+pub mod prereqs;

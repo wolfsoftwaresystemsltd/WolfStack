@@ -109,6 +109,8 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         web::scope("/api/vms")
             .route("", web::get().to(list_vms))
             .route("/wolfnet/health", web::get().to(wolfnet_health))
+            .route("/prerequisites", web::get().to(vm_prerequisites))
+            .route("/prerequisites/install", web::post().to(vm_prerequisites_install))
             .route("/create", web::post().to(create_vm))
             .route("/storage", web::get().to(list_storage))
             .route("/host-devices", web::get().to(host_devices))
@@ -132,6 +134,77 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route("/{name}", web::delete().to(delete_vm))
             .route("/{name}", web::get().to(get_vm))
     );
+}
+
+/// GET /api/vms/prerequisites?uefi=1&tpm=1 — VM host preflight. Reports
+/// each required/optional component (QEMU, qemu-img, OVMF, swtpm, KVM)
+/// and whether it's installed, so the New VM UI can offer one-click
+/// installs before a VM ever fails to start. `uefi`/`tpm` reflect the
+/// form's Firmware / TPM toggles so components are marked required only
+/// when the current config uses them.
+async fn vm_prerequisites(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let truthy = |k: &str| matches!(query.get(k).map(|s| s.as_str()), Some("1") | Some("true"));
+    let needs_uefi = truthy("uefi");
+    let needs_tpm = truthy("tpm");
+    // Filesystem probes only — cheap, but keep it off the async worker.
+    let report = web::block(move || crate::vms::prereqs::check(needs_uefi, needs_tpm))
+        .await
+        .unwrap_or_else(|_| crate::vms::prereqs::PrereqReport {
+            ready: false, proxmox: false, items: Vec::new(),
+        });
+    HttpResponse::Ok().json(report)
+}
+
+#[derive(serde::Deserialize)]
+struct PrereqInstallRequest {
+    /// Logical package keys to install (from the preflight's missing
+    /// items). "kvm" and any non-installable key are ignored server-side.
+    packages: Vec<String>,
+}
+
+/// POST /api/vms/prerequisites/install — install several VM prerequisite
+/// packages in one call (the "Install missing components" button). Runs
+/// each through the same allowlisted installer as /api/system/install-
+/// package; returns a per-package result so the UI shows what succeeded.
+async fn vm_prerequisites_install(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<PrereqInstallRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let pkgs = body.into_inner().packages;
+    if pkgs.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "no packages specified",
+        }));
+    }
+    let results = web::block(move || {
+        pkgs.into_iter().map(|p| {
+            // Never shell out for the non-installable capability key.
+            if p == "kvm" || !crate::installer::packages::is_installable(&p) {
+                return serde_json::json!({
+                    "package": p, "success": false,
+                    "error": "not installable on this host",
+                });
+            }
+            match crate::installer::packages::install(&p) {
+                Ok(r) => serde_json::json!({
+                    "package": r.package, "success": r.success, "message": r.message,
+                }),
+                Err(e) => serde_json::json!({
+                    "package": p, "success": false, "error": e,
+                }),
+            }
+        }).collect::<Vec<_>>()
+    }).await.unwrap_or_default();
+
+    let ok = results.iter().all(|r| r.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
+    HttpResponse::Ok().json(serde_json::json!({ "success": ok, "results": results }))
 }
 
 /// GET /api/vms/host-devices — list USB + PCI devices on the host with IOMMU
