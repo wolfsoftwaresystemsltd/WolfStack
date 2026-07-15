@@ -296,7 +296,27 @@ if [ -f /etc/unraid-version ]; then
                 # RAM-backed /usr/local/bin so they're on PATH from the first
                 # moment; the agent re-checks at startup as belt-and-braces.
                 printf '%s\n' "  for t in \"$WS_APPDATA/tools/\"*; do [ -x \"\$t\" ] && ln -sf \"\$t\" \"/usr/local/bin/\$(basename \"\$t\")\"; done || true"
-                printf '%s\n' "  cd \"$WS_APPDATA\" && ./wolfstack --agent </dev/null >> \"$WS_APPDATA/wolfstack.log\" 2>&1"
+                # Supervise the agent: Unraid has no systemd, so a one-shot
+                # launch means any death (OOM-kill, panic, crash) leaves the
+                # node offline until someone re-runs the installer (klas,
+                # 2026-07-15: "offline 2-3x/day, curl script brings it back").
+                # Loop restarts it; backoff (30s) only when it dies inside 10s
+                # so a broken binary can't spin the CPU, else fast (3s). The
+                # exit code + runtime is logged — that's the crash diagnostic
+                # (137=OOM-killed, 101=Rust panic, 0=clean self-update exit).
+                printf '%s\n' "  cd \"$WS_APPDATA\" || exit 0"
+                # Single-supervisor lock: if the installer is re-run while
+                # this boot-started supervisor is alive, the installer's own
+                # supervisor exits instead of double-launching (port clash).
+                printf '%s\n' "  exec 9>\"$WS_APPDATA/agent-supervisor.lock\" 2>/dev/null || exit 0"
+                printf '%s\n' "  flock -n 9 || exit 0"
+                printf '%s\n' "  while true; do"
+                printf '%s\n' "    _s=\$(date +%s)"
+                printf '%s\n' "    ./wolfstack --agent </dev/null >> \"$WS_APPDATA/wolfstack.log\" 2>&1"
+                printf '%s\n' "    _ec=\$?; _ran=\$(( \$(date +%s) - _s ))"
+                printf '%s\n' "    echo \"\$(date) wolfstack agent exited (code \$_ec) after \${_ran}s — restarting\" >> \"$WS_APPDATA/wolfstack.log\""
+                printf '%s\n' "    if [ \"\$_ran\" -lt 10 ]; then sleep 30; else sleep 3; fi"
+                printf '%s\n' "  done"
                 printf '%s\n' ") &"
                 printf '%s\n' "$GO_END"
             } >> "$GO_FILE"
@@ -304,11 +324,32 @@ if [ -f /etc/unraid-version ]; then
         fi
     fi
 
-    # Start the agent now (no reboot needed). nohup + background so it keeps
-    # running after this script (often curl|bash) exits.
-    echo "  Starting WolfStack agent..."
+    # Start the agent now (no reboot needed), SUPERVISED. Unraid has no
+    # systemd, so without a supervisor any later crash/OOM-kill leaves the
+    # node dead until the installer is re-run (klas, 2026-07-15). The loop
+    # restarts the agent and logs each exit code+runtime (the crash
+    # diagnostic). flock ensures exactly one supervisor even across a
+    # re-run or a boot-started supervisor.
+    echo "  Starting WolfStack agent (supervised)..."
+    # Stop the current agent ONLY (not any running supervisor): if a
+    # supervisor is already up it will relaunch the freshly-installed
+    # binary; if not, our new supervisor below takes over. Leave the
+    # supervisor's own shell loop alone so we don't orphan the lock.
+    pkill -f "wolfstack --agent" 2>/dev/null || true
+    sleep 1
     # </dev/null so the backgrounded agent never holds the curl|bash pipe open.
-    ( cd "$WS_APPDATA" && nohup ./wolfstack --agent </dev/null >> "$WS_APPDATA/wolfstack.log" 2>&1 & )
+    (
+        exec 9>"$WS_APPDATA/agent-supervisor.lock" 2>/dev/null || exit 0
+        flock -n 9 || exit 0   # a supervisor is already running — it took over above
+        cd "$WS_APPDATA" || exit 0
+        while true; do
+            _s=$(date +%s)
+            nohup ./wolfstack --agent </dev/null >> "$WS_APPDATA/wolfstack.log" 2>&1
+            _ec=$?; _ran=$(( $(date +%s) - _s ))
+            echo "$(date) wolfstack agent exited (code $_ec) after ${_ran}s — restarting" >> "$WS_APPDATA/wolfstack.log"
+            if [ "$_ran" -lt 10 ]; then sleep 30; else sleep 3; fi
+        done
+    ) &
     sleep 3
 
     # The whole point of an update is a RUNNING agent — verify it, don't
