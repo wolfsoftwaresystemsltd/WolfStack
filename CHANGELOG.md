@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.62: shared confirm dialog renders above ad-hoc modals (Rutger)** _(2026-07-15 — [`5bd5aa7c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5bd5aa7c33fe9ce347052852bee30ea5bb8fb9d8))_
 - **v25.2.61: Docker autostart survives image update — use name, not stale id (Paul)** _(2026-07-14 — [`2ebef92e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2ebef92e8b086381a26c4d016e858dde8b3ad38a))_
 - **v25.2.60: mobile action drawers for Docker/LXC/VM rows (klas)** _(2026-07-14 — [`32a66fd4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/32a66fd4439279f952119598af846560a317bf73))_
 - **v25.2.59: value-receipt sponsor card + icon-theme revert fix (Rutger)** _(2026-07-14 — [`eed3761b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/eed3761bc25a47d3c6ed25c1ceea26b285acfe27))_
