@@ -252,7 +252,7 @@ pub struct AppState {
     pub bootstrap_grants: Arc<crate::cluster_join::OneTimeTokens>,
     pub pbs_restore_progress: std::sync::Mutex<PbsRestoreProgress>,
     pub ai_agent: Arc<crate::ai::AiAgent>,
-    /// Pre-built agent status response, updated every 2s by background task
+    /// Pre-built agent status response, updated by the self-monitor loop (every 2s on a manager, 5s on an agent)
     pub cached_status: Arc<std::sync::RwLock<Option<serde_json::Value>>>,
     /// WolfRun orchestration state
     pub wolfrun: Arc<crate::wolfrun::WolfRunState>,
@@ -7174,7 +7174,7 @@ pub async fn local_publish(req: HttpRequest, state: web::Data<AppState>, body: w
 // ─── Agent API (server-to-server, no auth required) ───
 
 /// GET /api/agent/status — return this node's status (for remote polling)
-/// Uses pre-cached data from the 2-second background task for instant responses.
+/// Uses pre-cached data from the self-monitor loop (2s manager / 5s agent) for instant responses.
 pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_cluster_auth(&req, &state) { return e; }
 

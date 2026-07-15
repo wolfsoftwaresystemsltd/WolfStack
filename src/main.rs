@@ -1010,6 +1010,21 @@ async fn main() -> std::io::Result<()> {
         // from the previous WolfStack process. Kernel rules survive a
         // service restart; this keeps our in-memory state aligned.
         app_state.login_limiter.restore_persisted_lockouts();
+
+        // Agent nodes are lightweight cluster members — the MANAGER reads
+        // their container/VM/metrics lists on-demand via proxied API
+        // handlers, and runs all fleet aggregation + orchestration itself.
+        // So an agent has no reason to run the manager-weight background
+        // loops (daily report, fleet threshold monitor, AI health probe,
+        // scheduler orchestration…). On RAM-constrained hosts (Unraid) that
+        // redundant work drives the OOM kills klas reported. Gate the
+        // verified-manager-only loops off here. KEPT on agents: self-report
+        // (self-monitor), node polling (feeds the agent's own WolfNet
+        // self-heal), per-node security/SMART/predictive diagnostics (so the
+        // manager keeps fleet coverage of the node), and all networking
+        // self-heal. See the loop-by-loop audit, 2026-07-15.
+        let agent_mode = cli.agent;
+
         // Start the sshd/pvedaemon log monitor. Feeds the same limiter
         // so SSH and Proxmox brute-force attacks trigger the same
         // kernel-block + fleet propagation as WolfStack-UI attacks.
@@ -1422,7 +1437,11 @@ async fn main() -> std::io::Result<()> {
         // VM IPs and joining followers to the leader's cluster.
         // 30 s tick. No state shared with the rest of the daemon —
         // it operates entirely off /etc/wolfstack/pools.json.
-        tokio::spawn(crate::pools::orchestrator::run_loop());
+        // Manager-only: pool provisioning is orchestration an agent
+        // never drives (agent-mode memory reduction).
+        if !agent_mode {
+            tokio::spawn(crate::pools::orchestrator::run_loop());
+        }
 
         // HTTP-proxy edge reconciler — keeps DNS records (Cloudflare
         // and friends) in sync with peer-health observations. Runs
@@ -2084,9 +2103,15 @@ async fn main() -> std::io::Result<()> {
 
         let public_ip = public_ip.clone();
         let cached_status_bg = cached_status.clone();
+        // Agent nodes: relax the self-monitor cadence 2s→5s. This is the
+        // most frequent loop (collects sysinfo + docker/lxc/vm counts every
+        // tick), and the MANAGER only polls the agent every 10s, so 5s is
+        // still fresher than the consumer — cutting this loop's allocation
+        // rate ~2.5× on RAM-constrained agents (agent-mode reduction).
+        let self_monitor_secs = if agent_mode { 5 } else { 2 };
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(self_monitor_secs)).await;
                 // Run all blocking sysinfo/subprocess work off the async runtime
                 let sc = state_clone.clone();
                 let (metrics, components, docker_count, lxc_count, vm_count, compose_count, has_docker, has_lxc, has_kvm) =
@@ -2391,8 +2416,11 @@ async fn main() -> std::io::Result<()> {
         services_discovery::restore_cache();
 
         // Background: cluster browser session reconciliation (every 60s)
-        // — prunes ghost sessions whose container died.
-        tokio::spawn(cluster_browser::run_reconcile_loop());
+        // — prunes ghost sessions whose container died. Manager-only:
+        // browser sessions are a manager-UI feature (agent-mode reduction).
+        if !agent_mode {
+            tokio::spawn(cluster_browser::run_reconcile_loop());
+        }
 
         // Background: Internet Exposure — refresh each exposed workload's
         // upstream so its public URL keeps working after the workload
@@ -2650,6 +2678,9 @@ async fn main() -> std::io::Result<()> {
         {
             let int_state = app_state.integrations.clone();
             tokio::spawn(async move {
+                // Manager-only: integration health is a manager feature
+                // (agent-mode reduction).
+                if agent_mode { return; }
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 loop {
                     int_state.check_all_health().await;
@@ -2664,6 +2695,12 @@ async fn main() -> std::io::Result<()> {
         let scan_cluster = cluster.clone();
         let scan_secret = cluster_secret.clone();
         tokio::spawn(async move {
+            // Manager-only: fleet-wide issue scan + daily email report is
+            // pure aggregation the manager runs over every node (which it
+            // scans on-demand via each node's /api/issues/scan). An agent
+            // running it just re-polls the fleet redundantly — the single
+            // biggest agent-mode memory saving (agent-mode reduction).
+            if agent_mode { return; }
             // Wait 60 seconds after startup before first check
             tokio::time::sleep(Duration::from_secs(60)).await;
             let mut last_daily_date = String::new();
@@ -3252,6 +3289,9 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
         let ai_state = app_state.clone();
         let ai_agent_bg = ai_agent.clone();
         tokio::spawn(async move {
+            // Manager-only: the periodic LLM health probe is a manager
+            // feature (agent-mode reduction).
+            if agent_mode { return; }
             // Wait 30 seconds after startup before first check
             tokio::time::sleep(Duration::from_secs(30)).await;
             loop {
@@ -3352,6 +3392,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             .build()
             .unwrap_or_default();
         tokio::spawn(async move {
+            // Manager-only: the threshold monitor iterates ALL cluster
+            // nodes and alerts; the manager runs its own copy, so an agent
+            // doing it too is redundant (and would double-alert). Gate off
+            // in agent mode (agent-mode reduction).
+            if agent_mode { return; }
             // Wait 90 seconds after startup before first check (let metrics stabilise)
             tokio::time::sleep(Duration::from_secs(90)).await;
 
@@ -4009,7 +4054,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
 
         // Determine web directory
         let web_dir = find_web_dir();
-        let agent_mode = cli.agent;
+        // `agent_mode` already bound above (near the background-task gates).
         if agent_mode {
             info!("  ⚙ Agent-only mode — management SPA disabled, cluster API only");
             info!("    Manage this node from the master server's UI (Add Node).");
