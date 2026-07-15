@@ -3133,6 +3133,19 @@ body.sidebar-collapsed #task-log-footer {
     transition: var(--transition);
 }
 
+/* The shared confirm/prompt dialog (wolfConfirm / wolfPrompt) must sit
+   ABOVE ad-hoc content modals — those are created inline at z-index
+   9999–10001, but the base .modal-overlay is only 200, so a confirm
+   raised from inside a modal (e.g. image-update policy → "Update now")
+   rendered BEHIND it: its backdrop dimmed the screen but the dialog was
+   hidden, only reachable by cancelling the modal in front (Rutger,
+   2026-07-14). 100000 matches the other confirm dialogs
+   (showDangerConfirm/showConfirm/showPrompt); stays below the fixed
+   connection/cluster-block banners (2147483644+) which must always show. */
+#wolf-dialog-modal {
+    z-index: 100000;
+}
+
 .modal-overlay.active {
     opacity: 1;
     pointer-events: all;
