@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.67: auto-heal PBS-in-LXC /run ownership loss on every reboot (wabil)** _(2026-07-16 — [`59ad1068`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/59ad106894ea99221dc11ba9f6af9634bf1949eb))_
 - **v25.2.66: agent mode skips manager-only background loops (klas Unraid OOM)** _(2026-07-15 — [`d5ef8f33`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d5ef8f33b49e41f2e5955489a1517f615c65955e))_
 - **v25.2.65: VM host readiness preflight — one-click install of swtpm/OVMF/qemu (masterpier)** _(2026-07-15 — [`3fd9053a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3fd9053ab000cfc46fdc5dc3f95acccf1ccd84ca))_
 - **v25.2.64: fix monitor Recent Checks showing 21/01/1970 (Rutger)** _(2026-07-15 — [`7b062b4b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7b062b4be1be4dab27b8076be5bcbf3c5e30ff34))_
