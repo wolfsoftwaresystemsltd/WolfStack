@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.69: agent mode caps HTTP workers + skips tenant poll (klas Unraid RSS)** _(2026-07-16 — [`67bcfcc1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/67bcfcc165bfd888dac95aa23f5a48627e5bec7b))_
 - **v25.2.68: agent mode skips WolfHost customer portal (klas Unraid startup error)** _(2026-07-16 — [`af734485`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af73448514c3a0ec23a8a88f56f1bd62d38c3802))_
 - **v25.2.67: auto-heal PBS-in-LXC /run ownership loss on every reboot (wabil)** _(2026-07-16 — [`59ad1068`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/59ad106894ea99221dc11ba9f6af9634bf1949eb))_
 - **v25.2.66: agent mode skips manager-only background loops (klas Unraid OOM)** _(2026-07-15 — [`d5ef8f33`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d5ef8f33b49e41f2e5955489a1517f615c65955e))_
