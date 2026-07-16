@@ -1432,6 +1432,19 @@ async fn main() -> std::io::Result<()> {
             tokio::spawn(predictive::orchestrator::run_loop(p, a, m, mon, n));
         }
 
+        // One-shot PBS runtime-dir self-heal. Ensures every running PBS
+        // LXC has the persistent /run/proxmox-backup ownership fix so it
+        // stops losing the web GUI + backups on every reboot (wabil).
+        // Idempotent + PBS-only; runs off the bind path (post-startup
+        // delay) per the masterpier lesson. One-shot is enough — the
+        // installed tmpfiles.d drop-in persists across reboots.
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(45)).await;
+            let _ = tokio::task::spawn_blocking(
+                predictive::container_boot::ensure_pbs_runtime_dir_persistence,
+            ).await;
+        });
+
         // WolfStack Pools orchestrator — drives in-flight pools
         // (`provisioning` → `leader_up` → `live`) by polling backend
         // VM IPs and joining followers to the leader's cluster.
