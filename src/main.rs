@@ -4098,7 +4098,16 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
         let wolfhost_state = wolfhost::build_state(wolfhost_cfg).await;
         let wolfhost_data = web::Data::new(wolfhost_state.clone());
         let wolfhost_data2 = wolfhost_data.clone();
-        wolfhost::spawn_portal(wolfhost_state.clone(), wolfhost_portal_port, wolfhost_portal_dir).await;
+        // The portal is manager-only: agent nodes have no web assets and
+        // must not bind a public customer-facing port (klas 2026-07-16:
+        // Unraid agent logged "Specified path is not a directory:
+        // web/wolfhost-portal" and grabbed 0.0.0.0:8443). Same gating
+        // rationale as the v25.2.66 agent-mode background-loop reduction.
+        if agent_mode {
+            info!("  ⚙ Agent mode — WolfHost customer portal not started (manager-only)");
+        } else {
+            wolfhost::spawn_portal(wolfhost_state.clone(), wolfhost_portal_port, wolfhost_portal_dir).await;
+        }
 
         // Try to load TLS config using OpenSSL — fall back to HTTP if anything goes wrong
         let ssl_builder = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
