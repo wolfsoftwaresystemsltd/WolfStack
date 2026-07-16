@@ -2,24 +2,40 @@
 // (C)Copyright Wolf Software Systems Ltd
 // https://wolf.uk.com
 
-//! Outbound scan detection — would have caught the zmap incident at
-//! minute 1 instead of waiting for Hetzner's abuse mail.
+//! Outbound scan detection — catches a host being used to scan others
+//! before the provider's abuse desk does.
 //!
-//! ## How it works
+//! ## Two detection paths (they cover different scanners)
 //!
-//! Every 30s we sample `/proc/net/tcp` and `/proc/net/tcp6` for
-//! sockets in SYN_SENT state. Each row gives us a (local_pid via
-//! `inode→pid` mapping, remote_addr) pair. We count distinct remote
-//! addresses per local-process across a rolling 60s window. Above
-//! `threshold_destinations` distinct destinations in the window =
-//! suspect scanner, alert + auto-action.
+//! **1. SYN_SENT cardinality (connect()-based scanners).**
+//! Every sample we read `/proc/net/tcp` and `/proc/net/tcp6` for sockets
+//! in SYN_SENT state. Each row gives a (local_pid via `inode→pid`,
+//! remote_addr) pair. We count distinct remote addresses per process
+//! across a rolling window; above `threshold_destinations` = suspect.
+//! This catches scanners that use the *kernel TCP stack*: `nmap -sT`,
+//! Python-`socket.connect()` scanners, most application-level fan-out.
 //!
-//! ## Why /proc/net/tcp not eBPF
+//! **2. Raw / packet socket holders (stateless scanners).**
+//! `zmap`, `masscan`, and `nmap -sS` (as root) do NOT use the kernel TCP
+//! stack — they craft raw SYN packets and send them via an `AF_PACKET`
+//! or `SOCK_RAW` socket, reading replies with libpcap. They therefore
+//! create **zero SYN_SENT entries**, and path #1 is structurally blind
+//! to them. (This is the real reason the July 2026 `mouse` zmap run was
+//! never caught in-flight — the detector as originally written could not
+//! see it, despite a comment here once claiming it would.) Path #2 closes
+//! that gap: we enumerate processes holding an `AF_PACKET`/`SOCK_RAW`
+//! socket (`/proc/net/packet`, `/proc/net/raw[6]`, joined via the same
+//! `inode→pid` map), and flag any that is not allowlisted and persists
+//! for `raw_socket_min_samples` consecutive samples. The persistence gate
+//! + allowlist (dhclient, tcpdump, ping, keepalived, …) keep brief/benign
+//! raw-socket users from being actioned.
 //!
-//! eBPF would be more accurate but requires kernel headers, BCC, and
-//! root privileges WolfStack already has but operators on minimal
-//! Hetzner installs may have other dependencies missing. /proc/net/
-//! is universal — exists on every Linux kernel since 2.0.
+//! ## Why /proc not eBPF
+//!
+//! eBPF would be more accurate but requires kernel headers/BCC that
+//! minimal installs may lack. Everything here reads `/proc/net/*`, which
+//! exists on every Linux kernel since 2.0 — including the AF_PACKET and
+//! raw-socket tables path #2 relies on.
 //!
 //! ## What we do on detection
 //!
@@ -75,6 +91,20 @@ pub struct ScanDetectorConfig {
     /// What to do on detection. "alert_only" | "kill_and_block" (default).
     #[serde(default = "default_action")]
     pub action: String,
+    /// Also detect raw / AF_PACKET socket holders (zmap, masscan,
+    /// `nmap -sS`) that path #1's SYN_SENT sampling is structurally blind
+    /// to. Default on — it is the whole reason the `mouse` zmap run went
+    /// undetected. Legit raw-socket users are covered by the allowlist +
+    /// the persistence gate below.
+    #[serde(default = "default_detect_raw")]
+    pub detect_raw_sockets: bool,
+    /// A non-allowlisted process must hold a raw/packet socket for this
+    /// many CONSECUTIVE samples before it is actioned. Guards against
+    /// killing a brief legitimate raw-socket user (a one-off `ping`, a
+    /// short `tcpdump`). Default 2 = the socket must persist across two
+    /// samples (~one sample interval of dwell).
+    #[serde(default = "default_raw_min_samples")]
+    pub raw_socket_min_samples: usize,
 }
 
 // v23.12.3: default OFF. v23.10.0–v23.12.2 shipped this enabled-by-
@@ -95,6 +125,8 @@ fn default_threshold() -> usize { 50 }
 fn default_window() -> u64 { 60 }
 fn default_sample() -> u64 { 15 }
 fn default_action() -> String { "kill_and_block".into() }
+fn default_detect_raw() -> bool { true }
+fn default_raw_min_samples() -> usize { 2 }
 fn default_allowlist() -> Vec<String> {
     let mut v: Vec<String> = vec![
         "apt".into(), "apt-get".into(), "dpkg".into(), "unattended-upgr".into(),
@@ -107,6 +139,14 @@ fn default_allowlist() -> Vec<String> {
         "chronyd".into(), "systemd-resolve".into(), "systemd-network".into(),
         "tailscaled".into(), "tailscale".into(), "wg-quick".into(),
         "node_exporter".into(), "prometheus".into(),
+        // Legit AF_PACKET / SOCK_RAW holders — these hold raw sockets by
+        // design and must not trip the raw-socket path (#2). Diagnostics
+        // (tcpdump/ping/mtr) are usually brief and would clear the
+        // persistence gate anyway, but allowlisting them removes any doubt.
+        "tcpdump".into(), "tshark".into(), "dumpcap".into(), "wireshark".into(),
+        "ping".into(), "ping6".into(), "fping".into(), "arping".into(),
+        "mtr".into(), "mtr-packet".into(), "traceroute".into(),
+        "avahi-daemon".into(),
     ];
     // Also surface the essential-safety set in the editable allowlist
     // so operators see (and can audit) what's protected. The
@@ -202,6 +242,9 @@ pub const ESSENTIAL_SAFETY_COMMS: &[&str] = &[
     "bird", "bird6",
     // VPN tunnels
     "openvpn", "strongswan", "charon", "pluto", "wg-quick",
+    // VRRP / HA — holds a raw socket for VRRP advertisements; killing it
+    // triggers a VIP failover (or split-brain) across the cluster.
+    "keepalived", "vrrpd",
 
     // ── Core OS daemons (kill = host unreachable / unbootable) ───
     "systemd",   // PID 1 is already protected, but defence in depth
@@ -215,8 +258,11 @@ pub const ESSENTIAL_SAFETY_COMMS: &[&str] = &[
     "udevadm",
 
     // ── DNS / DHCP (kill = network goes dark) ────────────────────
+    // DHCP clients hold an AF_PACKET socket for the lease handshake —
+    // essential-safety (not just allowlist) so the raw-socket path can
+    // never kill one and strand the host at lease-renewal time.
     "dnsmasq", "named", "unbound", "bind9", "kresd", "knot",
-    "dhclient", "dhcpd", "dhcrelay",
+    "dhclient", "dhcpcd", "dhcpd", "dhcrelay",
 
     // ── Time sync (kill = clock drift breaks auth, TLS, kerberos) ─
     "chronyd", "ntpd",
@@ -245,6 +291,8 @@ impl Default for ScanDetectorConfig {
             allowlist_comms: default_allowlist(),
             allowlist_uids: Vec::new(),
             action: default_action(),
+            detect_raw_sockets: default_detect_raw(),
+            raw_socket_min_samples: default_raw_min_samples(),
         }
     }
 }
@@ -280,6 +328,11 @@ pub struct DetectionEvent {
     pub window_seconds: u64,
     pub sample_destinations: Vec<String>,
     pub action_taken: String,
+    /// Which detection path fired: "syn_sent" (path #1, connect()-based
+    /// scanners) or "raw_packet_socket" (path #2, zmap/masscan/nmap -sS).
+    /// The event ring is serialise-only (out to the UI), never read back,
+    /// so no serde default is needed.
+    pub reason: String,
 }
 
 const EVENTS_MAX: usize = 200;
@@ -290,6 +343,10 @@ struct Inner {
     samples: HashMap<i32, Vec<(Instant, String)>>,
     /// PIDs we've already actioned (don't repeat-action).
     actioned: HashMap<i32, Instant>,
+    /// Path #2: per-PID count of CONSECUTIVE samples the process has held
+    /// a raw/packet socket. Reset to 0 the moment it no longer holds one,
+    /// so a brief holder never accumulates toward the threshold.
+    raw_holders: HashMap<i32, usize>,
     events: std::collections::VecDeque<DetectionEvent>,
 }
 
@@ -395,8 +452,10 @@ impl ScanDetector {
             let distinct: HashSet<String> = entries.iter().map(|(_, d)| d.clone()).collect();
             if distinct.len() < cfg.threshold_destinations { continue; }
             // Already actioned recently? Skip.
-            if let Some(when) = recently_actioned.get(pid) {
-                if now.duration_since(*when) < Duration::from_secs(300) { continue; }
+            if recently_actioned.get(pid)
+                .is_some_and(|when| now.duration_since(*when) < Duration::from_secs(300))
+            {
+                continue;
             }
             let comm = read_comm(*pid).unwrap_or_else(|| "?".into());
             // Essential-safety list checked BEFORE the operator allowlist.
@@ -419,63 +478,134 @@ impl ScanDetector {
             to_action.push((*pid, comm, uid, distinct.clone()));
         }
         for (pid, comm, uid, dests) in to_action {
-            let action_taken = self.take_action(pid, &comm, uid, cfg);
             let sample_dests: Vec<String> = dests.iter().take(20).cloned().collect();
-            let event = DetectionEvent {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-                pid,
-                comm: comm.clone(),
-                uid,
-                distinct_destinations: dests.len(),
-                window_seconds: cfg.window_seconds,
-                sample_destinations: sample_dests,
-                action_taken: action_taken.clone(),
-            };
-            inner.actioned.insert(pid, now);
-            if inner.events.len() >= EVENTS_MAX { inner.events.pop_front(); }
-            inner.events.push_back(event.clone());
-            tracing::error!(
-                "scan-detect: PID {} ({}, uid {}) made {} distinct outbound connections in {}s — action: {}",
-                pid, comm, uid, dests.len(), cfg.window_seconds, action_taken
+            let detail = format!(
+                "{} distinct outbound destinations in {}s",
+                dests.len(), cfg.window_seconds
             );
-            // Operator alert out-of-band. Cluster + hostname stamped
-            // by the alert hook. Sample destinations included so the
-            // operator can immediately see if it's a scanner pattern
-            // (random IPs across many /8s) vs a noisy app (lots of
-            // connections all to one CDN).
-            let hook = self.alert_hook.read().unwrap().clone();
-            if let Some(h) = hook {
-                let title = format!("🚨 Outbound scan detected: PID {} ({})", pid, comm);
-                let dests_preview = event.sample_destinations.iter()
-                    .take(15)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let body = format!(
-                    "A process on this host hit the outbound-scan threshold:\n\n\
-                     PID:      {}\n\
-                     comm:     {}\n\
-                     UID:      {}\n\
-                     Distinct destinations: {} in {} seconds\n\
-                     Action taken: {}\n\n\
-                     Sample destinations: {}\n\n\
-                     This is the same fingerprint that triggered the recent Hetzner abuse mail. \
-                     If the process was legitimate (a bulk apt upgrade, etc.) add its comm name \
-                     to the scan-detector allowlist on the Fleet Security page.",
-                    pid, comm, uid,
-                    event.distinct_destinations, event.window_seconds,
-                    action_taken,
-                    if dests_preview.is_empty() { "(none captured)".into() } else { dests_preview },
-                );
-                h(title, body);
-            }
+            self.emit_detection(
+                &mut inner, now, cfg, pid, &comm, uid,
+                "syn_sent", &detail, dests.len(), sample_dests,
+            );
         }
+
+        // ── Path #2: raw / AF_PACKET socket holders (zmap/masscan/nmap -sS) ──
+        // These never appear in the SYN_SENT table above. A non-allowlisted
+        // process holding such a socket across `raw_socket_min_samples`
+        // consecutive samples is actioned. The consecutive-count lives in
+        // `inner.raw_holders` and is reset the moment the socket goes away.
+        if cfg.detect_raw_sockets {
+            let raw_pids = sample_raw_socket_pids(&inode_to_pid);
+            // Bump counts for current holders; anyone not currently holding
+            // a raw socket drops out (map rebuilt from current holders only).
+            inner.raw_holders = update_raw_holder_counts(&inner.raw_holders, &raw_pids);
+            let min_samples = cfg.raw_socket_min_samples.max(1);
+            let raw_to_action: Vec<(i32, usize)> = inner.raw_holders.iter()
+                .filter(|(_, c)| **c >= min_samples)
+                .map(|(p, c)| (*p, *c))
+                .collect();
+            for (pid, count) in raw_to_action {
+                // Skip if actioned recently — checked against the LIVE
+                // `actioned` map, not the pre-tick snapshot, so a PID that
+                // path #1 already killed/alerted THIS tick isn't actioned a
+                // second time here (which would double-kill, insert a
+                // duplicate iptables rule, and log a duplicate event).
+                if inner.actioned.get(&pid)
+                    .is_some_and(|when| now.duration_since(*when) < Duration::from_secs(300))
+                {
+                    continue;
+                }
+                let comm = read_comm(pid).unwrap_or_else(|| "?".into());
+                if essential.contains(comm.as_str()) {
+                    tracing::debug!(
+                        "scan-detect: PID {} ({}) holds a raw socket but is on the essential-safety list — skipping",
+                        pid, comm
+                    );
+                    continue;
+                }
+                if allowlist.contains(comm.as_str()) { continue; }
+                let uid = read_uid(pid).unwrap_or(0);
+                if cfg.allowlist_uids.contains(&uid) { continue; }
+                let detail = format!(
+                    "held an AF_PACKET/SOCK_RAW socket for {} consecutive samples \
+                     (raw-packet scanner class — zmap / masscan / nmap -sS)",
+                    count
+                );
+                self.emit_detection(
+                    &mut inner, now, cfg, pid, &comm, uid,
+                    "raw_packet_socket", &detail, 0, Vec::new(),
+                );
+            }
+        } else {
+            // Raw path disabled — drop any stale per-PID counters so a
+            // re-enable starts from a clean slate.
+            inner.raw_holders.clear();
+        }
+
         // Garbage-collect actioned entries older than 1h.
         inner.actioned.retain(|_, t| now.duration_since(*t) < Duration::from_secs(3600));
         inner.samples.retain(|_, entries| !entries.is_empty());
+    }
+
+    /// Record a detection: take the configured action, append a bounded
+    /// event, log, and fire the operator alert. Shared by both detection
+    /// paths so the SYN_SENT and raw-socket branches stay consistent.
+    /// `detail` is a human phrase describing why it fired; `reason` is the
+    /// machine tag ("syn_sent" | "raw_packet_socket").
+    #[allow(clippy::too_many_arguments)]
+    fn emit_detection(
+        &self, inner: &mut Inner, now: Instant, cfg: &ScanDetectorConfig,
+        pid: i32, comm: &str, uid: u32, reason: &str, detail: &str,
+        distinct_destinations: usize, sample_destinations: Vec<String>,
+    ) {
+        let action_taken = self.take_action(pid, comm, uid, cfg);
+        let event = DetectionEvent {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            pid,
+            comm: comm.to_string(),
+            uid,
+            distinct_destinations,
+            window_seconds: cfg.window_seconds,
+            sample_destinations: sample_destinations.into_iter().take(20).collect(),
+            action_taken: action_taken.clone(),
+            reason: reason.to_string(),
+        };
+        inner.actioned.insert(pid, now);
+        if inner.events.len() >= EVENTS_MAX { inner.events.pop_front(); }
+        let sample_preview = event.sample_destinations.iter()
+            .take(15).cloned().collect::<Vec<_>>().join(", ");
+        inner.events.push_back(event);
+        tracing::error!(
+            "scan-detect [{}]: PID {} ({}, uid {}) — {} — action: {}",
+            reason, pid, comm, uid, detail, action_taken
+        );
+        // Operator alert out-of-band. Cluster + hostname stamped by the hook.
+        let hook = self.alert_hook.read().unwrap().clone();
+        if let Some(h) = hook {
+            let title = format!("🚨 Outbound scan detected ({}): PID {} ({})", reason, pid, comm);
+            let dests_line = if sample_preview.is_empty() {
+                "Sample destinations: (none — raw-socket senders bypass per-connection tracking)".to_string()
+            } else {
+                format!("Sample destinations: {}", sample_preview)
+            };
+            let body = format!(
+                "A process on this host tripped the outbound-scan detector.\n\n\
+                 PID:       {}\n\
+                 comm:      {}\n\
+                 UID:       {}\n\
+                 Detection: {}\n\
+                 Detail:    {}\n\
+                 Action taken: {}\n\n\
+                 {}\n\n\
+                 If this process is legitimate, add its comm name to the \
+                 scan-detector allowlist on the Fleet Security page.",
+                pid, comm, uid, reason, detail, action_taken, dests_line,
+            );
+            h(title, body);
+        }
     }
 
     /// Apply the configured action. Returns a human-readable description.
@@ -546,6 +676,62 @@ fn build_inode_pid_map() -> HashMap<u64, i32> {
         }
     }
     map
+}
+
+/// Enumerate PIDs holding an `AF_PACKET` or `SOCK_RAW` socket, via
+/// `/proc/net/packet`, `/proc/net/raw` and `/proc/net/raw6`, joined
+/// through the inode→pid map. These are the socket types zmap / masscan /
+/// `nmap -sS` use to send hand-crafted probes outside the kernel TCP
+/// stack — which is exactly why they never show up in the SYN_SENT table
+/// that `parse_syn_sent` reads.
+/// Advance the raw-socket persistence counters by one sample. Each PID
+/// currently holding a raw/packet socket has its consecutive-sample count
+/// incremented; a PID that dropped its socket is absent from `current` and
+/// therefore vanishes from the returned map — i.e. its count resets to 0.
+/// Pure (no I/O) so the gate transition logic is unit-testable without
+/// touching /proc. Returned map is rebuilt from `current` only, so it is
+/// bounded by the number of live raw-socket holders.
+fn update_raw_holder_counts(
+    prev: &HashMap<i32, usize>,
+    current: &HashSet<i32>,
+) -> HashMap<i32, usize> {
+    let mut next = HashMap::with_capacity(current.len());
+    for pid in current {
+        next.insert(*pid, prev.get(pid).copied().unwrap_or(0) + 1);
+    }
+    next
+}
+
+fn sample_raw_socket_pids(inode_to_pid: &HashMap<u64, i32>) -> HashSet<i32> {
+    let mut pids = HashSet::new();
+    // /proc/net/packet — AF_PACKET sockets. Columns:
+    //   sk RefCnt Type Proto Iface R Rmem User Inode
+    // Inode is the LAST whitespace-separated column.
+    if let Ok(content) = std::fs::read_to_string("/proc/net/packet") {
+        for (i, line) in content.lines().enumerate() {
+            if i == 0 { continue; } // header
+            if let Some(inode_str) = line.split_whitespace().last() {
+                if let Ok(inode) = inode_str.parse::<u64>() {
+                    if let Some(&pid) = inode_to_pid.get(&inode) { pids.insert(pid); }
+                }
+            }
+        }
+    }
+    // /proc/net/raw[6] — SOCK_RAW IP sockets. Same column layout as
+    // /proc/net/tcp: inode is column index 9.
+    for path in ["/proc/net/raw", "/proc/net/raw6"] {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for (i, line) in content.lines().enumerate() {
+                if i == 0 { continue; }
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 10 { continue; }
+                if let Ok(inode) = cols[9].parse::<u64>() {
+                    if let Some(&pid) = inode_to_pid.get(&inode) { pids.insert(pid); }
+                }
+            }
+        }
+    }
+    pids
 }
 
 /// Parse /proc/net/tcp[6] for SYN_SENT (state=02) sockets. Returns
@@ -779,5 +965,89 @@ mod tests {
         assert!(cfg.allowlist_uids.is_empty(),
             "missing allowlist_uids field must default to empty Vec");
         assert_eq!(cfg.threshold_destinations, 50);
+        // Configs predating the raw-socket path must still enable it by
+        // default on load — otherwise an upgrade silently leaves the
+        // zmap/masscan blind spot open on every existing install.
+        assert!(cfg.detect_raw_sockets,
+            "missing detect_raw_sockets must default to true (closes the raw-scanner blind spot on upgrade)");
+        assert_eq!(cfg.raw_socket_min_samples, 2,
+            "missing raw_socket_min_samples must default to 2");
+    }
+
+    #[test]
+    fn raw_socket_detection_defaults_on() {
+        let cfg = ScanDetectorConfig::default();
+        assert!(cfg.detect_raw_sockets, "raw-socket detection must be on by default");
+        assert!(cfg.raw_socket_min_samples >= 1, "min samples must be at least 1");
+    }
+
+    /// The raw-socket path must honour the same essential-safety guarantee
+    /// as the SYN_SENT path — keepalived (VRRP) holds a raw socket by
+    /// design and killing it fails a cluster VIP over.
+    #[test]
+    fn essential_safety_covers_raw_socket_holders() {
+        let essential: HashSet<&str> = ESSENTIAL_SAFETY_COMMS.iter().copied().collect();
+        assert!(essential.contains("keepalived"),
+            "keepalived holds a raw VRRP socket — must be essential-safety protected");
+        // DHCP clients (AF_PACKET for the lease handshake) — both dhclient
+        // and dhcpcd must be essential-safety, not merely allowlisted.
+        assert!(essential.contains("dhclient"),
+            "dhclient holds an AF_PACKET socket — must be essential-safety protected");
+        assert!(essential.contains("dhcpcd"),
+            "dhcpcd holds an AF_PACKET socket — must be essential-safety protected");
+    }
+
+    #[test]
+    fn raw_holder_counts_increment_and_reset() {
+        let prev = HashMap::new();
+        // Two holders appear → each at count 1.
+        let s1: HashSet<i32> = [10, 20].into_iter().collect();
+        let c1 = update_raw_holder_counts(&prev, &s1);
+        assert_eq!(c1.get(&10), Some(&1));
+        assert_eq!(c1.get(&20), Some(&1));
+        // 10 persists (→2), 20 drops its socket (absent → reset).
+        let s2: HashSet<i32> = [10].into_iter().collect();
+        let c2 = update_raw_holder_counts(&c1, &s2);
+        assert_eq!(c2.get(&10), Some(&2), "persistent holder must accumulate");
+        assert!(!c2.contains_key(&20), "a holder that dropped its socket must reset (absent)");
+        // 10 keeps holding → 3; a fresh PID 30 starts at 1.
+        let s3: HashSet<i32> = [10, 30].into_iter().collect();
+        let c3 = update_raw_holder_counts(&c2, &s3);
+        assert_eq!(c3.get(&10), Some(&3));
+        assert_eq!(c3.get(&30), Some(&1), "new holder starts at 1");
+        // Everyone drops → empty map (bounded, no leak).
+        let empty: HashSet<i32> = HashSet::new();
+        assert!(update_raw_holder_counts(&c3, &empty).is_empty());
+    }
+
+    #[test]
+    fn allowlist_covers_common_raw_socket_tools() {
+        let cfg = ScanDetectorConfig::default();
+        for tool in &["tcpdump", "ping", "mtr", "traceroute"] {
+            assert!(cfg.allowlist_comms.contains(&tool.to_string()),
+                "{tool} is a legitimate raw-socket user and must be allowlisted");
+        }
+    }
+
+    #[test]
+    fn sample_raw_socket_pids_reads_live_proc() {
+        // Smoke test against the real /proc — must not panic and returns a
+        // set (typically non-empty on a real host: dhclient / systemd-*).
+        let inode_to_pid = build_inode_pid_map();
+        let _pids = sample_raw_socket_pids(&inode_to_pid);
+        // No assertion on contents (host-dependent) — the contract under
+        // test is "parses live /proc without panicking".
+    }
+
+    #[test]
+    fn detection_event_reason_serialises() {
+        let ev = DetectionEvent {
+            timestamp: 0, pid: 42, comm: "zmap".into(), uid: 0,
+            distinct_destinations: 0, window_seconds: 60,
+            sample_destinations: vec![], action_taken: "alert only".into(),
+            reason: "raw_packet_socket".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("raw_packet_socket"), "reason must serialise into the event");
     }
 }
