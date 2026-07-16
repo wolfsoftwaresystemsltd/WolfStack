@@ -813,13 +813,26 @@ pub async fn security_kernel_block_ip(
     // (loaded / hardcoded / on-disk) OR an authenticated session.
     // Rolling our own check here meant peers running with a custom
     // cluster secret (the standard production setup) were rejected.
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(e) => return e };
     let body = body.into_inner();
     let source = if body.source_node.is_empty() {
         "operator".to_string()
     } else {
         body.source_node.clone()
     };
+    // An OPERATOR-initiated block overrides the sticky 30-day peer
+    // protection: lift it first so the block lands on a removed/untrusted
+    // ex-peer. LIVE cluster members re-enter the protected set on the next
+    // sync tick, so nodes still can't block each other. The decision keys
+    // off the AUTHENTICATED identity, never the client-supplied
+    // source_node field: require_auth returns the session username for a
+    // dashboard operator, "cluster-node" for a secret-holding peer, and
+    // "apikey:…" for automation — a rogue peer or leaked key must not be
+    // able to strip a manager's ban protection and then block it.
+    if actor != "cluster-node" && !actor.starts_with("apikey:") {
+        let pip = body.ip.clone();
+        let _ = web::block(move || crate::auth::forget_known_peer_ip(&pip)).await;
+    }
     state.login_limiter.add_propagated_lockout(&body.ip, body.lockout_seconds, &source);
     HttpResponse::Ok().json(serde_json::json!({
         "ok": true,
@@ -3610,7 +3623,33 @@ pub async fn cluster_join_handshake(
         }
     }
 
-    // 4) Audit + security alert — make a join loud. `admin_user` is
+    // 4) Protect the PROVEN manager from auto-bans before anything else in
+    //    the join flow can trip a detector: token + this node's admin creds
+    //    are both verified above, so the source is operator-controlled by
+    //    definition. Sticky (30 days, persisted) so the protection survives
+    //    this node falling back out of the cluster mid-join — the exact
+    //    window where stale-secret polling used to get the manager banned
+    //    and the re-add could never connect (klasSponsor 2026-07-16). Also
+    //    clear accumulated app-level failures (mistyped passwords during
+    //    this very add) — same as interactive login success — and heal any
+    //    leftover kernel ban. iptables is a sync subprocess → web::block.
+    if !peer_ip.is_empty() {
+        state.login_limiter.clear_with(&peer_ip, &admin_user);
+        let pip = peer_ip.clone();
+        if let Err(e) = web::block(move || {
+            crate::auth::record_known_peer_ip(&pip);
+            crate::auth::kernel_unblock_ip(&pip);
+        }).await {
+            // Best-effort side channel — the join itself proceeds, but the
+            // operator should be able to see the protection didn't land.
+            tracing::warn!(
+                "cluster-join: could not persist ban protection for manager {}: {}",
+                peer_ip, e
+            );
+        }
+    }
+
+    // 5) Audit + security alert — make a join loud. `admin_user` is
     //    guaranteed non-empty here (rejected above), so it is the actor.
     let actor = admin_user.clone();
     let target_cluster = if incoming.is_empty() { our_cluster.clone() } else { incoming.clone() };

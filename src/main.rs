@@ -1069,7 +1069,14 @@ async fn main() -> std::io::Result<()> {
                     let subnets_changed = crate::auth::set_protected_workload_subnets(
                         crate::networking::collect_workload_subnets(),
                     );
-                    let newly = crate::auth::set_protected_node_ips(cluster.wolfstack_node_ips());
+                    // set_protected_node_ips now also maintains the sticky
+                    // known-peer-ips.json store (file read each tick, write
+                    // at most daily) — off the executor like the iptables
+                    // work below.
+                    let node_ips = cluster.wolfstack_node_ips();
+                    let newly = tokio::task::spawn_blocking(move || {
+                        crate::auth::set_protected_node_ips(node_ips)
+                    }).await.unwrap_or_default();
                     // Heal pre-existing bad bans (the ones klas hit before this
                     // shipped). One-shot per newly-protected IP, plus a sweep of
                     // stale WolfStack-shaped DROP rules whenever a workload
