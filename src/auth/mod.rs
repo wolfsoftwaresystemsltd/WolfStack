@@ -1406,6 +1406,134 @@ fn protected_events() -> &'static RwLock<std::collections::VecDeque<ProtectedBlo
     PROTECTED_BLOCK_EVENTS.get_or_init(|| RwLock::new(std::collections::VecDeque::new()))
 }
 
+// ─── Sticky peer protection — persisted cluster-peer IPs ───
+//
+// The protected-node set is rebuilt every sync tick from LIVE cluster
+// membership, so the moment a node fell out of its cluster the manager's
+// IP lost ban protection — exactly when re-add auth churn (stale-secret
+// polls, mistyped admin passwords) makes an auto-ban most likely, and a
+// banned manager can't even reach the join handshake to recover
+// (klasSponsor 2026-07-16: Unraid agent's startup log showed healed bans
+// against both cluster LAN IPs). Persist every peer we've protected and
+// keep protecting it for 30 days after it was last seen in the cluster.
+// Same bounded-file pattern as known-admin-ips above.
+
+const KNOWN_PEER_IPS_MAX: usize = 128;
+const KNOWN_PEER_IP_TTL_SECS: u64 = 30 * 24 * 3600;
+// Refresh a stored peer's last-seen stamp at most daily: the cluster sync
+// loop calls set_protected_node_ips every 10s and must not rewrite
+// flash-backed config storage on every tick.
+const KNOWN_PEER_REFRESH_SECS: u64 = 24 * 3600;
+
+fn known_peer_ips_path() -> String {
+    format!("{}/known-peer-ips.json", crate::paths::get().config_dir)
+}
+
+/// An address worth protecting: parseable, not unspecified (would match
+/// far too much and must never be whitelisted), not loopback (never needs
+/// protection).
+fn valid_protectable_ip(s: &str) -> bool {
+    s.parse::<std::net::IpAddr>()
+        .map(|ip| !ip.is_unspecified() && !ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn load_known_peer_ips(now: u64) -> std::collections::BTreeMap<String, u64> {
+    let mut map: std::collections::BTreeMap<String, u64> =
+        std::fs::read_to_string(known_peer_ips_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    map.retain(|ip, ts| {
+        now.saturating_sub(*ts) < KNOWN_PEER_IP_TTL_SECS && valid_protectable_ip(ip)
+    });
+    map
+}
+
+fn save_known_peer_ips(map: &std::collections::BTreeMap<String, u64>) {
+    if let Ok(json) = serde_json::to_string_pretty(map) {
+        let _ = crate::paths::write_secure(&known_peer_ips_path(), &json);
+    }
+}
+
+fn evict_oldest_peers(map: &mut std::collections::BTreeMap<String, u64>) {
+    while map.len() > KNOWN_PEER_IPS_MAX {
+        match map.iter().min_by_key(|(_, ts)| **ts).map(|(k, _)| k.clone()) {
+            Some(oldest) => { map.remove(&oldest); }
+            None => break,
+        }
+    }
+}
+
+// Serializes read-modify-write of known-peer-ips.json between the cluster
+// sync loop, the join-handshake path, and the operator forget path. Never
+// held across an await — all users are plain sync fns.
+static PEER_IPS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Record a PROVEN cluster manager's source IP as a sticky protected peer
+/// and protect it in-memory immediately. Called from the join-handshake
+/// success path — the caller has verified the join token AND this node's
+/// admin credentials, so the source is operator-controlled by definition.
+/// The caller heals any existing kernel ban (`kernel_unblock_ip`) off the
+/// async executor.
+pub fn record_known_peer_ip(ip: &str) {
+    let canon = match ip.trim().parse::<std::net::IpAddr>() {
+        Ok(a) => a.to_canonical().to_string(),
+        Err(_) => return,
+    };
+    if !valid_protectable_ip(&canon) { return; }
+    // Hold PEER_IPS_LOCK across BOTH the persist and the in-memory insert:
+    // a concurrent set_protected_node_ips tick snapshots-then-overwrites
+    // the in-memory set, and an insert landing between its snapshot and
+    // its commit would be clobbered until the next tick — a 10s window of
+    // lost protection at the exact moment a join is in flight. Lock order
+    // is always PEER_IPS_LOCK → protected_ips().write(), never reversed.
+    {
+        let _guard = PEER_IPS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs();
+        let mut stored = load_known_peer_ips(now);
+        stored.insert(canon.clone(), now);
+        evict_oldest_peers(&mut stored);
+        save_known_peer_ips(&stored);
+        if let Ok(mut g) = protected_ips().write() {
+            g.insert(canon.clone());
+        }
+    }
+    tracing::info!(
+        "auth: protecting joining manager IP {} from auto-bans (join handshake verified)",
+        canon
+    );
+}
+
+/// Drop an IP from the sticky peer store AND the in-memory protected set —
+/// the operator explicitly wants this address blockable (e.g. a removed,
+/// now-untrusted ex-peer). A LIVE cluster member re-enters the protected
+/// set on the next sync tick, so this can never make nodes block each
+/// other; it only lifts the 30-day stickiness. Callers must ensure the
+/// request is operator-initiated, NOT propagated (a peer's bad ban must
+/// not strip protection fleet-wide).
+pub fn forget_known_peer_ip(ip: &str) {
+    let canon = match ip.trim().parse::<std::net::IpAddr>() {
+        Ok(a) => a.to_canonical().to_string(),
+        Err(_) => return,
+    };
+    // Same lock scope as record_known_peer_ip — see the comment there.
+    {
+        let _guard = PEER_IPS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs();
+        let mut stored = load_known_peer_ips(now);
+        if stored.remove(&canon).is_none() { return; }
+        save_known_peer_ips(&stored);
+        if let Ok(mut g) = protected_ips().write() {
+            g.remove(&canon);
+        }
+    }
+    tracing::info!(
+        "auth: operator lifted sticky peer protection for {} (block will apply unless it is a live cluster member)",
+        canon
+    );
+}
+
 /// Replace the set of cluster-node IPs that must never be kernel-blocked.
 /// Returns the IPs that are NEWLY protected since the last call, so the caller
 /// can heal any pre-existing bad ban (a one-shot unblock per IP) without
@@ -1413,19 +1541,45 @@ fn protected_events() -> &'static RwLock<std::collections::VecDeque<ProtectedBlo
 /// (e.g. a node still reporting 0.0.0.0) are dropped — they'd match far too
 /// much and must never be whitelisted.
 pub fn set_protected_node_ips(ips: Vec<String>) -> Vec<String> {
-    let set: std::collections::HashSet<String> = ips.into_iter()
-        .filter(|s| {
-            s.parse::<std::net::IpAddr>()
-                .map(|ip| !ip.is_unspecified() && !ip.is_loopback())
-                .unwrap_or(false)
-        })
+    let live: std::collections::HashSet<String> = ips.into_iter()
+        .filter(|s| valid_protectable_ip(s))
         .collect();
+    // Sticky protection: union live membership with every peer seen in the
+    // last 30 days (see the known-peer section above) so a node that falls
+    // out of its cluster keeps protecting its manager/peers while the
+    // operator re-adds it. Live members refresh their stored last-seen at
+    // most daily to bound file writes.
+    let mut set = live.clone();
     let mut newly = Vec::new();
-    if let Ok(mut g) = protected_ips().write() {
-        for ip in &set {
-            if !g.contains(ip) { newly.push(ip.clone()); }
+    // The in-memory commit stays INSIDE the PEER_IPS_LOCK scope so a
+    // concurrent record/forget can't land between this snapshot and the
+    // `*g = set` overwrite and get clobbered for a tick (lock order:
+    // PEER_IPS_LOCK → protected_ips().write(), same everywhere).
+    {
+        let _guard = PEER_IPS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs();
+        let mut stored = load_known_peer_ips(now);
+        let mut dirty = false;
+        for ip in &live {
+            let needs_refresh = stored.get(ip)
+                .is_none_or(|ts| now.saturating_sub(*ts) >= KNOWN_PEER_REFRESH_SECS);
+            if needs_refresh {
+                stored.insert(ip.clone(), now);
+                dirty = true;
+            }
         }
-        *g = set;
+        if stored.len() > KNOWN_PEER_IPS_MAX {
+            evict_oldest_peers(&mut stored);
+            dirty = true;
+        }
+        if dirty { save_known_peer_ips(&stored); }
+        set.extend(stored.into_keys());
+        if let Ok(mut g) = protected_ips().write() {
+            for ip in &set {
+                if !g.contains(ip) { newly.push(ip.clone()); }
+            }
+            *g = set;
+        }
     }
     newly
 }
@@ -2424,6 +2578,34 @@ mod secret_tests {
 }
 
 #[cfg(test)]
+mod sticky_peer_tests {
+    use super::*;
+
+    #[test]
+    fn protectable_ip_filter_rejects_dangerous_addresses() {
+        assert!(valid_protectable_ip("10.10.10.10"));
+        assert!(valid_protectable_ip("2001:db8::1"));
+        assert!(!valid_protectable_ip("0.0.0.0"), "unspecified must never be whitelisted");
+        assert!(!valid_protectable_ip("::"), "unspecified v6 must never be whitelisted");
+        assert!(!valid_protectable_ip("127.0.0.1"), "loopback never needs protection");
+        assert!(!valid_protectable_ip("not-an-ip"));
+        assert!(!valid_protectable_ip(""));
+    }
+
+    #[test]
+    fn evict_oldest_peers_caps_and_keeps_newest() {
+        let mut map = std::collections::BTreeMap::new();
+        for i in 0..(KNOWN_PEER_IPS_MAX as u64 + 10) {
+            map.insert(format!("10.0.{}.{}", i / 256, i % 256), 1000 + i);
+        }
+        evict_oldest_peers(&mut map);
+        assert_eq!(map.len(), KNOWN_PEER_IPS_MAX);
+        // The oldest 10 stamps (1000..1009) must be the ones evicted.
+        assert!(map.values().all(|ts| *ts >= 1010));
+    }
+}
+
+#[cfg(test)]
 mod lockout_tests {
     use super::*;
 
@@ -2614,7 +2796,19 @@ mod protected_node_tests {
     // the sequences below are deterministic within the test binary.
 
     #[test]
-    fn protected_ip_set_filters_and_diffs() {
+    fn protected_ip_set_filters_diffs_and_sticks() {
+        // Point config at a writable temp dir so the sticky known-peer
+        // store is exercised for real: the live default /etc/wolfstack is
+        // root-owned on dev boxes, which would silently disable stickiness
+        // and let the pre-sticky expectations pass by accident (and, run
+        // as root, the test would write to the LIVE store).
+        let root = std::env::temp_dir().join(format!("wspt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root); // stale store from a prior run
+        std::fs::create_dir_all(&root).unwrap();
+        let mut locs = crate::paths::get();
+        locs.config_dir = root.to_string_lossy().to_string();
+        crate::paths::set_for_test(locs);
+
         // Valid IPs are kept; loopback / unspecified / garbage are dropped —
         // protecting those would whitelist far too much.
         let newly = set_protected_node_ips(vec![
@@ -2637,10 +2831,34 @@ mod protected_node_tests {
         // Re-asserting the same set reports nothing new (no repeat heal churn).
         assert!(set_protected_node_ips(vec!["10.0.0.1".into(), "192.168.1.5".into()]).is_empty());
 
-        // Dropping an IP from the set un-protects it.
+        // STICKY: dropping an IP from live membership must KEEP it
+        // protected — a node falling out of its cluster must not expose
+        // its manager to auto-bans during re-add (klasSponsor 2026-07-16).
         let _ = set_protected_node_ips(vec!["10.0.0.1".into()]);
         assert!(is_protected_node_ip("10.0.0.1"));
-        assert!(!is_protected_node_ip("192.168.1.5"), "dropped IP must no longer be protected");
+        assert!(is_protected_node_ip("192.168.1.5"),
+                "ex-peer must STAY protected via the sticky 30-day store");
+
+        // A verified join-handshake source is protected immediately and
+        // survives subsequent membership ticks that don't list it.
+        record_known_peer_ip("172.16.0.9");
+        assert!(is_protected_node_ip("172.16.0.9"));
+        let _ = set_protected_node_ips(vec!["10.0.0.1".into()]);
+        assert!(is_protected_node_ip("172.16.0.9"),
+                "handshake-recorded manager must survive the sync tick");
+
+        // Operator forget lifts stickiness for a NON-member…
+        forget_known_peer_ip("192.168.1.5");
+        let _ = set_protected_node_ips(vec!["10.0.0.1".into()]);
+        assert!(!is_protected_node_ip("192.168.1.5"),
+                "operator forget must make an ex-peer blockable");
+        // …but a LIVE member is re-protected on the next sync tick.
+        forget_known_peer_ip("10.0.0.1");
+        let _ = set_protected_node_ips(vec!["10.0.0.1".into()]);
+        assert!(is_protected_node_ip("10.0.0.1"),
+                "a live cluster member must always be re-protected");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
