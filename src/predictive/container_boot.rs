@@ -370,6 +370,73 @@ fn build_generic_proposal(container: &str, failed: &[&String], scope: ProposalSc
     )
 }
 
+/// Proactive, non-disruptive self-heal for the recurring PBS-in-LXC
+/// runtime-dir ownership loss (wabil, 2026-07-15: "lose PBS webui + LXC
+/// backups every reboot; mkstemp /run/proxmox-backup EACCES; chown
+/// backup:backup fixes it until next reboot").
+///
+/// PBS gets /run/proxmox-backup's `backup` ownership ONLY from a tmpfs
+/// mount unit whose uid=backup option a container's AppArmor profile
+/// often drops — so every boot the directory is root-owned and the
+/// proxy (user `backup`) can't write. The detector card
+/// (`build_pbs_proposal`) only fires when that mount unit lands in
+/// `systemctl --failed`; wabil's case (dir mounted/created root-owned
+/// but the unit not "failed") slips past it, so the card never reached
+/// him. This closes that gap by fixing the SYMPTOM directly, for every
+/// running PBS LXC:
+///   1. install a tmpfiles.d drop-in that recreates the dir with
+///      `backup` ownership on every boot — the PERMANENT fix;
+///   2. apply it now (`systemd-tmpfiles --create`) and chown the live
+///      dir, so the running proxy recovers on its next write.
+/// Deliberately does NOT mask units or restart the proxy — those are
+/// the disruptive steps that stay in the operator card. Idempotent
+/// (exits early once the drop-in exists), PBS-only (keyed off
+/// /etc/proxmox-backup), and safe to run on every WolfStack start.
+///
+/// One-shot at startup is enough: the drop-in persists, so after the
+/// first heal every future reboot is correct with no further action.
+pub fn ensure_pbs_runtime_dir_persistence() {
+    // The whole heal, run inside the container so we never assume the
+    // host paths line up with the container's. Single-quoted so the
+    // container's own shell evaluates it. Exits 0 (no output) unless it
+    // actually healed something, in which case it prints HEALED.
+    // Write the drop-in to a temp file then mv it into place, so a
+    // partial/interrupted write can never leave an EMPTY drop-in that
+    // the existence check then treats as "already fixed" forever. Only
+    // the atomic mv publishes the final path.
+    const HEAL: &str = "\
+[ -d /etc/proxmox-backup ] || exit 0; \
+[ -f /etc/tmpfiles.d/proxmox-backup-lxc.conf ] && exit 0; \
+printf 'd /run/proxmox-backup 0755 backup backup -\\n' > /etc/tmpfiles.d/.proxmox-backup-lxc.conf.tmp || exit 0; \
+mv /etc/tmpfiles.d/.proxmox-backup-lxc.conf.tmp /etc/tmpfiles.d/proxmox-backup-lxc.conf || exit 0; \
+systemd-tmpfiles --create /etc/tmpfiles.d/proxmox-backup-lxc.conf 2>/dev/null || true; \
+[ -d /run/proxmox-backup ] && chown backup:backup /run/proxmox-backup 2>/dev/null || true; \
+echo HEALED";
+
+    // Bound the whole sweep like sample_now's SWEEP_BUDGET — on a fleet
+    // of many stalled containers, back-to-back 10s attach timeouts would
+    // otherwise tie up a blocking thread for minutes. Unswept containers
+    // get healed on the next WolfStack start (the fix is one-shot anyway).
+    let deadline = std::time::Instant::now() + SWEEP_BUDGET;
+    for c in crate::containers::lxc_list_all_cached() {
+        if c.runtime != "lxc" || c.state != "running" { continue; }
+        let now = std::time::Instant::now();
+        if now >= deadline { break; }
+        let out = run_capped(
+            "lxc-attach",
+            &["-n", c.name.as_str(), "--", "sh", "-c", HEAL],
+            PROBE_TIMEOUT.min(deadline - now),
+        );
+        if out.as_deref().map(|s| s.contains("HEALED")).unwrap_or(false) {
+            tracing::info!(
+                "container_boot: installed persistent /run/proxmox-backup ownership fix \
+                 (tmpfiles.d) in PBS container '{}' — survives reboots",
+                c.name,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
