@@ -1645,7 +1645,11 @@ async fn main() -> std::io::Result<()> {
         // no-op when no tenants are registered, and each tenant is probed
         // lock-free so one slow/unreachable customer can't stall the rest. A
         // short initial delay lets startup settle before the first sweep.
-        tokio::spawn(async {
+        tokio::spawn(async move {
+            // Manager-only: tenants are registered and browsed via the
+            // manager UI, so an agent's registry is always empty and the
+            // sweep is pure overhead (agent-mode reduction).
+            if agent_mode { return; }
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             // If a sweep ever runs long (many unreachable tenants), skip the
@@ -4109,6 +4113,27 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             wolfhost::spawn_portal(wolfhost_state.clone(), wolfhost_portal_port, wolfhost_portal_dir).await;
         }
 
+        // HTTP worker count. Agents serve only the manager's 10s poll plus
+        // occasional on-demand proxied calls, but some handlers still run
+        // sync work on the worker thread (the sync-in-async sweep is
+        // ongoing), so keep 4 workers of headroom rather than the bare
+        // minimum — enough that a couple of concurrent blocking calls
+        // can't stall the manager's poll. The default is one worker PER
+        // CPU THREAD per listener (actix-server 2.6.0 builder.rs:61:
+        // available_parallelism().map_or(2, get)), which on a 16-thread
+        // host is 48 idle threads across three listeners — each an OS
+        // thread + malloc arena an OOM-squeezed Unraid agent can't spare
+        // (agent-mode reduction). min() so a small box never gets MORE
+        // workers than the upstream default gave it; managers keep the
+        // exact upstream default via the same formula.
+        let default_workers = std::thread::available_parallelism()
+            .map_or(2, std::num::NonZeroUsize::get);
+        let http_workers: usize = if agent_mode {
+            default_workers.min(4)
+        } else {
+            default_workers
+        };
+
         // Try to load TLS config using OpenSSL — fall back to HTTP if anything goes wrong
         let ssl_builder = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
             use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
@@ -4218,6 +4243,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             .keep_alive(std::time::Duration::from_secs(2))
             .client_request_timeout(std::time::Duration::from_secs(3))
             .client_disconnect_timeout(std::time::Duration::from_millis(500))
+            .workers(http_workers)
             .bind_openssl(&https_bind, ssl_builder)
             .map_err(|e| {
                 tracing::error!("❌ Failed to bind HTTPS on {}: {}", https_bind, e);
@@ -4257,6 +4283,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .keep_alive(std::time::Duration::from_secs(2))
                     .client_request_timeout(std::time::Duration::from_secs(3))
                     .client_disconnect_timeout(std::time::Duration::from_millis(500))
+                    .workers(http_workers)
                     .bind(&http_bind)
                     .map_err(|e| {
                         tracing::error!("❌ Failed to bind HTTP on {}: {}", http_bind, e);
@@ -4275,6 +4302,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .app_data(app_state3.clone())
                     .configure(api::configure_statuspage_only)
             })
+            .workers(http_workers)
             .bind(&sp_bind)
             .map_err(|e| {
                 tracing::warn!("⚠️  Failed to bind status page listener on {}: {}", sp_bind, e);
@@ -4360,6 +4388,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             .keep_alive(std::time::Duration::from_secs(2))
             .client_request_timeout(std::time::Duration::from_secs(3))
             .client_disconnect_timeout(std::time::Duration::from_millis(500))
+            .workers(http_workers)
             .bind(netaddr::host_port(&cli.bind, api_port))?
             .run();
 
@@ -4370,6 +4399,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .app_data(app_state2.clone())
                     .configure(api::configure_statuspage_only)
             })
+            .workers(http_workers)
             .bind(&sp_bind)
             .map_err(|e| {
                 tracing::warn!("⚠️  Failed to bind status page listener on {}: {}", sp_bind, e);
