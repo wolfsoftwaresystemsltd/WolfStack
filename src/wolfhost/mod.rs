@@ -140,14 +140,30 @@ pub fn configure_admin(cfg: &mut web::ServiceConfig) {
 /// failing to start must never take WolfStack down.
 pub async fn spawn_portal(state: Arc<AppState>, portal_port: u16, portal_web_dir: String) {
     let portal_state = state.clone();
+    // Only mount the static-asset service when the directory actually
+    // exists. actix_files::Files::new on a missing path logs an ERROR
+    // per server worker ("Specified path is not a directory") and then
+    // 404s everything anyway — one clear warning here is strictly
+    // better, and the portal API routes keep working either way.
+    let portal_static_dir = if Path::new(&portal_web_dir).is_dir() {
+        Some(portal_web_dir)
+    } else {
+        log::warn!(
+            "WolfHost portal: static assets dir '{}' not found — portal UI disabled, API routes still served",
+            portal_web_dir
+        );
+        None
+    };
     let portal_factory = move || {
-        App::new()
+        let app = App::new()
             .app_data(web::Data::new(portal_state.clone()))
-            .configure(portal::configure)
-            .service(
-                actix_files::Files::new("/", &portal_web_dir)
-                    .index_file("index.html"),
-            )
+            .configure(portal::configure);
+        match &portal_static_dir {
+            Some(dir) => app.service(
+                actix_files::Files::new("/", dir).index_file("index.html"),
+            ),
+            None => app,
+        }
     };
 
     // Reuse WolfStack's TLS material for the portal when available:
