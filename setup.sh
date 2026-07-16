@@ -201,15 +201,14 @@ if [ -f /etc/unraid-version ]; then
     # Stop any agent we previously started (upgrade / re-run) so the new binary
     # takes over the port cleanly.
     #
-    # Match on "wolfstack --agent" only — NOT the absolute "$WS_APPDATA/..." path.
-    # We start the agent with `cd "$WS_APPDATA" && ./wolfstack --agent`, so its
-    # /proc/<pid>/cmdline is the RELATIVE `./wolfstack --agent`. The old absolute
-    # pattern never matched it, so on every update the running agent was never
-    # stopped: the new binary landed on disk but the old agent kept holding the
-    # port, the freshly-started one couldn't bind, and the node "updated"
-    # without errors yet stayed on the old version (klasSponsor, Unraid,
-    # 2026-06-22). "wolfstack --agent" matches both the relative and absolute
-    # forms; on an Unraid agent node it's the only such process.
+    # Match on "wolfstack --agent" only — never an anchored path. Historic
+    # launches used the RELATIVE `./wolfstack --agent` (cwd appdata); the
+    # current supervisor launches `/usr/local/bin/wolfstack --agent`. An
+    # absolute-path pattern missed the relative form, so updates never
+    # stopped the running agent and the node silently stayed on the old
+    # version (klasSponsor, Unraid, 2026-06-22). The unanchored substring
+    # matches every historic and current form; on an Unraid agent node
+    # it's the only such process.
     # Download the static musl binary BEFORE stopping the running agent.
     # download_prebuilt writes to a temp file and mv's into place, and mv over
     # a running binary's path is safe (the old process keeps its inode) — so
@@ -235,7 +234,147 @@ if [ -f /etc/unraid-version ]; then
     # /etc is RAM-fresh each boot, so /etc/wolfstack must be a symlink onto the
     # array. -n replaces an existing symlink instead of descending into it.
     ln -sfn "$WS_APPDATA/etc" /etc/wolfstack
-    ln -sf "$WS_APPDATA/wolfstack" /usr/local/bin/wolfstack
+    # The binary on PATH is a real RAM-side COPY, not a symlink into
+    # /mnt/user: appdata sits on Unraid's shfs FUSE mount, and executing
+    # (demand-paging) a binary from a stalled shfs can freeze any thread in
+    # uninterruptible D-state mid-run. The persistent copy stays on the
+    # array; the RAM copy is what runs (klas 2026-07-16: supervised agent
+    # alive with zero listeners while /mnt/user was under stress).
+    if cp -f "$WS_APPDATA/wolfstack" /usr/local/bin/wolfstack.next 2>/dev/null; then
+        chmod +x /usr/local/bin/wolfstack.next
+        mv -f /usr/local/bin/wolfstack.next /usr/local/bin/wolfstack
+    else
+        rm -f /usr/local/bin/wolfstack.next 2>/dev/null || true
+    fi
+
+    # The agent supervisor — ONE source of truth used by both this installer
+    # run and every boot (the go block copies it to RAM and runs it there;
+    # scripts are never executed from FUSE either). @WS_APPDATA@ is
+    # substituted below.
+    cat > "$WS_APPDATA/agent-supervisor.sh" <<'SUPERVISOR_EOF'
+#!/bin/bash
+# WolfStack Unraid agent supervisor — written by setup.sh; do not edit
+# (installer re-runs overwrite it). Executed from a RAM copy at
+# /usr/local/bin/wolfstack-agent-supervisor, never from /mnt/user.
+#
+# Everything runtime-critical lives OFF /mnt/user: appdata sits on
+# Unraid's shfs FUSE mount, and a stalled shfs (mover, backup plugins,
+# getxattr storms) freezes processes in uninterruptible D-state on a
+# single read/write/page-fault. klas 2026-07-16: the supervised agent sat
+# alive with ZERO listeners while a foreground run from /root worked —
+# the launcher's FUSE-side cwd/log/binary were the difference. So: the
+# binary runs from RAM-backed /usr/local/bin, the log is RAM-backed
+# /var/log (size-capped — tmpfs eats RAM), cwd is /, the lock is in
+# /var/run, and the only remaining FUSE touches (binary refresh, port
+# lookup) are wrapped in `timeout` — best-effort, since a true D-state
+# stall is unkillable, but those touches happen once per restart instead
+# of once per log line. Config stays on the array (/etc/wolfstack ->
+# appdata/etc symlink) — that's what persists across RAM-fresh boots.
+
+WS_APPDATA="@WS_APPDATA@"
+LOG="/var/log/wolfstack-agent.log"
+RAM_BIN="/usr/local/bin/wolfstack"
+
+# Single supervisor per host. RAM-side lock: taking it can never stall on
+# FUSE, and RAM-fresh boots start clean. The installer fuser-kills any
+# pre-RAM-era supervisor holding the OLD appdata lock before starting us.
+# (No 2>/dev/null on the exec: a trailing redirect can't suppress a
+# failed-open of an earlier one anyway; callers null our stderr.)
+exec 9>"/var/run/wolfstack-agent-supervisor.lock" || exit 0
+flock -n 9 || exit 0
+trap '' HUP    # survive the installer's curl|bash session ending
+cd / || exit 0
+
+api_port() {
+    # The operator may have moved the API port (ports.json). timeout:
+    # ports.json is on FUSE — never let a wedged share freeze the watchdog.
+    p=$(timeout 5 tr -d ' \t\n' 2>/dev/null < "$WS_APPDATA/etc/ports.json" \
+        | grep -o '"api":[0-9]*' | grep -o '[0-9]*$' | head -1)
+    case "$p" in ("") echo 8553 ;; (*) echo "$p" ;; esac
+}
+
+port_open() {
+    # TCP-level liveness probe via curl (guaranteed present — this very
+    # install arrived over curl). NOT bash /dev/tcp: that needs a bash
+    # built with --enable-net-redirections, which we have not verified on
+    # every Unraid release, and a bash without it would make every check
+    # read "closed" and kill healthy agents forever. curl exit 7 is the
+    # one code that means "nothing accepted the connection" — any other
+    # outcome (HTTP response, TLS error against a non-TLS probe, protocol
+    # noise) proves a listener accepted us. Fail-safe: if curl is somehow
+    # missing, report OPEN so the watchdog never kills on tooling doubt.
+    command -v curl >/dev/null 2>&1 || return 0
+    curl -sk -o /dev/null --max-time 5 "https://127.0.0.1:$1/" 2>/dev/null
+    [ $? -ne 7 ]
+}
+
+while true; do
+    # Refresh the RAM copy when the array holds a newer binary (installer
+    # download or self-update wrote it). Temp+mv keeps the running inode
+    # intact; on a wedged share the timeout skips the refresh and we run
+    # the existing RAM copy instead of hanging the loop.
+    if timeout 60 cp -f "$WS_APPDATA/wolfstack" "$RAM_BIN.next" 2>/dev/null; then
+        chmod +x "$RAM_BIN.next" 2>/dev/null
+        mv -f "$RAM_BIN.next" "$RAM_BIN" 2>/dev/null
+    else
+        # Don't leave a stale ~84MB partial copy sitting in tmpfs.
+        rm -f "$RAM_BIN.next" 2>/dev/null
+    fi
+    if [ ! -x "$RAM_BIN" ]; then
+        echo "$(date) no runnable agent binary at $RAM_BIN yet — retrying in 30s" >> "$LOG"
+        sleep 30
+        continue
+    fi
+    # Cap the RAM-backed log at ~5 MB, keeping one rotation.
+    if [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+        mv -f "$LOG" "$LOG.1" 2>/dev/null || : > "$LOG"
+    fi
+    _s=$(date +%s)
+    # 9>&- : the agent must NOT inherit the supervisor's lock fd — an
+    # agent outliving a killed supervisor would block the next one.
+    "$RAM_BIN" --agent </dev/null >> "$LOG" 2>&1 9>&- &
+    AGENT=$!
+    # Listener watchdog. Exit codes catch crashes; this catches the HANG
+    # class (process alive, zero listeners — klas 2026-07-16): if the API
+    # port stays closed for 5 consecutive minute-checks while the process
+    # lives, kill -9 and restart. The probe is port_open() above (curl,
+    # "closed" = connection refused only). Normal startup binds well
+    # inside the first minute; 5 minutes tolerates a slow array without
+    # flapping a healthy agent. Port re-read per check so an operator
+    # port move is honoured without restarting the supervisor.
+    fails=0
+    while kill -0 "$AGENT" 2>/dev/null; do
+        sleep 60
+        kill -0 "$AGENT" 2>/dev/null || break
+        # In-flight log cap: the pre-launch rotation only runs between
+        # restarts, and a HEALTHY long-lived agent never restarts — its
+        # log would grow unbounded in tmpfs (= RAM). The agent's fd is
+        # O_APPEND (>>), so truncating in place is safe: the next write
+        # lands at the new end. Keep the last 256K as .1 for context.
+        if [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+            tail -c 262144 "$LOG" > "$LOG.1" 2>/dev/null
+            : > "$LOG"
+            echo "$(date) (wolfstack-agent.log truncated at 5 MB cap — older tail in $LOG.1)" >> "$LOG"
+        fi
+        if port_open "$(api_port)"; then
+            fails=0
+        else
+            fails=$((fails + 1))
+        fi
+        if [ "$fails" -ge 5 ]; then
+            echo "$(date) wolfstack agent PID $AGENT alive but API port closed for $fails consecutive checks — killing for restart (hang recovery)" >> "$LOG"
+            kill -9 "$AGENT" 2>/dev/null
+            break
+        fi
+    done
+    wait "$AGENT"
+    _ec=$?; _ran=$(( $(date +%s) - _s ))
+    echo "$(date) wolfstack agent exited (code $_ec) after ${_ran}s — restarting" >> "$LOG"
+    if [ "$_ran" -lt 10 ]; then sleep 30; else sleep 3; fi
+done
+SUPERVISOR_EOF
+    sed -i "s|@WS_APPDATA@|$WS_APPDATA|g" "$WS_APPDATA/agent-supervisor.sh"
+    chmod +x "$WS_APPDATA/agent-supervisor.sh"
 
     # Wire startup into /boot/config/go (persists on the USB). Append an
     # idempotent, marker-delimited block — never clobber the rest of go, which
@@ -290,33 +429,20 @@ if [ -f /etc/unraid-version ]; then
                 printf '%s\n' "  for _i in \$(seq 1 180); do [ -x \"$WS_APPDATA/wolfstack\" ] && break; sleep 5; done"
                 printf '%s\n' "  [ -x \"$WS_APPDATA/wolfstack\" ] || exit 0"
                 printf '%s\n' "  ln -sfn \"$WS_APPDATA/etc\" /etc/wolfstack"
-                printf '%s\n' "  ln -sf \"$WS_APPDATA/wolfstack\" /usr/local/bin/wolfstack"
                 # Persisted static tools (proxmox-backup-client, pxar, smartctl —
                 # fetched by the agent's unraid_tools bootstrapper) re-linked into
                 # RAM-backed /usr/local/bin so they're on PATH from the first
                 # moment; the agent re-checks at startup as belt-and-braces.
                 printf '%s\n' "  for t in \"$WS_APPDATA/tools/\"*; do [ -x \"\$t\" ] && ln -sf \"\$t\" \"/usr/local/bin/\$(basename \"\$t\")\"; done || true"
-                # Supervise the agent: Unraid has no systemd, so a one-shot
-                # launch means any death (OOM-kill, panic, crash) leaves the
-                # node offline until someone re-runs the installer (klas,
-                # 2026-07-15: "offline 2-3x/day, curl script brings it back").
-                # Loop restarts it; backoff (30s) only when it dies inside 10s
-                # so a broken binary can't spin the CPU, else fast (3s). The
-                # exit code + runtime is logged — that's the crash diagnostic
-                # (137=OOM-killed, 101=Rust panic, 0=clean self-update exit).
-                printf '%s\n' "  cd \"$WS_APPDATA\" || exit 0"
-                # Single-supervisor lock: if the installer is re-run while
-                # this boot-started supervisor is alive, the installer's own
-                # supervisor exits instead of double-launching (port clash).
-                printf '%s\n' "  exec 9>\"$WS_APPDATA/agent-supervisor.lock\" 2>/dev/null || exit 0"
-                printf '%s\n' "  flock -n 9 || exit 0"
-                printf '%s\n' "  while true; do"
-                printf '%s\n' "    _s=\$(date +%s)"
-                printf '%s\n' "    ./wolfstack --agent </dev/null >> \"$WS_APPDATA/wolfstack.log\" 2>&1"
-                printf '%s\n' "    _ec=\$?; _ran=\$(( \$(date +%s) - _s ))"
-                printf '%s\n' "    echo \"\$(date) wolfstack agent exited (code \$_ec) after \${_ran}s — restarting\" >> \"$WS_APPDATA/wolfstack.log\""
-                printf '%s\n' "    if [ \"\$_ran\" -lt 10 ]; then sleep 30; else sleep 3; fi"
-                printf '%s\n' "  done"
+                # Supervise the agent via the shared supervisor script —
+                # copied to RAM and executed THERE (never run scripts or
+                # binaries from FUSE; see agent-supervisor.sh header). The
+                # supervisor itself creates the RAM binary copy, logs to
+                # /var/log, watchdogs the listener, and restarts on
+                # crash/hang (klas 2026-07-15 + 2026-07-16).
+                printf '%s\n' "  cp -f \"$WS_APPDATA/agent-supervisor.sh\" /usr/local/bin/wolfstack-agent-supervisor 2>/dev/null || exit 0"
+                printf '%s\n' "  chmod +x /usr/local/bin/wolfstack-agent-supervisor"
+                printf '%s\n' "  /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &"
                 printf '%s\n' ") &"
                 printf '%s\n' "$GO_END"
             } >> "$GO_FILE"
@@ -331,47 +457,59 @@ if [ -f /etc/unraid-version ]; then
     # diagnostic). flock ensures exactly one supervisor even across a
     # re-run or a boot-started supervisor.
     echo "  Starting WolfStack agent (supervised)..."
-    # Stop the current agent ONLY (not any running supervisor): if a
-    # supervisor is already up it will relaunch the freshly-installed
-    # binary; if not, our new supervisor below takes over. Leave the
-    # supervisor's own shell loop alone so we don't orphan the lock.
+    # Retire any PRE-RAM-ERA supervisor first: older installs ran the
+    # supervisor loop with its lock on appdata and launched agents FROM
+    # /mnt/user (the FUSE-freeze bug, klas 2026-07-16). fuser -k kills the
+    # old lock's holders — the old supervisor shell AND any old agent that
+    # inherited its lock fd — so it can't respawn a FUSE-side agent under
+    # our new one. New-style supervisors are unaffected (RAM-side lock,
+    # agents don't inherit it). timeout: the lock file is on FUSE and
+    # fuser must stat it — best-effort guard against a wedged share.
+    if command -v fuser >/dev/null 2>&1; then
+        timeout 15 fuser -k "$WS_APPDATA/agent-supervisor.lock" >/dev/null 2>&1 || true
+        sleep 1
+    else
+        # No fuser on this build: we can still kill old AGENTS below, but
+        # an old supervisor loop may survive and respawn a FUSE-side agent
+        # that fights the new one for the port. Say so instead of hiding it.
+        echo "  ⚠ 'fuser' not found — if the node flaps after this update, reboot once"
+        echo "    to clear any pre-update supervisor loop (RAM-fresh boot starts clean)."
+    fi
     pkill -f "wolfstack --agent" 2>/dev/null || true
     sleep 1
-    # </dev/null so the backgrounded agent never holds the curl|bash pipe open.
-    (
-        exec 9>"$WS_APPDATA/agent-supervisor.lock" 2>/dev/null || exit 0
-        flock -n 9 || exit 0   # a supervisor is already running — it took over above
-        cd "$WS_APPDATA" || exit 0
-        while true; do
-            _s=$(date +%s)
-            nohup ./wolfstack --agent </dev/null >> "$WS_APPDATA/wolfstack.log" 2>&1
-            _ec=$?; _ran=$(( $(date +%s) - _s ))
-            echo "$(date) wolfstack agent exited (code $_ec) after ${_ran}s — restarting" >> "$WS_APPDATA/wolfstack.log"
-            if [ "$_ran" -lt 10 ]; then sleep 30; else sleep 3; fi
-        done
-    ) &
+    # Run the shared supervisor from RAM. If a NEW-style supervisor is
+    # already alive (holding the /var/run lock), this one exits at flock
+    # and the incumbent relaunches the freshly-installed binary — its loop
+    # refreshes the RAM copy on every restart.
+    if ! cp -f "$WS_APPDATA/agent-supervisor.sh" /usr/local/bin/wolfstack-agent-supervisor \
+        || ! chmod +x /usr/local/bin/wolfstack-agent-supervisor; then
+        echo "  ✗ Could not stage the agent supervisor to /usr/local/bin (RAM)."
+        echo "    Check free space in the root filesystem and re-run this installer."
+        exit 1
+    fi
+    nohup /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &
     sleep 3
 
     # The whole point of an update is a RUNNING agent — verify it, don't
-    # assume it. A one-shot retry covers the "old process still releasing
-    # the port during our sleep 2" race; if the agent still isn't up, say so
-    # loudly and point at the log instead of printing the success banner over
-    # a dead node (PineappleGod, Unraid, 2026-07-03).
+    # assume it. The supervisor restarts a dying agent on a 3s cadence, so
+    # one more 5s wait covers the "old process still releasing the port"
+    # race; if the agent still isn't up, say so loudly and point at the log
+    # instead of printing the success banner over a dead node
+    # (PineappleGod, Unraid, 2026-07-03).
     if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
-        echo "  ⚠ Agent not running after start — retrying once..."
-        ( cd "$WS_APPDATA" && nohup ./wolfstack --agent </dev/null >> "$WS_APPDATA/wolfstack.log" 2>&1 & )
+        echo "  ⚠ Agent not running yet — giving the supervisor 5s more..."
         sleep 5
     fi
     if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
         echo ""
         echo "  ✗ WolfStack agent FAILED to start. Last log lines:"
-        tail -20 "$WS_APPDATA/wolfstack.log" 2>/dev/null | sed 's/^/    /'
+        tail -20 /var/log/wolfstack-agent.log 2>/dev/null | sed 's/^/    /'
         echo "  Start it manually after fixing the above:"
-        echo "    cd $WS_APPDATA && nohup ./wolfstack --agent >> wolfstack.log 2>&1 &"
+        echo "    /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &"
         [ -t 0 ] || cat >/dev/null 2>&1 || true
         exit 1
     fi
-    echo "  ✓ Agent is running"
+    echo "  ✓ Agent is running (supervised from RAM; log: /var/log/wolfstack-agent.log)"
 
     # awk (not grep -PoP) so it works on busybox grep too: pull the token after "src".
     WS_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
