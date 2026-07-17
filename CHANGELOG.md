@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.76: fix overlapping action labels in the mobile row drawer (klas)** _(2026-07-17 — [`bdde5ea9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bdde5ea92044c0bbe6582ea2c539126d9c6c44d6))_
 - **v25.2.75: fix Docker image-update 'name not found' + vanishing containers (RutgerDiehard)** _(2026-07-17 — [`5d11b123`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5d11b123f2dee846fe8cf800528b5145c76064b0))_
 - **v25.2.74: optional mutual-TLS (client certificate) support on the admin port** _(2026-07-17 — [`341c6e3e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/341c6e3ec546cfab16f710c8d385ea2c0cb0bdb5))_
 - **v25.2.73: cluster and install maintenance** _(2026-07-17 — [`ad928b3b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ad928b3b02f2681c9d13b05150beefa3dcdcb449))_
