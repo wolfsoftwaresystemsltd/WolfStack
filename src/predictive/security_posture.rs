@@ -49,6 +49,7 @@ use crate::predictive::{
 pub const FINDING_SERVICE_PUBLIC: &str = "service_bound_publicly";
 pub const FINDING_SSHD_PASSWORD_AUTH: &str = "sshd_password_auth_enabled";
 pub const FINDING_SSHD_ROOT_LOGIN: &str = "sshd_root_login_enabled";
+pub const FINDING_SCAN_DETECTOR_DISABLED: &str = "scan_detector_disabled";
 
 /// Well-known services that should generally not be reachable from
 /// outside loopback. The bool flags "extreme blast radius" — Docker
@@ -96,12 +97,14 @@ pub async fn sample_sshd_config_now_async(timeout: Duration) -> SshdConfig {
 pub fn analyze(
     ctx: &Context,
     sshd: &SshdConfig,
+    scan_detector_enabled: bool,
     acks: &AckStore,
     proposals: &crate::predictive::proposal::ProposalStore,
 ) -> Vec<Proposal> {
     let mut out = Vec::new();
     out.extend(analyze_listening_services(ctx, &ctx.network, acks, proposals));
     out.extend(analyze_sshd(ctx, sshd, &ctx.network, acks, proposals));
+    out.extend(analyze_scan_detector(ctx, scan_detector_enabled, acks, proposals));
     out
 }
 
@@ -133,6 +136,15 @@ pub fn covered_scopes(
     };
     out.push((FINDING_SSHD_PASSWORD_AUTH.to_string(), sshd_scope.clone()));
     out.push((FINDING_SSHD_ROOT_LOGIN.to_string(), sshd_scope));
+    // Always cover the scan-detector posture so enabling it clears the
+    // finding (analyze_scan_detector emits nothing once enabled).
+    out.push((
+        FINDING_SCAN_DETECTOR_DISABLED.to_string(),
+        ProposalScope {
+            node_id: ctx.node_id.clone(),
+            resource_id: Some("scan_detector".into()),
+        },
+    ));
     out
 }
 
@@ -324,6 +336,69 @@ fn analyze_sshd(
     }
 
     out
+}
+
+/// Flag when the outbound scan detector is disabled. It ships default-OFF
+/// (v23.12.3, after an enabled + kill_and_block build SIGKILL'd pmxcfs on a
+/// Proxmox host during a backup-driven replication burst), which is a safe
+/// default but a silent one: with the detector off, a compromised or misused
+/// host can port-scan or flood outbound with nothing on the box watching —
+/// exactly the gap that ends in a provider abuse-lock. Surface it as a Warn
+/// (visible in the inbox, no first-appearance alarm) so the operator makes a
+/// deliberate choice instead of being unaware it's off. Ackable for anyone
+/// who leaves it off on purpose.
+fn analyze_scan_detector(
+    ctx: &Context,
+    scan_detector_enabled: bool,
+    acks: &AckStore,
+    proposals: &crate::predictive::proposal::ProposalStore,
+) -> Vec<Proposal> {
+    if scan_detector_enabled {
+        return Vec::new();
+    }
+    let scope = ProposalScope {
+        node_id: ctx.node_id.clone(),
+        resource_id: Some("scan_detector".into()),
+    };
+    if acks.suppresses(FINDING_SCAN_DETECTOR_DISABLED, &scope)
+        || proposals.is_suppressed(FINDING_SCAN_DETECTOR_DISABLED, &scope)
+    {
+        return Vec::new();
+    }
+    vec![Proposal::new(
+        FINDING_SCAN_DETECTOR_DISABLED,
+        ProposalSource::Rule,
+        Severity::Warn,
+        "Outbound scan detection is disabled".to_string(),
+        "The outbound scan detector is turned off on this node. It ships \
+         disabled by default, so unless it was deliberately enabled nothing \
+         is watching for a local process fanning out to many destinations \
+         (port-scanning) or a raw-socket scanner such as zmap / masscan — the \
+         behaviour that gets a host flagged for abuse and network-locked by \
+         the hosting provider. Enable it, starting with 'Alert only (no kill)' \
+         so nothing is killed while you confirm there are no false positives, \
+         then promote to 'Kill + block'. Acknowledge this finding to silence \
+         it if leaving the detector off is a deliberate choice."
+            .to_string(),
+        vec![Evidence {
+            label: "Scan detector".into(),
+            value: "disabled".into(),
+            detail: Some(
+                "Enable under Fleet Security \u{2192} Scan Detector (persisted in scan-detector.json)."
+                    .into(),
+            ),
+            links: Vec::new(),
+        }],
+        RemediationPlan::Manual {
+            instructions: "Open Fleet Security \u{2192} Scan Detector, tick 'Enabled', choose \
+                           'Alert only (no kill)' for the first few days, review 'Recent detections', \
+                           add any legitimate high-fanout processes to the allowlist, then switch the \
+                           action to 'Kill + block' and push to every node."
+                .into(),
+            commands: Vec::new(),
+        },
+        scope,
+    )]
 }
 
 /// What reachability class does sshd's binding fall into? Walk the
@@ -593,10 +668,10 @@ mod tests {
         );
         let cfg = SshdConfig { root_login: false, password_auth: false };
         let p = analyze(
-            &ctx, &cfg, &AckStore::default(), &ProposalStore::default(),
+            &ctx, &cfg, true, &AckStore::default(), &ProposalStore::default(),
         );
         assert!(p.is_empty(),
-            "a clean host (services on lo, ssh keys-only) produces no posture findings");
+            "a clean host (services on lo, ssh keys-only, scan detector on) produces no posture findings");
     }
 
     /// Guards the discipline rule from the original predictive
@@ -612,7 +687,54 @@ mod tests {
             vec![sock("127.0.0.1", 3306)],
         );
         let cfg = SshdConfig::default();
-        let p = analyze(&ctx, &cfg, &AckStore::default(), &ProposalStore::default());
+        let p = analyze(&ctx, &cfg, true, &AckStore::default(), &ProposalStore::default());
         assert!(p.is_empty());
+    }
+
+    // ── Outbound scan detector posture ──────────────────────────
+
+    #[test]
+    fn scan_detector_disabled_fires_warn() {
+        let ctx = ctx_with(
+            vec![iface("eth0", "145.224.67.239", "inet")],
+            vec![sock("127.0.0.1", 3306)],
+        );
+        let p = analyze_scan_detector(
+            &ctx, false, &AckStore::default(), &ProposalStore::default(),
+        );
+        assert_eq!(p.len(), 1, "a disabled detector must produce exactly one finding");
+        assert_eq!(p[0].severity, Severity::Warn,
+            "disabled scan detector is a Warn — surfaced, but not a first-appearance alarm");
+        assert_eq!(p[0].finding_type, FINDING_SCAN_DETECTOR_DISABLED);
+        assert_eq!(p[0].scope.resource_id.as_deref(), Some("scan_detector"));
+    }
+
+    #[test]
+    fn scan_detector_enabled_is_silent() {
+        let ctx = ctx_with(
+            vec![iface("eth0", "145.224.67.239", "inet")],
+            vec![sock("127.0.0.1", 3306)],
+        );
+        let p = analyze_scan_detector(
+            &ctx, true, &AckStore::default(), &ProposalStore::default(),
+        );
+        assert!(p.is_empty(), "an enabled detector produces no finding (posture is correct)");
+    }
+
+    #[test]
+    fn scan_detector_disabled_but_acked_is_silent() {
+        let ctx = ctx_with(vec![iface("eth0", "145.224.67.239", "inet")], vec![]);
+        let mut acks = AckStore::default();
+        acks.add(crate::predictive::ack::Ack::new(
+            FINDING_SCAN_DETECTOR_DISABLED,
+            crate::predictive::ack::AckScope::Resource {
+                node_id: "node-a".into(),
+                resource_id: "scan_detector".into(),
+            },
+            "intentionally off on this host",
+            "paul", None,
+        ));
+        let p = analyze_scan_detector(&ctx, false, &acks, &ProposalStore::default());
+        assert!(p.is_empty(), "an operator ack silences the disabled-detector finding");
     }
 }
