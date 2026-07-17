@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.78: fix false "stopped" service badge on minimal containers (KO4BSR)** _(2026-07-17 — [`de3b30c9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/de3b30c952de3ca974eb307e01582e3f1e5101da))_
 - **v25.2.77: Fleet Security — surface a disabled outbound scan detector + honest multi-node push status** _(2026-07-17 — [`325e2227`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/325e2227afedd6f1bc93f95d42017564795a0477))_
 - **v25.2.76: fix overlapping action labels in the mobile row drawer (klas)** _(2026-07-17 — [`bdde5ea9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bdde5ea92044c0bbe6582ea2c539126d9c6c44d6))_
 - **v25.2.75: fix Docker image-update 'name not found' + vanishing containers (RutgerDiehard)** _(2026-07-17 — [`5d11b123`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5d11b123f2dee846fe8cf800528b5145c76064b0))_
