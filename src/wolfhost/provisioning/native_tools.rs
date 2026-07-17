@@ -1075,7 +1075,7 @@ fn valid_mail_local_part(u: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
 }
 
-fn valid_email(a: &str) -> bool {
+pub fn valid_email(a: &str) -> bool {
     let mut parts = a.splitn(2, '@');
     match (parts.next(), parts.next()) {
         (Some(u), Some(d)) => valid_mail_local_part(u) && valid_domain(d),

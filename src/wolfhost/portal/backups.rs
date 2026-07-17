@@ -61,6 +61,14 @@ pub async fn list(req: HttpRequest, state: web::Data<Arc<AppState>>, query: web:
         for filename in output.lines() {
             let fname = filename.trim();
             if fname.is_empty() { continue; }
+            // The filename is interpolated into `stat '…{}…'` below. It comes
+            // from `ls` of the backup dir, but a customer with write access to
+            // that dir (FTP / app) could plant a name containing shell
+            // metacharacters. Skip anything outside the safe allowlist so a
+            // hostile filename is never passed to the shell.
+            if !fname.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+                continue;
+            }
 
             // Get file size
             let size_str = lxc_exec(&svc.container_name,
@@ -175,8 +183,16 @@ pub async fn restore(req: HttpRequest, state: web::Data<Arc<AppState>>, path: we
     let container = parts[0];
     let filename = parts[1];
 
-    // Sanitize filename — no path traversal
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+    // Sanitize filename — no path traversal AND no shell metacharacters.
+    // The filename is interpolated into a shell command (tar -xzf '…{}…')
+    // run inside the container below, so beyond blocking traversal we
+    // restrict it to a safe allowlist. Backup filenames are system-generated
+    // (timestamped archives), so a real backup always passes; a value like
+    // `x'; touch /tmp/pwned; #` is rejected instead of executing.
+    let filename_safe = !filename.is_empty()
+        && !filename.contains("..")
+        && filename.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !filename_safe {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid filename"}));
     }
 

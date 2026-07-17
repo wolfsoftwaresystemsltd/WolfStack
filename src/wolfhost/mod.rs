@@ -127,11 +127,52 @@ pub async fn build_state(cfg: WolfHostConfig) -> Arc<AppState> {
     })
 }
 
+/// Scope-level auth guard for the WolfHost admin API.
+///
+/// Every `/api/wolfhost/*` route is an administrative operation (customer
+/// records + PII, container provisioning across the cluster, DNS, DirectAdmin
+/// control). The rest of the main-app API enforces auth per-handler via
+/// `require_auth`, but the WolfHost handlers were written behind an older
+/// plugin/portal boundary and never adopted that convention — so when the
+/// subsystem was folded onto the main port the whole subtree was reachable
+/// with no credential. This guard closes that in ONE place by applying the
+/// exact same check every other admin endpoint uses (`crate::api::require_auth`
+/// — session cookie, API key, or inter-node secret). The admin UI (which sends
+/// the `wolfstack_session` cookie) and inter-node callers keep working
+/// unchanged; an unauthenticated request is rejected before reaching any
+/// handler. Using the shared helper means this can never drift from the
+/// acceptance rules the rest of the API applies.
+async fn require_admin_auth(
+    req: actix_web::dev::ServiceRequest,
+    next: actix_web::middleware::Next<impl actix_web::body::MessageBody + 'static>,
+) -> Result<actix_web::dev::ServiceResponse<actix_web::body::BoxBody>, actix_web::Error> {
+    let authed = req
+        .app_data::<web::Data<crate::api::AppState>>()
+        .map(|state| crate::api::require_auth(req.request(), state).is_ok())
+        .unwrap_or(false);
+    if authed {
+        Ok(next.call(req).await?.map_into_boxed_body())
+    } else {
+        Ok(req
+            .into_response(
+                actix_web::HttpResponse::Unauthorized()
+                    .json(serde_json::json!({ "error": "Not authenticated" })),
+            )
+            .map_into_boxed_body())
+    }
+}
+
 /// Register the WolfHost admin API routes into WolfStack's main app,
 /// mounted under `/api/wolfhost`. The caller must also register the
-/// WolfHost `AppState` via `.app_data(web::Data::new(state))`.
+/// WolfHost `AppState` via `.app_data(web::Data::new(state))`. The whole
+/// scope is gated by `require_admin_auth` so no handler is reachable without
+/// the same authentication the rest of the admin API requires.
 pub fn configure_admin(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::scope("/api/wolfhost").configure(api::configure));
+    cfg.service(
+        web::scope("/api/wolfhost")
+            .wrap(actix_web::middleware::from_fn(require_admin_auth))
+            .configure(api::configure),
+    );
 }
 
 /// Spawn the customer-facing portal as its own bound server, plus the

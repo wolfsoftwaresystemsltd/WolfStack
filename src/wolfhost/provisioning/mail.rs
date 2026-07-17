@@ -222,6 +222,15 @@ UserID                  opendkim
 
 /// Add an email account inside the container
 pub fn add_email_account(container: &str, address: &str, password: &str) -> Result<(), String> {
+    // The address (and the user/domain split from it) is interpolated into
+    // shell strings run inside the container below. `valid_email` restricts
+    // it to [A-Za-z0-9._+-]@[A-Za-z0-9.-] — no quote, semicolon, backtick,
+    // `$` or whitespace can survive — so it cannot break out of the shell
+    // command. Reject at the boundary; a legitimate mailbox address always
+    // passes. (password is separately single-quote-escaped below.)
+    if !super::native_tools::valid_email(address) {
+        return Err("Invalid email address".to_string());
+    }
     let parts: Vec<&str> = address.split('@').collect();
     if parts.len() != 2 { return Err("Invalid email address".to_string()); }
     let user = parts[0];
@@ -268,6 +277,11 @@ pub fn add_email_account(container: &str, address: &str, password: &str) -> Resu
 
 /// Remove an email account from the container
 pub fn remove_email_account(container: &str, address: &str) -> Result<(), String> {
+    // Same shell-safety guard as add_email_account — address is interpolated
+    // into container shell commands below.
+    if !super::native_tools::valid_email(address) {
+        return Err("Invalid email address".to_string());
+    }
     // Remove from Dovecot users
     lxc_exec(container, &format!(
         "grep -v '^{}:' /etc/dovecot/users > /tmp/du_tmp 2>/dev/null; mv /tmp/du_tmp /etc/dovecot/users; \
