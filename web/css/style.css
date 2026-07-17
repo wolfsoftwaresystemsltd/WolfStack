@@ -4382,8 +4382,11 @@ body.sidebar-collapsed #task-log-footer {
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: flex-start;
     gap: 4px;
     padding: 10px 6px;
+    min-width: 0;
+    height: 100%;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -4400,6 +4403,11 @@ body.sidebar-collapsed #task-log-footer {
     color: var(--text-secondary);
     line-height: 1.2;
     text-align: center;
+    /* Wrap onto its own rows within the tile instead of overflowing and
+       overlapping neighbours on a narrow phone (klas 2026-07-17). */
+    white-space: normal;
+    overflow-wrap: anywhere;
+    max-width: 100%;
 }
 .ws-mobile-action-disabled {
     opacity: 0.35;
