@@ -16398,8 +16398,22 @@ pub async fn fleet_security_push_scan_detector(
             }));
         }
     }
+    // Honest reporting: the local node always applied (we early-returned on
+    // local failure above), but a security control silently not reaching some
+    // peers is dangerous — a "push to every node" that skips unreachable
+    // production nodes must NOT read as fully applied. Report per-node counts
+    // and set the top-level `ok` false when any peer failed, so both API
+    // consumers and the UI can surface the partial result.
+    let peers_total = peer_results.len();
+    let peers_ok = peer_results.iter().filter(|p| p["ok"] == serde_json::json!(true)).count();
+    let peers_failed = peers_total - peers_ok;
     HttpResponse::Ok().json(serde_json::json!({
-        "ok": true, "self_applied": true, "peers": peer_results,
+        "ok": peers_failed == 0,
+        "self_applied": true,
+        "peers_total": peers_total,
+        "peers_ok": peers_ok,
+        "peers_failed": peers_failed,
+        "peers": peer_results,
     }))
 }
 

@@ -311,8 +311,15 @@ pub async fn tick(
     new_proposals.extend(vm_disk::analyze(
         &ctx, &vm_facts, &acks_snap, &proposals_snap,
     ));
+    // The persisted config is the source of truth (`set_config` always writes
+    // it), so this reflects the live state. Read off the async executor —
+    // consistent with the other facts above — and fail safe toward "disabled"
+    // so a read error surfaces the finding rather than hiding it.
+    let scan_detector_enabled = tokio::task::spawn_blocking(|| {
+        crate::scan_detector::ScanDetectorConfig::load().enabled
+    }).await.unwrap_or(false);
     new_proposals.extend(security_posture::analyze(
-        &ctx, &sshd_cfg, &acks_snap, &proposals_snap,
+        &ctx, &sshd_cfg, scan_detector_enabled, &acks_snap, &proposals_snap,
     ));
     new_proposals.extend(vulnerability::analyze(
         &ctx, &vuln_facts, &acks_snap, &proposals_snap,
