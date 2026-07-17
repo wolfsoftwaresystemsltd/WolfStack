@@ -869,23 +869,22 @@ fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> Ima
         return event;
     }
 
-    // Step 6: stop + remove + recreate.
+    // Step 6: recreate. `docker_recreate_from_inspect` performs the whole safe
+    // swap ITSELF on the LIVE container: it stops it, renames it to a
+    // `<name>_wolfstack_old` backup, creates the replacement (which now
+    // resolves the freshly-pulled image via its tag), starts it, and deletes
+    // the backup only on success — rolling the backup back on any failure.
+    // We must therefore NOT stop/remove the container first. The old flow did
+    // `docker stop` + `docker rm` here, which deleted the container before the
+    // recreate could rename it — the internal rename then failed with "No such
+    // container" (surfacing to the operator as "name not found"), and because
+    // the container was already gone there was nothing to roll back to, so it
+    // vanished from the list (RutgerDiehard 2026-07-17). Hand the fn the full
+    // lifecycle; on failure it has already restored the original container.
     event.status = ImageUpdateStatus::Recreating;
-    if let Err(e) = crate::containers::docker_stop(container_name) {
-        // Stop failures aren't fatal — the container may already be
-        // stopped, or docker may have raced us. Log and continue.
-        warn!("docker stop {} during update: {}", container_name, e);
-    }
-    if let Err(e) = crate::containers::docker_remove(container_name) {
-        event.status = ImageUpdateStatus::Failed;
-        event.error = Some(format!("docker rm failed: {}", e));
-        return event;
-    }
     if let Err(e) = crate::containers::docker_recreate_from_inspect(container_name, &inspect) {
         event.status = ImageUpdateStatus::Failed;
         event.error = Some(format!("docker recreate failed: {}", e));
-        // Try to bring the OLD container back as a safety net.
-        let _ = recreate_with_image(&inspect, container_name, &old_image_id);
         return event;
     }
 
@@ -899,8 +898,10 @@ fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> Ima
                     "auto-update {} unhealthy after restart — rolling back to image {}",
                     container_name, old_image_id,
                 );
-                let _ = crate::containers::docker_stop(container_name);
-                let _ = crate::containers::docker_remove(container_name);
+                // recreate_with_image → docker_recreate_from_inspect does its
+                // own stop + rename + create + rollback on the LIVE (new)
+                // container; pre-removing it here would leave nothing to
+                // rename — the same bug fixed in the main recreate above.
                 match recreate_with_image(&inspect, container_name, &old_image_id) {
                     Ok(_) => {
                         event.status = ImageUpdateStatus::RolledBack;
