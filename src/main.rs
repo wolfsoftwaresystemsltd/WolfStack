@@ -63,6 +63,7 @@ mod wolffunctions;
 mod wolfusb;
 mod dashboard_sync;
 mod paths;
+mod mtls;
 mod loghub;
 mod ports;
 mod reverse_proxy;
@@ -4144,6 +4145,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             default_workers
         };
 
+        // mTLS client-certificate gate — OFF by default. Loaded once; when
+        // enabled with a valid CA it is applied to the admin HTTPS acceptor
+        // below so only the operator's cert-bearing devices can use the port.
+        let mtls_ca = crate::mtls::MtlsConfig::load().active_ca();
+
         // Try to load TLS config using OpenSSL — fall back to HTTP if anything goes wrong
         let ssl_builder = tls_paths.as_ref().and_then(|(cert_path, key_path)| {
             use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
@@ -4164,6 +4170,22 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             if let Err(e) = builder.set_private_key_file(key_path, SslFiletype::PEM) {
                 tracing::warn!("Cannot load TLS key '{}': {} — falling back to HTTP", key_path, e);
                 return None;
+            }
+
+            // Apply the client-certificate gate when configured. On any load
+            // failure, log and continue WITHOUT it — a CA typo must never
+            // brick admin access (recovery would need console, which many
+            // installs lack). MTLS_ACTIVE is only set when it truly activates.
+            if let Some(ca) = &mtls_ca {
+                match crate::mtls::apply_client_ca(&mut builder, ca) {
+                    Ok(()) => {
+                        crate::mtls::MTLS_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+                        info!("  🔐 mTLS: admin port requires a client certificate (CA: {})", ca);
+                    }
+                    Err(e) => tracing::error!(
+                        "mTLS: could not enable client-cert gate: {} — admin port running WITHOUT it", e
+                    ),
+                }
             }
 
             Some(builder)
@@ -4220,6 +4242,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     // finished loading, so none of its functions existed).
                     // Compressed it's ~10x smaller and far less reset-prone.
                     .wrap(actix_web::middleware::Compress::default())
+                    .wrap(actix_web::middleware::from_fn(mtls_gate))
                     .app_data(app_state.clone())
                     .app_data(wolfhost_data.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
@@ -4254,6 +4277,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             .client_request_timeout(std::time::Duration::from_secs(3))
             .client_disconnect_timeout(std::time::Duration::from_millis(500))
             .workers(http_workers)
+            .on_connect(mtls_on_connect)
             .bind_openssl(&https_bind, ssl_builder)
             .map_err(|e| {
                 tracing::error!("❌ Failed to bind HTTPS on {}: {}", https_bind, e);
@@ -4273,6 +4297,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                             // Compress responses — see the main server above
                             // (app.js is ~3.9 MB uncompressed otherwise).
                             .wrap(actix_web::middleware::Compress::default())
+                    .wrap(actix_web::middleware::from_fn(mtls_gate))
                             .app_data(app_state2.clone())
                             .app_data(wolfhost_data2.clone())
                             .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
@@ -4368,6 +4393,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     // finished loading, so none of its functions existed).
                     // Compressed it's ~10x smaller and far less reset-prone.
                     .wrap(actix_web::middleware::Compress::default())
+                    .wrap(actix_web::middleware::from_fn(mtls_gate))
                     .app_data(app_state.clone())
                     .app_data(wolfhost_data.clone())
                     .app_data(actix_multipart::form::MultipartFormConfig::default().total_limit(2 * 1024 * 1024 * 1024))
@@ -4608,6 +4634,61 @@ async fn gather_reboot_reason_remote(
         result.push_str("\n[truncated]");
     }
     result
+}
+
+/// `on_connect` hook for the admin HTTPS listener: record whether the peer
+/// presented a CA-verified client certificate, for the mTLS gate to read via
+/// `conn_data`. With SSL_VERIFY_PEER (no fail-if-absent), an invalid cert
+/// already aborts the handshake, so a present cert here is a valid one.
+fn mtls_on_connect(conn: &dyn std::any::Any, ext: &mut actix_web::dev::Extensions) {
+    if !crate::mtls::is_active() {
+        return;
+    }
+    if let Some(tls) = conn.downcast_ref::<
+        actix_tls::accept::openssl::TlsStream<actix_web::rt::net::TcpStream>
+    >() {
+        let present = tls.ssl().peer_certificate().is_some();
+        ext.insert(crate::mtls::ClientCertPresented(present));
+    }
+}
+
+/// mTLS enforcement middleware for the admin API. A no-op unless mTLS is active
+/// (a single atomic load when disabled). When active, a request must EITHER authenticate
+/// as an inter-node peer (valid cluster secret — machine-to-machine, no cert)
+/// OR arrive on a connection that presented a valid client certificate.
+/// Anything else is refused before any handler runs.
+async fn mtls_gate(
+    req: actix_web::dev::ServiceRequest,
+    next: actix_web::middleware::Next<impl actix_web::body::MessageBody + 'static>,
+) -> Result<actix_web::dev::ServiceResponse<actix_web::body::BoxBody>, actix_web::Error> {
+    if crate::mtls::is_active() {
+        // Inter-node (cluster-secret) requests bypass the client-cert rule:
+        // peers hold no client cert and authenticate with the shared secret.
+        let secret_ok = req
+            .headers()
+            .get("X-WolfStack-Secret")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                req.app_data::<actix_web::web::Data<crate::api::AppState>>()
+                    .map(|st| crate::auth::validate_inter_node_secret(s, &st.cluster_secret))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !secret_ok {
+            let has_cert = req
+                .conn_data::<crate::mtls::ClientCertPresented>()
+                .map(|c| c.0)
+                .unwrap_or(false);
+            if !has_cert {
+                return Ok(req
+                    .into_response(actix_web::HttpResponse::Forbidden().json(serde_json::json!({
+                        "error": "A client certificate is required to access this server."
+                    })))
+                    .map_into_boxed_body());
+            }
+        }
+    }
+    Ok(next.call(req).await?.map_into_boxed_body())
 }
 
 /// Find the web directory — check multiple locations
