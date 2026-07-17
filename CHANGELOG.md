@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.74: optional mutual-TLS (client certificate) support on the admin port** _(2026-07-17 — [`341c6e3e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/341c6e3ec546cfab16f710c8d385ea2c0cb0bdb5))_
 - **v25.2.73: cluster and install maintenance** _(2026-07-17 — [`ad928b3b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ad928b3b02f2681c9d13b05150beefa3dcdcb449))_
 - **v25.2.72: WolfHost subsystem maintenance and input validation** _(2026-07-17 — [`f528ff41`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f528ff41ef2cf4e14292bf64bc9f4903215ddbe0))_
 - **v25.2.71: scan detector catches raw-socket scanners (zmap/masscan/nmap -sS)** _(2026-07-17 — [`014b234b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/014b234bdb6526de840a0b67d3d467e604a07031))_
