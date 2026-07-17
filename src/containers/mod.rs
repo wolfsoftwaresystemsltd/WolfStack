@@ -4124,9 +4124,27 @@ pub struct RuntimeStatus {
 /// Detect Wolf ecosystem services (and web servers) running inside a container.
 /// Returns a list of services found with their running status.
 fn detect_container_services(runtime: &str, name: &str) -> Vec<ContainerService> {
-    let script = r#"for s in wolfproxy wolfserve wolfdisk wolfscale nginx apache2 httpd; do
+    // Running-check must work on MINIMAL images too. Many app containers
+    // (e.g. aonsoku: Alpine/BusyBox running nginx as PID 1 with `daemon off`)
+    // have neither systemd nor pgrep, so a `systemctl is-active || pgrep`
+    // check falsely reported the service as stopped even though `ps` clearly
+    // showed it running (KO4BSR, Jul 2026). Fall back to scanning
+    // /proc/<pid>/comm, which needs no extra tooling and matches the kernel's
+    // process name — nginx keeps comm "nginx" even though its setproctitle
+    // rewrites the cmdline to "nginx: master process ...".
+    let script = r#"is_running() {
+systemctl is-active --quiet "$1" 2>/dev/null && return 0
+if command -v pgrep >/dev/null 2>&1; then pgrep -x "$1" >/dev/null 2>&1 && return 0; fi
+for c in /proc/[0-9]*/comm; do
+[ -r "$c" ] || continue
+read cn < "$c" 2>/dev/null || continue
+[ "$cn" = "$1" ] && return 0
+done
+return 1
+}
+for s in wolfproxy wolfserve wolfdisk wolfscale nginx apache2 httpd; do
 if command -v "$s" >/dev/null 2>&1 || [ -f "/etc/systemd/system/${s}.service" ] || [ -f "/usr/lib/systemd/system/${s}.service" ]; then
-if systemctl is-active --quiet "$s" 2>/dev/null || pgrep -x "$s" >/dev/null 2>&1; then
+if is_running "$s"; then
 echo "${s}:running"
 else
 echo "${s}:stopped"
