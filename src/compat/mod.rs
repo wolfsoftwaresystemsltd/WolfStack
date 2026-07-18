@@ -163,23 +163,30 @@ pub fn license_manifest() -> Option<PlatformManifest> {
 /// signed payload; older licences are inferred from the `features` list
 /// (the webhook always sets the first feature to the tier slug).
 ///
-/// Tier slugs in use today: `homelab`, `team`, `msp`, `enterprise`.
-/// `pro` is a legacy alias for `msp` — pre-2026-05 licences carried
-/// `tier=pro`; the rebrand to MSP is display-only, so we resolve `pro`
-/// to `msp` to give those licences the same feature bundle they had
-/// before. Unknown slugs fall through to `enterprise` to avoid
+/// Tier slugs in use today: `homelab`, `homelab_plus`, `team`, `msp`,
+/// `enterprise`. `homelab_plus` is Homelab with a higher host cap (the cap
+/// itself rides in the licence's `max_nodes`), so it resolves to the same
+/// feature bundle as `homelab` — the ONLY difference between the two is how
+/// many hosts they license. `pro` is a legacy alias for `msp` — pre-2026-05
+/// licences carried `tier=pro`; the rebrand to MSP is display-only, so we
+/// resolve `pro` to `msp` to give those licences the same feature bundle they
+/// had before. Unknown slugs fall through to `enterprise` to avoid
 /// retroactively denying paid customers a feature on tier-string drift.
 pub fn resolve_tier(dm: &PlatformManifest) -> &'static str {
     if !dm.tier.is_empty() {
         return match dm.tier.as_str() {
             "homelab" => "homelab",
+            // Homelab Plus = Homelab feature bundle, larger host cap. Must map
+            // to "homelab" (NOT fall through to the enterprise catch-all, which
+            // would hand a £29 tier every enterprise feature).
+            "homelab_plus" => "homelab",
             "team" => "team",
             "pro" | "msp" => "msp",
             "enterprise" => "enterprise",
             _ => "enterprise",
         };
     }
-    if dm.features.iter().any(|f| f == "homelab") { "homelab" }
+    if dm.features.iter().any(|f| f == "homelab" || f == "homelab_plus") { "homelab" }
     else if dm.features.iter().any(|f| f == "team") { "team" }
     else if dm.features.iter().any(|f| f == "msp" || f == "pro") { "msp" }
     else { "enterprise" }
@@ -740,6 +747,26 @@ mod tests {
         let m_with_plugins = dm("homelab", &["plugins"]);
         assert!(manifest_has_feature(&m_with_plugins, "plugins"));
         assert!(!manifest_has_feature(&m_with_plugins, "api_keys"));
+    }
+
+    #[test]
+    fn homelab_plus_is_homelab_not_enterprise() {
+        // Homelab Plus is Homelab with a bigger host cap — it MUST resolve to
+        // the homelab bundle. If the unknown-slug catch-all (→ enterprise) ever
+        // caught it, a £29 tier would silently grant SSO, plugins and
+        // white-label. This test is the guard against that regression.
+        let m = dm("homelab_plus", &["homelab_plus", "api_keys"]);
+        assert_eq!(resolve_tier(&m), "homelab");
+        // Gets exactly what its explicit features list carries...
+        assert!(manifest_has_feature(&m, "api_keys"));
+        assert!(manifest_has_feature(&m, "wolfhost")); // base tier, free everywhere
+        // ...and NONE of the higher-tier bundle.
+        assert!(!manifest_has_feature(&m, "sso"));
+        assert!(!manifest_has_feature(&m, "plugins"));
+        assert!(!manifest_has_feature(&m, "wolfcustom"));
+        assert!(!manifest_has_feature(&m, "multi_tenancy"));
+        // The cap comes from the licence's max_nodes, unchanged.
+        assert_eq!(effective_cap(resolve_tier(&m), 25), 25);
     }
 
     #[test]
