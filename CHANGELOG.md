@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.81: raise Team host cap to 150 so the pricing ladder makes sense** _(2026-07-18 — [`641dcd3d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/641dcd3d3425ac91fa0bf68b63e8b3b530689479))_
 - **v25.2.80: Homelab Plus in the host-cap upgrade ladder + AI knowledge base** _(2026-07-18 — [`e7bfb316`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e7bfb31601ffae4b6e1fd4d82974a7d2e33f6278))_
 - **v25.2.79: recognise the Homelab Plus tier (homelab bundle, larger host cap)** _(2026-07-18 — [`4989c648`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4989c6482fe6ed16d684f7cb8b3e4957eef5a706))_
 - **v25.2.78: fix false "stopped" service badge on minimal containers (KO4BSR)** _(2026-07-17 — [`de3b30c9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/de3b30c952de3ca974eb307e01582e3f1e5101da))_
