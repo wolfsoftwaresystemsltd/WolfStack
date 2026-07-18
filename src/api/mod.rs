@@ -4389,7 +4389,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
             let current = state.cluster.get_all_nodes().len() as u32;
             if current + 1 > cap {
                 // Tier names/prices/caps per web/includes/stripe-tiers.php
-                // (homelab £12/10, homelab_plus £29/25, team £149/50, msp
+                // (homelab £12/10, homelab_plus £29/25, team £149/150, msp
                 // £499/unlimited). Suggest the NEXT rung of the ladder.
                 //
                 // Key the suggestion off the RAW tier slug, not resolve_tier:
@@ -4401,7 +4401,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                 let raw_tier = if dm.tier.is_empty() { tier } else { dm.tier.as_str() };
                 let (tier_label, upgrade): (&str, &str) = match raw_tier {
                     "homelab"      => ("Homelab",      "Upgrade to Homelab Plus (£29/mo, 25 hosts) at https://wolfstack.org/enterprise.php"),
-                    "homelab_plus" => ("Homelab Plus", "Upgrade to Team (£149/mo, 50 hosts) at https://wolfstack.org/enterprise.php"),
+                    "homelab_plus" => ("Homelab Plus", "Upgrade to Team (£149/mo, 150 hosts) at https://wolfstack.org/enterprise.php"),
                     "team"         => ("Team",         "Upgrade to Enterprise (unlimited hosts) at https://wolfstack.org/enterprise-contact.php"),
                     other          => (other,          "Contact sales@wolf.uk.com to raise the cap"),
                 };

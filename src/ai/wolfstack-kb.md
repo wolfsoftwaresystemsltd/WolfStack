@@ -415,8 +415,8 @@ One page (Storage & Network → Internet Exposure) to give any Docker/LXC contai
 Five paid tiers on Stripe plus free Community use. Authoritative pricing lives at wolfstack.org — verify there for current numbers; as of 2026-07:
 - **Community** (no licence) — source-available under PolyForm Noncommercial: free for personal & non-commercial use. **No code-enforced host cap** — the limits are licence terms, not software blocks
 - **Homelab £12/mo** — licence issued with max_nodes=10. Clustering, WireGuard bridge, branded status pages, scheduled backups, AI agent, Predictive Inbox + AUTOFIX, OSV scanner, REST API keys
-- **Homelab Plus £29/mo** — max_nodes=25. Same feature bundle as Homelab, just a bigger host cap — the enthusiast "missing middle" between Homelab (10) and Team (50). Binary maps tier `homelab_plus` → the homelab feature bundle in compat::resolve_tier
-- **Team £149/mo** — max_nodes=50. Adds OIDC/SSO and 24-hour email support (feature bundle is sso + api_keys — plugin store and white-label are MSP+)
+- **Homelab Plus £29/mo** — max_nodes=25. Same feature bundle as Homelab, just a bigger host cap — the enthusiast "missing middle" between Homelab (10) and Team (150). Binary maps tier `homelab_plus` → the homelab feature bundle in compat::resolve_tier
+- **Team £149/mo** — max_nodes=150. Adds OIDC/SSO and 24-hour email support (feature bundle is sso + api_keys — plugin store and white-label are MSP+)
 - **MSP £499/mo** — unlimited hosts (max_nodes=0). Adds WolfCustom white-label, multi-tenant client portals, plugin SDK, WolfHost, priority support. Was "Pro" before the 2026-05 rebrand
 - **Enterprise** — sales-led only, no public price. Custom cap per contract, custom SLA, SOC2/ISO collateral, on-prem/air-gap, bespoke development
 - **Soft host cap**: over-cap nodes still join — a warning is attached and a dashboard banner shows, but usage is NEVER hard-blocked ("that's a sales conversation, not an outage"). `max_nodes=0` = unlimited; legacy/sponsor licences carry 0
