@@ -36,6 +36,7 @@ ASSUME_YES=false
 AGENT_MODE=false
 SKIP_PBS_BUILD=false
 FORCE_PBS_BUILD=false
+MINIMAL=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --beta) BRANCH="beta" ;;
@@ -43,6 +44,7 @@ while [ $# -gt 0 ]; do
         --agent) AGENT_MODE=true ;;
         --skip-pbs-build|--no-pbs-build) SKIP_PBS_BUILD=true ;;
         --build-pbs|--pbs-from-source) FORCE_PBS_BUILD=true ;;
+        --minimal|--lite) MINIMAL=true ;;
         --install-dir|--install)
             if [ -n "$2" ]; then
                 shift
@@ -55,6 +57,45 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# ─── Optional-component selection (--minimal) ───────────────────────────────
+# Which heavy optional runtimes to install. Default = all, so a plain install
+# is byte-for-byte the historic behaviour and nothing changes for existing
+# users. `--minimal` lets the operator pick, so a lightweight box (a Raspberry
+# Pi print server, an edge node) gets a working monitoring UI without a
+# hypervisor and backup stack it will never use. The WolfStack binary detects
+# missing runtimes gracefully — skipped ones simply show as "not installed".
+WANT_DOCKER=true
+WANT_LXC=true
+WANT_KVM=true
+WANT_PBS=true
+
+wolfstack_pick_components() {
+    # Interactive picker for --minimal. Reads from /dev/tty so it works through
+    # `curl … | bash`, where stdin is the piped script rather than the keyboard.
+    local can_prompt=false
+    if [ -t 0 ] || { [ -e /dev/tty ] && : < /dev/tty 2>/dev/null; }; then can_prompt=true; fi
+    if [ "$ASSUME_YES" = true ] || [ "$can_prompt" != true ]; then
+        # No terminal to ask (unattended / --yes) — honour "minimal" literally:
+        # core only, nothing heavy. Everything can be added later.
+        WANT_DOCKER=false; WANT_LXC=false; WANT_KVM=false; WANT_PBS=false
+        echo "  --minimal (unattended): installing core only — no Docker, LXC, KVM/QEMU or PBS client."
+        return
+    fi
+    echo ""
+    echo "Minimal install — choose which optional runtimes to add (Enter = No):"
+    _ws_pick() {  # $1 = question ; $2 = variable name to set true/false
+        local reply=""
+        printf "  %s [y/N] " "$1" > /dev/tty
+        read -r reply < /dev/tty 2>/dev/null || reply=""
+        case "$reply" in y|Y|yes|YES) eval "$2=true" ;; *) eval "$2=false" ;; esac
+    }
+    _ws_pick "Docker (container management)?"          WANT_DOCKER
+    _ws_pick "LXC system containers?"                  WANT_LXC
+    _ws_pick "KVM / QEMU virtual machines?"            WANT_KVM
+    _ws_pick "Proxmox Backup Client (PBS backups)?"    WANT_PBS
+    echo ""
+}
 
 # Existing install = upgrade. The /api/upgrade endpoint in older WolfStack
 # binaries spawns this script via `curl|bash` without --yes, with stdin nulled
@@ -901,6 +942,18 @@ ws_install_pkgs() {
     return 0
 }
 
+# Run the --minimal picker (a no-op unless --minimal was passed), then print
+# exactly which optional runtimes are about to be installed — so a plain
+# install is never a surprise either.
+if [ "$MINIMAL" = true ]; then
+    wolfstack_pick_components
+fi
+_ws_yn() { [ "$1" = true ] && echo yes || echo no; }
+echo ""
+echo "Optional runtimes → Docker: $(_ws_yn "$WANT_DOCKER")  ·  LXC: $(_ws_yn "$WANT_LXC")  ·  KVM/QEMU: $(_ws_yn "$WANT_KVM")  ·  PBS client: $(_ws_yn "$WANT_PBS")"
+echo "(Core WolfStack + monitoring, networking and storage helpers are always installed. Use --minimal to choose.)"
+echo ""
+
 if [ "$PKG_MANAGER" = "apt" ]; then
     apt update -qq 2>/dev/null || true
     # On Proxmox hosts, QEMU and LXC are already provided by pve-qemu-kvm and lxc-pve.
@@ -945,7 +998,9 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         # Debian/Ubuntu — minimal cloud images skip them with -y, then the
         # first `lxc-start` fails with "apparmor_parser not available".
         # Pin them explicitly so containers actually start out of the box.
-        ws_install_pkgs git curl build-essential pkg-config libssl-dev libcrypt-dev lxc lxc-templates apparmor apparmor-utils dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3 smartmontools
+        LXC_PKGS="lxc lxc-templates apparmor apparmor-utils"; [ "$WANT_LXC" = true ] || LXC_PKGS=""
+        [ "$WANT_KVM" = true ] || QEMU_PKG=""
+        ws_install_pkgs git curl build-essential pkg-config libssl-dev libcrypt-dev $LXC_PKGS dnsmasq-base bridge-utils $QEMU_PKG socat nfs-common fuse3 smartmontools
         apt install -y s3fs-fuse 2>/dev/null || apt install -y s3fs 2>/dev/null || echo "  ⚠ s3fs not available — S3 mounts will use built-in sync"
     fi
 elif [ "$PKG_MANAGER" = "dnf" ]; then
@@ -955,7 +1010,9 @@ elif [ "$PKG_MANAGER" = "dnf" ]; then
     else
         QEMU_DNF="qemu-kvm qemu-img"
     fi
-    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_DNF socat s3fs-fuse nfs-utils fuse3 smartmontools
+    LXC_PKGS="lxc lxc-templates lxc-extra"; [ "$WANT_LXC" = true ] || LXC_PKGS=""
+    [ "$WANT_KVM" = true ] || QEMU_DNF=""
+    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkg-config libxcrypt-devel $LXC_PKGS dnsmasq bridge-utils $QEMU_DNF socat s3fs-fuse nfs-utils fuse3 smartmontools
 elif [ "$PKG_MANAGER" = "yum" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -963,7 +1020,9 @@ elif [ "$PKG_MANAGER" = "yum" ]; then
     else
         QEMU_YUM="qemu-kvm qemu-img"
     fi
-    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkgconfig lxc lxc-templates lxc-extra dnsmasq bridge-utils $QEMU_YUM socat s3fs-fuse nfs-utils fuse smartmontools
+    LXC_PKGS="lxc lxc-templates lxc-extra"; [ "$WANT_LXC" = true ] || LXC_PKGS=""
+    [ "$WANT_KVM" = true ] || QEMU_YUM=""
+    ws_install_pkgs git curl gcc gcc-c++ make openssl-devel pkgconfig $LXC_PKGS dnsmasq bridge-utils $QEMU_YUM socat s3fs-fuse nfs-utils fuse smartmontools
 elif [ "$PKG_MANAGER" = "zypper" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -972,7 +1031,9 @@ elif [ "$PKG_MANAGER" = "zypper" ]; then
         QEMU_ZYPP="qemu-kvm qemu-tools"
     fi
     # SUSE uses AppArmor by default — same Recommends-not-Depends trap.
-    ws_install_pkgs git curl gcc gcc-c++ make libopenssl-devel pkg-config lxc apparmor-parser apparmor-utils dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3 smartmontools
+    LXC_PKGS="lxc apparmor-parser apparmor-utils"; [ "$WANT_LXC" = true ] || LXC_PKGS=""
+    [ "$WANT_KVM" = true ] || QEMU_ZYPP=""
+    ws_install_pkgs git curl gcc gcc-c++ make libopenssl-devel pkg-config $LXC_PKGS dnsmasq bridge-utils $QEMU_ZYPP socat s3fs nfs-client fuse3 smartmontools
 elif [ "$PKG_MANAGER" = "pacman" ]; then
     ARCH=$(uname -m)
     if [ "$ARCH" = "aarch64" ]; then
@@ -980,7 +1041,9 @@ elif [ "$PKG_MANAGER" = "pacman" ]; then
     else
         QEMU_PAC="qemu-full"
     fi
-    ws_install_pkgs git curl base-devel openssl pkg-config lxc dnsmasq $QEMU_PAC socat s3fs-fuse nfs-utils fuse3 rustup smartmontools
+    LXC_PKGS="lxc"; [ "$WANT_LXC" = true ] || LXC_PKGS=""
+    [ "$WANT_KVM" = true ] || QEMU_PAC=""
+    ws_install_pkgs git curl base-devel openssl pkg-config $LXC_PKGS dnsmasq $QEMU_PAC socat s3fs-fuse nfs-utils fuse3 rustup smartmontools
 fi
 
 # Decide whether to disable the freshly-installed dnsmasq.service.
@@ -1014,6 +1077,12 @@ fi
 echo "✓ System dependencies installed"
 
 # ─── Install Proxmox Backup Client (optional, for PBS integration) ──────────
+# WANT_PBS gates the entire client install + ARM source-build for --minimal.
+# A plain install keeps WANT_PBS=true, so behaviour is unchanged.
+if [ "$WANT_PBS" != true ]; then
+    echo ""
+    echo "Proxmox Backup Client — skipped (not selected)."
+else
 echo ""
 echo "Installing Proxmox Backup Client..."
 
@@ -1425,6 +1494,7 @@ if command -v proxmox-backup-client >/dev/null 2>&1; then
         fi
     done
 fi
+fi  # ── end WANT_PBS gate ──
 
 # ─── Configure FUSE for storage mounts ──────────────────────────────────────
 # Enable allow_other in FUSE (needed for s3fs mounts accessible by containers)
@@ -1459,7 +1529,9 @@ for f in /etc/wolfstack/custom-cluster-secret \
 done
 
 # ─── Install Docker if missing ──────────────────────────────────────────────
-if ! command -v docker >/dev/null 2>&1; then
+# WANT_DOCKER gates this for --minimal installs. A plain install keeps
+# WANT_DOCKER=true, so behaviour is unchanged.
+if [ "$WANT_DOCKER" = true ] && ! command -v docker >/dev/null 2>&1; then
     echo ""
     echo "Installing Docker..."
     DOCKER_INSTALLED=false
