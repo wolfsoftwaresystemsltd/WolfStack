@@ -4389,19 +4389,28 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
             let current = state.cluster.get_all_nodes().len() as u32;
             if current + 1 > cap {
                 // Tier names/prices/caps per web/includes/stripe-tiers.php
-                // (homelab £12/10 hosts, team £149/50, msp £499/unlimited).
-                // resolve_tier never returns "pro" — it aliases to "msp".
-                let upgrade = match tier {
-                    "homelab" => "Upgrade to Team (£149/mo, 50 hosts) at https://wolfstack.org/enterprise.php",
-                    "team"    => "Upgrade to MSP (£499/mo, unlimited hosts) at https://wolfstack.org/enterprise.php",
-                    _         => "Contact sales@wolf.uk.com to raise the cap",
+                // (homelab £12/10, homelab_plus £29/25, team £149/50, msp
+                // £499/unlimited). Suggest the NEXT rung of the ladder.
+                //
+                // Key the suggestion off the RAW tier slug, not resolve_tier:
+                // resolve_tier collapses `homelab_plus` → `homelab` (same
+                // feature bundle), so it can't tell the two apart — but their
+                // upgrade paths differ (Homelab → Homelab Plus, Homelab Plus →
+                // Team). Fall back to resolve_tier's name for tier-less legacy
+                // licences.
+                let raw_tier = if dm.tier.is_empty() { tier } else { dm.tier.as_str() };
+                let (tier_label, upgrade): (&str, &str) = match raw_tier {
+                    "homelab"      => ("Homelab",      "Upgrade to Homelab Plus (£29/mo, 25 hosts) at https://wolfstack.org/enterprise.php"),
+                    "homelab_plus" => ("Homelab Plus", "Upgrade to Team (£149/mo, 50 hosts) at https://wolfstack.org/enterprise.php"),
+                    "team"         => ("Team",         "Upgrade to Enterprise (unlimited hosts) at https://wolfstack.org/enterprise-contact.php"),
+                    other          => (other,          "Contact sales@wolf.uk.com to raise the cap"),
                 };
                 Some(serde_json::json!({
                     "message": format!(
                         "Host added — but your cluster now exceeds the {} tier ({} of {} hosts). {}",
-                        tier, current + 1, cap, upgrade
+                        tier_label, current + 1, cap, upgrade
                     ),
-                    "tier": tier,
+                    "tier": raw_tier,
                     "max_nodes": cap,
                     "current_nodes": current + 1,
                     "feature": "host_cap",
