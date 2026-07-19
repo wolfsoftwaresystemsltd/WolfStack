@@ -8305,6 +8305,53 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     })
 }
 
+/// Join LXC config lines into a file body, guaranteeing exactly one trailing
+/// newline. `Vec<_>::join("\n")` drops the terminating newline, so a config
+/// written straight from joined lines is POSIX-malformed — and, worse, any
+/// later `>> config` append would land on the same line as the final
+/// directive. Every config rewrite goes through this so no writer can
+/// reintroduce that (the autostart toggle did, 2026-07: it wrote
+/// `lxc.start.auto = 1` with no trailing newline).
+fn lxc_config_body<S: AsRef<str>>(lines: &[S]) -> String {
+    let mut body = lines.iter().map(|s| s.as_ref()).collect::<Vec<&str>>().join("\n");
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body
+}
+
+/// Write an LXC container config from its line vector with a guaranteed
+/// trailing newline. See `lxc_config_body`.
+fn write_lxc_config<S: AsRef<str>>(path: &str, lines: &[S]) -> std::io::Result<()> {
+    std::fs::write(path, lxc_config_body(lines))
+}
+
+#[cfg(test)]
+mod lxc_config_body_tests {
+    use super::lxc_config_body;
+
+    #[test]
+    fn always_ends_with_exactly_one_newline() {
+        // The autostart-toggle regression: joined lines dropped the trailing
+        // newline. The body must always end with exactly one.
+        let owned = vec![
+            "lxc.start.auto = 1".to_string(),
+            "lxc.start.delay = 5".to_string(),
+        ];
+        assert_eq!(lxc_config_body(&owned), "lxc.start.auto = 1\nlxc.start.delay = 5\n");
+
+        // Works with &str slices too (the mount-remove path uses Vec<&str>).
+        assert_eq!(lxc_config_body(&["a", "b"]), "a\nb\n");
+
+        // Idempotent: an already-terminated final line is not doubled.
+        assert_eq!(lxc_config_body(&["x\n"]), "x\n");
+
+        // Empty input still yields a newline-terminated (empty) body.
+        let empty: [&str; 0] = [];
+        assert_eq!(lxc_config_body(&empty), "\n");
+    }
+}
+
 /// Update LXC container autostart specifically
 pub fn lxc_set_autostart(container: &str, enabled: bool) -> Result<String, String> {
     if is_proxmox() {
@@ -8332,7 +8379,7 @@ pub fn lxc_set_autostart(container: &str, enabled: bool) -> Result<String, Strin
             new_lines.push("lxc.start.delay = 5".to_string());
         }
 
-        std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
+        write_lxc_config(&path, &new_lines).map_err(|e| e.to_string())?;
     }
     Ok(format!("Autostart set to {}", enabled))
 }
@@ -8359,7 +8406,7 @@ pub fn lxc_set_network_link(container: &str, link: &str) -> Result<String, Strin
         new_lines.push(format!("lxc.net.0.link = {}", link));
     }
 
-    std::fs::write(&path, new_lines.join("\n")).map_err(|e| e.to_string())?;
+    write_lxc_config(&path, &new_lines).map_err(|e| e.to_string())?;
     Ok(format!("Network link set to {}", link))
 }
 
@@ -11740,7 +11787,7 @@ pub fn lxc_migrate_fixup(new_name: &str) {
             }
             line.to_string()
         }).collect();
-        let _ = std::fs::write(&config_path, updated.join("\n"));
+        let _ = write_lxc_config(&config_path, &updated);
     }
     // Mark setup done so lxc_post_start_setup doesn't reassign a bridge IP
     // at first boot — the carried rootfs already holds the original network
@@ -11818,7 +11865,7 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
 
         }
 
-        let _ = std::fs::write(&config_path, updated.join("\n"));
+        let _ = write_lxc_config(&config_path, &updated);
     }
 
     // Write the setup_done marker so lxc_post_start_setup doesn't
@@ -11872,7 +11919,7 @@ pub fn lxc_ensure_network_config(name: &str) {
     for (i, line) in additions.iter().enumerate() {
         lines.insert(insert_pos + i, line.clone());
     }
-    let _ = std::fs::write(&config_path, lines.join("\n"));
+    let _ = write_lxc_config(&config_path, &lines);
 
 }
 
@@ -12522,8 +12569,7 @@ pub fn lxc_remove_mount(container: &str, host_path: &str) -> Result<String, Stri
         })
         .collect();
 
-    let new_config = filtered.join("\n");
-    std::fs::write(&config_path, &new_config)
+    write_lxc_config(&config_path, &filtered)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
 
