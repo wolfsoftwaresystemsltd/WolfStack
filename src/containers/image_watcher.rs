@@ -133,6 +133,37 @@ impl ImageWatcherConfig {
         m
     }
 
+    /// Copy the CLUSTER-WIDE settings from `other` onto self, preserving this
+    /// node's host-specific state. Applied when a config push arrives from a
+    /// cluster peer: `enabled`, the check interval, the default policy, and the
+    /// auto-apply schedule are cluster decisions and must match everywhere, but
+    /// `container_policies` key on THIS host's container names and
+    /// `update_history` is THIS host's audit trail — both stay local so a
+    /// cluster-wide enable never wipes them. Single source of truth for what
+    /// counts as "cluster-wide" so the API handler and any future caller agree.
+    pub fn merge_cluster_settings_from(&mut self, other: &Self) {
+        self.enabled = other.enabled;
+        self.check_interval_secs = other.check_interval_secs;
+        self.default_policy = other.default_policy.clone();
+        self.schedule_cron = other.schedule_cron.clone();
+        self.schedule_window_minutes = other.schedule_window_minutes;
+        self.max_parallel_updates = other.max_parallel_updates;
+    }
+
+    /// True when the CLUSTER-WIDE settings (the ones `merge_cluster_settings_from`
+    /// copies) are identical between the two configs. Lets the save handler skip
+    /// a cluster fan-out when only host-local state changed — e.g. an operator
+    /// pinning a single container — so a per-container edit never triggers (or
+    /// blocks on) peer propagation.
+    pub fn cluster_settings_eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.check_interval_secs == other.check_interval_secs
+            && self.default_policy == other.default_policy
+            && self.schedule_cron == other.schedule_cron
+            && self.schedule_window_minutes == other.schedule_window_minutes
+            && self.max_parallel_updates == other.max_parallel_updates
+    }
+
     /// True when the auto-apply window is currently open. With no
     /// schedule configured, the window is always open (apply
     /// immediately on detection). With a cron set, the window opens
@@ -1466,5 +1497,72 @@ mod tests {
 
         let parsed: ImageUpdateStatus = serde_json::from_str("\"rolled_back\"").unwrap();
         assert_eq!(parsed, ImageUpdateStatus::RolledBack);
+    }
+
+    #[test]
+    fn merge_cluster_settings_applies_globals_but_keeps_local_state() {
+        // A peer that already has its own per-container policies + audit
+        // history. A propagated cluster-wide enable must flip the globals
+        // without touching either — that's the whole point of the merge
+        // (RutgerDiehard 2026-07-20: enabling the watcher on one node must
+        // reach the others, but must not clobber their local state).
+        let mut local = ImageWatcherConfig::default(); // enabled = false
+        local.container_policies.insert(
+            "my-nginx".to_string(),
+            ContainerUpdatePolicy { policy: UpdatePolicy::Pinned, ..Default::default() },
+        );
+        local.update_history.push(ImageUpdateEvent {
+            id: "evt-1".to_string(),
+            container_name: "my-nginx".to_string(),
+            image: "nginx:1".to_string(),
+            old_digest: String::new(),
+            new_digest: String::new(),
+            backup_id: None,
+            status: ImageUpdateStatus::Completed,
+            timestamp: "2026-07-20T00:00:00Z".to_string(),
+            error: None,
+        });
+
+        let mut incoming = ImageWatcherConfig::default();
+        incoming.enabled = true;
+        incoming.check_interval_secs = 7200;
+        incoming.default_policy = UpdatePolicy::AutoUpdate;
+        incoming.schedule_cron = Some("0 4 * * 0".to_string());
+        incoming.schedule_window_minutes = 120;
+        incoming.max_parallel_updates = 3;
+        // The pushing node's own policies/history must NOT leak into the peer.
+        incoming.container_policies.insert(
+            "other-host-container".to_string(),
+            ContainerUpdatePolicy::default(),
+        );
+
+        local.merge_cluster_settings_from(&incoming);
+
+        // Cluster-wide fields adopted.
+        assert!(local.enabled);
+        assert_eq!(local.check_interval_secs, 7200);
+        assert_eq!(local.default_policy, UpdatePolicy::AutoUpdate);
+        assert_eq!(local.schedule_cron.as_deref(), Some("0 4 * * 0"));
+        assert_eq!(local.schedule_window_minutes, 120);
+        assert_eq!(local.max_parallel_updates, 3);
+        // Host-specific state preserved: our policy stays, the pusher's
+        // container is not adopted, and our audit trail is intact.
+        assert!(local.container_policies.contains_key("my-nginx"));
+        assert!(!local.container_policies.contains_key("other-host-container"));
+        assert_eq!(local.update_history.len(), 1);
+        assert_eq!(local.update_history[0].id, "evt-1");
+
+        // cluster_settings_eq: after the merge the cluster-wide fields match
+        // the source; a difference in host-local state (a container policy)
+        // must NOT read as a cluster-wide change, so a per-container edit
+        // won't trigger propagation.
+        assert!(local.cluster_settings_eq(&incoming));
+        let mut only_policy_differs = local.clone();
+        only_policy_differs.container_policies.insert(
+            "yet-another".to_string(), ContainerUpdatePolicy::default());
+        assert!(local.cluster_settings_eq(&only_policy_differs));
+        // A genuine cluster-wide difference (disabled default vs enabled) reads
+        // as changed.
+        assert!(!ImageWatcherConfig::default().cluster_settings_eq(&incoming));
     }
 }

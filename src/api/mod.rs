@@ -35726,17 +35726,156 @@ pub async fn image_watcher_config_get(req: HttpRequest, state: web::Data<AppStat
     HttpResponse::Ok().json(crate::containers::image_watcher::ImageWatcherConfig::load())
 }
 
+/// Fan the image-watcher config out to every ONLINE WolfStack peer in this
+/// node's cluster. The watcher config is a per-node local file
+/// (`/etc/wolfstack/image-watcher.json`); without propagation, enabling the
+/// watcher on one node left the rest of the cluster disabled, so their Docker
+/// containers never got image-update flags and showed as up-to-date while
+/// newer images existed (RutgerDiehard 2026-07-20). Peers receive the config
+/// with `X-WolfStack-Secret` auth (caller "cluster-node"), which their save
+/// handler treats as a MERGE — cluster-wide settings apply, but each peer's
+/// own per-container policies and update_history are preserved — and they do
+/// NOT re-propagate, so there is no fan-out loop.
+/// One peer's outcome from a config propagation, surfaced in the save
+/// response so the operator learns immediately if a node did NOT receive the
+/// cluster-wide settings — the exact silent-failure mode that left the watcher
+/// disabled on some hosts in the first place (RutgerDiehard 2026-07-20).
+#[derive(serde::Serialize)]
+struct ImageWatcherPeerResult {
+    hostname: String,
+    address: String,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn image_watcher_propagate_config_to_peers(
+    state: &web::Data<AppState>,
+    cfg: &crate::containers::image_watcher::ImageWatcherConfig,
+) -> Vec<ImageWatcherPeerResult> {
+    let nodes = state.cluster.get_all_nodes();
+    // Confine propagation to this node's own cluster — a multi-cluster
+    // bastion must not flip the watcher on for a different operator's fleet.
+    // Normalise cluster names (None / "" / whitespace all collapse to the
+    // same key) so a slightly-inconsistently-named but genuinely-single
+    // cluster still fans out to every member.
+    let norm_cluster = |c: &Option<String>| c.as_deref().unwrap_or("").trim().to_string();
+    let self_cluster = nodes.iter().find(|n| n.is_self)
+        .map(|n| norm_cluster(&n.cluster_name))
+        .unwrap_or_default();
+    let peers: Vec<(String, String, u16)> = nodes.iter()
+        .filter(|n| !n.is_self && n.online && n.node_type == "wolfstack"
+                    && norm_cluster(&n.cluster_name) == self_cluster)
+        .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
+        .collect();
+    if peers.is_empty() { return Vec::new(); }
+
+    let secret = state.cluster_secret.clone();
+    let payload = serde_json::json!(cfg);
+    let client = &*API_HTTP_CLIENT;
+    let mut futures = Vec::with_capacity(peers.len());
+    for (hostname, address, port) in peers {
+        let secret = secret.clone();
+        let client = client.clone();
+        let payload = payload.clone();
+        futures.push(async move {
+            let urls = build_node_urls(&address, port, "/api/image-watcher/config");
+            for url in &urls {
+                match client.put(url)
+                    .timeout(std::time::Duration::from_secs(15))
+                    .header("X-WolfStack-Secret", &secret)
+                    .json(&payload)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let _ = resp.bytes().await;
+                        tracing::info!("image_watcher: config propagated to peer '{}' ({})", hostname, address);
+                        return ImageWatcherPeerResult { hostname, address, ok: true, error: None };
+                    }
+                    Ok(resp) => {
+                        // Reachable peer gave a definitive (non-2xx) answer —
+                        // don't retry the other URL candidates for this peer.
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        let snippet: String = body.chars().take(200).collect();
+                        tracing::warn!("image_watcher: peer '{}' ({}) rejected config: HTTP {}", hostname, address, status);
+                        return ImageWatcherPeerResult {
+                            hostname, address, ok: false,
+                            error: Some(format!("HTTP {}: {}", status, snippet)),
+                        };
+                    }
+                    Err(_) => continue, // connection failed — try next candidate URL
+                }
+            }
+            tracing::warn!("image_watcher: could not reach peer '{}' ({}) to propagate config", hostname, address);
+            ImageWatcherPeerResult {
+                hostname, address, ok: false,
+                error: Some("unreachable on all known addresses".to_string()),
+            }
+        });
+    }
+    futures::future::join_all(futures).await
+}
+
 /// PUT /api/image-watcher/config
 pub async fn image_watcher_config_save(
     req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<crate::containers::image_watcher::ImageWatcherConfig>,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
-    match body.into_inner().save() {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "message": "Image watcher config saved" })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    // Cycle-breaker: a propagated save arrives via X-WolfStack-Secret auth
+    // (caller "cluster-node"). Peers must apply-but-not-refan, or the cluster
+    // loops. See image_watcher_propagate_config_to_peers.
+    let from_peer = caller == "cluster-node";
+
+    // Merge so per-node state survives a cluster-wide toggle. `update_history`
+    // is THIS host's audit trail and `container_policies` key on THIS host's
+    // container names — a propagated enable/interval change must never wipe
+    // them. A peer save takes only the cluster-wide fields; a local operator
+    // save keeps the submitted config but still restores the on-disk history
+    // (the config editor never edits history, so a stale client copy must not
+    // truncate it).
+    let existing = crate::containers::image_watcher::ImageWatcherConfig::load();
+    let incoming = body.into_inner();
+    // Whether any CLUSTER-WIDE field changed vs what's on disk. Computed before
+    // `existing` is consumed below. Both branches produce a `cfg` whose
+    // cluster-wide fields equal `incoming`'s, so comparing against `incoming`
+    // is exact. A purely host-local edit (one container's policy) leaves this
+    // false and skips the fan-out entirely.
+    let cluster_changed = !existing.cluster_settings_eq(&incoming);
+    let cfg = if from_peer {
+        let mut merged = existing;
+        merged.merge_cluster_settings_from(&incoming);
+        merged
+    } else {
+        let mut c = incoming;
+        c.update_history = existing.update_history;
+        c
+    };
+
+    if let Err(e) = cfg.save() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
     }
+
+    // Operator-driven save that changes a cluster-wide setting: fan it out so
+    // the watcher runs on every node, not just the one the operator was
+    // viewing. A peer save (cycle-breaker) or a purely host-local edit never
+    // propagates — the latter would otherwise fan out on every single-container
+    // pin/unpin and could block the request on one slow/firewalled peer.
+    let peers = if !from_peer && cluster_changed {
+        image_watcher_propagate_config_to_peers(&state, &cfg).await
+    } else {
+        Vec::new()
+    };
+    let peers_failed = peers.iter().filter(|p| !p.ok).count();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "Image watcher config saved",
+        "peers": peers,
+        "peers_failed": peers_failed,
+    }))
 }
 
 /// GET /api/image-watcher/status
