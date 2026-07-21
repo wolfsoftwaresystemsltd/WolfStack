@@ -35878,6 +35878,29 @@ pub async fn image_watcher_config_save(
     }))
 }
 
+/// POST /api/image-watcher/propagate
+/// Force-push this node's current image-watcher settings to every online peer
+/// in the same cluster, regardless of whether anything changed. `config_save`
+/// only fans out when a cluster-wide field actually changed, so after a fleet
+/// upgrade the peers keep their old (usually disabled-by-default) config until
+/// an operator happens to nudge a setting. This gives operators one explicit
+/// "sync settings to all nodes" action so a freshly-upgraded cluster converges
+/// without the change-detection trick.
+pub async fn image_watcher_config_propagate(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let cfg = crate::containers::image_watcher::ImageWatcherConfig::load();
+    let peers = image_watcher_propagate_config_to_peers(&state, &cfg).await;
+    let peers_failed = peers.iter().filter(|p| !p.ok).count();
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "Image watcher settings pushed to cluster",
+        "peers": peers,
+        "peers_failed": peers_failed,
+    }))
+}
+
 /// GET /api/image-watcher/status
 pub async fn image_watcher_status(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
@@ -40436,6 +40459,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Image Watcher (auth required)
         .route("/api/image-watcher/config", web::get().to(image_watcher_config_get))
         .route("/api/image-watcher/config", web::put().to(image_watcher_config_save))
+        .route("/api/image-watcher/propagate", web::post().to(image_watcher_config_propagate))
         .route("/api/image-watcher/status", web::get().to(image_watcher_status))
         .route("/api/image-watcher/check/{container}", web::post().to(image_watcher_check))
         // Operator-triggered "Update now" — singular and bulk. Bulk
