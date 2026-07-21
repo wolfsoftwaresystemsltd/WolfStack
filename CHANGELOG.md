@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.84: bridge networking — active ifupdown beats a stray netplan file; warn when the drop-in isn't sourced (Computerman)** _(2026-07-21 — [`c0605d45`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c0605d4592f0c4410578c28bb20181a8f66c87f3))_
+- **v25.2.83: Docker image-update flags now appear on every cluster node, not just the manager (RutgerDiehard)** _(2026-07-20 — [`fc78f39c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fc78f39c22d31c3b7bfcacfdb0c54fa95e0dd57e))_
 - **v25.2.82: LXC config writes always terminate with a newline** _(2026-07-19 — [`98e5b0c2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/98e5b0c22fa3e262fdb1304af351fe07dedb0fad))_
 - **v25.2.81: raise Team host cap to 150 so the pricing ladder makes sense** _(2026-07-18 — [`641dcd3d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/641dcd3d3425ac91fa0bf68b63e8b3b530689479))_
 - **v25.2.80: Homelab Plus in the host-cap upgrade ladder + AI knowledge base** _(2026-07-18 — [`e7bfb316`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e7bfb31601ffae4b6e1fd4d82974a7d2e33f6278))_
