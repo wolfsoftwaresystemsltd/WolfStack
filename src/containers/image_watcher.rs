@@ -65,6 +65,16 @@ pub struct ImageWatcherConfig {
     /// with fast networks and beefy hosts can raise this.
     #[serde(default = "default_max_parallel_updates")]
     pub max_parallel_updates: usize,
+    /// When true, the pre-update safety backup SKIPS all bind mounts
+    /// (host paths bind-mounted into the container) — named volumes are
+    /// still captured. Bind mounts are typically large external data
+    /// (NAS media arrays) that don't belong in a quick pre-update
+    /// snapshot and would fill the backup staging dir. Off by default so
+    /// existing installs keep capturing everything. A per-container
+    /// `ContainerUpdatePolicy.exclude_bind_mounts_from_backup` overrides
+    /// it. Cluster-wide setting (see `merge_cluster_settings_from`).
+    #[serde(default)]
+    pub exclude_bind_mounts_from_backup: bool,
 }
 
 fn default_check_interval() -> u64 { 3600 }
@@ -82,6 +92,7 @@ impl Default for ImageWatcherConfig {
             schedule_cron: None,
             schedule_window_minutes: default_window_minutes(),
             max_parallel_updates: default_max_parallel_updates(),
+            exclude_bind_mounts_from_backup: false,
         }
     }
 }
@@ -133,6 +144,17 @@ impl ImageWatcherConfig {
         m
     }
 
+    /// Whether this container's pre-update safety backup should SKIP bind
+    /// mounts: the per-container override (`Some`) wins, otherwise the
+    /// global `exclude_bind_mounts_from_backup` default applies. Single
+    /// source of truth so the backup step and any UI preview agree. Named
+    /// volumes are unaffected — they're always captured.
+    pub fn exclude_binds_for(&self, container_name: &str) -> bool {
+        self.container_policies.get(container_name)
+            .and_then(|p| p.exclude_bind_mounts_from_backup)
+            .unwrap_or(self.exclude_bind_mounts_from_backup)
+    }
+
     /// Copy the CLUSTER-WIDE settings from `other` onto self, preserving this
     /// node's host-specific state. Applied when a config push arrives from a
     /// cluster peer: `enabled`, the check interval, the default policy, and the
@@ -148,6 +170,7 @@ impl ImageWatcherConfig {
         self.schedule_cron = other.schedule_cron.clone();
         self.schedule_window_minutes = other.schedule_window_minutes;
         self.max_parallel_updates = other.max_parallel_updates;
+        self.exclude_bind_mounts_from_backup = other.exclude_bind_mounts_from_backup;
     }
 
     /// True when the CLUSTER-WIDE settings (the ones `merge_cluster_settings_from`
@@ -162,6 +185,7 @@ impl ImageWatcherConfig {
             && self.schedule_cron == other.schedule_cron
             && self.schedule_window_minutes == other.schedule_window_minutes
             && self.max_parallel_updates == other.max_parallel_updates
+            && self.exclude_bind_mounts_from_backup == other.exclude_bind_mounts_from_backup
     }
 
     /// Resolve which config to persist when a save request lands.
@@ -276,6 +300,14 @@ pub struct ContainerUpdatePolicy {
     /// when applied so a typo can't hammer registries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_interval_secs: Option<u64>,
+    /// Per-container override for the global
+    /// `ImageWatcherConfig.exclude_bind_mounts_from_backup`. `None` =
+    /// inherit the global setting; `Some(true)` = always skip bind mounts
+    /// in this container's pre-update backup; `Some(false)` = always
+    /// include them. Resolved by `ImageWatcherConfig::exclude_binds_for`.
+    /// Named volumes are always captured regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_bind_mounts_from_backup: Option<bool>,
 }
 
 fn default_notify_only() -> UpdatePolicy { UpdatePolicy::NotifyOnly }
@@ -292,6 +324,7 @@ impl Default for ContainerUpdatePolicy {
             health_check_timeout_secs: default_health_check_timeout(),
             auto_rollback: true,
             check_interval_secs: None,
+            exclude_bind_mounts_from_backup: None,
         }
     }
 }
@@ -835,6 +868,28 @@ pub fn perform_update_blocking(container_name: &str, config: &ImageWatcherConfig
     event
 }
 
+/// Collect the host source paths of every BIND mount on a container from
+/// its `docker inspect` object (the single-container object as returned by
+/// `containers::docker_inspect`, not the raw array). Used to build the
+/// exclusion list for a pre-update backup when the operator has opted to
+/// skip bind mounts (large external data that would fill the staging dir).
+/// Named volumes are deliberately NOT returned — they hold app state and
+/// are always backed up. Each returned path is a bind's `Source`, which is
+/// exactly what `backup::mount_is_excluded` matches against.
+fn bind_mount_sources(inspect: &serde_json::Value) -> Vec<String> {
+    inspect.get("Mounts")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|m| m.get("Type").and_then(|v| v.as_str()) == Some("bind"))
+                .filter_map(|m| m.get("Source").and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The actual update pipeline — see `perform_update_blocking` (the public
 /// wrapper that also fires WolfFunctions trigger events) for the step list.
 fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> ImageUpdateEvent {
@@ -890,10 +945,18 @@ fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> Ima
     // Step 3: optional backup.
     if policy.backup_before_update {
         event.status = ImageUpdateStatus::BackingUp;
-        // Pre-update safety backup captures everything — no mount exclusions,
-        // and hot (false): the container is about to be recreated anyway, and
+        // Pre-update safety backup. Named volumes are always captured (they
+        // hold real app state). Bind mounts — typically large external data
+        // like NAS media arrays — are skipped when the operator has opted in
+        // (globally or per-container), so they don't fill the staging dir.
+        // hot (false): the container is about to be recreated anyway, and
         // stopping it here would just add downtime before the update.
-        match crate::backup::backup_docker(container_name, &[], false) {
+        let exclude_mounts: Vec<String> = if config.exclude_binds_for(container_name) {
+            bind_mount_sources(&inspect)
+        } else {
+            Vec::new()
+        };
+        match crate::backup::backup_docker(container_name, &exclude_mounts, false) {
             Ok((path, _size, _sha, _mounts)) => {
                 event.backup_id = path.file_name()
                     .and_then(|n| n.to_str())
@@ -1348,6 +1411,7 @@ mod tests {
                 health_check_timeout_secs: 120,
                 auto_rollback: false,
                 check_interval_secs: None,
+                exclude_bind_mounts_from_backup: None,
             },
         );
         config.update_history.push(ImageUpdateEvent {
@@ -1648,5 +1712,64 @@ mod tests {
             "propagation must not adopt the pusher's container policies");
         assert_eq!(synced.update_history.len(), 1,
             "propagation keeps this host's history");
+    }
+
+    #[test]
+    fn exclude_binds_for_resolves_override_then_global() {
+        let mut cfg = ImageWatcherConfig::default();
+        // Global default is off — capture everything.
+        assert!(!cfg.exclude_binds_for("anything"));
+
+        // Container with no explicit policy inherits the global.
+        cfg.exclude_bind_mounts_from_backup = true;
+        assert!(cfg.exclude_binds_for("no-policy"),
+            "a container without an override inherits the global default");
+
+        // Per-container override wins in both directions.
+        cfg.container_policies.insert(
+            "keep-binds".to_string(),
+            ContainerUpdatePolicy { exclude_bind_mounts_from_backup: Some(false), ..Default::default() },
+        );
+        cfg.container_policies.insert(
+            "skip-binds".to_string(),
+            ContainerUpdatePolicy { exclude_bind_mounts_from_backup: Some(true), ..Default::default() },
+        );
+        cfg.container_policies.insert(
+            "inherit".to_string(),
+            ContainerUpdatePolicy { exclude_bind_mounts_from_backup: None, ..Default::default() },
+        );
+        assert!(!cfg.exclude_binds_for("keep-binds"),
+            "Some(false) forces inclusion even when the global says exclude");
+        assert!(cfg.exclude_binds_for("skip-binds"));
+        assert!(cfg.exclude_binds_for("inherit"),
+            "None falls back to the (enabled) global default");
+
+        // The override is cluster-wide-neutral: it lives in container_policies,
+        // so flipping only the global toggle counts as a cluster-wide change.
+        let mut other = cfg.clone();
+        other.exclude_bind_mounts_from_backup = false;
+        assert!(!cfg.cluster_settings_eq(&other),
+            "the global bind-exclude toggle is a cluster-wide field");
+    }
+
+    #[test]
+    fn bind_mount_sources_returns_only_bind_paths() {
+        // Shape mirrors `docker inspect <name>` after containers::docker_inspect
+        // unwraps the outer array: a single container object with a Mounts[].
+        let inspect = serde_json::json!({
+            "Mounts": [
+                { "Type": "bind",   "Source": "/mnt/nas/media",      "Destination": "/media" },
+                { "Type": "volume", "Source": "/var/lib/docker/volumes/appdata/_data",
+                  "Name": "appdata", "Destination": "/config" },
+                { "Type": "bind",   "Source": "/mnt/nas/downloads",  "Destination": "/downloads" },
+                { "Type": "bind",   "Source": "",                    "Destination": "/empty" }
+            ]
+        });
+        let binds = bind_mount_sources(&inspect);
+        assert_eq!(binds, vec!["/mnt/nas/media".to_string(), "/mnt/nas/downloads".to_string()],
+            "only non-empty bind sources are returned; named volumes are excluded");
+
+        // No Mounts key → empty, never panics.
+        assert!(bind_mount_sources(&serde_json::json!({})).is_empty());
     }
 }

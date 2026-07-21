@@ -6497,6 +6497,14 @@
                             <small style="color:var(--text-muted);">How many containers to update concurrently. Default 1 avoids storming a single host. Raise on fast hardware + fast network.</small>
                         </div>
 
+                        <div class="form-group" style="margin-bottom:16px;">
+                            <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+                                <input type="checkbox" id="docker-updates-exclude-binds" style="width:18px; height:18px;">
+                                <span>Exclude bind mounts from pre-update backups</span>
+                            </label>
+                            <small style="color:var(--text-muted);">Before an image update WolfStack takes a safety backup of the container. Named volumes are always captured. Bind mounts (host paths mounted in — e.g. NAS media arrays) are usually large external data that would fill the staging area; turn this on to skip them. Off by default so existing installs keep capturing everything. Override per container from the "update settings" popover on the Docker page.</small>
+                        </div>
+
                         <div style="margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
                             <button class="btn btn-primary" onclick="saveDockerUpdatesConfig()"><span class="ws-icon-clean-wrap" data-icon="save"></span> Save Settings</button>
                             <button class="btn" onclick="pushDockerUpdatesToCluster(this)" title="Force these saved settings onto every other node in the cluster. Use after upgrading all your hosts so they all start watching for image updates.">Push to all nodes</button>
