@@ -106,6 +106,16 @@ if [ -d /etc/wolfstack ]; then
     ASSUME_YES=true
 fi
 
+# apt/dpkg must NEVER stop at an interactive prompt. The in-app Upgrade runs
+# this via `curl|bash` with stdin nulled, so a debconf config-file question or
+# — the common one on Debian 12 / Ubuntu 22.04+ — needrestart's "which services
+# should be restarted?" dialog would hang the whole upgrade forever while
+# holding the dpkg lock (klas 2026-07-22). `-y` alone does not cover those, so
+# force fully unattended mode for every apt call in this script.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 # Allow git to operate on repos owned by other users (setup.sh runs as root
 # but repos may have been cloned by a regular user)
 export GIT_CONFIG_COUNT=1
