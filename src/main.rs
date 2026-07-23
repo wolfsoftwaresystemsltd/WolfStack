@@ -71,6 +71,7 @@ mod control_panel;
 mod github_backup;
 mod deps;
 mod exposure;
+mod bruteforce;
 mod mail_relay;
 mod ups;
 mod systemcheck;
@@ -795,6 +796,11 @@ async fn main() -> std::io::Result<()> {
         // Create app state
         let monitor_arc = Arc::new(Mutex::new(mon));
         let ups_state = Arc::new(ups::UpsState::new());
+        // Hoisted so the brute-force monitor shares the *same* limiter as the
+        // login page + SSH monitor — one ban engine, one ipset, one fleet
+        // propagation path.
+        let login_limiter = Arc::new(auth::LoginRateLimiter::new());
+        let bruteforce_state = bruteforce::BruteforceState::new(login_limiter.clone());
         let app_state = web::Data::new(api::AppState {
             monitor: monitor_arc.clone(),
             metrics_history: Mutex::new(monitoring::MetricsHistory::new()),
@@ -818,7 +824,8 @@ async fn main() -> std::io::Result<()> {
             wolfflow: wolfflow_state.clone(),
             statuspage: statuspage_state.clone(),
             tls_enabled,
-            login_limiter: Arc::new(auth::LoginRateLimiter::new()),
+            login_limiter: login_limiter.clone(),
+            bruteforce: bruteforce_state.clone(),
             scan_detector: Arc::new(scan_detector::ScanDetector::new()),
             diag_control: Arc::new(diag::Control::new()),
             wireguard_bridges: Arc::new(std::sync::RwLock::new(networking::load_wireguard_bridges())),
@@ -1033,6 +1040,12 @@ async fn main() -> std::io::Result<()> {
         // so SSH and Proxmox brute-force attacks trigger the same
         // kernel-block + fleet propagation as WolfStack-UI attacks.
         crate::auth::log_monitor::start_monitor(app_state.login_limiter.clone());
+        // Start brute-force protection: extends the ban engine to each LXC
+        // container's own sshd + web auth logs. Idle (spawns nothing) while
+        // disabled in bruteforce.json; re-applied live on config change. Feeds
+        // the same limiter, so a container-side hit blocks + propagates exactly
+        // like an SSH/UI one.
+        app_state.bruteforce.apply();
         // Start the Fleet Logs shipper + janitor threads. Both idle cheaply
         // while the feature is disabled (off by default), so this is a no-op
         // on installs that never opt in. They re-read config each tick, so

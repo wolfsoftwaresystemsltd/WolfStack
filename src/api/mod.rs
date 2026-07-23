@@ -298,6 +298,8 @@ pub struct AppState {
     pub tls_enabled: bool,
     /// Login rate limiter (brute-force protection)
     pub login_limiter: Arc<crate::auth::LoginRateLimiter>,
+    /// Brute-force protection — extends the ban engine to container ssh/web logs.
+    pub bruteforce: Arc<crate::bruteforce::BruteforceState>,
     pub scan_detector: Arc<crate::scan_detector::ScanDetector>,
     pub diag_control: Arc<crate::diag::Control>,
     /// WireGuard bridge configs (cluster → bridge)
@@ -1076,6 +1078,112 @@ pub async fn security_auth_config_set(
         Ok(saved) => HttpResponse::Ok().json(saved),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
+}
+
+// ---- Brute-force protection (per-node) --------------------------------------
+// These are the node-local endpoints. The fleet_* wrappers below fan them out
+// across the cluster; a peer that receives a propagated call lands here too.
+
+/// GET /api/bruteforce/status — this node's watched sources + active bans +
+/// per-source hit counts.
+pub async fn bruteforce_status_get(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(state.bruteforce.status_json())
+}
+
+/// POST /api/bruteforce/config — set this node's config and (re)apply the
+/// monitors. The fleet wrapper propagates the identical body to peers, so no
+/// self-propagation is done here.
+pub async fn bruteforce_config_set(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::bruteforce::BruteforceConfig>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match state.bruteforce.set_config_and_apply(body.into_inner()) {
+        Ok(saved) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true,
+            "config": saved,
+            "watched_sources": state.bruteforce.sources.read().unwrap().clone(),
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/bruteforce/scan — re-run discovery and reattach on this node,
+/// returning the sources now watched (drives the live scan feedback).
+pub async fn bruteforce_scan(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let sources = state.bruteforce.rescan();
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "watched_sources": sources,
+        "active_bans": state.bruteforce.status_json().get("active_bans").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+    }))
+}
+
+// ---- Brute-force protection (fleet) -----------------------------------------
+
+/// GET /api/fleet/bruteforce/status — aggregated status across every WolfStack
+/// node in the cluster.
+pub async fn fleet_bruteforce_status(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let self_id = state.cluster.self_id.clone();
+    let state_for_local = state.clone();
+    let local = move || state_for_local.bruteforce.status_json();
+    let results = fleet_fanout_get::<serde_json::Value, _>(
+        &state, "/api/bruteforce/status", local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": results, "self_id": self_id }))
+}
+
+/// POST /api/fleet/bruteforce/config — push one config to every node and apply.
+pub async fn fleet_bruteforce_config(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::bruteforce::BruteforceConfig>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let cfg = body.into_inner();
+    let payload = serde_json::to_value(&cfg).unwrap_or(serde_json::json!({}));
+    let state_for_local = state.clone();
+    let cfg_for_local = cfg.clone();
+    let local = move || match state_for_local.bruteforce.set_config_and_apply(cfg_for_local) {
+        Ok(saved) => serde_json::json!({ "ok": true, "config": saved }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    let results = fleet_fanout_post::<serde_json::Value, _>(
+        &state, "/api/bruteforce/config", payload, local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
+}
+
+/// POST /api/fleet/bruteforce/scan — rescan + reattach on every node, returning
+/// each node's discovered sources for live feedback.
+pub async fn fleet_bruteforce_scan(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let self_id = state.cluster.self_id.clone();
+    let state_for_local = state.clone();
+    let local = move || {
+        let sources = state_for_local.bruteforce.rescan();
+        serde_json::json!({ "ok": true, "watched_sources": sources })
+    };
+    let results = fleet_fanout_post::<serde_json::Value, _>(
+        &state, "/api/bruteforce/scan", serde_json::json!({}), local,
+    ).await;
+    HttpResponse::Ok().json(serde_json::json!({ "nodes": results, "self_id": self_id }))
 }
 
 #[derive(Deserialize)]
@@ -17638,9 +17746,24 @@ pub async fn backup_stream(
 
     // Stream SSE events from the tokio channel
     let stream = async_stream::stream! {
-        while let Some(msg) = rx.recv().await {
-            let event = format!("data: {}\n\n", msg.replace('\n', "\ndata: "));
-            yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(event));
+        loop {
+            // Heartbeat: a restore can be silent for minutes (a large
+            // `docker load`, a PBS pull), and an idle connection with no bytes
+            // gets reaped — by the browser or, more often, a reverse proxy's
+            // read timeout — which surfaces in the UI as a bare fetch failure
+            // ("Load failed" / "Failed to fetch") with no server error. Emitting
+            // an SSE comment every 15s keeps the socket warm. Comment lines
+            // (`:`-prefixed) are ignored by the client's `data:` parser.
+            match tokio::time::timeout(std::time::Duration::from_secs(15), rx.recv()).await {
+                Ok(Some(msg)) => {
+                    let event = format!("data: {}\n\n", msg.replace('\n', "\ndata: "));
+                    yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(event));
+                }
+                Ok(None) => break, // channel closed — restore thread finished
+                Err(_) => {
+                    yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from_static(b": keepalive\n\n"));
+                }
+            }
         }
     };
 
@@ -17708,9 +17831,24 @@ pub async fn backup_restore_stream(
     });
 
     let stream = async_stream::stream! {
-        while let Some(msg) = rx.recv().await {
-            let event = format!("data: {}\n\n", msg.replace('\n', "\ndata: "));
-            yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(event));
+        loop {
+            // Heartbeat: a restore can be silent for minutes (a large
+            // `docker load`, a PBS pull), and an idle connection with no bytes
+            // gets reaped — by the browser or, more often, a reverse proxy's
+            // read timeout — which surfaces in the UI as a bare fetch failure
+            // ("Load failed" / "Failed to fetch") with no server error. Emitting
+            // an SSE comment every 15s keeps the socket warm. Comment lines
+            // (`:`-prefixed) are ignored by the client's `data:` parser.
+            match tokio::time::timeout(std::time::Duration::from_secs(15), rx.recv()).await {
+                Ok(Some(msg)) => {
+                    let event = format!("data: {}\n\n", msg.replace('\n', "\ndata: "));
+                    yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(event));
+                }
+                Ok(None) => break, // channel closed — restore thread finished
+                Err(_) => {
+                    yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from_static(b": keepalive\n\n"));
+                }
+            }
         }
     };
 
@@ -40821,6 +40959,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/security/abuse-report/history", web::get().to(abuse_report_history))
         .route("/api/security/listening-ports-local", web::get().to(security_listening_ports_local))
         .route("/api/security/sessions-destroy-all", web::post().to(security_sessions_destroy_all))
+        // Brute-force protection (extends the ban engine to container ssh/web)
+        .route("/api/bruteforce/status", web::get().to(bruteforce_status_get))
+        .route("/api/bruteforce/config", web::post().to(bruteforce_config_set))
+        .route("/api/bruteforce/scan", web::post().to(bruteforce_scan))
+        .route("/api/fleet/bruteforce/status", web::get().to(fleet_bruteforce_status))
+        .route("/api/fleet/bruteforce/config", web::post().to(fleet_bruteforce_config))
+        .route("/api/fleet/bruteforce/scan", web::post().to(fleet_bruteforce_scan))
         // Fleet-wide aggregation and operations
         .route("/api/fleet/security/lockouts", web::get().to(fleet_security_lockouts))
         .route("/api/fleet/security/listening-ports", web::get().to(fleet_security_listening_ports))
