@@ -994,6 +994,35 @@
                 </div>
             </div>
 
+            <!-- ── Brute-force protection ── -->
+            <div class="card fsec-card" data-fsec="detection" style="margin-bottom:20px;">
+                <div class="card-header">
+                    <h3 style="margin:0;">Brute-force protection</h3>
+                    <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">One switch that extends WolfStack's ban engine past the host's own SSH/Proxmox login into <strong>every managed LXC container</strong> — each container's sshd and its apache/nginx basic-auth failures. A hit anywhere feeds the same rate-limiter as the login page, so the attacker is kernel-blocked (<code>wolfstack_block4/6</code>) and the block propagates to every node in the cluster. No per-container fail2ban to install or babysit. Only unambiguous auth failures count — never bare 404s — so real users are never banned by mistake.</div>
+                </div>
+                <div class="card-body">
+                    <div style="display:flex; flex-wrap:wrap; gap:18px; align-items:center; margin-bottom:14px;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="bf-enabled" onchange="bfMarkDirty()">
+                            <span><strong>Enable</strong> extended monitoring <span style="color:var(--text-muted);font-size:11px;font-weight:400;">(off by default)</span></span>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="bf-watch-ssh" checked onchange="bfMarkDirty()">
+                            <span>Container sshd</span>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="bf-watch-web" checked onchange="bfMarkDirty()">
+                            <span>Container web (apache/nginx auth)</span>
+                        </label>
+                        <button class="btn btn-primary" onclick="bruteforceScanFleet()" id="bf-scan-btn" style="margin-left:auto;">Scan &amp; protect the fleet</button>
+                    </div>
+                    <div id="bf-scan-terminal" style="display:none; font-family:var(--font-mono); font-size:12px; background:#0b0f14; color:#cbd5e1; border:1px solid var(--border); border-radius:6px; padding:10px; max-height:260px; overflow-y:auto; margin-bottom:14px; white-space:pre-wrap;"></div>
+                    <div id="bf-fleet-status">
+                        <div style="color:var(--text-muted); font-size:13px;">Loading…</div>
+                    </div>
+                </div>
+            </div>
+
             <!-- ── Outbound scan detector ── -->
             <div class="card fsec-card" data-fsec="detection" style="margin-bottom:20px;">
                 <div class="card-header">

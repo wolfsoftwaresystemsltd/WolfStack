@@ -3398,8 +3398,16 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
     //          "docker-myapp-2026..." → "myapp", "vm-myvm-2026..." → "myvm"
     let backup_id = extract_backup_id_from_filename(filename);
 
-    // Determine backup type from filename prefix
-    let backup_type = if filename.starts_with("vzdump-lxc-") || filename.starts_with("lxc-") {
+    // Determine backup type from filename prefix. Docker archives
+    // (`docker-<name>-…`, or a vzdump-style `vzdump-docker-…`) are typed "ct"
+    // — the same as the live file-level Docker path (see build_pxar_pairs's
+    // Docker arm) — so they list as a Container, not a Host. Without the
+    // docker- case they fell into the `else` and were stored as "host", which
+    // then made the PBS-list restore refuse them ("host snapshot isn't
+    // supported here"). The container name is still parsed correctly by
+    // extract_backup_id_from_filename, which already understands `docker-`.
+    let backup_type = if filename.starts_with("vzdump-lxc-") || filename.starts_with("lxc-")
+        || filename.starts_with("vzdump-docker-") || filename.starts_with("docker-") {
         "ct"
     } else if filename.starts_with("vm-") || filename.starts_with("vzdump-qemu-") {
         "vm"
