@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.3.1: rebuild release — sync Cargo.lock to the crate version** _(2026-07-23 — [`74aaf23a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/74aaf23a7a7c72b26a121d9e06451e5aa7a140f4))_
+- **v25.3.0: brute-force protection feature + UniFi Integration API + PBS docker restore fixes** _(2026-07-23 — [`9f2cbe9b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9f2cbe9bf061465138b0960c8a2a88645bea497d))_
 - **v25.2.90: UniFi integration supports API-key auth (X-API-KEY)** _(2026-07-23 — [`51cfd27e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/51cfd27eb08f99003961d19e97e80b3afa23c507))_
 - **v25.2.89: fix invisible 'Add integration' modal — integration picker never showed** _(2026-07-22 — [`65e8f64f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65e8f64f9d8afc8d4e3213aa535f8055ed7ec6cc))_
 - **v25.2.88: switch in-app sponsor CTAs to Pricing, linking to the wolfstack.org pricing page** _(2026-07-22 — [`ff1ac941`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff1ac9411a7ff8efbac43af8d8358d2282db5877))_
