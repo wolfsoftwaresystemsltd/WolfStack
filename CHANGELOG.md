@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.2.90: UniFi integration supports API-key auth (X-API-KEY)** _(2026-07-23 — [`51cfd27e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/51cfd27eb08f99003961d19e97e80b3afa23c507))_
 - **v25.2.89: fix invisible 'Add integration' modal — integration picker never showed** _(2026-07-22 — [`65e8f64f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65e8f64f9d8afc8d4e3213aa535f8055ed7ec6cc))_
 - **v25.2.88: switch in-app sponsor CTAs to Pricing, linking to the wolfstack.org pricing page** _(2026-07-22 — [`ff1ac941`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff1ac9411a7ff8efbac43af8d8358d2282db5877))_
 - **v25.2.87: Docker update settings always reachable + skip bind mounts in pre-update backups (wabil)** _(2026-07-21 — [`d70ca667`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d70ca66716fca647b4ce8fd3857eeb8c260b8278))_
