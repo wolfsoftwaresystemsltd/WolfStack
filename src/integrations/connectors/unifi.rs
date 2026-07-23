@@ -4,10 +4,18 @@
 
 //! Unifi Controller connector — manage devices, clients, and networks.
 //!
-//! Unifi uses cookie-based auth: POST `/api/login` with `{username, password}`,
-//! then carry the returned session cookies on all subsequent requests.
-//! Since reqwest's `cookies` feature is not enabled, we extract the
-//! `Set-Cookie` header manually and replay it.
+//! Two auth paths, tried in that order:
+//!
+//! 1. **API key** (preferred). If a `api_key` credential is present we send it
+//!    as the `X-API-KEY` header and skip the login round-trip entirely. This is
+//!    the only path that works when the controller/account has 2FA enabled,
+//!    because the legacy `/api/login` username+password flow returns a 2FA
+//!    challenge that a headless integration can't answer. UniFi OS 4.x / Network
+//!    9.x let an admin mint a local API key under Settings → Admins → API Keys.
+//! 2. **Cookie login** (fallback for older controllers without API keys). POST
+//!    `/api/login` with `{username, password}`, then carry the returned session
+//!    cookies on subsequent requests. Since reqwest's `cookies` feature is not
+//!    enabled, we extract the `Set-Cookie` header manually and replay it.
 
 use crate::integrations::{
     AuthMethod, ConfigField, Connector, ConnectorCapability, ConnectorInfo,
@@ -35,6 +43,16 @@ static UNIFI_CLIENT: std::sync::LazyLock<reqwest::Client> =
     });
 
 pub struct UnifiConnector;
+
+/// Resolved auth for a single request. Kept separate from the request build so
+/// `api_get`/`api_post` share one auth-resolution path.
+enum UnifiAuth {
+    /// Local API key — sent as `X-API-KEY`. No login round-trip, so it works
+    /// even when the controller/account enforces 2FA.
+    ApiKey(String),
+    /// Session cookie string from a username/password `/api/login`.
+    Cookie(String),
+}
 
 impl UnifiConnector {
     /// Return a cheap (Arc-refcounted) clone of the shared Client so
@@ -101,18 +119,44 @@ impl UnifiConnector {
         Ok((client, cookie_header))
     }
 
-    /// GET request with session cookies.
+    /// Resolve auth for a request: prefer an API key (no login, 2FA-safe),
+    /// otherwise fall back to a username/password cookie login.
+    async fn authenticate(
+        base_url: &str,
+        credentials: &serde_json::Value,
+    ) -> Result<(reqwest::Client, UnifiAuth), String> {
+        if let Some(key) = credentials.get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Ok((Self::base_client()?, UnifiAuth::ApiKey(key.to_string())));
+        }
+        let (client, cookie) = Self::login(base_url, credentials).await?;
+        Ok((client, UnifiAuth::Cookie(cookie)))
+    }
+
+    /// Attach the resolved auth to a request builder.
+    fn apply_auth(rb: reqwest::RequestBuilder, auth: &UnifiAuth) -> reqwest::RequestBuilder {
+        match auth {
+            UnifiAuth::ApiKey(key) => rb.header("X-API-KEY", key),
+            UnifiAuth::Cookie(cookie) => rb.header("Cookie", cookie),
+        }
+    }
+
+    /// GET request, authenticated by API key or session cookie.
     async fn api_get(
         base_url: &str,
         credentials: &serde_json::Value,
         path: &str,
     ) -> Result<serde_json::Value, String> {
-        let (client, cookies) = Self::login(base_url, credentials).await?;
+        let (client, auth) = Self::authenticate(base_url, credentials).await?;
         let url = format!("{}{}", base_url.trim_end_matches('/'), path);
 
-        let resp = client.get(&url)
-            .header("Cookie", &cookies)
-            .header("Accept", "application/json")
+        let resp = Self::apply_auth(
+                client.get(&url).header("Accept", "application/json"),
+                &auth,
+            )
             .send()
             .await
             .map_err(|e| format!("Request failed: {}", e))?;
@@ -129,19 +173,20 @@ impl UnifiConnector {
         resp.json().await.map_err(|e| format!("JSON parse error: {}", e))
     }
 
-    /// POST request with session cookies.
+    /// POST request, authenticated by API key or session cookie.
     async fn api_post(
         base_url: &str,
         credentials: &serde_json::Value,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let (client, cookies) = Self::login(base_url, credentials).await?;
+        let (client, auth) = Self::authenticate(base_url, credentials).await?;
         let url = format!("{}{}", base_url.trim_end_matches('/'), path);
 
-        let resp = client.post(&url)
-            .header("Cookie", &cookies)
-            .header("Content-Type", "application/json")
+        let resp = Self::apply_auth(
+                client.post(&url).header("Content-Type", "application/json"),
+                &auth,
+            )
             .json(body)
             .send()
             .await
@@ -170,8 +215,10 @@ impl Connector for UnifiConnector {
             id: "unifi".to_string(),
             name: "Unifi Controller".to_string(),
             icon: "fa-wifi".to_string(),
-            description: "Manage Unifi network devices, clients, and networks".to_string(),
-            auth_methods: vec![AuthMethod::Cookie],
+            description: "Manage Unifi network devices, clients, and networks. Use an API key (Settings → Admins → API Keys) — required if the controller has 2FA; username/password is a fallback for older controllers.".to_string(),
+            // API key first so the UI prefers it; cookie login stays as a
+            // fallback for controllers without API-key support.
+            auth_methods: vec![AuthMethod::ApiKey, AuthMethod::Cookie],
             config_schema: vec![
                 ConfigField {
                     name: "base_url".to_string(),
