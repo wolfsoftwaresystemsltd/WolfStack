@@ -399,10 +399,12 @@ impl Connector for UnifiConnector {
             name: "Unifi Controller".to_string(),
             icon: "fa-wifi".to_string(),
             description: "Manage Unifi network devices, clients, and networks. \
-                An API key (Settings → Control Plane → Integrations, Network 9.3+) \
-                lists devices and clients and is required if the controller has 2FA. \
-                Add a username + password to also block/kick clients, restart devices, \
-                and list networks. UniFi OS consoles (UDM/UDR/UCG) are supported."
+                An API key alone (Settings → Control Plane → Integrations, Network 9.3+) \
+                is all most people need — it lists devices and clients and is the only \
+                method that works when the controller has 2FA. You do NOT also need a \
+                username. A username + password is optional and only enables the extra \
+                actions the API key can't do (block/kick clients, restart a device, list \
+                networks). UniFi OS consoles (UDM/UDR/UCG) are supported."
                 .to_string(),
             // API key first so the UI prefers it; username/password enables the
             // actions the Integration API can't perform.

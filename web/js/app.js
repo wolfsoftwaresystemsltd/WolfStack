@@ -3250,6 +3250,25 @@ function intgFormModal(title, fields, submitLabel) {
         modal.appendChild(h);
         const inputs = {};
         fields.forEach(f => {
+            // Presentation-only pseudo-fields (no value collected): a hint line
+            // and an "— OR —" style divider, used to make either/or credential
+            // choices (e.g. UniFi: API key OR username+password) visually clear.
+            if (f.field_type === 'note') {
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:12px;color:var(--text-secondary,#a1a1aa);margin:0 0 12px;line-height:1.4;';
+                note.textContent = f.label;
+                modal.appendChild(note);
+                return;
+            }
+            if (f.field_type === 'separator') {
+                const sep = document.createElement('div');
+                sep.style.cssText = 'display:flex;align-items:center;gap:10px;margin:6px 0 14px;color:var(--text-muted,#71717a);font-size:11px;font-weight:600;letter-spacing:0.08em;';
+                sep.innerHTML = '<span style="flex:1;height:1px;background:var(--border-color,#2d2f3a);"></span>' +
+                    escapeHtml(f.label || 'OR') +
+                    '<span style="flex:1;height:1px;background:var(--border-color,#2d2f3a);"></span>';
+                modal.appendChild(sep);
+                return;
+            }
             const wrap = document.createElement('div');
             wrap.style.cssText = 'margin-bottom:12px;';
             const lbl = document.createElement('label');
@@ -3388,9 +3407,15 @@ async function intgSetCredModal(instanceId, connectorId) {
     const dualAuth = methods.includes('api_key') && methods.includes('cookie');
     let cred, storedMethod;
     if (dualAuth) {
+        // Either/or: an API key ALONE, or a username+password ALONE. The stacked
+        // fields used to look co-required (RutgerDiehard 2026-07-24 — "won't work
+        // without an API key AND username"); the note + divider make it explicit
+        // that you fill in ONE side only.
         const fields = [
-            { name: 'api_key', label: 'API key (recommended — required if 2FA is enabled)', field_type: 'password', required: false },
-            { name: 'username', label: 'Username (only if not using an API key)', field_type: 'text', required: false },
+            { field_type: 'note', label: 'Choose ONE method. An API key alone is recommended — it is the only option that works when the controller has 2FA enabled.' },
+            { name: 'api_key', label: 'API key', field_type: 'password', required: false },
+            { field_type: 'separator', label: 'OR' },
+            { name: 'username', label: 'Username', field_type: 'text', required: false },
             { name: 'password', label: 'Password', field_type: 'password', required: false },
         ];
         const raw = await intgFormModal('Credentials', fields, 'Store');
@@ -3441,12 +3466,83 @@ async function intgShowDashboard(instanceId, capabilityId) {
         if (panel) {
             panel.innerHTML = `<div style="background:var(--bg-input,#14151a);border:1px solid var(--border-color,#2d2f3a);border-radius:6px;padding:10px;">
                 <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">${escapeHtml(capabilityId)}</div>
-                <pre style="margin:0;max-height:340px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(JSON.stringify(j && j.data, null, 2))}</pre>
+                ${intgRenderCapabilityData(instanceId, j && j.data)}
             </div>`;
         }
     } catch (e) {
         if (panel) panel.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:8px;">${escapeHtml(String(e.message||e))}</div>`;
     }
+}
+
+// Render a connector capability payload (devices, clients, …) as a readable
+// table instead of raw JSON (RutgerDiehard 2026-07-24: "only gives pages of
+// json"). Most connectors — including UniFi's Integration and legacy APIs —
+// wrap their list in an envelope ({data:[…]} / {meta,data:[…]} / paginated
+// {offset,limit,count,data:[…]}), so we unwrap to the underlying array first.
+// An array of flat-ish objects becomes a compact table (curated columns, capped
+// width); anything else falls back to pretty JSON. A "raw JSON" toggle is always
+// available so nothing is hidden from power users.
+function intgRenderCapabilityData(instanceId, payload) {
+    const rawJson = JSON.stringify(payload, null, 2);
+    // Sanitize before interpolating into an id attribute and inline onclick:
+    // create_instance() keeps a caller-supplied non-empty id verbatim, so it
+    // can't be trusted to be a bare UUID.
+    const rawId = 'intg-raw-' + String(instanceId).replace(/[^a-zA-Z0-9_-]/g, '');
+    const rawBlock = `<pre id="${rawId}" style="display:none;margin:8px 0 0;max-height:340px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(rawJson)}</pre>`;
+
+    // Unwrap common list envelopes to the underlying array.
+    let rows = null;
+    if (Array.isArray(payload)) {
+        rows = payload;
+    } else if (payload && typeof payload === 'object' && Array.isArray(payload.data)) {
+        rows = payload.data;
+    }
+
+    // Only tabulate a non-empty array of objects; otherwise show JSON.
+    const tabular = Array.isArray(rows) && rows.length > 0 &&
+        rows.every(r => r && typeof r === 'object' && !Array.isArray(r));
+    if (!tabular) {
+        return `<pre style="margin:0;max-height:340px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(rawJson)}</pre>`;
+    }
+
+    // Choose columns: preferred identifying fields first (if present), then any
+    // remaining scalar fields, capped so the table stays readable. Field names
+    // cover both UniFi APIs (macAddress/ipAddress/id) and the legacy shapes
+    // (mac/ip/_id/hostname), plus generic ones.
+    const preferred = ['id', '_id', 'name', 'displayName', 'hostname', 'model', 'type',
+        'mac', 'macAddress', 'ip', 'ipAddress', 'ip_address', 'state', 'status',
+        'connected', 'network', 'ssid', 'version', 'uptime'];
+    const isScalar = (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+    const present = new Set();
+    rows.forEach(r => Object.keys(r).forEach(k => { if (isScalar(r[k])) present.add(k); }));
+    let cols = preferred.filter(c => present.has(c));
+    for (const k of present) { if (cols.length >= 8) break; if (!cols.includes(k)) cols.push(k); }
+    if (cols.length === 0) {
+        return `<pre style="margin:0;max-height:340px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(rawJson)}</pre>`;
+    }
+
+    const fmt = (v) => {
+        if (v === null || v === undefined) return '<span style="color:var(--text-muted)">—</span>';
+        if (typeof v === 'boolean') return v ? '✓' : '✗';
+        return escapeHtml(String(v));
+    };
+    const head = cols.map(c => `<th style="text-align:left;padding:4px 8px;position:sticky;top:0;background:var(--bg-input,#14151a);border-bottom:1px solid var(--border-color,#2d2f3a);font-weight:600;">${escapeHtml(c)}</th>`).join('');
+    const body = rows.map(r => '<tr>' + cols.map(c =>
+        `<td style="padding:4px 8px;border-bottom:1px solid var(--border-color,#22252f);white-space:nowrap;">${fmt(r[c])}</td>`
+    ).join('') + '</tr>').join('');
+
+    return `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span style="font-size:12px;color:var(--text-muted);">${rows.length} ${rows.length === 1 ? 'item' : 'items'}</span>
+            <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;" onclick="(function(){var e=document.getElementById('${rawId}');if(e){e.style.display=e.style.display==='none'?'block':'none';}})()">Raw JSON</button>
+        </div>
+        <div style="max-height:340px;overflow:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:var(--font-mono,monospace);">
+                <thead><tr>${head}</tr></thead>
+                <tbody>${body}</tbody>
+            </table>
+        </div>
+        ${rawBlock}`;
 }
 
 async function intgRunOpPrompt(instanceId, connectorId, operationId) {
@@ -52573,6 +52669,15 @@ let wdExpandedNodes = new Set();
 let wdConfigNodeId = null;
 let wdInstallMode = null; // set when install button was clicked — config saves then launches terminal
 let wdLatestVersion = null; // latest version from GitHub
+// Cache state (wabil 2026-07-24: every click re-ran a full 30s cluster scan —
+// 5+ API calls per online node plus 2 per wolfdisk container). We now paint the
+// page instantly from the last scan and refresh in the background, and skip the
+// heavy scan entirely while the cache is still fresh.
+let wdClusterDataTime = 0;   // epoch ms of the last successful scan
+let wdClusterDataFor = null; // which wdCurrentCluster the cache belongs to
+let wdScanInFlight = false;  // coalesce overlapping scans (buttons fire fast)
+let wdScanningCluster = null; // which cluster the in-flight scan is for
+const WD_CACHE_TTL_MS = 15000;
 
 // Encode a unique member ID: "nodeId" for hosts, "nodeId:runtime:containerName" for containers
 function wdMemberId(n) {
@@ -52830,7 +52935,7 @@ async function wdDedicateDiskGo(btn) {
             showToast('WolfDisk dedicated disk set up', 'success');
             btn.disabled = false;
             btn.textContent = 'Close';
-            btn.onclick = () => { const o = document.querySelector('.modal-overlay'); if (o) o.remove(); loadWolfDiskCluster(); };
+            btn.onclick = () => { const o = document.querySelector('.modal-overlay'); if (o) o.remove(); loadWolfDiskCluster({ force: true }); };
         } else {
             statusEl.innerHTML = '<span style="color:var(--danger)">' + escapeHtml(data.error || 'Failed') + '</span>';
             btn.disabled = false; btn.textContent = 'Erase & Dedicate';
@@ -52841,13 +52946,51 @@ async function wdDedicateDiskGo(btn) {
     }
 }
 
-async function loadWolfDiskCluster() {
+// Cache-first entry point. Paints instantly from the last scan when we have
+// one, then refreshes in the background — so clicking a button no longer blanks
+// the page to "Scanning cluster nodes…" for 30s (wabil 2026-07-24). Pass
+// {force:true} to always re-scan (e.g. straight after an install/config change).
+function loadWolfDiskCluster(opts) {
+    opts = opts || {};
+    // Cache is per-cluster: a different WolfStack cluster's data must never be
+    // painted here (would flash the wrong cluster before the background refresh).
+    const haveCache = Array.isArray(wdClusterData) && wdClusterData.length > 0
+        && wdClusterDataFor === wdCurrentCluster;
+    if (haveCache) {
+        // Instant repaint from cache — no blank "Scanning…" screen.
+        const loading = document.getElementById('wd-loading');
+        if (loading) loading.style.display = 'none';
+        renderWolfDiskPage(wdClusterData);
+        loadWolfDiskSyncHealth();                    // cheap, always live
+        const fresh = (Date.now() - wdClusterDataTime) < WD_CACHE_TTL_MS;
+        if (fresh && !opts.force) return;            // cache still warm — no scan
+        wdScanCluster(true);                          // silent background refresh
+        return;
+    }
+    wdScanCluster(false);                             // first load — blocking scan
+}
+
+// Heavy cluster scan: 5+ API calls per online node plus per-container config
+// fetches. background=true refreshes silently (no blocking spinner, no clearing
+// the current view); background=false shows "Scanning cluster nodes…" for the
+// very first load when there's nothing cached to display.
+async function wdScanCluster(background) {
+    // Capture the cluster this scan is for, so a cluster-switch mid-scan can't
+    // stamp/paint the wrong cluster's data. Coalesce only when a scan for the
+    // SAME cluster is already running (a switch to a different cluster proceeds).
+    const targetCluster = wdCurrentCluster;
+    if (wdScanInFlight && wdScanningCluster === targetCluster) return;
+    wdScanInFlight = true;
+    wdScanningCluster = targetCluster;
     const loading = document.getElementById('wd-loading');
     const container = document.getElementById('wd-clusters-container');
     const statsEl = document.getElementById('wd-summary-stats');
-    if (loading) loading.style.display = 'block';
-    if (container) container.innerHTML = '';
-    if (statsEl) statsEl.innerHTML = '';
+    if (!background) {
+        if (loading) loading.style.display = 'block';
+        if (container) container.innerHTML = '';
+        if (statsEl) statsEl.innerHTML = '';
+    }
+    try {
     // Refresh the node list FIRST. On first navigation to this tab, allNodes can
     // still be stale/partial (or a node's online flag not yet set), so the scan
     // below missed nodes — that's why the tab "didn't show all nodes until you
@@ -52868,7 +53011,7 @@ async function loadWolfDiskCluster() {
             .catch(() => {});
     }
 
-    const nodes = getClusterNodes(wdCurrentCluster);
+    const nodes = getClusterNodes(targetCluster);
     const results = await Promise.allSettled(
         nodes.filter(n => n.online).map(async (node) => {
             const [provResp, mountsResp, dockerResp, lxcResp, wnResp] = await Promise.all([
@@ -53013,9 +53156,17 @@ async function loadWolfDiskCluster() {
         ...erroredNodes,
         ...offlineNodes,
     ];
+    wdClusterDataTime = Date.now();
+    wdClusterDataFor = targetCluster;
 
-    if (loading) loading.style.display = 'none';
-    renderWolfDiskPage(wdClusterData);
+        // Only paint if the user is still on the cluster we scanned — a
+        // cluster-switch mid-scan must not overwrite the new view with old data.
+        if (wdCurrentCluster === targetCluster) renderWolfDiskPage(wdClusterData);
+    } finally {
+        wdScanInFlight = false;
+        wdScanningCluster = null;
+        if (loading) loading.style.display = 'none';
+    }
 }
 
 function renderWolfDiskPage(data) {
@@ -53459,9 +53610,10 @@ function wdOpenConsole(nodeId, type, consoleName) {
     }
     window.open(url, 'wd_install_' + consoleName, 'width=960,height=600,menubar=no,toolbar=no,scrollbars=yes,resizable=yes');
     // Auto-refresh the WolfDisk page when the user returns to this window
+    // (an install likely just completed in the console — force a fresh scan).
     var refreshOnFocus = function() {
         window.removeEventListener('focus', refreshOnFocus);
-        if (currentPage === 'wolfdisk-cluster') loadWolfDiskCluster();
+        if (currentPage === 'wolfdisk-cluster') loadWolfDiskCluster({ force: true });
     };
     window.addEventListener('focus', refreshOnFocus);
 }
@@ -53501,7 +53653,7 @@ async function wdAction(mid, action) {
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
-    loadWolfDiskCluster();
+    loadWolfDiskCluster({ force: true }); // action changed daemon state — rescan
 }
 
 async function wdInstallContainer(hostNodeId, runtime, containerName) {
@@ -53583,7 +53735,7 @@ async function wdMountAction(nodeId, mountId, action) {
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
-    loadWolfDiskCluster();
+    loadWolfDiskCluster({ force: true }); // mount start/stop changed state — rescan
 }
 
 async function wdOpenConfig(mid) {
@@ -53729,7 +53881,7 @@ function wdCloseConfig() {
     wdConfigNodeId = null;
     wdInstallMode = null;
     // Always refresh after closing config modal (install/save may have changed state)
-    if (currentPage === 'wolfdisk-cluster') loadWolfDiskCluster();
+    if (currentPage === 'wolfdisk-cluster') loadWolfDiskCluster({ force: true });
 }
 
 async function wdSaveAndInstall() {
