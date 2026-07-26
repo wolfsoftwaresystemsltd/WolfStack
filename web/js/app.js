@@ -11508,6 +11508,8 @@ async function loadZfsStatus() {
             return;
         }
         section.style.display = '';
+        const badge = document.getElementById('zfs-version-badge');
+        if (badge) badge.textContent = data.version || '';
         renderZfsPools(data.pools || []);
     } catch (e) {
         console.error('Failed to load ZFS status:', e);
@@ -11549,6 +11551,7 @@ function renderZfsPools(pools) {
             }
                 <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolStatus('${escapeHtml(p.name)}')" title="Detailed Status">Status</button>
                 <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border);" onclick="showZfsPoolIostat('${escapeHtml(p.name)}')" title="IO Statistics">IO Stats</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);" onclick="zfsOpenDestroyPool('${escapeHtml(p.name)}')" title="Destroy Pool">Destroy</button>
             </td>
         </tr>
         <tr class="storage-sub-row" style="background:var(--bg-secondary);">
@@ -11561,6 +11564,252 @@ function renderZfsPools(pools) {
             </td>
         </tr>`;
     }).join('');
+}
+
+// ── ZFS pool lifecycle (klasSponsor 2026-07-22): create, import (the TrueNAS
+// migration path — TrueNAS pools are plain OpenZFS), destroy, new datasets.
+// AnyRaid/AnyMirror (mixed-size vdevs) is shown as "coming" but NOT offered:
+// it is not in any released OpenZFS as of 2026-07 (still in review upstream),
+// so there is no real syntax to drive yet. The modal says so honestly.
+
+function zfsOpenCreatePool() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'display:flex; z-index:10001;';
+    overlay.innerHTML = `
+      <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:26px; max-width:560px; width:92%; max-height:90vh; display:flex; flex-direction:column; overflow-y:auto;">
+        <h3 style="margin:0 0 6px; font-size:17px; color:var(--text-primary);">Create ZFS Pool</h3>
+        <p style="color:var(--text-secondary); font-size:13px; margin:0 0 14px;">Build a pool from unused whole disks on this node. Disks that are mounted or hold LVM/RAID/LUKS/ZFS data are not eligible and are blocked server-side too.</p>
+        <div class="form-group"><label>Pool name</label>
+          <input id="zfs-cp-name" class="form-control" placeholder="tank" autocomplete="off"></div>
+        <div class="form-group"><label>Layout</label>
+          <select id="zfs-cp-layout" class="form-control">
+            <option value="stripe">Stripe — no redundancy (1+ disks)</option>
+            <option value="mirror" selected>Mirror — n-way copies (2+ disks)</option>
+            <option value="raidz1">RAID-Z1 — single parity (3+ disks recommended)</option>
+            <option value="raidz2">RAID-Z2 — double parity (4+ disks recommended)</option>
+            <option value="raidz3">RAID-Z3 — triple parity (5+ disks recommended)</option>
+            <option value="" disabled>AnyMirror (mixed sizes) — needs a future OpenZFS release</option>
+          </select>
+          <small style="color:var(--text-muted); font-size:11px;">Mixed-size disks work in every layout, but classic vdevs only use the smallest disk's capacity per member. ZFS "AnyRaid" lifts that — it isn't in a released OpenZFS yet; WolfStack will offer it as soon as it ships.</small></div>
+        <div class="form-group"><label>Disks</label>
+          <div id="zfs-cp-disks" style="max-height:180px; overflow:auto; border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:13px;">Loading…</div></div>
+        <div class="form-group"><label>Mountpoint (optional)</label>
+          <input id="zfs-cp-mount" class="form-control" placeholder="/tank (default: /<pool name>)" autocomplete="off"></div>
+        <label style="display:flex; gap:8px; align-items:center; font-size:12px; margin-bottom:8px; cursor:pointer;">
+          <input type="checkbox" id="zfs-cp-force"> Clear foreign disk labels (<code>zpool create -f</code>) — for disks from another, no-longer-active pool/array.</label>
+        <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.35); border-radius:8px; padding:10px 12px; margin:6px 0 12px; font-size:12px; color:#fca5a5;">
+          ⚠ Creating a pool <b>takes over the selected disks</b> — anything on them becomes unrecoverable.</div>
+        <label style="display:flex; gap:8px; align-items:center; font-size:13px; margin-bottom:12px; cursor:pointer;">
+          <input type="checkbox" id="zfs-cp-confirm"> I understand the selected disks will be wiped.</label>
+        <div id="zfs-cp-status" style="font-size:12px; margin-bottom:10px;" role="alert" aria-live="assertive"></div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="zfs-cp-go" onclick="zfsCreatePoolGo(this)">Create Pool</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    zfsCreatePoolLoadDisks();
+}
+
+async function zfsCreatePoolLoadDisks() {
+    const box = document.getElementById('zfs-cp-disks');
+    if (!box) return;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/disk-info'));
+        const data = await resp.json();
+        const devs = Array.isArray(data) ? data : (data.devices || []);
+        const disks = devs.filter(d => d.type === 'disk');
+        if (disks.length === 0) { box.innerHTML = '<span style="color:var(--text-muted);">No disks found</span>'; return; }
+        box.innerHTML = disks.map(d => {
+            // A disk is eligible only if neither it nor any of its partitions
+            // is mounted or claimed by a filesystem/subsystem. The server
+            // re-checks with the full lsblk gate before creating.
+            const related = devs.filter(x => x.disk === d.device);
+            const busy = related.some(x => (x.mountpoints && x.mountpoints.length > 0) || x.fstype);
+            const label = `${d.device} — ${d.size}${d.model ? ' · ' + d.model : ''}`;
+            if (busy) {
+                return `<label style="display:flex; gap:8px; align-items:center; opacity:0.45; cursor:not-allowed;" title="In use — mounted or holds data">
+                    <input type="checkbox" disabled> ${escapeHtml(label)} <span style="font-size:11px;">(in use)</span></label>`;
+            }
+            return `<label style="display:flex; gap:8px; align-items:center; cursor:pointer;">
+                <input type="checkbox" class="zfs-cp-disk" value="${escapeAttr(d.device)}"> ${escapeHtml(label)}</label>`;
+        }).join('');
+    } catch (e) {
+        box.innerHTML = `<span style="color:#ef4444;">Failed to load disks: ${escapeHtml(e.message)}</span>`;
+    }
+}
+
+async function zfsCreatePoolGo(btn) {
+    const statusEl = document.getElementById('zfs-cp-status');
+    const name = (document.getElementById('zfs-cp-name').value || '').trim();
+    const layout = document.getElementById('zfs-cp-layout').value;
+    const mountpoint = (document.getElementById('zfs-cp-mount').value || '').trim();
+    const force = document.getElementById('zfs-cp-force').checked;
+    const disks = Array.from(document.querySelectorAll('.zfs-cp-disk:checked')).map(c => c.value);
+    const mins = { stripe: 1, mirror: 2, raidz1: 2, raidz2: 3, raidz3: 4 };
+
+    const fail = (msg) => { statusEl.innerHTML = `<span style="color:var(--danger,#ef4444);">${escapeHtml(msg)}</span>`; };
+    if (!/^[a-zA-Z][a-zA-Z0-9_.:-]*$/.test(name)) return fail('Pool name must start with a letter (letters, digits, - _ . : only).');
+    if (!mins[layout]) return fail('Pick a layout.');
+    if (disks.length < mins[layout]) return fail(`Layout '${layout}' needs at least ${mins[layout]} disks.`);
+    if (!document.getElementById('zfs-cp-confirm').checked) return fail('Tick the confirmation checkbox first.');
+
+    btn.disabled = true;
+    statusEl.innerHTML = '<span style="color:var(--text-secondary);">Creating pool…</span>';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/pool/create'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, layout, disks, mountpoint, force }),
+        });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.error || 'Create failed');
+        showToast(j.message || 'Pool created', 'success');
+        btn.closest('.modal-overlay').remove();
+        loadZfsStatus();
+        loadDiskInfo();
+    } catch (e) {
+        btn.disabled = false;
+        fail(e.message);
+    }
+}
+
+async function zfsToggleImport() {
+    const panel = document.getElementById('zfs-import-panel');
+    if (!panel) return;
+    if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    panel.innerHTML = renderBlockSkeleton({ lines: 2 });
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/importable'));
+        const j = await resp.json();
+        const pools = j.pools || [];
+        if (pools.length === 0) {
+            panel.innerHTML = `<div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:13px;color:var(--text-muted);">
+                No importable pools found. Attach the disks (e.g. from a TrueNAS system — TrueNAS pools are standard OpenZFS) and refresh.</div>`;
+            return;
+        }
+        panel.innerHTML = `<div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <h4 style="margin:0 0 8px;font-size:13px;">Importable pools</h4>
+            ${pools.map(p => `<div style="display:flex;align-items:center;gap:12px;font-size:13px;padding:4px 0;">
+                <strong>${escapeHtml(p.name)}</strong>
+                <span style="color:var(--text-muted);font-size:11px;">id ${escapeHtml(p.id)} · ${escapeHtml(p.state)}</span>
+                <span style="flex:1;"></span>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;" onclick="zfsImportPool('${escapeAttr(p.name)}', false, this)">Import</button>
+                <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;" title="zpool import -f — needed when the pool was last used on another system and was never exported (typical for a TrueNAS migration)" onclick="zfsImportPool('${escapeAttr(p.name)}', true, this)">Force import</button>
+            </div>`).join('')}
+        </div>`;
+    } catch (e) {
+        panel.innerHTML = `<div style="color:#ef4444;font-size:13px;">Failed to scan for importable pools: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function zfsImportPool(pool, force, btn) {
+    if (btn) btn.disabled = true;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/pool/import'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pool, force }),
+        });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.error || 'Import failed');
+        showToast(j.message || `Pool '${pool}' imported`, 'success');
+        document.getElementById('zfs-import-panel').style.display = 'none';
+        loadZfsStatus();
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        showToast('Import failed: ' + e.message, 'error');
+    }
+}
+
+function zfsOpenDestroyPool(pool) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'display:flex; z-index:10001;';
+    overlay.innerHTML = `
+      <div role="alertdialog" aria-modal="true" style="background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:26px; max-width:460px; width:92%;">
+        <h3 style="margin:0 0 6px; font-size:17px; color:#ef4444;">Destroy pool '${escapeHtml(pool)}'</h3>
+        <p style="color:var(--text-secondary); font-size:13px; margin:0 0 12px;">This permanently destroys the pool and <b>every dataset and snapshot on it</b>. There is no undo.</p>
+        <div class="form-group"><label>Type the pool name to confirm</label>
+          <input id="zfs-dp-confirm" class="form-control" placeholder="${escapeAttr(pool)}" autocomplete="off"></div>
+        <div id="zfs-dp-status" style="font-size:12px; margin-bottom:10px;" role="alert" aria-live="assertive"></div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+          <button class="btn btn-sm" style="background:#ef4444;color:#fff;" onclick="zfsDestroyPoolGo('${escapeAttr(pool)}', this)">Destroy Pool</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+}
+
+async function zfsDestroyPoolGo(pool, btn) {
+    const statusEl = document.getElementById('zfs-dp-status');
+    const confirm = (document.getElementById('zfs-dp-confirm').value || '').trim();
+    if (confirm !== pool) {
+        statusEl.innerHTML = '<span style="color:#ef4444;">Confirmation text does not match the pool name.</span>';
+        return;
+    }
+    btn.disabled = true;
+    statusEl.innerHTML = '<span style="color:var(--text-secondary);">Destroying…</span>';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/pool'), {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pool, confirm }),
+        });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.error || 'Destroy failed');
+        showToast(j.message || `Pool '${pool}' destroyed`, 'success');
+        btn.closest('.modal-overlay').remove();
+        loadZfsStatus();
+        loadDiskInfo();
+    } catch (e) {
+        btn.disabled = false;
+        statusEl.innerHTML = `<span style="color:#ef4444;">${escapeHtml(e.message)}</span>`;
+    }
+}
+
+function zfsCreateDatasetPrompt(pool) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'display:flex; z-index:10001;';
+    overlay.innerHTML = `
+      <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:26px; max-width:440px; width:92%;">
+        <h3 style="margin:0 0 6px; font-size:17px; color:var(--text-primary);">New dataset in '${escapeHtml(pool)}'</h3>
+        <div class="form-group"><label>Dataset path</label>
+          <div style="display:flex; align-items:center; gap:4px;">
+            <span style="font-family:var(--font-mono,monospace); font-size:13px; color:var(--text-muted);">${escapeHtml(pool)}/</span>
+            <input id="zfs-nd-name" class="form-control" placeholder="backups/host1" autocomplete="off" style="flex:1;"></div>
+          <small style="color:var(--text-muted); font-size:11px;">Nested paths are created as needed (<code>zfs create -p</code>).</small></div>
+        <div id="zfs-nd-status" style="font-size:12px; margin-bottom:10px;" role="alert" aria-live="assertive"></div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn btn-sm" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick="zfsCreateDatasetGo('${escapeAttr(pool)}', this)">Create</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+}
+
+async function zfsCreateDatasetGo(pool, btn) {
+    const statusEl = document.getElementById('zfs-nd-status');
+    const sub = (document.getElementById('zfs-nd-name').value || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!sub || !/^[a-zA-Z0-9_.:\/-]+$/.test(sub)) {
+        statusEl.innerHTML = '<span style="color:#ef4444;">Enter a dataset path (letters, digits, - _ . : / only).</span>';
+        return;
+    }
+    btn.disabled = true;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/zfs/dataset'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: pool + '/' + sub }),
+        });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.error || 'Create failed');
+        showToast(j.message || 'Dataset created', 'success');
+        btn.closest('.modal-overlay').remove();
+        expandZfsPool(pool);
+    } catch (e) {
+        btn.disabled = false;
+        statusEl.innerHTML = `<span style="color:#ef4444;">${escapeHtml(e.message)}</span>`;
+    }
 }
 
 async function expandZfsPool(pool) {
@@ -11582,7 +11831,10 @@ async function expandZfsPool(pool) {
             <div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:8px;padding:16px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
                     <h4 style="margin:0;font-size:14px;">Datasets — ${escapeHtml(pool)}</h4>
-                    <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">Close</button>
+                    <div style="display:flex;gap:6px;">
+                        <button class="btn btn-sm" onclick="zfsCreateDatasetPrompt('${escapeHtml(pool)}')" style="font-size:11px;padding:2px 8px;">＋ New Dataset</button>
+                        <button class="btn btn-sm" onclick="document.getElementById('zfs-detail-section').innerHTML=''" style="font-size:11px;padding:2px 8px;">Close</button>
+                    </div>
                 </div>
                 <table class="data-table">
                     <thead><tr><th>Name</th><th>Used</th><th>Available</th><th>Refer</th><th>Mountpoint</th><th>Compression</th><th>Ratio</th><th>Actions</th></tr></thead>
@@ -34188,6 +34440,42 @@ async function rffRun(filename) {
     }
 }
 
+
+// Partition backup targets into Docker Compose stacks (docker targets sharing
+// a com.docker.compose.project label, 2+ services) and standalone targets —
+// so an operator can protect a whole stack in one click (klasSponsor
+// 2026-07-23). Capture stays per-service (each service's binds/volumes plus
+// the shared compose definition are archived with it), so restoring every
+// service of a stack restores the stack.
+function groupBackupTargetsByStack(targets) {
+    const byProject = new Map();
+    const singles = [];
+    for (const t of targets) {
+        if (t.type === 'docker' && t.compose_project) {
+            if (!byProject.has(t.compose_project)) byProject.set(t.compose_project, []);
+            byProject.get(t.compose_project).push(t);
+        } else {
+            singles.push(t);
+        }
+    }
+    const stacks = [];
+    for (const [project, ts] of byProject) {
+        if (ts.length >= 2) stacks.push({ project, targets: ts });
+        else singles.push(...ts); // a one-service "stack" is just a container
+    }
+    return { stacks, singles };
+}
+
+// Select/deselect every service checkbox inside a stack group box.
+function backupStackToggle(cb) {
+    const group = cb.closest('[data-stack-group]');
+    if (!group) return;
+    group.querySelectorAll('input.backup-target-cb, input.schedule-target-cb').forEach(c => {
+        if (!c.disabled) c.checked = cb.checked;
+    });
+    if (typeof updateBackupSelectedCount === 'function') updateBackupSelectedCount();
+}
+
 function renderBackupTargets(targets) {
     const container = document.getElementById('backup-targets-list');
     if (!container) return;
@@ -34199,7 +34487,7 @@ function renderBackupTargets(targets) {
 
     const EMOJIS = { docker: '', lxc: '', vm: '', config: '' };
 
-    container.innerHTML = targets.map(t => {
+    const cardFor = (t) => {
         const emoji = EMOJIS[t.type] || '';
         // Build display name: prefer hostname, fall back to name
         let label = t.type === 'config' ? 'WolfStack Config' : (t.name || t.type);
@@ -34249,7 +34537,19 @@ function renderBackupTargets(targets) {
             ${mountsLink}
             ${stopOption}
         </div>`;
-    }).join('');
+    };
+
+    const { stacks, singles } = groupBackupTargetsByStack(targets);
+    const stackBlocks = stacks.map(s => `
+        <div data-stack-group style="border:1px solid var(--border); border-left:3px solid var(--accent, #7c5cff); border-radius:var(--radius-sm); padding:8px 10px; display:flex; flex-direction:column; gap:6px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; color:var(--text-secondary);">
+                <input type="checkbox" onchange="backupStackToggle(this)">
+                <span><strong style="color:var(--text-primary);">Compose stack: ${escapeHtml(s.project)}</strong>
+                <span style="color:var(--text-muted); margin-left:6px;">${s.targets.length} services — select all</span></span>
+            </label>
+            ${s.targets.map(cardFor).join('')}
+        </div>`).join('');
+    container.innerHTML = stackBlocks + singles.map(cardFor).join('');
 }
 
 // Per-target mount exclusions, keyed by "type:name" → [excluded source paths].
@@ -34408,7 +34708,7 @@ function renderScheduleTargets(selectedKeys, backupAll) {
         container.innerHTML = renderEmptyState({ title: 'No containers, VMs, or configs found to backup.' });
         return;
     }
-    container.innerHTML = targets.map(t => {
+    const cardFor = (t) => {
         const key = `${t.type}:${t.name}`;
         const val = JSON.stringify(t).replace(/"/g, '&quot;');
         const canExclude = (t.type === 'docker' || t.type === 'lxc');
@@ -34432,7 +34732,19 @@ function renderScheduleTargets(selectedKeys, backupAll) {
             ${mountsLink}
             ${renderStopForBackupOption(t, 'sched-')}
         </div>`;
-    }).join('');
+    };
+
+    const { stacks, singles } = groupBackupTargetsByStack(targets);
+    const stackBlocks = stacks.map(s => `
+        <div data-stack-group style="border:1px solid var(--border); border-left:3px solid var(--accent, #7c5cff); border-radius:var(--radius-sm); padding:6px 8px; display:flex; flex-direction:column; gap:4px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:11px; color:var(--text-secondary);">
+                <input type="checkbox" onchange="backupStackToggle(this)" ${backupAll ? 'disabled' : ''}>
+                <span><strong style="color:var(--text-primary);">Compose stack: ${escapeHtml(s.project)}</strong>
+                <span style="color:var(--text-muted); margin-left:6px;">${s.targets.length} services — select all</span></span>
+            </label>
+            ${s.targets.map(cardFor).join('')}
+        </div>`).join('');
+    container.innerHTML = stackBlocks + singles.map(cardFor).join('');
 }
 
 // Read the schedule modal's picker into a target array (with mount exclusions).
