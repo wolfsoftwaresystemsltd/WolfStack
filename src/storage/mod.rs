@@ -1417,7 +1417,7 @@ fn lsblk_field(device: &str, col: &str) -> String {
 /// the wipe-safety gate, so it must catch everything that would mean "this disk
 /// already holds data" — otherwise dedicate-disk would silently destroy an LVM PV
 /// or LUKS volume that has nothing mounted right now (code review 2026-06-25).
-fn device_or_children_in_use(device: &str) -> Result<bool, String> {
+pub(crate) fn device_or_children_in_use(device: &str) -> Result<bool, String> {
     // Subsystems that hold data (or an active pool/array) WITHOUT a mountpoint — a
     // wipe would destroy them. ZFS/bcache/Ceph added after the paranoid disk review.
     const CLAIMED: &[&str] = &[
@@ -2491,7 +2491,7 @@ fn validate_device(device: &str) -> Result<(), String> {
 }
 
 /// Check if a device or any of its children are mounted at a protected mount point
-fn is_protected_device(device: &str) -> Result<bool, String> {
+pub(crate) fn is_protected_device(device: &str) -> Result<bool, String> {
     let output = Command::new("lsblk")
         .args(["-Jno", "NAME,MOUNTPOINTS,TYPE", device])
         .output()

@@ -74,6 +74,14 @@ pub struct BackupTarget {
     /// Empty for every other target type.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub system_path: String,
+    /// Docker targets that belong to a Docker Compose project carry the
+    /// project name (the `com.docker.compose.project` label). The UI groups
+    /// these into "stacks" so an operator can select a whole compose stack —
+    /// every service, each with its binds/volumes and the shared compose
+    /// definition — as one action (klasSponsor 2026-07-23). None for
+    /// non-compose targets; absent from older configs (serde default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_project: Option<String>,
     /// Native-LXC targets only: stop the container for the duration of the
     /// tar (fully consistent archive, at the cost of downtime AND a restart
     /// whose clean boot is the container's problem — wolfscale-3 2026-07-05:
@@ -96,6 +104,7 @@ impl Default for BackupTarget {
             specs: None,
             exclude_mounts: Vec::new(),
             system_path: String::new(),
+            compose_project: None,
             stop_for_backup: false,
         }
     }
@@ -7224,9 +7233,11 @@ pub fn run_schedule_now(id: &str) -> Result<String, String> {
 pub fn list_available_targets() -> Vec<BackupTarget> {
     let mut targets = Vec::new();
 
-    // Docker containers — include image and state
+    // Docker containers — include image, state, and (for compose-managed
+    // containers) the compose project so the UI can group them into stacks.
     if let Ok(output) = Command::new("docker")
-        .args(["ps", "-a", "--format", "{{.Names}}\t{{.Image}}\t{{.State}}"])
+        .args(["ps", "-a", "--format",
+            "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}"])
         .output()
     {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -7235,12 +7246,17 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
             if name.is_empty() { continue; }
             let image = parts.get(1).unwrap_or(&"").to_string();
             let state = parts.get(2).map(|s| s.to_string());
+            let compose_project = parts.get(3)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
             targets.push(BackupTarget {
                 target_type: BackupTargetType::Docker,
                 name,
                 hostname: None,
                 state,
                 specs: if image.is_empty() { None } else { Some(image) },
+                compose_project,
                 ..Default::default()
             });
         }

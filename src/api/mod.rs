@@ -21066,7 +21066,10 @@ pub async fn zfs_status(req: HttpRequest, state: web::Data<AppState>) -> HttpRes
     let pools = zfs_get_pools();
     HttpResponse::Ok().json(serde_json::json!({
         "available": true,
-        "pools": pools
+        "pools": pools,
+        // e.g. "zfs-2.4.2-1~bpo13+1" — surfaced so admins can see what their
+        // installed OpenZFS supports (and why AnyRaid isn't offered yet).
+        "version": zfs_version_string(),
     }))
 }
 
@@ -21362,6 +21365,270 @@ pub async fn zfs_pool_iostat(
                 "pool": pool,
                 "iostat_text": text,
             }))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// First line of `zfs version` (e.g. "zfs-2.4.2-1~bpo13+1"), or None if it
+/// can't be read. Shown in the UI so admins know what their installed OpenZFS
+/// can and can't do (klasSponsor 2026-07-22 asked for AnyRaid management —
+/// AnyRaid is not in any RELEASED OpenZFS as of 2026-07, so the UI shows the
+/// version plus an honest "pending upstream" note instead of unusable options).
+fn zfs_version_string() -> Option<String> {
+    let out = std::process::Command::new("zfs").arg("version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+}
+
+/// Valid ZFS pool name: begins with a letter; letters/digits/-_.: after; not a
+/// reserved vdev keyword (zpoolconcepts(7): mirror/raidz/draid/spare/log).
+fn valid_zpool_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let first_ok = chars.next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false);
+    let rest_ok = name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'));
+    let reserved = ["mirror", "raidz", "draid", "spare", "log"];
+    let not_reserved = !reserved.iter().any(|r| name == *r || name.starts_with(&format!("{}0", r)) || name.starts_with(&format!("{}1", r)) || name.starts_with(&format!("{}2", r)) || name.starts_with(&format!("{}3", r)));
+    first_ok && rest_ok && not_reserved
+}
+
+/// GET /api/storage/zfs/importable — pools visible to `zpool import` (exported
+/// or foreign, e.g. a disk shelf pulled from a TrueNAS box — TrueNAS pools are
+/// plain OpenZFS, so migrating to WolfStack is a straight import).
+pub async fn zfs_importable(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    // `zpool import` scans every device; seconds, not millis — off the runtime.
+    let output = web::block(|| std::process::Command::new("zpool").arg("import").output()).await;
+    let output = match output {
+        Ok(Ok(o)) => o,
+        _ => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": "zpool import failed to run" })),
+    };
+    // Exit status is non-zero when there is nothing to import — that's an
+    // empty list, not an error.
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut pools: Vec<serde_json::Value> = Vec::new();
+    let mut current: Option<(String, String, String)> = None; // name, id, state
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("pool:") {
+            if let Some((n, i, s)) = current.take() {
+                pools.push(serde_json::json!({ "name": n, "id": i, "state": s }));
+            }
+            current = Some((rest.trim().to_string(), String::new(), String::new()));
+        } else if let Some(rest) = t.strip_prefix("id:")
+            && let Some(c) = current.as_mut() { c.1 = rest.trim().to_string(); }
+        else if let Some(rest) = t.strip_prefix("state:")
+            && let Some(c) = current.as_mut() { c.2 = rest.trim().to_string(); }
+    }
+    if let Some((n, i, s)) = current.take() {
+        pools.push(serde_json::json!({ "name": n, "id": i, "state": s }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "pools": pools }))
+}
+
+/// POST /api/storage/zfs/pool/import — {pool, force?} import by name or id.
+/// `force` maps to `zpool import -f` (pool last used on another system — the
+/// normal case for a TrueNAS migration, where the pool was never exported).
+pub async fn zfs_pool_import(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = body.get("pool").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    // Accept a pool name or a numeric pool id.
+    let is_id = !pool.is_empty() && pool.chars().all(|c| c.is_ascii_digit());
+    if pool.is_empty() || (!is_id && !valid_zpool_name(&pool)) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+    let output = web::block(move || {
+        let mut args: Vec<&str> = vec!["import"];
+        if force { args.push("-f"); }
+        args.push(&pool);
+        std::process::Command::new("zpool").args(&args).output()
+            .map(|o| (o, pool.clone()))
+    })
+    .await;
+    match output {
+        Ok(Ok((out, pool))) if out.status.success() => {
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("Pool '{}' imported", pool) }))
+        }
+        Ok(Ok((out, _))) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        _ => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "zpool import failed to run" })),
+    }
+}
+
+/// POST /api/storage/zfs/pool/create — {name, layout, disks[], mountpoint?, force?}.
+///
+/// Layouts are the RELEASED OpenZFS vdev types only (stripe/mirror/raidz1-3).
+/// AnyRaid/anymirror (mixed-size vdevs) is deliberately NOT offered: it is not
+/// in any released OpenZFS (still in review upstream as of 2026-07) and its
+/// final CLI syntax is not frozen — offering it would ship guessed commands.
+/// The UI explains this; support lands here the release after OpenZFS ships it.
+///
+/// DESTRUCTIVE: creating a pool takes ownership of the member disks. Every
+/// disk must pass the same paranoid in-use gate as dedicate-disk
+/// (mounted/LVM/mdraid/LUKS/swap/ZFS/bcache/Ceph anywhere on the device) —
+/// `force` does NOT bypass that gate, it only maps to `zpool create -f`
+/// (which clears foreign non-active labels). A disk that is part of the
+/// running system can never be pulled into a pool through this endpoint.
+pub async fn zfs_pool_create(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let layout = body.get("layout").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mountpoint = body.get("mountpoint").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let disks: Vec<String> = body.get("disks").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|d| d.as_str()).map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    if !valid_zpool_name(&name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name (must start with a letter; letters, digits, - _ . : only)" }));
+    }
+    // (vdev keyword, minimum devices) per zpoolconcepts(7).
+    let (vdev_kw, min_disks): (Option<&str>, usize) = match layout.as_str() {
+        "stripe" => (None, 1),
+        "mirror" => (Some("mirror"), 2),
+        "raidz1" => (Some("raidz1"), 2),
+        "raidz2" => (Some("raidz2"), 3),
+        "raidz3" => (Some("raidz3"), 4),
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid layout (stripe, mirror, raidz1, raidz2, raidz3)" })),
+    };
+    if disks.len() < min_disks {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("Layout '{}' needs at least {} disks", layout, min_disks) }));
+    }
+    if !mountpoint.is_empty() && (!mountpoint.starts_with('/') || mountpoint.contains("..")) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Mountpoint must be an absolute path" }));
+    }
+    for d in &disks {
+        if !d.starts_with("/dev/") || d.contains("..") || d.chars().any(|c| c.is_whitespace()) {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("Invalid device path: {}", d) }));
+        }
+        if !std::path::Path::new(d).exists() {
+            return HttpResponse::BadRequest().json(serde_json::json!({ "error": format!("Device not found: {}", d) }));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    if !disks.iter().all(|d| seen.insert(d.clone())) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Duplicate device in disk list" }));
+    }
+
+    let result = web::block(move || -> Result<String, String> {
+        // Safety gates — never overridable from the API (matches dedicate-disk).
+        for d in &disks {
+            if storage::is_protected_device(d)? {
+                return Err(format!("{} holds a protected system mountpoint — refusing", d));
+            }
+            if storage::device_or_children_in_use(d)? {
+                return Err(format!(
+                    "{} is in use (mounted, or holds LVM/mdraid/LUKS/swap/ZFS/bcache/Ceph data) — \
+                     clear it first if it really is expendable", d
+                ));
+            }
+        }
+        let mut args: Vec<String> = vec!["create".into()];
+        if force { args.push("-f".into()); }
+        if !mountpoint.is_empty() {
+            args.push("-m".into());
+            args.push(mountpoint.clone());
+        }
+        args.push(name.clone());
+        if let Some(kw) = vdev_kw { args.push(kw.into()); }
+        args.extend(disks.iter().cloned());
+        let out = std::process::Command::new("zpool").args(&args).output()
+            .map_err(|e| format!("zpool: {}", e))?;
+        if out.status.success() {
+            Ok(format!("Pool '{}' created ({} on {} disks)", name, layout, disks.len()))
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// DELETE /api/storage/zfs/pool — {pool, confirm} destroy a pool. `confirm`
+/// must EXACTLY equal the pool name (the UI makes the admin type it) — this is
+/// an irreversible, whole-pool data loss operation.
+pub async fn zfs_pool_destroy(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let pool = body.get("pool").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let confirm = body.get("confirm").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if !valid_zpool_name(&pool) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid pool name" }));
+    }
+    if confirm != pool {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Confirmation text does not match the pool name" }));
+    }
+    let output = web::block(move || {
+        std::process::Command::new("zpool").args(["destroy", &pool]).output()
+            .map(|o| (o, pool.clone()))
+    })
+    .await;
+    match output {
+        Ok(Ok((out, pool))) if out.status.success() => {
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("Pool '{}' destroyed", pool) }))
+        }
+        Ok(Ok((out, _))) => {
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            HttpResponse::InternalServerError().json(serde_json::json!({ "error": err.trim() }))
+        }
+        _ => HttpResponse::InternalServerError().json(serde_json::json!({ "error": "zpool destroy failed to run" })),
+    }
+}
+
+/// POST /api/storage/zfs/dataset — {name} create a dataset (name must be
+/// pool/path, validated to the zfs charset).
+pub async fn zfs_dataset_create(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let valid = !name.is_empty()
+        && name.contains('/')
+        && !name.contains("..")
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+        && !name.starts_with('/')
+        && !name.ends_with('/');
+    if !valid {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid dataset name (pool/path)" }));
+    }
+    let output = std::process::Command::new("zfs").args(["create", "-p", &name]).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("Dataset '{}' created", name) }))
         }
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
@@ -40863,6 +41130,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/zfs/pool/scrub", web::post().to(zfs_pool_scrub))
         .route("/api/storage/zfs/pool/status", web::get().to(zfs_pool_status))
         .route("/api/storage/zfs/pool/iostat", web::get().to(zfs_pool_iostat))
+        .route("/api/storage/zfs/importable", web::get().to(zfs_importable))
+        .route("/api/storage/zfs/pool/import", web::post().to(zfs_pool_import))
+        .route("/api/storage/zfs/pool/create", web::post().to(zfs_pool_create))
+        .route("/api/storage/zfs/pool", web::delete().to(zfs_pool_destroy))
+        .route("/api/storage/zfs/dataset", web::post().to(zfs_dataset_create))
         // File Manager
         .route("/api/files/browse", web::get().to(files_browse))
         .route("/api/files/mkdir", web::post().to(files_mkdir))

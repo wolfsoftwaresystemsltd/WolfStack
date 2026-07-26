@@ -7854,12 +7854,23 @@ dns_cloudflare_api_token = your_token_here"
             <!-- ZFS Pools (shown if ZFS available) -->
             <div id="zfs-section" class="card" style="margin-top:20px; display:none;">
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3>ZFS Pools</h3>
-                    <button class="btn btn-sm" onclick="loadZfsStatus()"
-                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
-                        Refresh</button>
+                    <h3 style="display:flex; align-items:center; gap:10px;">ZFS Pools
+                        <span id="zfs-version-badge" style="font-size:11px; font-weight:400; color:var(--text-muted); font-family:var(--font-mono, monospace);"></span>
+                    </h3>
+                    <div style="display:flex; gap:6px;">
+                        <button class="btn btn-sm" onclick="zfsOpenCreatePool()"
+                            style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">＋
+                            Create Pool</button>
+                        <button class="btn btn-sm" onclick="zfsToggleImport()"
+                            style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">⤓
+                            Import</button>
+                        <button class="btn btn-sm" onclick="loadZfsStatus()"
+                            style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
+                            Refresh</button>
+                    </div>
                 </div>
                 <div class="card-body">
+                    <div id="zfs-import-panel" style="display:none; margin-bottom:14px;"></div>
                     <table class="data-table">
                         <thead>
                             <tr>
