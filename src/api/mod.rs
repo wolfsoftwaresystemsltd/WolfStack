@@ -34439,8 +34439,12 @@ pub(crate) fn compose_stack_count() -> u32 {
 
 /// The image references a stack resolves to (`docker compose config --images`).
 fn compose_config_images(dir: &std::path::Path, compose_file: &std::path::Path) -> Vec<String> {
-    match Command::new("docker")
-        .args(["compose", "-f", &compose_file.to_string_lossy(), "config", "--images"])
+    let mut cmd = match crate::containers::compose_cmd() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    match cmd
+        .args(["-f", &compose_file.to_string_lossy(), "config", "--images"])
         .envs(compose_secrets_env())
         .current_dir(dir)
         .output()
@@ -34552,11 +34556,14 @@ async fn compose_list_stacks(
             if !compose_file.exists() { continue; }
 
             // Get stack status via docker compose ps
-            let status = Command::new("docker")
-                .args(["compose", "-f", &compose_file.to_string_lossy(), "ps", "--format", "json"])
-                .envs(compose_secrets_env())
-                .current_dir(&path)
-                .output();
+            let status = match crate::containers::compose_cmd() {
+                Ok(mut c) => c
+                    .args(["-f", &compose_file.to_string_lossy(), "ps", "--format", "json"])
+                    .envs(compose_secrets_env())
+                    .current_dir(&path)
+                    .output(),
+                Err(e) => Err(std::io::Error::other(e)),
+            };
 
             let mut services = Vec::new();
             let mut running = 0u32;
@@ -34651,12 +34658,15 @@ async fn compose_delete_stack(
 
     // Run docker compose down first
     let compose_file = compose_file_in(&dir);
-    match Command::new("docker")
-        .args(["compose", "-f", &compose_file.to_string_lossy(), "down", "--remove-orphans"])
-        .envs(compose_secrets_env())
-        .current_dir(&dir)
-        .output()
-    {
+    let compose_down = match crate::containers::compose_cmd() {
+        Ok(mut c) => c
+            .args(["-f", &compose_file.to_string_lossy(), "down", "--remove-orphans"])
+            .envs(compose_secrets_env())
+            .current_dir(&dir)
+            .output(),
+        Err(e) => Err(std::io::Error::other(e)),
+    };
+    match compose_down {
         Ok(out) if !out.status.success() => {
             warn!("compose down failed for '{}': {}", name, String::from_utf8_lossy(&out.stderr).trim());
         }
@@ -34757,11 +34767,14 @@ async fn compose_up(
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Stack not found" }));
     }
 
-    let output = Command::new("docker")
-        .args(["compose", "-f", &compose_file.to_string_lossy(), "up", "-d", "--remove-orphans"])
-        .envs(compose_secrets_env())
-        .current_dir(&dir)
-        .output();
+    let output = match crate::containers::compose_cmd() {
+        Ok(mut c) => c
+            .args(["-f", &compose_file.to_string_lossy(), "up", "-d", "--remove-orphans"])
+            .envs(compose_secrets_env())
+            .current_dir(&dir)
+            .output(),
+        Err(e) => Err(std::io::Error::other(e)),
+    };
 
     match output {
         Ok(out) => {
@@ -34822,11 +34835,14 @@ async fn compose_down(
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Stack not found" }));
     }
 
-    let output = Command::new("docker")
-        .args(["compose", "-f", &compose_file.to_string_lossy(), "down", "--remove-orphans"])
-        .envs(compose_secrets_env())
-        .current_dir(&dir)
-        .output();
+    let output = match crate::containers::compose_cmd() {
+        Ok(mut c) => c
+            .args(["-f", &compose_file.to_string_lossy(), "down", "--remove-orphans"])
+            .envs(compose_secrets_env())
+            .current_dir(&dir)
+            .output(),
+        Err(e) => Err(std::io::Error::other(e)),
+    };
 
     match output {
         Ok(out) => {
@@ -34863,11 +34879,14 @@ async fn compose_pull(
     let before: std::collections::HashMap<String, String> =
         compose_image_id_map(&dir, &compose_file).into_iter().collect();
 
-    let output = Command::new("docker")
-        .args(["compose", "-f", &compose_file.to_string_lossy(), "pull"])
-        .envs(compose_secrets_env())
-        .current_dir(&dir)
-        .output();
+    let output = match crate::containers::compose_cmd() {
+        Ok(mut c) => c
+            .args(["-f", &compose_file.to_string_lossy(), "pull"])
+            .envs(compose_secrets_env())
+            .current_dir(&dir)
+            .output(),
+        Err(e) => Err(std::io::Error::other(e)),
+    };
 
     match output {
         Ok(out) => {
@@ -34921,11 +34940,14 @@ async fn compose_restart(
         return HttpResponse::NotFound().json(serde_json::json!({ "error": "Stack not found" }));
     }
 
-    let output = Command::new("docker")
-        .args(["compose", "-f", &compose_file.to_string_lossy(), "restart"])
-        .envs(compose_secrets_env())
-        .current_dir(&dir)
-        .output();
+    let output = match crate::containers::compose_cmd() {
+        Ok(mut c) => c
+            .args(["-f", &compose_file.to_string_lossy(), "restart"])
+            .envs(compose_secrets_env())
+            .current_dir(&dir)
+            .output(),
+        Err(e) => Err(std::io::Error::other(e)),
+    };
 
     match output {
         Ok(out) => {
@@ -34960,7 +34982,7 @@ async fn compose_logs(
     let lines = query.get("lines").and_then(|l| l.parse::<u32>().ok()).unwrap_or(200).min(5000);
     let file_str = compose_file.to_string_lossy().into_owned();
     let lines_str = lines.to_string();
-    let mut cmd_args = vec!["compose", "-f", &file_str, "logs", "--no-color", "--tail", &lines_str];
+    let mut cmd_args = vec!["-f", &file_str, "logs", "--no-color", "--tail", &lines_str];
 
     // Validate service name to prevent argument injection
     let service_owned: String;
@@ -34974,11 +34996,14 @@ async fn compose_logs(
         }
     }
 
-    let output = Command::new("docker")
-        .args(&cmd_args)
-        .envs(compose_secrets_env())
-        .current_dir(&dir)
-        .output();
+    let output = match crate::containers::compose_cmd() {
+        Ok(mut c) => c
+            .args(&cmd_args)
+            .envs(compose_secrets_env())
+            .current_dir(&dir)
+            .output(),
+        Err(e) => Err(std::io::Error::other(e)),
+    };
 
     match output {
         Ok(out) => {
@@ -35037,11 +35062,14 @@ async fn compose_validate(
         }
     };
 
-    let output = Command::new("docker")
-        .args(["compose", "-f", &file_str, "config", "--quiet"])
-        .envs(compose_secrets_env())
-        .current_dir(&dir)
-        .output();
+    let output = match crate::containers::compose_cmd() {
+        Ok(mut c) => c
+            .args(["-f", &file_str, "config", "--quiet"])
+            .envs(compose_secrets_env())
+            .current_dir(&dir)
+            .output(),
+        Err(e) => Err(std::io::Error::other(e)),
+    };
 
     // Remove the throwaway file regardless of the outcome — never leave it behind.
     if posted.is_some() {

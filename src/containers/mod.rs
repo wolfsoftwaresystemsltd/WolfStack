@@ -4906,6 +4906,49 @@ fn docker_cpu_limits() -> std::collections::HashMap<String, f64> {
     limits
 }
 
+/// Whether `<program> <args...> version` runs successfully.
+fn compose_probe(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .arg("version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// How to invoke Docker Compose on this host: (program, leading args).
+///
+/// `docker compose` (the v2 CLI plugin) is preferred, falling back to the
+/// standalone `docker-compose` binary. Every call site used to hardcode
+/// `docker compose`, which on a Docker CLI without the plugin doesn't fail
+/// cleanly — the CLI parses `-f` as a *global* flag and prints its own usage,
+/// so JJ's Unraid install died with the baffling "unknown shorthand flag: 'f'
+/// in -f" (2026-07-27). Unraid's Docker Compose Manager plugin installs the
+/// standalone binary, which this now finds.
+pub fn compose_command() -> Result<(String, Vec<String>), String> {
+    if compose_probe("docker", &["compose"]) {
+        return Ok(("docker".to_string(), vec!["compose".to_string()]));
+    }
+    if compose_probe("docker-compose", &[]) {
+        return Ok(("docker-compose".to_string(), Vec::new()));
+    }
+    Err("Docker Compose is not available on this node — neither the \
+         `docker compose` plugin nor a standalone `docker-compose` binary was \
+         found. On Unraid, install the Docker Compose Manager plugin; on other \
+         hosts install the docker-compose-plugin package. You can also install \
+         this app with the Standard (Docker Run) option instead."
+        .to_string())
+}
+
+/// A `Command` pre-loaded with the working compose invocation, ready for the
+/// caller to append `-f <file> …` to.
+pub fn compose_cmd() -> Result<Command, String> {
+    let (program, base_args) = compose_command()?;
+    let mut cmd = Command::new(program);
+    cmd.args(base_args);
+    Ok(cmd)
+}
+
 /// Get Docker container stats (one-shot)
 pub fn docker_stats() -> Vec<ContainerStats> {
     let limits = docker_cpu_limits();
@@ -13802,5 +13845,47 @@ mod cpu_capacity_tests {
     fn host_cpu_cores_is_never_zero() {
         // Every capacity calculation divides by this.
         assert!(host_cpu_cores() >= 1.0);
+    }
+}
+
+#[cfg(test)]
+mod compose_command_tests {
+    use super::*;
+
+    #[test]
+    fn probe_rejects_a_missing_binary() {
+        assert!(!compose_probe("wolfstack-no-such-compose-binary", &[]));
+    }
+
+    #[test]
+    fn resolves_to_one_of_the_two_supported_forms() {
+        // Environment-dependent by nature: assert the shape, not the outcome.
+        // Either form must be directly runnable, and the v2 form must carry
+        // its `compose` subcommand — dropping it is what produced the
+        // "unknown shorthand flag: 'f'" failure this replaced.
+        match compose_command() {
+            Ok((program, base_args)) => match program.as_str() {
+                "docker" => assert_eq!(base_args, vec!["compose".to_string()]),
+                "docker-compose" => assert!(base_args.is_empty()),
+                other => panic!("unexpected compose program: {}", other),
+            },
+            Err(msg) => {
+                // The error is operator-facing — it must say what to install.
+                assert!(msg.contains("docker-compose"), "unhelpful error: {}", msg);
+            }
+        }
+    }
+
+    #[test]
+    fn built_command_never_starts_with_a_flag() {
+        // Whatever we resolve, appending "-f <file>" must not leave `-f` in
+        // the global-flag position, which is exactly how the Unraid failure
+        // presented (JJ, 2026-07-27).
+        if let Ok((program, base_args)) = compose_command() {
+            if program == "docker" {
+                assert_eq!(base_args.first().map(|s| s.as_str()), Some("compose"));
+            }
+            assert!(base_args.iter().all(|a| !a.starts_with('-')));
+        }
     }
 }
