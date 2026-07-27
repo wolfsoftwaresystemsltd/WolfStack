@@ -14,7 +14,7 @@ pub fn parse_config(target: &ExecTarget, component: &str) -> Result<serde_json::
     let comp = component_from_name(component)?;
     let config_path = comp.config_path()
         .ok_or_else(|| format!("No config path for {}", component))?;
-    let content = target.read_file(config_path)?;
+    let content = target.read_file(&config_path)?;
     let toml_value: toml::Value = content.parse()
         .map_err(|e| format!("Failed to parse TOML: {}", e))?;
     Ok(toml_to_json(&toml_value))
@@ -28,7 +28,7 @@ pub fn validate_config(target: &ExecTarget, component: &str) -> Result<Vec<Strin
     let comp = component_from_name(component)?;
     let config_path = comp.config_path()
         .ok_or_else(|| format!("No config path for {}", component))?;
-    let content = target.read_file(config_path)?;
+    let content = target.read_file(&config_path)?;
     let toml_value: toml::Value = content.parse()
         .map_err(|e| format!("Failed to parse TOML: {}", e))?;
     let actual = toml_to_json(&toml_value);
@@ -54,7 +54,7 @@ pub fn save_config(target: &ExecTarget, component: &str, data: &serde_json::Valu
 
     // Read + parse existing config; on failure, start from empty/default
     // so a corrupted file doesn't block the operator from rewriting it.
-    let mut merged = match target.read_file(config_path) {
+    let mut merged = match target.read_file(&config_path) {
         Ok(content) => {
             content.parse::<toml::Value>()
                 .map(|tv| toml_to_json(&tv))
@@ -86,7 +86,7 @@ pub fn save_config(target: &ExecTarget, component: &str, data: &serde_json::Valu
         .ok_or_else(|| "Failed to convert config to TOML format".to_string())?;
     let toml_string = toml::to_string_pretty(&toml_value)
         .map_err(|e| format!("Failed to serialize TOML: {}", e))?;
-    target.write_file(config_path, &toml_string)?;
+    target.write_file(&config_path, &toml_string)?;
     Ok(format!("Configuration saved to {}. Restart {} to apply changes.",
         config_path, comp.service_name()))
 }
@@ -102,7 +102,7 @@ pub fn repair_config(target: &ExecTarget, component: &str) -> Result<String, Str
         .ok_or_else(|| format!("No default template for {}", component))?;
     // Read whatever's on disk (fall back to empty if file is missing
     // or unparseable — same approach as save_config).
-    let existing_json = target.read_file(config_path)
+    let existing_json = target.read_file(&config_path)
         .ok()
         .and_then(|c| c.parse::<toml::Value>().ok())
         .map(|tv| toml_to_json(&tv))
@@ -126,7 +126,7 @@ pub fn repair_config(target: &ExecTarget, component: &str) -> Result<String, Str
         .ok_or_else(|| "Failed to convert repaired config to TOML".to_string())?;
     let toml_string = toml::to_string_pretty(&toml_value)
         .map_err(|e| format!("Failed to serialize TOML: {}", e))?;
-    target.write_file(config_path, &toml_string)?;
+    target.write_file(&config_path, &toml_string)?;
     Ok(format!(
         "Repaired {} — filled in {} missing key(s): {}. Restart {} to apply.",
         config_path, missing.len(),
@@ -393,12 +393,12 @@ pub fn bootstrap_config(target: &ExecTarget, component: &str) -> Result<String, 
         .ok_or_else(|| format!("No config path for {}", component))?;
 
     // Never overwrite existing config
-    if target.path_exists(config_path).unwrap_or(false) {
+    if target.path_exists(&config_path).unwrap_or(false) {
         return Ok(format!("Configuration already exists at {}. Not overwriting.", config_path));
     }
 
     // Create parent directory
-    if let Some(parent) = std::path::Path::new(config_path).parent() {
+    if let Some(parent) = std::path::Path::new(&config_path).parent() {
         let _ = target.exec(&format!("mkdir -p '{}'", parent.display()));
     }
 
@@ -413,7 +413,7 @@ pub fn bootstrap_config(target: &ExecTarget, component: &str) -> Result<String, 
         _ => return Err(format!("No default config template for {}", component)),
     };
 
-    target.write_file(config_path, default_config)?;
+    target.write_file(&config_path, default_config)?;
     Ok(format!("Default configuration created at {}. Edit the values and save.", config_path))
 }
 

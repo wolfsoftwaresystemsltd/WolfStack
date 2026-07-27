@@ -142,6 +142,38 @@ download_prebuilt() {
     echo "  Downloading prebuilt ${binary} for ${BINARY_ARCH}..."
     local tmpfile="${dest}.download"
     if curl -fSL --connect-timeout 15 --max-time 300 --retry 2 -o "$tmpfile" "$url" 2>&1; then
+        # This binary is about to be executed as root, so check it against the
+        # release's SHA256SUMS. WolfStack publishes one (see
+        # .github/workflows/release.yml); a release that doesn't still
+        # installs, with a warning, because making it fatal would break
+        # upgrades for any component repo that has yet to publish sums. A
+        # checksum that IS published and does NOT match is always fatal.
+        if command -v sha256sum >/dev/null 2>&1; then
+            local sums="${dest}.SHA256SUMS"
+            if curl -fsSL --connect-timeout 15 --max-time 60 -o "$sums" \
+                    "https://github.com/${repo}/releases/latest/download/SHA256SUMS" 2>/dev/null; then
+                local want got
+                want=$(awk -v f="${binary}-${BINARY_ARCH}" '$2 == f || $2 == "*" f {print $1}' "$sums" | head -1)
+                got=$(sha256sum "$tmpfile" | awk '{print $1}')
+                rm -f "$sums"
+                if [ -n "$want" ] && [ "$want" != "$got" ]; then
+                    echo "  ✗ Checksum MISMATCH for ${binary}-${BINARY_ARCH} — refusing to install"
+                    echo "    expected: $want"
+                    echo "    got:      $got"
+                    rm -f "$tmpfile"
+                    return 1
+                elif [ -n "$want" ]; then
+                    echo "  ✓ Checksum verified"
+                else
+                    echo "  ⚠ ${binary}-${BINARY_ARCH} is not listed in SHA256SUMS — installing unverified"
+                fi
+            else
+                rm -f "$sums" 2>/dev/null || true
+                echo "  ⚠ No SHA256SUMS published for this release — installing unverified"
+            fi
+        else
+            echo "  ⚠ sha256sum not available — installing unverified"
+        fi
         mv "$tmpfile" "$dest"
         chmod +x "$dest"
         echo "  ✓ Downloaded prebuilt ${binary} (${BINARY_ARCH})"
@@ -1731,13 +1763,61 @@ fi
 
 # ─── Install WolfNet (cluster network layer) ────────────────────────────────
 
+# (Re)write wolfnet.service and reload systemd.
+#
+# Always rewrites. The unit used to be created only when the file was absent,
+# so no fix to it ever reached a node that already had WolfNet installed —
+# including both directives below, which is why they are worth a rewrite.
+write_wolfnet_unit() {
+    cat > /etc/systemd/system/wolfnet.service <<'WOLFNET_UNIT_EOF'
+[Unit]
+Description=WolfNet - Secure Private Mesh Networking
+Before=wolfstack.service
+After=network-online.target
+Wants=network-online.target
+# A failure during an upgrade must not leave the unit permanently dead. Under
+# systemd's default (5 starts in 10s) a node that lost a few restarts stayed
+# down until someone power-cycled it, because setup.sh's `systemctl start`
+# fails silently against a unit in start-limit state.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wolfnet --config /etc/wolfnet/config.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+DeviceAllow=/dev/net/tun rw
+RuntimeDirectory=wolfnet
+RuntimeDirectoryMode=0755
+# Keep /run/wolfnet across a stop. systemd removes a RuntimeDirectory when the
+# service stops, which threw away routes.json and subnet-routes.json on every
+# upgrade. WolfNet then restarted with an empty route table and announced it,
+# and each peer's announce handler dropped every route pointing back at this
+# host — the whole cluster losing container routing at once (sabur7, G740,
+# 2026-07-27).
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target
+WOLFNET_UNIT_EOF
+    systemctl daemon-reload
+}
+
 # Helper: download prebuilt WolfNet binaries or build from source.
 # Sets WOLFNET_BUILT=true on success.
 # Requires WOLFNET_SRC_DIR to be set if building from source.
 build_or_download_wolfnet() {
+    # Callers upgrading a RUNNING WolfNet set WOLFNET_STAGE_DIR so the new
+    # binaries land somewhere harmless first; they then stop the daemon and
+    # move them into place. Unset (fresh install, or the daemon is already
+    # stopped) means write straight to the final location, as before.
+    WN_DEST="${WOLFNET_STAGE_DIR:-/usr/local/bin}"
+
     # Try prebuilt first
-    if download_prebuilt "wolfsoftwaresystemsltd/WolfNet" "wolfnet" "/usr/local/bin/wolfnet"; then
-        download_prebuilt "wolfsoftwaresystemsltd/WolfNet" "wolfnetctl" "/usr/local/bin/wolfnetctl" || true
+    if download_prebuilt "wolfsoftwaresystemsltd/WolfNet" "wolfnet" "$WN_DEST/wolfnet"; then
+        download_prebuilt "wolfsoftwaresystemsltd/WolfNet" "wolfnetctl" "$WN_DEST/wolfnetctl" || true
         WOLFNET_BUILT=true
         return 0
     fi
@@ -1772,11 +1852,11 @@ build_or_download_wolfnet() {
         cargo build --release
     fi
 
-    cp "$WOLFNET_SRC_DIR/target/release/wolfnet" /usr/local/bin/wolfnet
-    chmod +x /usr/local/bin/wolfnet
+    cp "$WOLFNET_SRC_DIR/target/release/wolfnet" "$WN_DEST/wolfnet"
+    chmod +x "$WN_DEST/wolfnet"
     if [ -f "$WOLFNET_SRC_DIR/target/release/wolfnetctl" ]; then
-        cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" /usr/local/bin/wolfnetctl
-        chmod +x /usr/local/bin/wolfnetctl
+        cp "$WOLFNET_SRC_DIR/target/release/wolfnetctl" "$WN_DEST/wolfnetctl"
+        chmod +x "$WN_DEST/wolfnetctl"
     fi
     WOLFNET_BUILT=true
     return 0
@@ -1815,14 +1895,41 @@ if command -v wolfnet >/dev/null 2>&1 && systemctl is-active --quiet wolfnet 2>/
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
     fi
 
-    # Update binaries (prebuilt or source)
-    systemctl stop wolfnet 2>/dev/null || true
-    if build_or_download_wolfnet; then
+    # Update binaries (prebuilt or source).
+    #
+    # Build/download FIRST, into a staging dir on the same filesystem, and only
+    # then stop the daemon to swap the binaries in. Stopping first left WolfNet
+    # down for the entire build — up to ~50 minutes on a slow ARM board — and
+    # during that window WolfStack's own watchdog would try to restart a
+    # service whose binary was half-written. The overlay now drops for about a
+    # second (sabur7 / G740, 2026-07-27).
+    WOLFNET_STAGE_DIR=/usr/local/bin/.wolfnet-stage
+    rm -rf "$WOLFNET_STAGE_DIR"
+    mkdir -p "$WOLFNET_STAGE_DIR"
+    # `set -e` is active: every step below tolerates its own failure, because
+    # aborting here would leave the node with WolfNet stopped and the rest of
+    # the upgrade unrun — strictly worse than an upgrade that didn't happen.
+    if build_or_download_wolfnet && [ -f "$WOLFNET_STAGE_DIR/wolfnet" ]; then
+        systemctl stop wolfnet 2>/dev/null || true
+        mv -f "$WOLFNET_STAGE_DIR/wolfnet" /usr/local/bin/wolfnet ||
+            echo "  ⚠ Could not replace /usr/local/bin/wolfnet — keeping the existing binary"
+        chmod +x /usr/local/bin/wolfnet || true
+        if [ -f "$WOLFNET_STAGE_DIR/wolfnetctl" ]; then
+            mv -f "$WOLFNET_STAGE_DIR/wolfnetctl" /usr/local/bin/wolfnetctl || true
+            chmod +x /usr/local/bin/wolfnetctl || true
+        fi
+        write_wolfnet_unit
+        # A unit sitting in failed/start-limit state ignores `start` silently,
+        # which is how nodes stayed offline until someone rebooted them.
+        systemctl reset-failed wolfnet 2>/dev/null || true
         systemctl start wolfnet 2>/dev/null || true
         echo "  ✓ WolfNet updated and restarted"
     else
-        systemctl start wolfnet 2>/dev/null || true
+        # Nothing new was staged — the running daemon was never touched.
+        echo "  ⚠ WolfNet update unavailable — leaving the running version in place"
     fi
+    unset WOLFNET_STAGE_DIR
+    rm -rf /usr/local/bin/.wolfnet-stage
 
 elif command -v wolfnet >/dev/null 2>&1 && [ -f "/etc/systemd/system/wolfnet.service" ]; then
     # Installed but not running — check for upgrades, then start
@@ -1853,6 +1960,12 @@ elif command -v wolfnet >/dev/null 2>&1 && [ -f "/etc/systemd/system/wolfnet.ser
     if build_or_download_wolfnet; then
         echo "  ✓ WolfNet updated"
     fi
+
+    # This is the branch a node lands in after the failure this release fixes —
+    # WolfNet dead, operator re-running the upgrade. Repair the unit and clear
+    # any start-limit state first, or `start` below fails silently again.
+    write_wolfnet_unit
+    systemctl reset-failed wolfnet 2>/dev/null || true
 
     echo "  Starting WolfNet..."
     systemctl start wolfnet 2>/dev/null || true
@@ -2035,29 +2148,7 @@ EOF
     fi
 
     # Create systemd service
-    if [ ! -f "/etc/systemd/system/wolfnet.service" ]; then
-        cat > /etc/systemd/system/wolfnet.service <<EOF
-[Unit]
-Description=WolfNet - Secure Private Mesh Networking
-Before=wolfstack.service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/wolfnet --config /etc/wolfnet/config.toml
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65535
-DeviceAllow=/dev/net/tun rw
-RuntimeDirectory=wolfnet
-RuntimeDirectoryMode=0755
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-    fi
+    write_wolfnet_unit
 
     systemctl enable wolfnet 2>/dev/null || true
     systemctl start wolfnet 2>/dev/null || true

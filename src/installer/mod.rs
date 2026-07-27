@@ -68,85 +68,258 @@ impl Component {
         }
     }
 
-    pub fn config_path(&self) -> Option<&'static str> {
+    /// Whether this component has a config file at all. Certbot is driven
+    /// entirely by CLI flags and has none, which is a different answer from
+    /// "it has one but this node's copy could not be located".
+    pub fn has_config_file(&self) -> bool {
+        !matches!(self, Component::Certbot)
+    }
+
+    /// Absolute path of the component's config file, or None when this host
+    /// has none.
+    ///
+    /// None is a real answer, not a failure to guess: the DB engines are
+    /// packaged in layouts WolfStack does not control, and returning a path
+    /// that cannot exist is exactly what produced klas's
+    /// "Failed to save config: No such file or directory (os error 2)"
+    /// (2026-07-27). Callers must handle None rather than write to it.
+    pub fn config_path(&self) -> Option<String> {
         match self {
-            Component::WolfNet => Some("/etc/wolfnet/config.toml"),
-            Component::WolfProxy => Some("/opt/wolfproxy/wolfproxy.toml"),
-            Component::WolfServe => Some("/opt/wolfserve/wolfserve.toml"),
-            Component::WolfDisk => Some("/etc/wolfdisk/config.toml"),
-            Component::WolfScale => Some("/opt/wolfscale/wolfscale.toml"),
-            Component::MariaDB => Some(mariadb_config_path()),
-            Component::PostgreSQL => Some(postgresql_config_path()),
+            Component::WolfNet => Some("/etc/wolfnet/config.toml".to_string()),
+            Component::WolfProxy => Some("/opt/wolfproxy/wolfproxy.toml".to_string()),
+            Component::WolfServe => Some("/opt/wolfserve/wolfserve.toml".to_string()),
+            Component::WolfDisk => Some("/etc/wolfdisk/config.toml".to_string()),
+            Component::WolfScale => Some("/opt/wolfscale/wolfscale.toml".to_string()),
+            Component::MariaDB => mariadb_config_path(),
+            Component::PostgreSQL => postgresql_config_path(),
             Component::Certbot => None,
         }
     }
 
 }
 
-/// Detect the MariaDB/MySQL config file path for the current distro
-fn mariadb_config_path() -> &'static str {
-    // Debian/Ubuntu
-    if std::path::Path::new("/etc/mysql/mariadb.conf.d/50-server.cnf").exists() {
-        return "/etc/mysql/mariadb.conf.d/50-server.cnf";
-    }
-    // Arch/Manjaro/CachyOS
-    if std::path::Path::new("/etc/my.cnf.d/server.cnf").exists() {
-        return "/etc/my.cnf.d/server.cnf";
-    }
-    // RHEL/Fedora/CentOS
-    if std::path::Path::new("/etc/my.cnf.d/mariadb-server.cnf").exists() {
-        return "/etc/my.cnf.d/mariadb-server.cnf";
-    }
-    // SUSE
-    if std::path::Path::new("/etc/my.cnf.d/mysql/mysqld.cnf").exists() {
-        return "/etc/my.cnf.d/mysql/mysqld.cnf";
-    }
-    // Global fallback
-    if std::path::Path::new("/etc/my.cnf").exists() {
-        return "/etc/my.cnf";
-    }
-    // Default to Debian path even if it doesn't exist yet
-    "/etc/mysql/mariadb.conf.d/50-server.cnf"
+/// Where a component's generated admin credentials are recorded, root-only.
+pub const CREDENTIALS_DIR: &str = "/etc/wolfstack/credentials";
+
+/// A database admin account WolfStack created during install.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentCredentials {
+    pub component: String,
+    pub username: String,
+    pub password: String,
+    pub host: String,
+    pub port: u16,
 }
 
-/// Detect the PostgreSQL config file path for the current distro
-fn postgresql_config_path() -> &'static str {
-    // Debian/Ubuntu (version-specific paths)
-    for v in &["17", "16", "15", "14", "13"] {
-        let path = format!("/etc/postgresql/{}/main/postgresql.conf", v);
-        if std::path::Path::new(&path).exists() {
-            return match *v {
-                "17" => "/etc/postgresql/17/main/postgresql.conf",
-                "16" => "/etc/postgresql/16/main/postgresql.conf",
-                "15" => "/etc/postgresql/15/main/postgresql.conf",
-                "14" => "/etc/postgresql/14/main/postgresql.conf",
-                _ => "/etc/postgresql/13/main/postgresql.conf",
-            };
-        }
-    }
-    // Arch/Manjaro
-    if std::path::Path::new("/var/lib/postgres/data/postgresql.conf").exists() {
-        return "/var/lib/postgres/data/postgresql.conf";
-    }
-    // RHEL/Fedora/CentOS
-    for v in &["17", "16", "15", "14", "13"] {
-        let path = format!("/var/lib/pgsql/{}/data/postgresql.conf", v);
-        if std::path::Path::new(&path).exists() {
-            return match *v {
-                "17" => "/var/lib/pgsql/17/data/postgresql.conf",
-                "16" => "/var/lib/pgsql/16/data/postgresql.conf",
-                "15" => "/var/lib/pgsql/15/data/postgresql.conf",
-                "14" => "/var/lib/pgsql/14/data/postgresql.conf",
-                _ => "/var/lib/pgsql/13/data/postgresql.conf",
-            };
-        }
-    }
-    // RHEL default data dir
-    if std::path::Path::new("/var/lib/pgsql/data/postgresql.conf").exists() {
-        return "/var/lib/pgsql/data/postgresql.conf";
-    }
-    "/etc/postgresql/17/main/postgresql.conf"
+/// Read the credentials recorded for a component, if any.
+pub fn load_credentials(component: Component) -> Option<ComponentCredentials> {
+    let path = format!("{}/{}.json", CREDENTIALS_DIR, component.name().to_lowercase());
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
 }
+
+/// Post-install bootstrap that gives a freshly-installed database engine an
+/// admin account WolfStack can actually log in with, prints it, and records it
+/// where the UI can show it again later.
+///
+/// A stock Debian/Ubuntu MariaDB authenticates `root@localhost` with the
+/// `unix_socket` plugin. No Rust client in this tree can speak that —
+/// mysql_async 0.34 rejects auth plugins it doesn't know — so Database
+/// Management could never connect as root however the operator typed it, which
+/// is what klas hit on 2026-07-27. Rather than converting `root` off socket
+/// auth and weakening local admin, this creates a dedicated `wolfstack`
+/// account through the local socket, where root already has the rights to do
+/// so. PostgreSQL gets the same treatment via `peer`-authenticated psql.
+///
+/// Existing credentials are never overwritten, so re-running an install (or an
+/// upgrade) can't invalidate connections the operator has already saved.
+pub fn credential_bootstrap_script(component: Component) -> Option<String> {
+    let (name, port) = match component {
+        Component::MariaDB => ("mariadb", 3306),
+        Component::PostgreSQL => ("postgresql", 5432),
+        _ => return None,
+    };
+
+    // Hex, so it is safe unquoted in SQL, in JSON and in the shell below.
+    let common = format!(
+        r#"
+echo ''
+echo 'Configuring WolfStack database access...'
+WS_CRED_DIR={dir}
+WS_CRED_FILE=$WS_CRED_DIR/{name}.json
+WS_PORT={port}
+WS_PW=$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+"#,
+        dir = CREDENTIALS_DIR,
+        name = name,
+        port = port
+    );
+
+    let engine = match component {
+        Component::MariaDB => r#"
+ws_apply() {
+    WS_CLIENT=$(command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null)
+    [ -n "$WS_CLIENT" ] || return 1
+    printf "CREATE USER IF NOT EXISTS 'wolfstack'@'localhost' IDENTIFIED BY '%s';
+CREATE USER IF NOT EXISTS 'wolfstack'@'127.0.0.1' IDENTIFIED BY '%s';
+ALTER USER 'wolfstack'@'localhost' IDENTIFIED BY '%s';
+ALTER USER 'wolfstack'@'127.0.0.1' IDENTIFIED BY '%s';
+GRANT ALL PRIVILEGES ON *.* TO 'wolfstack'@'localhost' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON *.* TO 'wolfstack'@'127.0.0.1' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+" "$WS_PW" "$WS_PW" "$WS_PW" "$WS_PW" | "$WS_CLIENT" -u root
+}
+"#,
+        Component::PostgreSQL => r#"
+ws_apply() {
+    if su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='wolfstack'\"" 2>/dev/null | grep -q 1; then
+        WS_SQL="ALTER ROLE wolfstack LOGIN SUPERUSER PASSWORD '$WS_PW'"
+    else
+        WS_SQL="CREATE ROLE wolfstack LOGIN SUPERUSER PASSWORD '$WS_PW'"
+    fi
+    su - postgres -c "psql -q -c \"$WS_SQL\"" >/dev/null 2>&1 || return 1
+    # A password is useless if pg_hba.conf won't accept a TCP login for it.
+    WS_HBA=$(su - postgres -c "psql -tAc 'SHOW hba_file'" 2>/dev/null)
+    if [ -n "$WS_HBA" ] && [ -f "$WS_HBA" ] && ! grep -q '^host.*wolfstack' "$WS_HBA"; then
+        printf 'host    all    wolfstack    127.0.0.1/32    scram-sha-256\nhost    all    wolfstack    ::1/128    scram-sha-256\n' >> "$WS_HBA"
+        su - postgres -c 'psql -q -c "SELECT pg_reload_conf()"' >/dev/null 2>&1
+    fi
+    return 0
+}
+"#,
+        _ => return None,
+    };
+
+    let tail = r#"
+if [ -f "$WS_CRED_FILE" ]; then
+    echo '  Existing WolfStack database credentials kept.'
+    echo "  See $WS_CRED_FILE (root only), or the component page in WolfStack."
+elif [ -z "$WS_PW" ]; then
+    echo '  Could not generate a password — no openssl and no /dev/urandom.'
+    echo '  Create a database user manually before using Database Management.'
+elif ws_apply; then
+    mkdir -p "$WS_CRED_DIR" && chmod 700 "$WS_CRED_DIR"
+    printf '{"component":"%s","username":"wolfstack","password":"%s","host":"127.0.0.1","port":%s}\n' \
+        "$WS_COMPONENT" "$WS_PW" "$WS_PORT" > "$WS_CRED_FILE"
+    chmod 600 "$WS_CRED_FILE"
+    echo ''
+    echo '  ---------------------------------------------------------------'
+    echo '  WolfStack created a database administrator account:'
+    echo ''
+    echo '    Username : wolfstack'
+    echo "    Password : $WS_PW"
+    echo "    Host     : 127.0.0.1 port $WS_PORT"
+    echo ''
+    echo "  Saved to $WS_CRED_FILE (readable by root only) and shown on this"
+    echo '  component page in WolfStack. Use it in Databases -> Add connection.'
+    echo '  ---------------------------------------------------------------'
+else
+    echo '  Could not create the wolfstack database user automatically.'
+    echo '  The server may still be starting — create one by hand and add it'
+    echo '  under Databases -> Add connection.'
+fi
+"#;
+
+    Some(format!(
+        "WS_COMPONENT={}\n{}{}{}",
+        name, common, engine, tail
+    ))
+}
+
+/// Detect the MariaDB/MySQL server config file for the current distro.
+fn mariadb_config_path() -> Option<String> {
+    const CANDIDATES: &[&str] = &[
+        "/etc/mysql/mariadb.conf.d/50-server.cnf", // Debian/Ubuntu
+        "/etc/my.cnf.d/server.cnf",                // Arch/Manjaro/CachyOS
+        "/etc/my.cnf.d/mariadb-server.cnf",        // RHEL/Fedora/CentOS
+        "/etc/my.cnf.d/mysql/mysqld.cnf",          // SUSE
+        "/etc/mysql/my.cnf",                       // Debian aggregate include
+        "/etc/my.cnf",                             // global fallback
+    ];
+    CANDIDATES.iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| p.to_string())
+}
+
+/// Ask a running PostgreSQL server where its config file is.
+///
+/// `SHOW config_file` is authoritative for every packaging layout, cluster
+/// name and major version — including versions newer than this build, which
+/// is what a hardcoded version list can never handle. Verified against
+/// postgres:16, which answers `/var/lib/postgresql/data/postgresql.conf`.
+/// Same approach as `postgres_ha::detect_pgdata`, which uses
+/// `SHOW data_directory`.
+fn pg_show_config_file() -> Option<String> {
+    let out = Command::new("su")
+        .args(["-", "postgres", "-c", "psql -tAc \"SHOW config_file\""])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() || !std::path::Path::new(&path).exists() {
+        return None;
+    }
+    Some(path)
+}
+
+/// Find `<base>/<major>/<cluster>/postgresql.conf`, newest major first.
+///
+/// Debian nests a cluster name below the version (`/etc/postgresql/16/main`)
+/// and RHEL uses a fixed `data` (`/var/lib/pgsql/16/data`), so walking one
+/// level below the version directory covers both. Directories are
+/// enumerated rather than tested against a hardcoded list of majors — that
+/// list is what stopped at 17 and made PostgreSQL 18 invisible.
+fn newest_versioned_pg_conf(base: &str) -> Option<String> {
+    let mut versions: Vec<(u32, std::path::PathBuf)> = std::fs::read_dir(base)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let major: u32 = e.file_name().to_str()?.parse().ok()?;
+            Some((major, e.path()))
+        })
+        .collect();
+    versions.sort_by_key(|(major, _)| std::cmp::Reverse(*major));
+
+    for (_, version_dir) in versions {
+        let mut clusters: Vec<std::path::PathBuf> = std::fs::read_dir(&version_dir)
+            .ok()
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        clusters.sort();
+        for cluster in clusters {
+            let conf = cluster.join("postgresql.conf");
+            if conf.is_file() {
+                return Some(conf.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Detect the PostgreSQL config file for the current distro.
+fn postgresql_config_path() -> Option<String> {
+    if let Some(path) = pg_show_config_file() {
+        return Some(path);
+    }
+    // Server not running (or not installed) — fall back to the on-disk
+    // packaging layouts.
+    for base in ["/etc/postgresql", "/var/lib/pgsql"] {
+        if let Some(path) = newest_versioned_pg_conf(base) {
+            return Some(path);
+        }
+    }
+    const UNVERSIONED: &[&str] = &[
+        "/var/lib/pgsql/data/postgresql.conf",      // RHEL default cluster
+        "/var/lib/postgres/data/postgresql.conf",   // Arch
+        "/var/lib/postgresql/data/postgresql.conf", // Alpine / container images
+    ];
+    UNVERSIONED.iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| p.to_string())
+}
+
 
 impl Component {
     pub fn all() -> &'static [Component] {
@@ -369,6 +542,27 @@ pub fn install_component(component: Component) -> Result<String, String> {
     }
 }
 
+/// Run the credential bootstrap and summarise the result for the caller's
+/// message. The same script the install console runs, so the two install
+/// paths cannot drift apart — only the reporting differs, because this one
+/// has no terminal to print to.
+fn run_credential_bootstrap(component: Component) -> String {
+    let script = match credential_bootstrap_script(component) {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    match Command::new("sh").arg("-c").arg(&script).output() {
+        Ok(_) => match load_credentials(component) {
+            Some(c) => format!(
+                " Database user '{}' is ready — see the component page for its password.",
+                c.username
+            ),
+            None => " No database user could be created automatically; add one under Databases.".to_string(),
+        },
+        Err(e) => format!(" Database user setup could not run: {}", e),
+    }
+}
+
 fn install_mariadb(distro: DistroFamily) -> Result<String, String> {
     let (pkg_mgr, install_flag) = pkg_install_cmd(distro);
     let pkg_name = match distro {
@@ -390,7 +584,8 @@ fn install_mariadb(distro: DistroFamily) -> Result<String, String> {
     if output.status.success() {
         // Enable and start
         let _ = Command::new("sudo").args(["systemctl", "enable", "--now", "mariadb"]).output();
-        Ok(format!("{} installed and started", pkg_name))
+        let creds = run_credential_bootstrap(Component::MariaDB);
+        Ok(format!("{} installed and started.{}", pkg_name, creds))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
@@ -424,7 +619,8 @@ fn install_postgresql(distro: DistroFamily) -> Result<String, String> {
             let _ = Command::new("sudo").args(["postgresql-setup", "--initdb"]).output();
         }
         let _ = Command::new("sudo").args(["systemctl", "enable", "--now", "postgresql"]).output();
-        Ok(format!("{} installed and started", pkg_name))
+        let creds = run_credential_bootstrap(Component::PostgreSQL);
+        Ok(format!("{} installed and started.{}", pkg_name, creds))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
@@ -1983,5 +2179,54 @@ mod cert_tests {
         assert!(!host_matches_cert_name("*.example.com", "host.example.org"));
         // A bare "*." pattern matches nothing.
         assert!(!host_matches_cert_name("*.", "host.example.com"));
+    }
+}
+
+#[cfg(test)]
+mod credential_bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn only_database_components_bootstrap_credentials() {
+        assert!(credential_bootstrap_script(Component::MariaDB).is_some());
+        assert!(credential_bootstrap_script(Component::PostgreSQL).is_some());
+        for c in [Component::WolfNet, Component::WolfProxy, Component::Certbot] {
+            assert!(credential_bootstrap_script(c).is_none(), "{:?} must not bootstrap", c);
+        }
+    }
+
+    #[test]
+    fn bootstrap_never_overwrites_recorded_credentials() {
+        // The guard is what stops a re-install or an upgrade invalidating
+        // connections the operator has already saved.
+        for c in [Component::MariaDB, Component::PostgreSQL] {
+            let s = credential_bootstrap_script(c).unwrap();
+            assert!(s.contains("if [ -f \"$WS_CRED_FILE\" ]"), "{:?} lost its keep-existing guard", c);
+            assert!(s.contains("chmod 600 \"$WS_CRED_FILE\""), "{:?} must keep the file root-only", c);
+        }
+    }
+
+    #[test]
+    fn bootstrap_grants_a_usable_account() {
+        let mariadb = credential_bootstrap_script(Component::MariaDB).unwrap();
+        assert!(mariadb.contains("CREATE USER IF NOT EXISTS 'wolfstack'@'127.0.0.1'"));
+        assert!(mariadb.contains("GRANT ALL PRIVILEGES ON *.* TO 'wolfstack'@'127.0.0.1'"));
+
+        let postgres = credential_bootstrap_script(Component::PostgreSQL).unwrap();
+        assert!(postgres.contains("CREATE ROLE wolfstack LOGIN SUPERUSER PASSWORD"));
+        // A password with no matching pg_hba rule is not a usable account.
+        assert!(postgres.contains("scram-sha-256"));
+    }
+
+    /// Dump the exact generated script so it can be run against a real server.
+    /// Ignored by default — `cargo test -- --ignored dump_bootstrap_scripts`.
+    #[test]
+    #[ignore]
+    fn dump_bootstrap_scripts() {
+        for (c, name) in [(Component::MariaDB, "mariadb"), (Component::PostgreSQL, "postgresql")] {
+            let path = format!("/tmp/wolfstack-bootstrap-{}.sh", name);
+            std::fs::write(&path, credential_bootstrap_script(c).unwrap()).unwrap();
+            println!("wrote {}", path);
+        }
     }
 }

@@ -4088,7 +4088,22 @@ pub struct PortMapping {
 pub struct ContainerStats {
     pub id: String,
     pub name: String,
+    /// CPU usage on the "100% == one core" scale, matching `docker stats`:
+    /// a container saturating four cores reports 400. Verified against
+    /// docker 2026-07-27 — a two-core busy loop on a 24-core host reports
+    /// 200.35%. Divide by `cpu_capacity_percent` for a share of what this
+    /// container is actually allowed to use.
     pub cpu_percent: f64,
+    /// What this container may use, on the same scale: its own CPU limit
+    /// when one is set (`--cpus`, cpu-quota, cpuset), otherwise every host
+    /// core. Without this the UI had no denominator and clamped usage at
+    /// 100%, so one busy core on a 24-core host looked like a maxed-out
+    /// container (klas 2026-07-27).
+    #[serde(default = "default_cpu_capacity_percent")]
+    pub cpu_capacity_percent: f64,
+    /// Host core count, for cluster-wide totals.
+    #[serde(default)]
+    pub host_cpu_cores: u32,
     pub memory_usage: u64,
     pub memory_limit: u64,
     pub memory_percent: f64,
@@ -4790,8 +4805,111 @@ fn split_port_proto(key: &str) -> (u16, String) {
     (port, proto)
 }
 
+/// Number of CPUs visible to this host. Never returns 0 — a zero would turn
+/// every capacity division into NaN/inf on the way to the UI.
+pub fn host_cpu_cores() -> f64 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as f64)
+        .unwrap_or(1.0)
+        .max(1.0)
+}
+
+/// Serde default for configs written before `cpu_capacity_percent` existed:
+/// one core, i.e. the old "100% is full" reading.
+fn default_cpu_capacity_percent() -> f64 {
+    100.0
+}
+
+/// Count the CPUs named by a cpuset string such as `"0-3,8"`.
+/// Returns None for an empty set (= no cpuset restriction).
+fn cpuset_core_count(cpuset: &str) -> Option<f64> {
+    let mut count = 0u32;
+    for part in cpuset.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                let lo: u32 = lo.trim().parse().ok()?;
+                let hi: u32 = hi.trim().parse().ok()?;
+                if hi < lo {
+                    return None;
+                }
+                count += hi - lo + 1;
+            }
+            None => {
+                part.parse::<u32>().ok()?;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 { None } else { Some(count as f64) }
+}
+
+/// Effective CPU allowance, in cores, for every running Docker container.
+///
+/// One `docker inspect` for all of them rather than one per container. The
+/// three limit mechanisms are checked in the order Docker applies them:
+/// `--cpus` (NanoCpus), then an explicit quota/period pair, then `--cpuset-cpus`,
+/// with the tightest winning. Absent all three the container may use the
+/// whole host.
+fn docker_cpu_limits() -> std::collections::HashMap<String, f64> {
+    let mut limits = std::collections::HashMap::new();
+    let host_cores = host_cpu_cores();
+
+    let ids = match Command::new("docker").args(["ps", "-q"]).output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).split_whitespace()
+            .map(|s| s.to_string()).collect::<Vec<_>>(),
+        Err(_) => return limits,
+    };
+    if ids.is_empty() {
+        return limits;
+    }
+
+    let mut args = vec![
+        "inspect".to_string(),
+        "--format".to_string(),
+        "{{.Name}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.CpuQuota}}|{{.HostConfig.CpuPeriod}}|{{.HostConfig.CpusetCpus}}".to_string(),
+    ];
+    args.extend(ids);
+    let out = match Command::new("docker").args(&args).output() {
+        Ok(o) => o,
+        Err(_) => return limits,
+    };
+
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let f: Vec<&str> = line.split('|').collect();
+        if f.len() < 5 {
+            continue;
+        }
+        // docker reports names as "/name"
+        let name = f[0].trim().trim_start_matches('/').to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let mut cores = host_cores;
+
+        // --cpus, expressed in billionths of a core
+        if let Some(nano) = f[1].trim().parse::<i64>().ok().filter(|n| *n > 0) {
+            cores = cores.min(nano as f64 / 1e9);
+        }
+        // --cpu-quota / --cpu-period (period 0 means Docker's 100ms default)
+        if let Some(quota) = f[2].trim().parse::<i64>().ok().filter(|q| *q > 0) {
+            let period = f[3].trim().parse::<i64>().unwrap_or(0);
+            let period = if period > 0 { period as f64 } else { 100_000.0 };
+            cores = cores.min(quota as f64 / period);
+        }
+        // --cpuset-cpus
+        if let Some(set_cores) = cpuset_core_count(f[4]) {
+            cores = cores.min(set_cores);
+        }
+
+        limits.insert(name, cores.max(0.01));
+    }
+    limits
+}
+
 /// Get Docker container stats (one-shot)
 pub fn docker_stats() -> Vec<ContainerStats> {
+    let limits = docker_cpu_limits();
+    let host_cores = host_cpu_cores();
     Command::new("docker")
         .args(["stats", "--no-stream", "--format", "{{.ID}}\\t{{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}\\t{{.MemPerc}}\\t{{.NetIO}}\\t{{.BlockIO}}\\t{{.PIDs}}"])
         .output()
@@ -4807,11 +4925,15 @@ pub fn docker_stats() -> Vec<ContainerStats> {
                     let mem_perc = parts.get(4).unwrap_or(&"0%").trim_end_matches('%');
                     let net_io = parse_docker_io(parts.get(5).unwrap_or(&"0B / 0B"));
                     let block_io = parse_docker_io(parts.get(6).unwrap_or(&"0B / 0B"));
+                    let name = parts.get(1).unwrap_or(&"").to_string();
+                    let cores = limits.get(&name).copied().unwrap_or(host_cores);
 
                     ContainerStats {
                         id: parts.first().unwrap_or(&"").to_string(),
-                        name: parts.get(1).unwrap_or(&"").to_string(),
+                        name,
                         cpu_percent: cpu_str.parse().unwrap_or(0.0),
+                        cpu_capacity_percent: cores * 100.0,
+                        host_cpu_cores: host_cores as u32,
                         memory_usage: mem_usage.0,
                         memory_limit: mem_usage.1,
                         memory_percent: mem_perc.parse().unwrap_or(0.0),
@@ -6189,6 +6311,55 @@ fn parse_pct_rootfs_size(rootfs_cfg: &str) -> Option<u64> {
     None
 }
 
+/// Seed WOLFNET_ROUTES from this host's live container/VM IPs when the cache is
+/// empty. Returns how many routes were added.
+///
+/// An empty cache is indistinguishable on the wire from "this host has no
+/// container routes", and a receiving peer treats an announce as authoritative:
+/// `wolfnet_routes_announce` drops every route pointing back at us. The cache
+/// starts empty on any boot (/run is tmpfs) and — until the wolfnet.service
+/// RuntimeDirectoryPreserve fix — after every upgrade, because stopping WolfNet
+/// deleted its runtime directory. Seeding before we announce closes that window
+/// whatever emptied it, rather than only at WolfStack startup.
+///
+/// The IP sweep shells out per container and can hang on a wedged dockerd
+/// (masterpier's athena, v25.2.3), so it runs on its own thread under one hard
+/// timeout: a stalled runtime must never block the caller.
+pub fn seed_local_routes_if_empty() -> usize {
+    if !WOLFNET_ROUTES.lock().unwrap().is_empty() {
+        return 0;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(wolfnet_used_ips_cached());
+    });
+    let local_ips = match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok(ips) => ips,
+        Err(_) => {
+            tracing::warn!("WolfNet: route seed timed out (15s) — will retry on the next announce");
+            return 0;
+        }
+    };
+    if local_ips.len() <= 1 {
+        return 0; // no container IPs to seed
+    }
+    let host_ip = &local_ips[0];
+    let mut local_routes = std::collections::HashMap::new();
+    for ip in &local_ips[1..] {
+        if !ip.is_empty() && ip != host_ip {
+            local_routes.insert(ip.clone(), host_ip.clone());
+        }
+    }
+    if local_routes.is_empty() {
+        return 0;
+    }
+    // Merge, not replace, so anything legitimately loaded from routes.json survives.
+    let added = local_routes.len();
+    update_wolfnet_routes(&local_routes);
+    tracing::info!("WolfNet: seeded {} local container route(s) into an empty cache", added);
+    added
+}
+
 /// Get LXC container stats
 pub fn lxc_stats() -> Vec<ContainerStats> {
     let containers = lxc_list_all();
@@ -6200,6 +6371,8 @@ pub fn lxc_stats() -> Vec<ContainerStats> {
                 id: c.name.clone(),
                 name: c.name.clone(),
                 cpu_percent: info.cpu_percent,
+                cpu_capacity_percent: lxc_cpu_limit_cores(&c.name) * 100.0,
+                host_cpu_cores: host_cpu_cores() as u32,
                 memory_usage: info.memory_usage,
                 memory_limit: info.memory_limit,
                 memory_percent: if info.memory_limit > 0 {
@@ -12135,40 +12308,109 @@ pub fn lxc_reclaim_cache(name: &str) -> Result<u64, String> {
 }
 
 /// Get CPU usage percentage for an LXC container
-fn lxc_cpu_percent(name: &str) -> f64 {
-    // Read cpu.stat usage_usec (cgroup v2)
+/// Read one cgroup key for an LXC container.
+fn lxc_cgroup_value(name: &str, key: &str) -> Option<String> {
     let base = lxc_base_dir(name);
     let mut args: Vec<&str> = Vec::new();
     if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
-    args.extend_from_slice(&["-n", name, "cpu.stat"]);
-    let usage = Command::new("lxc-cgroup")
-        .args(&args)
-        .output()
-        .ok()
-        .and_then(|o| {
-            let text = String::from_utf8_lossy(&o.stdout).to_string();
-            text.lines()
-                .find(|l| l.starts_with("usage_usec"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<u64>().ok())
-        });
-
-    if let Some(usec) = usage {
-        // Convert to percentage using total system uptime normalised by CPU count
-        if let Ok(uptime) = std::fs::read_to_string("/proc/uptime") {
-            if let Some(secs) = uptime.split_whitespace().next()
-                .and_then(|s| s.parse::<f64>().ok()) {
-                let num_cpus = std::thread::available_parallelism()
-                    .map(|n| n.get() as f64)
-                    .unwrap_or(1.0);
-                let total_usec = secs * 1_000_000.0 * num_cpus;
-                if total_usec > 0.0 {
-                    return ((usec as f64 / total_usec) * 100.0 * 10.0).round() / 10.0;
-                }
-            }
-        }
+    args.extend_from_slice(&["-n", name, key]);
+    let out = Command::new("lxc-cgroup").args(&args).output().ok()?;
+    if !out.status.success() {
+        return None;
     }
-    0.0
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Cumulative CPU time consumed by a container, in microseconds (cgroup v2).
+fn lxc_cpu_usage_usec(name: &str) -> Option<u64> {
+    lxc_cgroup_value(name, "cpu.stat")?
+        .lines()
+        .find(|l| l.starts_with("usage_usec"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+/// Effective CPU allowance for an LXC container, in cores.
+///
+/// `cpu.max` is `"<quota|max> <period>"` in microseconds; `cpuset.cpus` narrows
+/// it further. Neither present means the whole host.
+fn lxc_cpu_limit_cores(name: &str) -> f64 {
+    let host_cores = host_cpu_cores();
+    let mut cores = host_cores;
+
+    if let Some(quota_cores) = lxc_cgroup_value(name, "cpu.max").as_deref().and_then(parse_cpu_max) {
+        cores = cores.min(quota_cores);
+    }
+    if let Some(set_cores) = lxc_cgroup_value(name, "cpuset.cpus")
+        .and_then(|set| cpuset_core_count(set.trim()))
+    {
+        cores = cores.min(set_cores);
+    }
+    cores.max(0.01)
+}
+
+/// Parse a cgroup v2 `cpu.max` value — `"<quota|max> <period>"` in
+/// microseconds — into a core count. `max` means no limit, so None.
+fn parse_cpu_max(raw: &str) -> Option<f64> {
+    let mut fields = raw.split_whitespace();
+    let quota: f64 = match fields.next()? {
+        "max" => return None,
+        q => q.parse().ok()?,
+    };
+    let period: f64 = fields.next().and_then(|p| p.parse().ok()).unwrap_or(100_000.0);
+    if quota > 0.0 && period > 0.0 {
+        Some(quota / period)
+    } else {
+        None
+    }
+}
+
+/// Per-container `(cumulative usage_usec, when it was read)` from the previous
+/// poll, so CPU can be reported as a rate rather than a lifetime average.
+static LXC_CPU_SAMPLES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, (u64, Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Turn a CPU-time delta into a percentage on the same "100% == one core"
+/// scale `docker stats` uses, so both runtimes mean the same thing in the UI.
+fn cpu_percent_from_delta(delta_usec: u64, elapsed: std::time::Duration) -> f64 {
+    let wall_usec = elapsed.as_micros() as f64;
+    if wall_usec <= 0.0 {
+        return 0.0;
+    }
+    ((delta_usec as f64 / wall_usec) * 100.0 * 10.0).round() / 10.0
+}
+
+/// Current CPU usage of an LXC container.
+///
+/// Was a lifetime average: cumulative usage divided by *system* uptime and by
+/// the host core count. That answered a question nobody asked — it could never
+/// show a busy container as busy, it understated any container started after
+/// boot, and it was on a different scale from the Docker figure shown beside
+/// it. This samples the delta between polls instead.
+fn lxc_cpu_percent(name: &str) -> f64 {
+    let usage = match lxc_cpu_usage_usec(name) {
+        Some(u) => u,
+        None => return 0.0,
+    };
+    let now = Instant::now();
+
+    // Lock only to swap the sample in — never across the sleep below.
+    let previous = LXC_CPU_SAMPLES.lock().unwrap().insert(name.to_string(), (usage, now));
+
+    if let Some((prev_usage, prev_at)) = previous {
+        return cpu_percent_from_delta(usage.saturating_sub(prev_usage), now.duration_since(prev_at));
+    }
+
+    // First time we've seen this container: take a second reading rather than
+    // reporting a flat 0% until the next poll.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let usage2 = match lxc_cpu_usage_usec(name) {
+        Some(u) => u,
+        None => return 0.0,
+    };
+    let now2 = Instant::now();
+    LXC_CPU_SAMPLES.lock().unwrap().insert(name.to_string(), (usage2, now2));
+    cpu_percent_from_delta(usage2.saturating_sub(usage), now2.duration_since(now))
 }
 
 fn read_container_net(name: &str) -> (u64, u64) {
@@ -13512,3 +13754,53 @@ mod orphan_guard_tests {
     }
 }
 
+
+#[cfg(test)]
+mod cpu_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn cpuset_counts_ranges_and_singletons() {
+        assert_eq!(cpuset_core_count("0-3"), Some(4.0));
+        assert_eq!(cpuset_core_count("0,2,4"), Some(3.0));
+        assert_eq!(cpuset_core_count("0-3,8"), Some(5.0));
+        assert_eq!(cpuset_core_count("7"), Some(1.0));
+        // Empty means "no cpuset restriction", not "zero cores" — returning
+        // Some(0.0) would divide the gauge by zero.
+        assert_eq!(cpuset_core_count(""), None);
+        assert_eq!(cpuset_core_count("   "), None);
+        // Malformed input must not be read as a limit.
+        assert_eq!(cpuset_core_count("3-1"), None);
+        assert_eq!(cpuset_core_count("a-b"), None);
+    }
+
+    #[test]
+    fn cpu_max_parses_quota_and_unlimited() {
+        assert_eq!(parse_cpu_max("200000 100000"), Some(2.0));
+        assert_eq!(parse_cpu_max("50000 100000"), Some(0.5));
+        // Period defaults to 100ms when the value omits it.
+        assert_eq!(parse_cpu_max("100000"), Some(1.0));
+        assert_eq!(parse_cpu_max("max 100000"), None);
+        assert_eq!(parse_cpu_max(""), None);
+        assert_eq!(parse_cpu_max("0 100000"), None);
+    }
+
+    #[test]
+    fn cpu_percent_matches_docker_scale() {
+        // Docker reports 100% per fully-used core (verified against docker
+        // 2026-07-27: a two-core busy loop on a 24-core host reads 200.35%).
+        // One core busy for one second of wall clock is 1_000_000us of CPU.
+        let one_second = std::time::Duration::from_secs(1);
+        assert_eq!(cpu_percent_from_delta(1_000_000, one_second), 100.0);
+        assert_eq!(cpu_percent_from_delta(2_000_000, one_second), 200.0);
+        assert_eq!(cpu_percent_from_delta(0, one_second), 0.0);
+        // A zero-length sample window must not produce inf/NaN.
+        assert_eq!(cpu_percent_from_delta(1_000_000, std::time::Duration::ZERO), 0.0);
+    }
+
+    #[test]
+    fn host_cpu_cores_is_never_zero() {
+        // Every capacity calculation divides by this.
+        assert!(host_cpu_cores() >= 1.0);
+    }
+}

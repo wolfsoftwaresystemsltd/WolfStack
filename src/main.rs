@@ -1554,51 +1554,13 @@ async fn main() -> std::io::Result<()> {
         // the poll loop above. A cluster_secret rotation should take
         // effect without a wolfstack restart.
 
-        // Seed WOLFNET_ROUTES with local container routes before the
-        // first push fires (T+5). On a tmpfs system /var/run/wolfnet/
-        // routes.json is lost on reboot, so WOLFNET_ROUTES starts empty.
-        // Without this seed the T+5 push sends an empty announce, and
-        // the receiver's wolfnet_routes_announce handler wipes all
-        // existing routes for this host via cache.retain().  Seeding
-        // here closes the window: the push at T+5 sends real local
-        // routes instead of an empty set.
-        //
-        // Uses update_wolfnet_routes (merge) rather than replace so we
-        // don't stomp any routes that were legitimately seeded from
-        // an existing routes.json (non-tmpfs systems).
-        {
-            // Guarded: the IP sweep shells out per container (docker ps +
-            // per-container inspect, pct/qm probes) and sits on the pre-bind
-            // path — on masterpier's athena a wedged dockerd hung the v25.2.3
-            // startup exactly here (his stuck `docker network inspect wolfnet`
-            // child), and even with per-command caps a big fleet of 10s
-            // timeouts would stall the bind for minutes. One thread + one
-            // timeout bounds the WHOLE sweep; on timeout the T+5 push loop
-            // seeds the cache instead once the system responds.
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(containers::wolfnet_used_ips_cached());
-            });
-            match rx.recv_timeout(std::time::Duration::from_secs(15)) {
-                Ok(local_ips) if local_ips.len() > 1 => {
-                    let host_ip = &local_ips[0];
-                    let mut local_routes = std::collections::HashMap::new();
-                    for ip in &local_ips[1..] {
-                        if !ip.is_empty() && ip != host_ip {
-                            local_routes.insert(ip.clone(), host_ip.clone());
-                        }
-                    }
-                    if !local_routes.is_empty() {
-                        containers::update_wolfnet_routes(&local_routes);
-                        info!("WolfNet: seeded {} local container route(s) into cache before first push", local_routes.len());
-                    }
-                }
-                Ok(_) => {} // no container IPs to seed
-                Err(_) => {
-                    tracing::warn!("WolfNet: route seed timed out (15s) — binding anyway; the push loop will seed routes once container runtimes respond");
-                }
-            }
-        }
+        // Seed WOLFNET_ROUTES with local container routes before the first
+        // push fires (T+5), so we never announce an empty set that makes every
+        // peer drop the routes it holds for us. seed_local_routes_if_empty is
+        // a no-op when routes.json already populated the cache, and the
+        // announce loop repeats the check before every push — this call just
+        // gets it done before the first one.
+        containers::seed_local_routes_if_empty();
 
         let cluster_for_push = app_state.cluster.clone();
         tokio::spawn(async move {

@@ -17047,7 +17047,15 @@ async function openComponentDetail(name, opts) {
     // list came back empty because the page node has no nginx/wolfproxy.
     // restoreConfiguratorNode falls back to the page-serving node (null) when
     // nothing is remembered or the remembered node is gone/offline.
-    currentConfiguratorNode = restoreConfiguratorNode(name);
+    // ONLY components that actually have a configurator get a remote node.
+    // The auto-detect below exists for the WolfProxy/Cert Manager case; when it
+    // fired for a component with no configurator (PostgreSQL installed on
+    // another node) refreshComponentDetail took the remote branch, hid every
+    // host panel, found no configurator to draw and returned — a completely
+    // blank page, with no selector left to escape it (klas 2026-07-27).
+    // Everything else always describes the node being viewed; apiUrl() already
+    // proxies those requests to it.
+    currentConfiguratorNode = hasConfigurator(name) ? restoreConfiguratorNode(name) : null;
     // If launched from container configurator, use the preset target; otherwise reset
     if (_configuratorTargetPreset) {
         currentConfiguratorTarget = _configuratorTargetPreset;
@@ -17093,6 +17101,12 @@ async function refreshComponentDetail(name, opts) {
         if (logsSection) logsSection.style.display = 'none';
         ['detail-top-btn-start', 'detail-top-btn-restart', 'detail-top-btn-stop']
             .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+        // The structured panels describe the page-serving host too, and are
+        // only ever un-hidden in the host branch below — without this they
+        // keep whatever the previously-viewed component left on screen (e.g.
+        // MariaDB's settings sitting under the PostgreSQL page title).
+        ['detail-mariadb-section', 'detail-postgresql-section', 'detail-wolfscale-section']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
 
         // Just load the configurator — reads from the container via ExecTarget
         const cfgSection = document.getElementById('detail-configurator-section');
@@ -17100,6 +17114,17 @@ async function refreshComponentDetail(name, opts) {
             cfgSection.style.display = '';
             if (skipCfgContent) { await buildConfiguratorTargetSelector(name); }
             else { loadConfigurator(name); }
+        } else if (cfgSection) {
+            // Nothing to draw for this target. Never leave the page blank —
+            // say why, and give the operator a way back to a view that works.
+            const where = isContainer
+                ? `inside ${escapeHtml(currentConfiguratorTarget.target)}`
+                : `on ${escapeHtml(currentConfiguratorNode.hostname || currentConfiguratorNode.address || currentConfiguratorNode.id)}`;
+            cfgSection.style.display = '';
+            cfgSection.innerHTML = `<h3 style="margin-top:0;">${escapeHtml(componentDisplayNames[name] || name)}</h3>
+                <p style="color:var(--text-muted);">This component has no remote configurator, so it can't be managed ${where} from here.</p>
+                <p style="color:var(--text-muted);">Open the node directly from the sidebar to see its status, configuration and logs.</p>
+                <button class="btn btn-sm" onclick="onConfiguratorNodeChange('', '${escapeHtml(name)}')">View on this node</button>`;
         }
         return;
     }
@@ -17167,14 +17192,25 @@ async function refreshComponentDetail(name, opts) {
         if (pgSection) pgSection.style.display = 'none';
         if (wsSection) wsSection.style.display = 'none';
 
+        // `config: null` means the file wasn't found (or isn't readable).
+        // The structured panels can't tell — they parse '' straight into
+        // their hardcoded defaults — so they need telling explicitly.
+        const configFound = d.config !== null && d.config !== undefined;
+
         if (name === 'mariadb' && mdbSection) {
             mdbSection.style.display = '';
             if (configSection) configSection.style.display = 'none';
             populateMariaDBSettings(d.config || '', d.config_path || '');
+            setStructuredConfigAvailability('detail-mariadb-section', 'mdb-apply-btn',
+                'MariaDB', d.config_path, configFound);
+            renderComponentCredentials('detail-mariadb-section', 'mariadb', d.credentials);
         } else if (name === 'postgresql' && pgSection) {
             pgSection.style.display = '';
             if (configSection) configSection.style.display = 'none';
             populatePostgreSQLSettings(d.config || '', d.config_path || '');
+            setStructuredConfigAvailability('detail-postgresql-section', 'pg-apply-btn',
+                'PostgreSQL', d.config_path, configFound);
+            renderComponentCredentials('detail-postgresql-section', 'postgresql', d.credentials);
         } else if (name === 'wolfscale' && wsSection) {
             wsSection.style.display = '';
             if (configSection) configSection.style.display = 'none';
@@ -17218,6 +17254,110 @@ async function refreshComponentDetail(name, opts) {
     } catch (e) {
         console.error('Failed to load component detail:', e);
         showToast('Failed to load component details', 'error');
+    }
+}
+
+// The structured MariaDB/PostgreSQL panels parse the raw config text, so a
+// missing file silently renders every field at its hardcoded default — an
+// authoritative-looking form built from nothing. The operator then edits it,
+// hits Apply, and gets an ENOENT they can do nothing with (klas 2026-07-27).
+// Say what happened, and take Apply away so nothing is written blind.
+function setStructuredConfigAvailability(sectionId, applyBtnId, componentLabel, configPath, found) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    const bannerId = sectionId + '-missing-banner';
+    let banner = document.getElementById(bannerId);
+
+    if (found) {
+        if (banner) banner.remove();
+    } else {
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = bannerId;
+            // Assertive: the form below is actively misleading until this is read.
+            banner.setAttribute('role', 'alert');
+            banner.style.cssText = 'margin-bottom:16px;padding:10px 12px;border-left:3px solid var(--danger);'
+                + 'background:var(--danger-bg);color:var(--danger);font-size:13px;line-height:1.5;';
+            const body = section.querySelector('.card-body');
+            if (body) body.insertBefore(banner, body.firstChild);
+            else section.appendChild(banner);
+        }
+        banner.textContent = configPath
+            ? `${componentLabel} configuration file not found at ${configPath}. The values below are `
+              + `defaults, not this server's settings — Apply is disabled until the file exists.`
+            : `No ${componentLabel} configuration file was found on this node. The values below are `
+              + `defaults, not this server's settings — Apply is disabled until ${componentLabel} is `
+              + `installed and initialised here.`;
+    }
+
+    const btn = document.getElementById(applyBtnId);
+    if (btn) btn.style.display = found ? '' : 'none';
+}
+
+// Show the database account WolfStack generated during install. Before this
+// there was nowhere at all to find it — klas asked "where do i set the
+// usernames and passwords" (2026-07-27) and the honest answer was "nowhere".
+// The password is fetched only when the operator asks for it.
+function renderComponentCredentials(sectionId, componentName, creds) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    const body = section.querySelector('.card-body');
+    if (!body) return;
+
+    const blockId = sectionId + '-credentials';
+    let block = document.getElementById(blockId);
+    if (!block) {
+        block = document.createElement('div');
+        block.id = blockId;
+        block.style.cssText = 'margin-bottom:18px;padding:12px;border:1px solid var(--border);border-radius:6px;';
+        // After the not-found banner (if any), before the settings form.
+        const banner = document.getElementById(sectionId + '-missing-banner');
+        if (banner && banner.nextSibling) body.insertBefore(block, banner.nextSibling);
+        else if (banner) body.appendChild(block);
+        else body.insertBefore(block, body.firstChild);
+    }
+
+    if (!creds) {
+        block.innerHTML = `<h4 style="font-size:14px;font-weight:600;margin:0 0 6px;">Database account</h4>
+            <p style="color:var(--text-muted);font-size:13px;margin:0;">WolfStack has no managed account for this
+            server on this node. One is created automatically when the component is installed from Components;
+            a server installed by hand keeps whatever accounts it already had. Add an existing account under
+            <a href="#" onclick="selectView('databases');return false;">Databases</a>.</p>`;
+        return;
+    }
+
+    block.innerHTML = `<h4 style="font-size:14px;font-weight:600;margin:0 0 8px;">Database account</h4>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px;align-items:center;">
+            <span style="color:var(--text-muted);">Username</span><code>${escapeHtml(creds.username)}</code>
+            <span style="color:var(--text-muted);">Host</span><code>${escapeHtml(creds.host)}:${escapeHtml(String(creds.port))}</code>
+            <span style="color:var(--text-muted);">Password</span>
+            <span id="${blockId}-pw-row">
+                <button class="btn btn-sm" onclick="revealComponentPassword('${escapeHtml(componentName)}','${blockId}')">Reveal password</button>
+            </span>
+        </div>`;
+}
+
+async function revealComponentPassword(componentName, blockId) {
+    const row = document.getElementById(blockId + '-pw-row');
+    if (!row) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/components/${componentName}/credentials`));
+        if (handleAuthError(resp)) return;
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Could not read the stored credentials', 'error');
+            return;
+        }
+        // Polite: the operator asked for this, so announce it without
+        // interrupting whatever a screen reader is already saying.
+        row.setAttribute('aria-live', 'polite');
+        // Read the secret back out of the DOM rather than quoting it into an
+        // onclick attribute — no escaping to get wrong.
+        row.innerHTML = `<code id="${blockId}-pw" style="user-select:all;">${escapeHtml(data.password)}</code>
+            <button class="btn btn-sm" style="margin-left:8px;"
+                onclick="navigator.clipboard.writeText(document.getElementById('${blockId}-pw').textContent).then(() => showToast('Password copied', 'success', 1500))">Copy</button>`;
+    } catch (e) {
+        showToast('Could not read the stored credentials: ' + e.message, 'error');
     }
 }
 
@@ -26695,6 +26835,33 @@ function applyContainerView(type) {
     }
 }
 
+// Container CPU arrives on docker's "100% == one core" scale — a container
+// saturating four cores reports 400 (verified: a two-core busy loop on a
+// 24-core host reports 200.35%). Feeding that straight into a 0-100 gauge and
+// clamping meant one busy core looked identical to a maxed-out host, which is
+// what G740 and klas both saw (2026-07-27). Report the share of what the
+// container is actually allowed to use, and keep the raw figure in the tooltip
+// so nothing is hidden.
+//
+// Returns null when the container has no stats (stopped, or not yet polled).
+function containerCpu(s) {
+    if (!s || s.cpu_percent === undefined || s.cpu_percent === null) return null;
+    // Pre-25.4.1 nodes in a mixed-version cluster don't send a capacity; one
+    // core is the scale their numbers were drawn against, so they keep their
+    // old reading rather than being silently rescaled.
+    const capacity = (s.cpu_capacity_percent > 0) ? s.cpu_capacity_percent : 100;
+    const share = Math.max(0, Math.min((s.cpu_percent / capacity) * 100, 100));
+    const coresUsed = s.cpu_percent / 100;
+    const coresAllowed = capacity / 100;
+    const fmtCores = c => (c % 1 === 0 ? c.toFixed(0) : c.toFixed(2));
+    return {
+        share,
+        text: share.toFixed(1) + '%',
+        title: `${fmtCores(coresUsed)} of ${fmtCores(coresAllowed)} cores`
+             + ` (${s.cpu_percent.toFixed(1)}% of one core)`,
+    };
+}
+
 // SVG pie chart helper — tiny donut chart
 function svgPie(pct, color, size = 48, label = '') {
     const r = (size - 6) / 2;
@@ -26751,7 +26918,8 @@ function dockerCardHtml(c) {
     const isRunning = c.state === 'running';
     const isPaused = c.state === 'paused';
     const borderColor = isRunning ? '#10b981' : isPaused ? '#f59e0b' : '#6b7280';
-    const cpuPct = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+    const cpu = containerCpu(s);
+    const cpuPct = cpu ? cpu.share : -1;
     const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
     const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
     const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
@@ -26802,7 +26970,7 @@ function dockerCardHtml(c) {
     }).join(' ') : '';
 
     const pies = [];
-    if (cpuPct >= 0) pies.push(`<div style="text-align:center;flex:1;">${svgPie(cpuPct, cpuColor, 64)}<div style="font-size:9px;color:var(--text-muted);">CPU</div></div>`);
+    if (cpuPct >= 0) pies.push(`<div style="text-align:center;flex:1;" title="${escapeHtml(cpu.title)}">${svgPie(cpuPct, cpuColor, 64)}<div style="font-size:9px;color:var(--text-muted);">CPU</div></div>`);
     if (memPct >= 0) pies.push(`<div style="text-align:center;flex:1;">${svgPie(memPct, memColor, 64)}<div style="font-size:9px;color:var(--text-muted);">RAM</div></div>`);
     if (hasStorage) pies.push(`<div style="text-align:center;flex:1;">${svgPie(diskPct, diskColor, 64)}<div style="font-size:9px;color:var(--text-muted);">Disk</div></div>`);
 
@@ -26824,7 +26992,7 @@ function dockerCardHtml(c) {
                 <span>${c.autostart ? 'Autostart' : 'Manual'}</span>
                 ${hasStorage ? `<span>${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
                 ${memPct >= 0 ? `<span>${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
-                ${cpuPct >= 0 ? `<span>${s.cpu_percent.toFixed(1)}%</span>` : ''}
+                ${cpuPct >= 0 ? `<span title="${escapeHtml(cpu.title)}">${cpu.text}</span>` : ''}
                 ${portWarning}
             </div>
             <div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:6px;">
@@ -26852,7 +27020,8 @@ function lxcCardHtml(c, s) {
     const isRunning = c.state === 'running';
         const isFrozen = c.state === 'frozen';
         const borderColor = isRunning ? '#10b981' : isFrozen ? '#f59e0b' : '#6b7280';
-        const cpuPct = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+        const cpu = containerCpu(s);
+        const cpuPct = cpu ? cpu.share : -1;
         const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
         const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
         const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
@@ -26866,7 +27035,7 @@ function lxcCardHtml(c, s) {
         }).join(' ') : '';
 
         const pies = [];
-        if (cpuPct >= 0) pies.push(`<div style="text-align:center;flex:1;">${svgPie(cpuPct, cpuColor, 64)}<div style="font-size:9px;color:var(--text-muted);">CPU</div></div>`);
+        if (cpuPct >= 0) pies.push(`<div style="text-align:center;flex:1;" title="${escapeHtml(cpu.title)}">${svgPie(cpuPct, cpuColor, 64)}<div style="font-size:9px;color:var(--text-muted);">CPU</div></div>`);
         if (memPct >= 0) pies.push(`<div style="text-align:center;flex:1;">${svgPie(memPct, memColor, 64)}<div style="font-size:9px;color:var(--text-muted);">RAM</div></div>`);
         if (hasStorage) pies.push(`<div style="text-align:center;flex:1;">${svgPie(diskPct, diskColor, 64)}<div style="font-size:9px;color:var(--text-muted);">Disk</div></div>`);
 
@@ -26906,7 +27075,7 @@ function lxcCardHtml(c, s) {
                     ${c.mac_address ? `<span>MAC: ${escapeHtml(c.mac_address)}</span>` : ''}
                     ${hasStorage ? `<span>${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
                     ${memPct >= 0 ? `<span>${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
-                    ${cpuPct >= 0 ? `<span>${s.cpu_percent.toFixed(1)}%</span>` : ''}
+                    ${cpuPct >= 0 ? `<span title="${escapeHtml(cpu.title)}">${cpu.text}</span>` : ''}
                     ${c.fs_type ? `<span>FS: ${escapeHtml(c.fs_type)}</span>` : ''}
                 </div>
                 <span data-update-badge="lxc:${c.name}"></span>
@@ -27387,12 +27556,13 @@ function renderDockerContainers(containers) {
         const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
         const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
         const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
-        const cpuPct = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+        const cpu = containerCpu(s);
+        const cpuPct = cpu ? cpu.share : -1;
         const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
         const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
         const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
-        const barSeg = (icon, pctVal, color, label) => `<div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
+        const barSeg = (icon, pctVal, color, label, title) => `<div title="${title || ''}" style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
             <span>${icon}</span>
             <div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
                 <div style="width:${pctVal}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s;"></div>
@@ -27401,7 +27571,7 @@ function renderDockerContainers(containers) {
         </div>`;
 
         const statsSegs = [];
-        if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, cpu.text, cpu.title));
         if (memPct >= 0) statsSegs.push(barSeg('', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
         if (hasStorage) statsSegs.push(barSeg('', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
@@ -27476,7 +27646,11 @@ function renderDockerStats(stats) {
         return;
     }
 
-    const totalCpu = stats.reduce((sum, s) => sum + s.cpu_percent, 0);
+    // Container CPU is on the "100% == one core" scale, so summing the
+    // percentages gave readings like "1200%" on a busy host — a number with no
+    // ceiling and no meaning. Cores used against cores available has both.
+    const coresUsed = stats.reduce((sum, s) => sum + (s.cpu_percent || 0), 0) / 100;
+    const hostCores = stats.reduce((max, s) => Math.max(max, s.host_cpu_cores || 0), 0);
     const totalMem = stats.reduce((sum, s) => sum + s.memory_usage, 0);
     const totalPids = stats.reduce((sum, s) => sum + s.pids, 0);
     const running = stats.length;
@@ -27492,8 +27666,8 @@ function renderDockerStats(stats) {
         <div class="stat-card">
             <div class="stat-icon"><span class="ws-icon-clean-wrap" data-icon="cpu"></span></div>
             <div class="stat-info">
-                <div class="stat-value">${totalCpu.toFixed(1)}%</div>
-                <div class="stat-label">Total CPU</div>
+                <div class="stat-value">${coresUsed.toFixed(2)}${hostCores ? ' / ' + hostCores : ''}</div>
+                <div class="stat-label">CPU cores in use</div>
             </div>
         </div>
         <div class="stat-card">
@@ -28217,12 +28391,13 @@ function renderLxcContainers(containers, stats) {
         const barColor = pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
         const fsLabel = c.fs_type ? `<span style="color:var(--text-muted);font-size:10px;margin-left:8px;">${c.fs_type}</span>` : '';
         const pathLabel = c.storage_path ? `<span style="color:var(--text-muted);font-size:10px;" title="${c.storage_path}">${c.storage_path.length > 30 ? '...' + c.storage_path.slice(-27) : c.storage_path}</span>` : '';
-        const cpuPct = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+        const cpu = containerCpu(s);
+        const cpuPct = cpu ? cpu.share : -1;
         const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
         const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
         const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
-        const barSeg = (icon, pctVal, color, label) => `<div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
+        const barSeg = (icon, pctVal, color, label, title) => `<div title="${title || ''}" style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
             <span>${icon}</span>
             <div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">
                 <div style="width:${pctVal}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s;"></div>
@@ -28231,7 +28406,7 @@ function renderLxcContainers(containers, stats) {
         </div>`;
 
         const statsSegs = [];
-        if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, s.cpu_percent.toFixed(1) + '%'));
+        if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, cpu.text, cpu.title));
         if (memPct >= 0) statsSegs.push(barSeg('', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
         if (hasStorage) statsSegs.push(barSeg('', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
@@ -43227,8 +43402,8 @@ async function loadFleetContainers() {
     var BS = 'margin:2px;font-size:18px;line-height:1;padding:3px 5px;';
     var DS = 'margin:2px;font-size:18px;line-height:1;padding:3px 5px;opacity:0.4;cursor:not-allowed;pointer-events:none;';
 
-    function barSeg(icon, pctVal, color, label) {
-        return '<div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">' +
+    function barSeg(icon, pctVal, color, label, title) {
+        return '<div title="' + escapeHtml(title || '') + '" style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">' +
             '<span>' + icon + '</span>' +
             '<div style="flex:1;height:8px;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">' +
                 '<div style="width:' + pctVal + '%;height:100%;background:' + color + ';border-radius:4px;transition:width 0.3s;"></div>' +
@@ -43237,11 +43412,11 @@ async function loadFleetContainers() {
         '</div>';
     }
 
-    function makeStatsSubRow(cpuPct, cpuLabel, memPct, memLabel, diskPct, diskLabel) {
+    function makeStatsSubRow(cpuPct, cpuLabel, cpuTitle, memPct, memLabel, diskPct, diskLabel) {
         var segs = [];
         if (cpuPct >= 0) {
             var cc = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
-            segs.push(barSeg('', cpuPct, cc, cpuLabel));
+            segs.push(barSeg('', cpuPct, cc, cpuLabel, cpuTitle));
         }
         if (memPct >= 0) {
             var mc = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
@@ -43366,11 +43541,12 @@ async function loadFleetContainers() {
                 list.forEach(function (c) {
                     var s = statsMap[c.name] || {};
                     var stateColor = c.state === 'running' ? '#10b981' : c.state === 'paused' ? '#f59e0b' : '#6b7280';
-                    var cpuP = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+                    var cpu = containerCpu(s);
+                    var cpuP = cpu ? cpu.share : -1;
                     var memP = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
                     var diskP = (c.disk_usage !== undefined && c.disk_total) ? Math.round((c.disk_usage / c.disk_total) * 100) : -1;
                     var sub = makeStatsSubRow(
-                        cpuP, cpuP >= 0 ? (s.cpu_percent.toFixed(1) + '%') : '',
+                        cpuP, cpuP >= 0 ? cpu.text : '', cpu ? cpu.title : '',
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
@@ -43394,11 +43570,12 @@ async function loadFleetContainers() {
                 list.forEach(function (c) {
                     var s = statsMap[c.name] || {};
                     var stateColor = c.state === 'running' ? '#10b981' : c.state === 'frozen' ? '#f59e0b' : '#6b7280';
-                    var cpuP = s.cpu_percent !== undefined ? Math.min(s.cpu_percent, 100) : -1;
+                    var cpu = containerCpu(s);
+                    var cpuP = cpu ? cpu.share : -1;
                     var memP = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
                     var diskP = (c.disk_usage !== undefined && c.disk_total) ? Math.round((c.disk_usage / c.disk_total) * 100) : -1;
                     var sub = makeStatsSubRow(
-                        cpuP, cpuP >= 0 ? (s.cpu_percent.toFixed(1) + '%') : '',
+                        cpuP, cpuP >= 0 ? cpu.text : '', cpu ? cpu.title : '',
                         memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );

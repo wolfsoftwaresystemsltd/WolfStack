@@ -372,12 +372,25 @@ async fn console_session(
                 None | Some("host") => {
                     // Install on host
                     if is_inline {
+                        // Database engines get a WolfStack admin account created
+                        // and printed here — a stock install leaves root on
+                        // socket auth, which Database Management cannot use, so
+                        // there was previously no credential to hand the
+                        // operator at all (klas 2026-07-27). Host installs only:
+                        // inside a container there is no /etc/wolfstack to
+                        // record it in, and the container branch below reaches
+                        // a different filesystem.
+                        let bootstrap = match component {
+                            "mariadb" => crate::installer::credential_bootstrap_script(crate::installer::Component::MariaDB),
+                            "postgresql" => crate::installer::credential_bootstrap_script(crate::installer::Component::PostgreSQL),
+                            _ => None,
+                        }.unwrap_or_default();
                         cmd.arg(format!(
                             "echo '\\x1b[1;36mInstalling {} on this host...\\x1b[0m' && \
                              export DEBIAN_FRONTEND=noninteractive && \
-                             {}; \
+                             {}\n{}\n\
                              echo '' && echo '\\x1b[1;32mInstallation complete. You can close this terminal.\\x1b[0m'",
-                            component, inline_script.unwrap()
+                            component, inline_script.unwrap(), bootstrap
                         ));
                     } else {
                         cmd.arg(format!(
