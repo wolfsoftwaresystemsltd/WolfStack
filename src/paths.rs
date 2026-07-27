@@ -202,7 +202,105 @@ pub struct FileLocations {
 fn default_config_dir() -> String { "/etc/wolfstack".into() }
 
 fn default_backup_config() -> String { "/etc/wolfstack/backups.json".into() }
-fn default_backup_staging_dir() -> String { "/tmp/wolfstack-backups".into() }
+/// Staging is where a whole container/VM archive is built before it is shipped
+/// to its destination, so it needs room for the largest single guest on the
+/// node. The old default, `/tmp/wolfstack-backups`, is tmpfs (RAM) on most
+/// systemd distros: on 2026-07-21 a 32 GB LXC tarball filled wolfstack-1's
+/// 32 GB /tmp and every later container backup came back 0 bytes. Default to
+/// disk instead, and fall back to the old path only if /var/lib is unusable.
+/// An explicit `backup_staging_dir` in paths.json always wins.
+fn default_backup_staging_dir() -> String {
+    let preferred = "/var/lib/wolfstack/backup-staging";
+    if std::fs::create_dir_all(preferred).is_ok() && !dir_is_memory_backed(preferred) {
+        return preferred.into();
+    }
+    "/tmp/wolfstack-backups".into()
+}
+
+/// Whether `path` lives on a RAM-backed filesystem — anything staged there is
+/// competing with the machine's memory, not its disk.
+///
+/// Resolves against /proc/mounts by longest matching mount point, so a nested
+/// mount (e.g. tmpfs on /var/lib/wolfstack) is reported correctly rather than
+/// being masked by its parent.
+pub fn dir_is_memory_backed(path: &str) -> bool {
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    matches!(fstype_for_path(&mounts, path).as_deref(), Some("tmpfs") | Some("ramfs"))
+}
+
+/// Filesystem type of the mount containing `path`, given /proc/mounts content.
+///
+/// Split out from `dir_is_memory_backed` so the matching rules are testable
+/// without depending on how the host happens to be mounted.
+fn fstype_for_path(mounts: &str, path: &str) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let (_device, mount_point, fstype) = match (fields.next(), fields.next(), fields.next()) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => continue,
+        };
+        // A mount point only contains `path` if it matches on whole path
+        // components — "/var/lib" must not be read as covering "/var/libexec".
+        let contains = path == mount_point
+            || mount_point == "/"
+            || path.strip_prefix(mount_point).is_some_and(|rest| rest.starts_with('/'));
+        if !contains {
+            continue;
+        }
+        // Deepest match wins, so a tmpfs nested inside a disk mount is seen.
+        if best.as_ref().is_none_or(|(depth, _)| mount_point.len() > *depth) {
+            best = Some((mount_point.len(), fstype.to_string()));
+        }
+    }
+    best.map(|(_, fstype)| fstype)
+}
+
+#[cfg(test)]
+mod staging_fstype_tests {
+    use super::*;
+
+    const MOUNTS: &str = "\
+/dev/sda1 / ext4 rw,relatime 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev 0 0
+tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0
+/dev/sdb1 /var/lib ext4 rw,relatime 0 0
+tmpfs /var/lib/wolfstack/backup-staging tmpfs rw 0 0
+";
+
+    #[test]
+    fn deepest_mount_wins() {
+        // The wolfstack-1 shape: a tmpfs nested inside a disk-backed parent.
+        assert_eq!(fstype_for_path(MOUNTS, "/var/lib/wolfstack/backup-staging").as_deref(), Some("tmpfs"));
+        assert_eq!(fstype_for_path(MOUNTS, "/var/lib/wolfstack/backups").as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn the_old_default_is_recognised_as_memory_backed() {
+        assert_eq!(fstype_for_path(MOUNTS, "/tmp/wolfstack-backups").as_deref(), Some("tmpfs"));
+    }
+
+    #[test]
+    fn matching_respects_path_components() {
+        // "/var/lib" must not claim "/var/libexec" — that would report the
+        // wrong filesystem and either warn wrongly or miss a real tmpfs.
+        assert_eq!(fstype_for_path(MOUNTS, "/var/libexec/staging").as_deref(), Some("ext4"));
+        assert_eq!(fstype_for_path(MOUNTS, "/tmpfoo/staging").as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn falls_back_to_root_and_survives_junk() {
+        assert_eq!(fstype_for_path(MOUNTS, "/srv/backups").as_deref(), Some("ext4"));
+        assert_eq!(fstype_for_path("", "/anything"), None);
+        assert_eq!(fstype_for_path("garbage line\nalso bad", "/anything"), None);
+    }
+
+    #[test]
+    fn dev_shm_is_memory_backed_on_this_host() {
+        // Sanity-check the real /proc/mounts path: /dev/shm is tmpfs on Linux.
+        assert!(dir_is_memory_backed("/dev/shm"));
+    }
+}
 fn default_backup_received_dir() -> String { "/var/lib/wolfstack/backups/received".into() }
 fn default_backup_local_dir() -> String { "/var/lib/wolfstack/backups".into() }
 fn default_compose_dir() -> String { "/etc/wolfstack/compose".into() }

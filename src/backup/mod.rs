@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 use tracing::{error, info, warn};
 use chrono::{Utc, Datelike};
 use uuid::Uuid;
@@ -1267,10 +1268,172 @@ pub fn save_config(config: &BackupConfig) -> Result<(), String> {
 
 // ─── Backup Functions ───
 
+/// Staging paths belonging to a backup that is running right now. The sweeper
+/// refuses to touch these however old they look, so a genuinely long job can
+/// never have its own work deleted out from under it.
+static ACTIVE_STAGING: LazyLock<Mutex<std::collections::HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// A staging file or directory that is deleted when it goes out of scope,
+/// unless the backup completed and called `keep()`.
+///
+/// Backups leaked disk on every failure before this existed: `tar` leaves the
+/// partial archive behind when it exits non-zero (verified: a failed tar still
+/// leaves its bytes on disk), the Docker path returned early through `?` after
+/// a multi-gigabyte `docker save`, and nothing ever swept staging afterwards.
+/// The worst of it was that the errors which skipped cleanup — write failures
+/// mid-archive — are exactly what a full disk produces, so a filling disk made
+/// itself fill faster. A guard is used rather than cleanup calls on each exit
+/// path because the leaking paths were precisely the ones nobody remembered to
+/// add a cleanup call to.
+struct StagedPath {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl StagedPath {
+    /// Register a path as in-progress staging work.
+    fn new(path: PathBuf) -> Self {
+        ACTIVE_STAGING.lock().unwrap().insert(path.clone());
+        StagedPath { path, keep: false }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The work succeeded — hand the path to the caller and stop guarding it.
+    fn keep(mut self) -> PathBuf {
+        self.keep = true;
+        self.path.clone()
+    }
+}
+
+impl Drop for StagedPath {
+    fn drop(&mut self) {
+        ACTIVE_STAGING.lock().unwrap().remove(&self.path);
+        if self.keep {
+            return;
+        }
+        let leftover = match fs::metadata(&self.path) {
+            Ok(m) => m,
+            Err(_) => return, // never created, or already gone
+        };
+        // Log either way: a stranded work directory costs more disk than the
+        // archive would have, so it should never disappear silently.
+        if leftover.is_dir() {
+            warn!("backup: discarding work directory {} left by a failed backup",
+                self.path.display());
+            let _ = fs::remove_dir_all(&self.path);
+        } else {
+            warn!("backup: discarding {} ({} bytes) left by a failed backup",
+                self.path.display(), leftover.len());
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Age after which an unreferenced staging entry is considered abandoned.
+///
+/// Generous on purpose: a slow whole-VM archive to a slow disk can run for
+/// hours, and the in-progress registry already protects anything this process
+/// is actively writing. This threshold only has to catch work orphaned by a
+/// crash or a kill, where the registry did not survive.
+const STAGING_ORPHAN_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// Delete abandoned staging files left by backups that died before they could
+/// clean up — a crash, an OOM kill, or a `systemctl restart` mid-archive.
+///
+/// Returns (files removed, bytes reclaimed). Never touches anything a backup
+/// in this process is currently working on, and never touches anything younger
+/// than `STAGING_ORPHAN_AGE_SECS`.
+pub fn sweep_staging_orphans() -> (usize, u64) {
+    let configured = backup_staging_dir();
+    let mut total = (0usize, 0u64);
+    // The legacy default is swept too, so an upgraded node reclaims whatever
+    // its old tmpfs staging was still holding — otherwise moving the default
+    // would strand exactly the files this is meant to clear.
+    const LEGACY_STAGING_DIR: &str = "/tmp/wolfstack-backups";
+    let mut dirs = vec![configured.clone()];
+    if configured != LEGACY_STAGING_DIR {
+        dirs.push(LEGACY_STAGING_DIR.to_string());
+    }
+    for dir in dirs {
+        let (n, b) = sweep_staging_dir(&PathBuf::from(dir));
+        total.0 += n;
+        total.1 += b;
+    }
+    total
+}
+
+fn sweep_staging_dir(dir: &Path) -> (usize, u64) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return (0, 0), // no staging dir yet — nothing to sweep
+    };
+    let active = ACTIVE_STAGING.lock().unwrap().clone();
+    let (mut count, mut bytes) = (0usize, 0u64);
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if active.contains(&path) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let age_ok = meta.modified().ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > STAGING_ORPHAN_AGE_SECS);
+        if !age_ok {
+            continue;
+        }
+        let size = if meta.is_dir() { quick_dir_size_bytes(&path.to_string_lossy()) } else { meta.len() };
+        let removed = if meta.is_dir() {
+            fs::remove_dir_all(&path).is_ok()
+        } else {
+            fs::remove_file(&path).is_ok()
+        };
+        if removed {
+            count += 1;
+            bytes += size;
+            warn!("backup: swept abandoned staging entry {} ({} bytes)", path.display(), size);
+        }
+    }
+    if count > 0 {
+        info!("backup: reclaimed {} bytes from {} abandoned staging entries in {}",
+            bytes, count, dir.display());
+    }
+    (count, bytes)
+}
+
+/// Warn once per process when staging sits on a RAM-backed filesystem.
+///
+/// A whole-container archive is built here before it ships, so on tmpfs it is
+/// competing with the machine's memory: wolfstack-1 staged a 32 GB LXC tarball
+/// into a 32 GB /tmp on 2026-07-21, filled it, and every later container
+/// backup returned 0 bytes. The default now avoids tmpfs, but an operator can
+/// still point paths.json at one, so say so rather than letting them find out
+/// the way we did.
+fn warn_if_staging_on_memory(path: &Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let dir = path.to_string_lossy().to_string();
+    if !crate::paths::dir_is_memory_backed(&dir) {
+        return;
+    }
+    WARNED.call_once(|| {
+        warn!("backup staging {} is on a RAM-backed filesystem (tmpfs/ramfs). A backup \
+               larger than free memory will fail and can wedge the node — set \
+               backup_staging_dir in /etc/wolfstack/paths.json to a disk-backed path.", dir);
+    });
+}
+
 /// Create staging directory
 fn ensure_staging_dir() -> Result<PathBuf, String> {
     let path = PathBuf::from(backup_staging_dir());
     fs::create_dir_all(&path).map_err(|e| format!("Failed to create staging dir: {}", e))?;
+    warn_if_staging_on_memory(&path);
     Ok(path)
 }
 
@@ -1311,7 +1474,11 @@ pub fn backup_docker(name: &str, exclude_mounts: &[String], stop_for_backup: boo
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("docker-{}-{}.tar.gz", name, timestamp);
-    let final_path = staging.join(&filename);
+    // Guarded from here: every early return below — including the `?` exits
+    // that used to leak a multi-gigabyte work dir and a partial tarball —
+    // removes what it had produced.
+    let staged_archive = StagedPath::new(staging.join(&filename));
+    let final_path = staged_archive.path().to_path_buf();
     let temp_image = format!("wolfstack-backup/{}", name);
 
     // Optional cold backup: stop the container so volume/bind data and
@@ -1338,7 +1505,10 @@ pub fn backup_docker(name: &str, exclude_mounts: &[String], stop_for_backup: boo
 
     // Per-backup work area we'll tar up at the end.
     let work_id = Uuid::new_v4().to_string();
-    let work_dir = staging.join(format!("docker-work-{}", work_id));
+    // Guarded too: this holds a full `docker save` image export, so leaking it
+    // costs more disk than the finished backup would have.
+    let staged_work = StagedPath::new(staging.join(format!("docker-work-{}", work_id)));
+    let work_dir = staged_work.path().to_path_buf();
     fs::create_dir_all(work_dir.join("volumes"))
         .map_err(|e| format!("Failed to create work dir: {}", e))?;
     fs::create_dir_all(work_dir.join("binds"))
@@ -1522,7 +1692,6 @@ pub fn backup_docker(name: &str, exclude_mounts: &[String], stop_for_backup: boo
         .output()
         .map_err(|e| format!("Failed to commit container: {}", e))?;
     if !commit.status.success() {
-        let _ = fs::remove_dir_all(&work_dir);
         return Err(format!("Docker commit failed: {}", String::from_utf8_lossy(&commit.stderr)));
     }
     let save = Command::new("sh")
@@ -1531,7 +1700,6 @@ pub fn backup_docker(name: &str, exclude_mounts: &[String], stop_for_backup: boo
         .map_err(|e| format!("Failed to save image: {}", e))?;
     let _ = Command::new("docker").args(["rmi", &temp_image]).output();
     if !save.status.success() {
-        let _ = fs::remove_dir_all(&work_dir);
         return Err(format!("Docker save failed: {}", String::from_utf8_lossy(&save.stderr)));
     }
 
@@ -1552,13 +1720,12 @@ pub fn backup_docker(name: &str, exclude_mounts: &[String], stop_for_backup: boo
         .arg(".")
         .output()
         .map_err(|e| format!("Failed to wrap backup tarball: {}", e))?;
-    let _ = fs::remove_dir_all(&work_dir);
     if !wrap.status.success() {
         return Err(format!("tar wrap failed: {}", String::from_utf8_lossy(&wrap.stderr)));
     }
 
     let size = fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
-    Ok((final_path, size, docker_config, mounts))
+    Ok((staged_archive.keep(), size, docker_config, mounts))
 }
 
 /// Sanitize a string for use as a filename component. Volume names are
@@ -1601,6 +1768,9 @@ fn tar_dir_to_gz(src_dir: &str, archive: &Path) -> Result<u64, String> {
         .output()
         .map_err(|e| format!("tar spawn failed: {}", e))?;
     if !out.status.success() {
+        // tar leaves whatever it had written when it failed — drop it here so
+        // a failing target can't accumulate a partial archive per run.
+        let _ = fs::remove_file(archive);
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(fs::metadata(archive).map(|m| m.len()).unwrap_or(0))
@@ -1629,6 +1799,7 @@ fn tar_path_to_gz(src: &str, archive: &Path) -> Result<u64, String> {
         .output()
         .map_err(|e| format!("tar spawn failed: {}", e))?;
     if !out.status.success() {
+        let _ = fs::remove_file(archive);
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(fs::metadata(archive).map(|m| m.len()).unwrap_or(0))
@@ -1741,7 +1912,10 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String], stop_for_backup: bool) 
 
     // Native LXC: tar the container directory (rootfs + config)
     let filename = format!("lxc-{}-{}.tar.gz", name, timestamp);
-    let tar_path = staging.join(&filename);
+    // Guarded: any error below deletes the half-written archive instead of
+    // leaving it in staging forever.
+    let staged = StagedPath::new(staging.join(&filename));
+    let tar_path = staged.path().to_path_buf();
 
     // Cold backup is opt-in per target (stop_for_backup). The old
     // unconditional stop turned every scheduled backup into a silent
@@ -1858,7 +2032,7 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String], stop_for_backup: bool) 
     }
 
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
-    Ok((tar_path, size))
+    Ok((staged.keep(), size))
 }
 
 /// Append operator mount-exclusions to a vzdump command. vzdump takes
@@ -1903,6 +2077,9 @@ fn backup_lxc_proxmox(vmid: &str, staging: &Path, timestamp: &str, exclude_mount
         String::from_utf8_lossy(&output.stderr));
 
     if !output.status.success() {
+        // Clear the failed attempt's partial archive before retrying, or a
+        // node that fails both modes keeps two sets of debris per run.
+        purge_vzdump_leftovers(staging, vmid, None);
         // Snapshot mode may not be supported (e.g. directory storage) — retry with stop mode
         let mut cmd2 = Command::new("vzdump");
         cmd2.args([
@@ -1918,16 +2095,57 @@ fn backup_lxc_proxmox(vmid: &str, staging: &Path, timestamp: &str, exclude_mount
 
         if !output2.status.success() {
             let stderr2 = String::from_utf8_lossy(&output2.stderr);
+            purge_vzdump_leftovers(staging, vmid, None);
             return Err(format!("vzdump failed: {}", stderr2.trim()));
         }
 
         let all_output2 = format!("{}{}",
             String::from_utf8_lossy(&output2.stdout),
             String::from_utf8_lossy(&output2.stderr));
-        return find_vzdump_result(&all_output2, staging, vmid, timestamp);
+        let found = find_vzdump_result(&all_output2, staging, vmid, timestamp);
+        purge_vzdump_leftovers(staging, vmid, found.as_ref().ok().map(|(p, _)| p.as_path()));
+        return found;
     }
 
-    find_vzdump_result(&all_output, staging, vmid, timestamp)
+    let found = find_vzdump_result(&all_output, staging, vmid, timestamp);
+    purge_vzdump_leftovers(staging, vmid, found.as_ref().ok().map(|(p, _)| p.as_path()));
+    found
+}
+
+/// Remove vzdump leftovers for one container from the dump directory.
+///
+/// A failed vzdump leaves its partial `.tar.zst` (and `.dat`/`.tmp` working
+/// files) in the dump dir, and the stop-mode retry below then adds a second
+/// set. Nothing else reclaims them: the guard used elsewhere can't help here
+/// because vzdump, not WolfStack, chooses the filenames. Scoped to this VMID
+/// so a concurrent backup of another container is untouched, and anything a
+/// running backup has registered is left alone.
+fn purge_vzdump_leftovers(staging: &Path, vmid: &str, keep: Option<&Path>) {
+    let prefixes = [format!("vzdump-lxc-{}-", vmid), format!("vzdump-qemu-{}-", vmid)];
+    let active = ACTIVE_STAGING.lock().unwrap().clone();
+    let entries = match fs::read_dir(staging) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if Some(path.as_path()) == keep || active.contains(&path) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let removed = if entry.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+            fs::remove_dir_all(&path).is_ok()
+        } else {
+            fs::remove_file(&path).is_ok()
+        };
+        if removed {
+            warn!("backup: removed vzdump leftover {} ({} bytes)", path.display(), size);
+        }
+    }
 }
 
 /// Locate the vzdump archive and return its path + size
@@ -2174,7 +2392,10 @@ fn backup_vm_native(name: &str) -> Result<(PathBuf, u64), String> {
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("vm-{}-{}.tar.gz", name, timestamp);
-    let tar_path = staging.join(&filename);
+    // Guarded: any error below deletes the half-written archive instead of
+    // leaving it in staging forever.
+    let staged = StagedPath::new(staging.join(&filename));
+    let tar_path = staged.path().to_path_buf();
 
     let vm_base = "/var/lib/wolfstack/vms";
     let config_file = format!("{}.json", name);
@@ -2271,7 +2492,7 @@ fn backup_vm_native(name: &str) -> Result<(PathBuf, u64), String> {
 
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
 
-    Ok((tar_path, size))
+    Ok((staged.keep(), size))
 }
 
 /// Backup a Proxmox-managed VM. Stops the VM (with an RAII restart
@@ -2365,7 +2586,10 @@ pub fn backup_config() -> Result<(PathBuf, u64), String> {
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("config-wolfstack-{}.tar.gz", timestamp);
-    let tar_path = staging.join(&filename);
+    // Guarded: any error below deletes the half-written archive instead of
+    // leaving it in staging forever.
+    let staged = StagedPath::new(staging.join(&filename));
+    let tar_path = staged.path().to_path_buf();
 
     let temp_dir = stage_config_bundle()?;
 
@@ -2383,7 +2607,7 @@ pub fn backup_config() -> Result<(PathBuf, u64), String> {
 
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
 
-    Ok((tar_path, size))
+    Ok((staged.keep(), size))
 }
 
 /// Assemble the config-backup tree in a staging directory and return it.
@@ -2620,7 +2844,10 @@ pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) ->
     // label is preserved.
     let path_disc = short_path_discriminator(path);
     let filename = format!("systempath-{}-{}-{}.tar.gz", safe_label, path_disc, timestamp);
-    let tar_path = staging.join(&filename);
+    // Guarded: any error below deletes the half-written archive instead of
+    // leaving it in staging forever.
+    let staged = StagedPath::new(staging.join(&filename));
+    let tar_path = staged.path().to_path_buf();
 
     // Trailing-slash semantics (rsync-style, wabil 2026-06-22): "/data/temp"
     // archives the folder itself (top entry `temp/`), so restore lands it back
@@ -2670,7 +2897,7 @@ pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) ->
         return Err(format!("System folder tar failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
     let size = fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
-    Ok((tar_path, size))
+    Ok((staged.keep(), size))
 }
 
 /// True when every top-level member of the archive is the folder's leaf name —
@@ -8620,5 +8847,198 @@ mod schedule_hook_tests {
         let (entries, _) = execute_schedule_run(&s);
         assert!(entries.is_empty(), "post asserting status=completed must pass: {:?}",
             entries.iter().map(|e| &e.error).collect::<Vec<_>>());
+    }
+}
+
+#[cfg(test)]
+mod staging_cleanup_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ws-staging-test-{}-{}", name, Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn dropping_a_guard_removes_a_partial_archive() {
+        let dir = scratch("partial");
+        let archive = dir.join("lxc-db-20260727-000000.tar.gz");
+        {
+            let staged = StagedPath::new(archive.clone());
+            // Stand in for tar writing part of an archive and then failing.
+            fs::write(staged.path(), vec![0u8; 4096]).unwrap();
+            assert!(archive.exists());
+        }
+        assert!(!archive.exists(), "a failed backup must not leave its partial archive behind");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeping_a_guard_preserves_a_finished_archive() {
+        let dir = scratch("keep");
+        let archive = dir.join("lxc-db-20260727-000001.tar.gz");
+        let kept = {
+            let staged = StagedPath::new(archive.clone());
+            fs::write(staged.path(), b"complete").unwrap();
+            staged.keep()
+        };
+        assert_eq!(kept, archive);
+        assert!(archive.exists(), "a successful backup must keep its archive for upload");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dropping_a_guard_removes_a_whole_work_directory() {
+        let dir = scratch("workdir");
+        let work = dir.join("docker-work-abc");
+        {
+            let staged = StagedPath::new(work.clone());
+            fs::create_dir_all(staged.path().join("volumes")).unwrap();
+            fs::write(work.join("image.tar.gz"), vec![0u8; 2048]).unwrap();
+        }
+        assert!(!work.exists(), "a failed docker backup must not strand its image export");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_guard_registers_and_releases_its_path() {
+        let dir = scratch("active");
+        let archive = dir.join("vm-win-20260727.tar.gz");
+        {
+            let _staged = StagedPath::new(archive.clone());
+            assert!(ACTIVE_STAGING.lock().unwrap().contains(&archive),
+                "an in-flight backup must be visible to the sweeper so it is skipped");
+        }
+        assert!(!ACTIVE_STAGING.lock().unwrap().contains(&archive),
+            "a finished backup must not leak a registry entry");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tar_failure_leaves_nothing_behind() {
+        // The real leak, end to end: tar exits non-zero after writing part of
+        // an archive. Before the fix that partial file stayed in staging, one
+        // per failed run, until someone noticed the disk was full.
+        let dir = scratch("tarfail");
+        let src = dir.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("payload.bin"), vec![7u8; 512 * 1024]).unwrap();
+        let archive = dir.join("out.tar.gz");
+
+        let result = tar_path_to_gz("/definitely/not/a/real/path/xyz", &archive);
+        assert!(result.is_err(), "tar over a missing source must report failure");
+        assert!(!archive.exists(), "a failed tar must not leave a partial archive in staging");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweeper_spares_fresh_and_active_entries() {
+        // Nothing here is a day old, so the sweeper must leave it all alone —
+        // including a file an in-flight backup is still writing.
+        let dir = scratch("sweep");
+        let fresh = dir.join("fresh.tar.gz");
+        fs::write(&fresh, b"in progress").unwrap();
+        let _staged = StagedPath::new(fresh.clone());
+        assert!(fresh.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod vzdump_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn purge_removes_only_this_containers_debris() {
+        let dir = std::env::temp_dir().join(format!("ws-vzdump-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let keep = dir.join("vzdump-lxc-105-2026_07_27-03_00_00.tar.zst");
+        let partial = dir.join("vzdump-lxc-105-2026_07_27-02_00_00.tar.zst");
+        let other_ct = dir.join("vzdump-lxc-106-2026_07_27-03_00_00.tar.zst");
+        let unrelated = dir.join("lxc-web-20260727-030000.tar.gz");
+        for f in [&keep, &partial, &other_ct, &unrelated] {
+            fs::write(f, b"x").unwrap();
+        }
+
+        purge_vzdump_leftovers(&dir, "105", Some(keep.as_path()));
+
+        assert!(keep.exists(), "the archive we are about to upload must survive");
+        assert!(!partial.exists(), "a failed run's partial archive must be removed");
+        assert!(other_ct.exists(), "another container's backup must not be touched");
+        assert!(unrelated.exists(), "non-vzdump files must not be touched");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn purge_spares_an_in_flight_backup() {
+        let dir = std::env::temp_dir().join(format!("ws-vzdump-active-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+        let in_flight = dir.join("vzdump-lxc-105-2026_07_27-04_00_00.tar.zst");
+        fs::write(&in_flight, b"still writing").unwrap();
+
+        let _guard = StagedPath::new(in_flight.clone());
+        purge_vzdump_leftovers(&dir, "105", None);
+
+        assert!(in_flight.exists(), "a registered in-flight archive must never be purged");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod sweeper_tests {
+    use super::*;
+
+    /// Backdate a path so the sweeper sees it as abandoned. Uses `touch`
+    /// rather than pulling in a crate just to set an mtime in a test.
+    fn age_out(path: &Path) {
+        let status = Command::new("touch")
+            .arg("-d").arg("3 days ago")
+            .arg(path)
+            .status()
+            .expect("touch must be available to run this test");
+        assert!(status.success(), "failed to backdate {}", path.display());
+    }
+
+    #[test]
+    fn sweeper_removes_abandoned_work_but_spares_fresh_and_active() {
+        let dir = std::env::temp_dir().join(format!("ws-sweep-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let abandoned = dir.join("lxc-db-20260101-000000.tar.gz");
+        fs::write(&abandoned, vec![0u8; 8192]).unwrap();
+        age_out(&abandoned);
+
+        let abandoned_dir = dir.join("docker-work-dead");
+        fs::create_dir_all(&abandoned_dir).unwrap();
+        fs::write(abandoned_dir.join("image.tar.gz"), vec![0u8; 4096]).unwrap();
+        age_out(&abandoned_dir);
+
+        let fresh = dir.join("lxc-db-20260727-030000.tar.gz");
+        fs::write(&fresh, b"just written").unwrap();
+
+        // Old, but a running backup owns it — must survive regardless of age.
+        let old_but_running = dir.join("vm-win-20260101-000000.tar.gz");
+        fs::write(&old_but_running, vec![0u8; 1024]).unwrap();
+        age_out(&old_but_running);
+        let _guard = StagedPath::new(old_but_running.clone());
+
+        let (count, bytes) = sweep_staging_dir(&dir);
+
+        assert!(!abandoned.exists(), "an abandoned archive must be reclaimed");
+        assert!(!abandoned_dir.exists(), "an abandoned work dir must be reclaimed");
+        assert!(fresh.exists(), "a recent file must not be touched");
+        assert!(old_but_running.exists(), "an in-flight backup must never be swept");
+        assert_eq!(count, 2);
+        assert!(bytes >= 8192, "reclaimed bytes should account for the archive");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweeping_a_missing_directory_is_harmless() {
+        let missing = std::env::temp_dir().join(format!("ws-sweep-absent-{}", Uuid::new_v4().simple()));
+        assert_eq!(sweep_staging_dir(&missing), (0, 0));
     }
 }

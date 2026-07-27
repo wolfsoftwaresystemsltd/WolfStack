@@ -2412,6 +2412,22 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Background: reclaim staging left by backups that died before they
+        // could clean up (crash, OOM kill, restart mid-archive). Runs once
+        // shortly after boot — which is when a node that filled its disk
+        // overnight most needs the space back — then hourly. The sweep only
+        // touches entries older than a day that no running backup owns, so it
+        // is safe to run alongside an in-flight job.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            loop {
+                if let Err(e) = tokio::task::spawn_blocking(backup::sweep_staging_orphans).await {
+                    tracing::error!("backup::sweep_staging_orphans panicked: {}", e);
+                }
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+
         // Cluster service discovery — runs on demand only (triggered
         // by the Cluster Browser page on load). Restore the previous
         // sweep's cache from disk so the first API hit returns
