@@ -6343,11 +6343,8 @@ pub async fn get_component_detail(req: HttpRequest, state: web::Data<AppState>, 
 
     // Get config file contents
     let config_path = component.config_path();
-    let config_content = if let Some(path) = config_path {
-        std::fs::read_to_string(path).ok()
-    } else {
-        None
-    };
+    let config_content = config_path.as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
 
     // Get recent journal logs
     let logs = get_service_logs(component.service_name(), 50);
@@ -6364,9 +6361,55 @@ pub async fn get_component_detail(req: HttpRequest, state: web::Data<AppState>, 
         "enabled": enabled,
         "config_path": config_path,
         "config": config_content,
+        // Identity only — the password is fetched separately, on an explicit
+        // operator action, so it never rides along in a page load.
+        "credentials": installer::load_credentials(component).map(|c| serde_json::json!({
+            "username": c.username,
+            "host": c.host,
+            "port": c.port,
+        })),
         "logs": logs,
         "unit_info": unit_info,
     }))
+}
+
+/// GET /api/components/{name}/credentials — reveal the database account
+/// WolfStack generated at install time.
+///
+/// Separate from `/detail` deliberately: the password is only sent when an
+/// operator explicitly asks for it, not on every page render.
+pub async fn get_component_credentials(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let name = path.into_inner();
+
+    let component = match name.to_lowercase().as_str() {
+        "mariadb" => installer::Component::MariaDB,
+        "postgresql" => installer::Component::PostgreSQL,
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "This component has no WolfStack-managed credentials"
+        })),
+    };
+
+    match installer::load_credentials(component) {
+        Some(c) => HttpResponse::Ok().json(serde_json::json!({
+            "username": c.username,
+            "password": c.password,
+            "host": c.host,
+            "port": c.port,
+        })),
+        None => HttpResponse::NotFound().json(serde_json::json!({
+            "error": format!(
+                "No WolfStack-managed credentials for {} on this node. They are \
+                 created when {} is installed from Components; an engine \
+                 installed by hand keeps whatever accounts it already had.",
+                component.name(), component.name()
+            )
+        })),
+    }
 }
 
 /// PUT /api/components/{name}/config — save component config
@@ -6401,17 +6444,41 @@ pub async fn save_component_config(
     let config_path = match component.config_path() {
         Some(p) => p,
         None => return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "This component has no config file"
+            // Distinguish "this component never has one" from "we could not
+            // find this node's copy" — the second is actionable, and used to
+            // surface as a bare ENOENT from a path that never existed.
+            "error": if !component.has_config_file() {
+                "This component has no config file".to_string()
+            } else {
+                format!(
+                    "No {} configuration file found on this node. Install and \
+                     initialise {} here first, then reload this page.",
+                    component.name(), component.name()
+                )
+            }
         })),
     };
 
-    match std::fs::write(config_path, &body.content) {
-        Ok(_) => {
-
-            HttpResponse::Ok().json(serde_json::json!({
-                "message": format!("Config saved. Restart {} to apply changes.", component.service_name())
-            }))
+    let content = body.content.clone();
+    let path_for_write = config_path.clone();
+    // Blocking file I/O must not run on an async worker (actix-web #941).
+    let write_result = web::block(move || {
+        // WolfStack owns its own components' config directories and may have
+        // to create them on first save. A DB engine's path is discovered from
+        // disk, so its parent always exists — nothing is invented here.
+        if let Some(parent) = std::path::Path::new(&path_for_write).parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        std::fs::write(&path_for_write, &content)
+    }).await;
+
+    match write_result {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Config saved. Restart {} to apply changes.", component.service_name())
+        })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to save {}: {}", config_path, e)
+        })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
             "error": format!("Failed to save config: {}", e)
         })),
@@ -10903,6 +10970,16 @@ pub async fn announce_wolfnet_routes_to_peers(
     cluster: std::sync::Arc<crate::agent::ClusterState>,
     cluster_secret: String,
 ) {
+    // Never announce an empty route set we haven't earned. Peers treat an
+    // announce as authoritative and drop every route pointing back at us, so
+    // an emptied cache propagates cluster-wide as lost container routing.
+    // The cache empties on any reboot (/run is tmpfs) and used to empty on
+    // every upgrade, when stopping WolfNet took its runtime directory with it
+    // (sabur7, G740, 2026-07-27). Re-seeding here means a WolfNet restart
+    // underneath a running WolfStack self-heals, which the startup-only seed
+    // could not do. No-op when the cache is populated.
+    let _ = tokio::task::spawn_blocking(containers::seed_local_routes_if_empty).await;
+
     // Build the announce payload first — shared by both discovery paths.
     let local_ips = containers::wolfnet_used_ips_cached();
     let host_ip = match local_ips.first() {
@@ -40851,6 +40928,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/components", web::get().to(get_components))
         .route("/api/components/{name}/detail", web::get().to(get_component_detail))
         .route("/api/components/{name}/config", web::put().to(save_component_config))
+        .route("/api/components/{name}/credentials", web::get().to(get_component_credentials))
         .route("/api/components/{name}/install", web::post().to(install_component))
         .route("/api/install/{tech}", web::post().to(install_runtime))
         // Services

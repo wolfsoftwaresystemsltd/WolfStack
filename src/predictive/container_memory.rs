@@ -281,7 +281,8 @@ mod tests {
         // `stat_to_fact`; the analyzer never sees these).
         let stat = crate::containers::ContainerStats {
             id: "x".into(), name: "free".into(),
-            cpu_percent: 0.0, memory_usage: 999, memory_limit: 0,
+            cpu_percent: 0.0, cpu_capacity_percent: 100.0, host_cpu_cores: 1,
+            memory_usage: 999, memory_limit: 0,
             memory_percent: 100.0,
             net_input: 0, net_output: 0, block_read: 0, block_write: 0,
             pids: 1, runtime: "docker".into(),
