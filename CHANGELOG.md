@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.5.0: upgrades stop breaking WolfNet routing (sabur7, G740) + PostgreSQL config, database credentials and container CPU% (klas)** _(2026-07-27 — [`a4aefd7c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a4aefd7c0a35d9409bd0d6676b6c3472b141c9a0))_
 - **v25.4.0: ZFS pool lifecycle (create/import/destroy) + compose-stack backup grouping (klas)** _(2026-07-26 — [`e89270ba`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e89270ba616e40cc15ac695a673df92e4a68cca6))_
 - **v25.3.2: wolfdisk UI cluster-scan caching + UniFi credential UX fixes** _(2026-07-24 — [`377805d8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/377805d8db278562dc54d1a7b1350d6003b52ce4))_
 - **v25.3.1: rebuild release — sync Cargo.lock to the crate version** _(2026-07-23 — [`74aaf23a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/74aaf23a7a7c72b26a121d9e06451e5aa7a140f4))_
