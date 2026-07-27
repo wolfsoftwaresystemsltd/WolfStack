@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.5.2: Docker installs work on Unraid — compose falls back to docker-compose, and resolv.conf comments stop breaking --dns (JJ)** _(2026-07-27 — [`fbb07d00`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fbb07d008bef0de3e7863341e1839b398d89dc6f))_
 - **v25.5.1: failed backups stop leaking their staging files (disks filling up)** _(2026-07-27 — [`cb8c2cd6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cb8c2cd637a0bdcdc2ae75634fbc2b5e8dc1f4f9))_
 - **v25.5.0: upgrades stop breaking WolfNet routing (sabur7, G740) + PostgreSQL config, database credentials and container CPU% (klas)** _(2026-07-27 — [`a4aefd7c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a4aefd7c0a35d9409bd0d6676b6c3472b141c9a0))_
 - **v25.4.0: ZFS pool lifecycle (create/import/destroy) + compose-stack backup grouping (klas)** _(2026-07-26 — [`e89270ba`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e89270ba616e40cc15ac695a673df92e4a68cca6))_
