@@ -818,11 +818,15 @@ fn install_compose(
     // have to clean up manually.
     if let Err(e) = compose_up(stack_name) {
         let file = appstore_compose_file(stack_name);
-        let _ = std::process::Command::new("docker")
-            .args(["compose", "-f", &file.to_string_lossy(), "down", "-v", "--remove-orphans"])
-            .envs(crate::api::compose_secrets_env())
-            .current_dir(&dir)
-            .output();
+        // Best effort: if compose isn't resolvable there is nothing running to
+        // tear down anyway, and the caller already has the real error.
+        if let Ok(mut cmd) = crate::containers::compose_cmd() {
+            let _ = cmd
+                .args(["-f", &file.to_string_lossy(), "down", "-v", "--remove-orphans"])
+                .envs(crate::api::compose_secrets_env())
+                .current_dir(&dir)
+                .output();
+        }
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
@@ -836,8 +840,9 @@ fn uninstall_compose(stack_name: &str) -> Result<String, String> {
         // `down -v` removes the containers *and* the named volumes
         // the compose file declared. UI guards this behind a typed-YES
         // modal so the user has acknowledged the data loss.
-        let out = std::process::Command::new("docker")
-            .args(["compose", "-f", &file.to_string_lossy(), "down", "-v", "--remove-orphans"])
+        let mut cmd = crate::containers::compose_cmd()?;
+        cmd.args(["-f", &file.to_string_lossy(), "down", "-v", "--remove-orphans"]);
+        let out = cmd
             .envs(crate::api::compose_secrets_env())
             .current_dir(appstore_compose_dir(stack_name))
             .output()
@@ -862,8 +867,9 @@ fn compose_up(stack_name: &str) -> Result<(), String> {
     // Secrets-Manager entries ride in as process env so `${KEY}` references
     // in the compose YAML resolve — same injection as the Compose page
     // (api::compose_secrets_env), no divergence between the two surfaces.
-    let out = std::process::Command::new("docker")
-        .args(["compose", "-f", &file.to_string_lossy(), "up", "-d", "--remove-orphans"])
+    let mut cmd = crate::containers::compose_cmd()?;
+    cmd.args(["-f", &file.to_string_lossy(), "up", "-d", "--remove-orphans"]);
+    let out = cmd
         .envs(crate::api::compose_secrets_env())
         .current_dir(appstore_compose_dir(stack_name))
         .output()

@@ -234,17 +234,55 @@ pub fn get_dns() -> DnsConfig {
 }
 
 /// Parse /etc/resolv.conf
+/// Strip a resolv.conf comment and return the remaining text.
+///
+/// resolv.conf(5) starts a comment at `#` or `;`. Unraid writes them on the
+/// nameserver line — `nameserver 10.10.1.250  # eth0:v4`.
+fn strip_resolv_comment(value: &str) -> &str {
+    value.split(['#', ';']).next().unwrap_or("")
+}
+
+/// The directive's value, if `line` is that directive.
+///
+/// Requires whitespace after the keyword so `nameserver` doesn't also match a
+/// hypothetical `nameservers`, and avoids the byte-slicing the old code did
+/// (which would panic on a multi-byte character in the line).
+fn resolv_directive<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(keyword)?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+/// Parse one `nameserver` value.
+///
+/// Returns None for anything that is not an address. The old code took the
+/// whole rest of the line, so on Unraid the nameserver became the literal
+/// string `10.10.1.250  # eth0:v4`, which was handed to `docker --dns` (JJ's
+/// failed install, 2026-07-27) and written into /etc/docker/daemon.json.
+/// Validating here keeps junk out of every consumer at once.
+fn parse_nameserver(value: &str) -> Option<String> {
+    let token = strip_resolv_comment(value).split_whitespace().next()?;
+    // A link-local address may carry a zone (fe80::1%eth0). Validate the
+    // address part; keep the zone, which the resolver needs.
+    token.split('%').next()?.parse::<std::net::IpAddr>().ok()?;
+    Some(token.to_string())
+}
+
 fn read_resolv_conf(nameservers: &mut Vec<String>, search_domains: &mut Vec<String>) {
     if let Ok(content) = std::fs::read_to_string("/etc/resolv.conf") {
         for line in content.lines() {
             let line = line.trim();
-            if line.starts_with("nameserver ") {
-                let ns = line[11..].trim().to_string();
-                if !ns.is_empty() && !nameservers.contains(&ns) {
+            if let Some(ns) = resolv_directive(line, "nameserver").and_then(parse_nameserver) {
+                if !nameservers.contains(&ns) {
                     nameservers.push(ns);
                 }
-            } else if line.starts_with("search ") {
-                *search_domains = line[7..].split_whitespace().map(|s| s.to_string()).collect();
+            } else if let Some(value) = resolv_directive(line, "search") {
+                *search_domains = strip_resolv_comment(value)
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
             }
         }
     }
@@ -5073,5 +5111,59 @@ mod tests {
         assert!(!is_on_link("8.8.8.8".parse().unwrap(), &subnets));
         // No local subnets → never on-link, so the guard can't wrongly fire.
         assert!(!is_on_link("10.10.10.20".parse().unwrap(), &[]));
+    }
+}
+
+#[cfg(test)]
+mod resolv_conf_tests {
+    use super::*;
+
+    #[test]
+    fn unraid_trailing_comment_is_stripped() {
+        // The exact shape that broke JJ's Unraid install (2026-07-27): the
+        // whole string "10.10.1.250  # eth0:v4" reached `docker --dns`.
+        assert_eq!(parse_nameserver("10.10.1.250  # eth0:v4").as_deref(), Some("10.10.1.250"));
+        assert_eq!(parse_nameserver("192.168.1.1 ; comment").as_deref(), Some("192.168.1.1"));
+        assert_eq!(parse_nameserver("  8.8.8.8  ").as_deref(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn non_addresses_are_rejected() {
+        // Anything that isn't an address must never reach --dns or daemon.json.
+        assert_eq!(parse_nameserver("# only a comment"), None);
+        assert_eq!(parse_nameserver(""), None);
+        assert_eq!(parse_nameserver("not-an-ip"), None);
+        assert_eq!(parse_nameserver("eth0:v4"), None);
+    }
+
+    #[test]
+    fn ipv6_and_zones_survive() {
+        assert_eq!(parse_nameserver("2001:4860:4860::8888").as_deref(), Some("2001:4860:4860::8888"));
+        // The zone is meaningful to the resolver — validate the address, keep the zone.
+        assert_eq!(parse_nameserver("fe80::1%eth0 # link-local").as_deref(), Some("fe80::1%eth0"));
+    }
+
+    #[test]
+    fn directive_matching_requires_whitespace() {
+        assert_eq!(resolv_directive("nameserver 1.1.1.1", "nameserver"), Some("1.1.1.1"));
+        assert_eq!(resolv_directive("nameserver\t1.1.1.1", "nameserver"), Some("1.1.1.1"));
+        // Must not match a longer keyword that merely starts the same way.
+        assert_eq!(resolv_directive("nameservers 1.1.1.1", "nameserver"), None);
+        assert_eq!(resolv_directive("# nameserver 1.1.1.1", "nameserver"), None);
+    }
+
+    #[test]
+    fn search_line_drops_its_comment() {
+        assert_eq!(
+            strip_resolv_comment("lan local # set by dhcp").split_whitespace().collect::<Vec<_>>(),
+            vec!["lan", "local"]
+        );
+    }
+
+    #[test]
+    fn multibyte_line_does_not_panic() {
+        // The old code byte-sliced line[11..], which could split a UTF-8 char.
+        assert_eq!(resolv_directive("nameserver ✓", "nameserver"), Some("✓"));
+        assert_eq!(parse_nameserver("✓"), None);
     }
 }
