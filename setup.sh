@@ -127,7 +127,16 @@ HOST_ARCH=$(uname -m)
 case "$HOST_ARCH" in
     x86_64)  BINARY_ARCH="x86_64" ;;
     aarch64) BINARY_ARCH="aarch64" ;;
-    *)       BINARY_ARCH="" ;;  # unsupported — will build from source
+    # 32-bit ARM userland: a Pi on a 32-bit OS reports armv7l, and armv8l is
+    # the same thing on 64-bit silicon running a 32-bit userland — both run the
+    # armv7 build. Published since 2026-07-28 so these boards get binaries
+    # instead of being told to retry (upgrades never compile locally).
+    armv7l|armv8l) BINARY_ARCH="armv7" ;;
+    # No riscv64 here on purpose: WolfNet publishes one, but WolfStack cannot
+    # be built as a static musl binary for riscv64 (the cross image has no
+    # riscv64-linux-musl-gcc for its C dependencies), so there is nothing to
+    # download and claiming support would just fail later with a 404.
+    *)       BINARY_ARCH="" ;;  # unsupported — fresh install builds from source
 esac
 
 # Download a prebuilt binary from GitHub Releases.

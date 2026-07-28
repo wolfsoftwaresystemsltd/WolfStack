@@ -35,6 +35,22 @@ jobs:
             arch: aarch64
             runner: ubuntu-latest
             image_digest: sha256:d4eea544818d42a15c090b2102b03c1a63a282505c9ab4b6bb7abb76b028a706
+          # 32-bit ARM: Raspberry Pi running a 32-bit OS, older ARM NAS boxes.
+          # Added 2026-07-28 — setup.sh no longer compiles on a user's machine
+          # during an upgrade, so an architecture with no published binary
+          # silently stops receiving updates. Verified to compile clean with
+          # `cross check` against this image before adding.
+          #
+          # riscv64 is deliberately NOT here: the cross musl image for
+          # riscv64gc ships no riscv64-linux-musl-gcc, so the C dependencies
+          # (libz-sys et al) cannot build. The gnu target would work but would
+          # not be a static binary, losing the "runs on any distro" property
+          # every other artifact here has. WolfNet, which has no C deps, does
+          # publish riscv64.
+          - target: armv7-unknown-linux-musleabihf
+            arch: armv7
+            runner: ubuntu-latest
+            image_digest: sha256:d943ceb3dccf755f6c0e45bd0d359f45b9e81bc007c916439af8aad2b85905c9
 
     runs-on: ${{ matrix.runner }}
     # Bound the wall-clock so a stuck network call doesn't hold a
@@ -153,7 +169,7 @@ jobs:
       - name: Compute SHA-256 checksums
         run: |
           cd dist
-          sha256sum wolfstack-x86_64 wolfstack-aarch64 > SHA256SUMS
+          sha256sum wolfstack-* > SHA256SUMS
 
       - name: Generate build-provenance attestation
         # Run BEFORE cosign signing so subject-path matches just the
@@ -164,6 +180,7 @@ jobs:
           subject-path: |
             dist/wolfstack-x86_64
             dist/wolfstack-aarch64
+            dist/wolfstack-armv7
 
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -178,7 +195,7 @@ jobs:
         # in the release notes.
         run: |
           cd dist
-          for f in wolfstack-x86_64 wolfstack-aarch64; do
+          for f in wolfstack-x86_64 wolfstack-aarch64 wolfstack-armv7; do
             cosign sign-blob --yes \
               --bundle "${f}.cosign.bundle" \
               "$f"
@@ -228,7 +245,7 @@ jobs:
 
           ## Artifacts
 
-          - `wolfstack-x86_64` / `wolfstack-aarch64` — static musl binaries (Linux x86_64 and ARM64 / Raspberry Pi 4+).
+          - `wolfstack-x86_64` / `wolfstack-aarch64` / `wolfstack-armv7` — static musl binaries (Linux x86_64, ARM64 / Raspberry Pi 4+, and 32-bit ARM).
           - `wolfstack-<arch>.cosign.bundle` — cosign signature bundle (cert + signature + Rekor entry).
           - `SHA256SUMS` — checksums for both binaries.
 
@@ -261,6 +278,8 @@ jobs:
             dist/wolfstack-x86_64.cosign.bundle \
             dist/wolfstack-aarch64 \
             dist/wolfstack-aarch64.cosign.bundle \
+            dist/wolfstack-armv7 \
+            dist/wolfstack-armv7.cosign.bundle \
             dist/SHA256SUMS
 
       - name: Regenerate CHANGELOG.md and push back to master
