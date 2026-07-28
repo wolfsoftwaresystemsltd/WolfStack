@@ -141,7 +141,13 @@ download_prebuilt() {
     local url="https://github.com/${repo}/releases/latest/download/${binary}-${BINARY_ARCH}"
     echo "  Downloading prebuilt ${binary} for ${BINARY_ARCH}..."
     local tmpfile="${dest}.download"
-    if curl -fSL --connect-timeout 15 --max-time 300 --retry 2 -o "$tmpfile" "$url" 2>&1; then
+    # --max-time is a poor fit for an 80 MB binary: a slow-but-healthy link can
+    # exceed it and be written off as "unavailable", which used to drop the
+    # node into a 20-50 minute source build (JJ, 2026-07-27). Abort on a
+    # genuinely STALLED transfer instead — under 10 kB/s for 60s — and give a
+    # working download plenty of time to finish.
+    if curl -fSL --connect-timeout 15 --max-time 1800 \
+            --speed-limit 10000 --speed-time 60 --retry 3 -o "$tmpfile" "$url" 2>&1; then
         # This binary is about to be executed as root, so check it against the
         # release's SHA256SUMS. WolfStack publishes one (see
         # .github/workflows/release.yml); a release that doesn't still
@@ -1822,7 +1828,23 @@ build_or_download_wolfnet() {
         return 0
     fi
 
-    # Fall back to source build
+    # No prebuilt for this arch/release. On an UPGRADE we stop here: compiling
+    # WolfNet on the user's own box turned a transient GitHub hiccup into a
+    # 20-50 minute CPU-burning rebuild, silently, on every node of a cluster
+    # (JJ, 2026-07-27). GitHub Actions builds these binaries — a node should
+    # only ever download them. Keep the version that is already installed and
+    # running, and let the operator retry.
+    if [ "$IS_UPGRADE" = true ]; then
+        echo "  ✗ No prebuilt WolfNet binary available for $BINARY_ARCH right now."
+        echo "    Keeping the installed version — WolfNet has NOT been changed."
+        echo "    This is usually a transient network/GitHub issue; re-run the"
+        echo "    upgrade later. WolfStack never compiles WolfNet on your server."
+        WOLFNET_BUILT=false
+        return 1
+    fi
+
+    # Fresh install only: an architecture with no published binary still has to
+    # get one somehow, so a first-time install may build from source.
     if [ -z "$WOLFNET_SRC_DIR" ] || [ ! -d "$WOLFNET_SRC_DIR" ]; then
         echo "  ✗ WolfNet source not available and no prebuilt binary — skipping"
         WOLFNET_BUILT=false
@@ -2295,8 +2317,22 @@ fi
 WOLFSTACK_PREBUILT=false
 if download_prebuilt "wolfsoftwaresystemsltd/WolfStack" "wolfstack" "/usr/local/bin/wolfstack"; then
     WOLFSTACK_PREBUILT=true
+elif [ "$IS_UPGRADE" = true ]; then
+    # Never compile on an upgrade. The binaries are built by GitHub Actions;
+    # a node downloads them. Falling back to `cargo build` here meant a
+    # transient download failure cost 20-50 minutes of the user's CPU on every
+    # node, with no indication that was even happening (JJ, 2026-07-27).
+    # The installed WolfStack keeps running untouched.
+    echo ""
+    echo "✗ Could not download the prebuilt WolfStack binary for $BINARY_ARCH."
+    echo "  Your existing WolfStack is still installed and running — the binary"
+    echo "  was NOT replaced, so the node keeps working on its current version."
+    echo "  This is normally a transient network/GitHub issue; re-run the upgrade later."
+    echo "  WolfStack is never compiled on your server during an upgrade."
+    echo ""
+    exit 1
 else
-    # Fall back to building from source
+    # Fresh install on an architecture with no published binary — build once.
     echo "Building WolfStack from source (this may take a few minutes)..."
 
     # Source build needs serious disk space — Cargo's target/ regularly hits
