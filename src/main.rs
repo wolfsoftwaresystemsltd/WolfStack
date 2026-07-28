@@ -2199,8 +2199,8 @@ async fn main() -> std::io::Result<()> {
         // route propagation across an entire fleet: the poll kept
         // sending the pre-rotation secret, every peer's receiver
         // returned 403, mouse never learned dreamer's container routes,
-        // dreamer never learned mouse's. `sweep_push_cluster_names`
-        // gets this right (line ~1588) — bringing the poll into line.
+        // dreamer never learned mouse's. Every inter-node sender now
+        // re-reads the secret per iteration — this poll included.
         let cluster_poll = cluster.clone();
         let ai_agent_poll = ai_agent.clone();
         tokio::spawn(async move {
@@ -2211,31 +2211,13 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
-        // Background: retroactive cluster-name sweep.
-        // Heals existing fleets that were joined before C1-Fix-2: pushes
-        // each peer's cluster_name (stored on this node's nodes.json
-        // from the original add_node call) to the peer's
-        // /api/agent/cluster-name. Receiver writes self_cluster.json,
-        // per-node WolfRouter preflight goes green.
-        //
-        // Fundamentally one-shot: once a peer's self_cluster.json is
-        // written, every subsequent sweep is a no-op (idempotent write).
-        // 30-minute cadence is enough to catch the only case that needs
-        // re-firing — a peer that was offline during the previous
-        // sweep — without spam. First sweep at T+30s handles the
-        // post-upgrade case immediately.
-        //
-        // Reads the cluster secret fresh from disk each iteration so a
-        // Stage-3 rotation doesn't strand the sweep with a stale value.
-        let cluster_sweep = cluster.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            loop {
-                let secret = auth::load_cluster_secret();
-                agent::sweep_push_cluster_names(cluster_sweep.clone(), secret).await;
-                tokio::time::sleep(Duration::from_secs(1800)).await;
-            }
-        });
+        // The retroactive cluster-name sweep that used to run here was
+        // removed in v25.5.5 — see the tombstone in agent/mod.rs above the
+        // identity-intent queue. It re-asserted a MIRRORED value as a
+        // command every 30 minutes and undid operator corrections. Cluster
+        // and display identity now propagate solely via the identity-intent
+        // sweep spawned below, which carries a recorded operator intent and
+        // clears once the owning node confirms it.
 
         // Background: identity-intent reconcile sweep. Re-pushes operator
         // renames (display_name) and moves (cluster_name) to each owning node
