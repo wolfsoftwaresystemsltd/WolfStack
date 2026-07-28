@@ -4884,6 +4884,20 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
     // bug was the per-node WolfRouter showing "this node is in cluster
     // `WolfStack`" (the hardcoded fallback) regardless of actual cluster.
     if let Some(ref name) = cluster_name {
+        // Record the durable intent BEFORE the opportunistic push below,
+        // matching update_node_settings. The push is best-effort: a node that
+        // is unreachable, mid-bootstrap-restart, or still negotiating its
+        // secret can burn all five attempts and end up with no cluster name.
+        // The retroactive heal sweep used to paper over that (and caused the
+        // v25.5.5 identity-flapping bug doing it); the intent replaces it
+        // properly — sweep_identity_intents re-pushes until the owner
+        // self-reports the name, then clears the intent. It also keeps a
+        // gossip round from reverting our local record while the new node is
+        // still converging (pending-intent guard in agent::poll_remote_nodes).
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        crate::agent::record_identity_intent(&id, None, Some(name.clone()), ts);
+
         let addr = body.address.clone();
         let our_secret = state.cluster_secret.clone();
         let cluster_name_val = name.clone();

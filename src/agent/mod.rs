@@ -1576,66 +1576,36 @@ pub enum AgentMessage {
     Response { success: bool, message: String },
 }
 
-/// Retroactive cluster-name sweep.
-///
-/// Background task that iterates every WolfStack peer in this node's
-/// `nodes.json`. For each peer where THIS node knows the peer's
-/// cluster_name (because we recorded it when add_node was called),
-/// push that name to the peer's `/api/agent/cluster-name` endpoint.
-///
-/// **Why this exists.** The cluster-name push at join time (C1-Fix-2)
-/// only helps NEW joins after that fix shipped. Every node joined
-/// before the fix has no `/etc/wolfstack/self_cluster.json`, so its
-/// per-node WolfRouter preflight reports "(not yet configured)". The
-/// fixed gossip path can heal these, but only if specific conditions
-/// align (the peer must be polling someone who has it with cluster_name
-/// set, AND that someone's record must carry the peer's self_id). For
-/// installs joined long ago, those conditions often don't.
-///
-/// Pushing periodically (every 5 minutes) makes the heal automatic:
-/// admin node has the cluster_name on disk, peer receives the push,
-/// peer writes self_cluster.json, peer's preflight goes green.
-///
-/// Idempotent — receiver writes whatever we send. Safe to call
-/// repeatedly. No-ops for peers we don't have a cluster_name for, or
-/// where the peer is offline (we don't want to retry-spam an
-/// unreachable node). Cluster secret used for auth.
-pub async fn sweep_push_cluster_names(cluster: Arc<ClusterState>, cluster_secret: String) {
-    // Snapshot peers under read lock; release before any HTTP work.
-    let peers: Vec<(String, u16, String)> = {
-        let nodes = cluster.nodes.read().unwrap();
-        nodes.values()
-            .filter(|n| !n.is_self)
-            .filter(|n| n.node_type == "wolfstack")
-            .filter(|n| n.online)
-            .filter_map(|n| {
-                n.cluster_name.clone().map(|name| (n.address.clone(), n.port, name))
-            })
-            .collect()
-    };
-    if peers.is_empty() { return; }
-    let client = crate::api::API_HTTP_CLIENT.clone();
-    for (address, port, cluster_name) in peers {
-        let urls = crate::api::build_node_urls(&address, port, "/api/agent/cluster-name");
-        let payload = serde_json::json!({ "cluster_name": cluster_name });
-        for url in &urls {
-            let r = client.post(url)
-                .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", &cluster_secret)
-                .json(&payload)
-                .send()
-                .await;
-            match r {
-                Ok(resp) => {
-                    let success = resp.status().is_success();
-                    let _ = resp.bytes().await;
-                    if success { break; }
-                }
-                Err(_) => { /* try next URL */ }
-            }
-        }
-    }
-}
+// REMOVED in v25.5.5: `sweep_push_cluster_names`, the retroactive
+// cluster-name heal sweep (added by 85e3553a for fleets joined before
+// C1-Fix-2). Do not reintroduce it.
+//
+// It read THIS node's `nodes.json` record for each peer and POSTed that
+// name to the peer's `/api/agent/cluster-name` every 30 minutes. Two
+// things make that wrong:
+//
+//  1. Our `cluster_name` for a peer is a MIRROR, not a command. The
+//     gossip merge in `poll_remote_nodes` syncs it *from* whatever peers
+//     report (`eff_cluster = known.cluster_name`) and only holds a local
+//     value while an identity intent is open. The sweep took that mirror
+//     and re-broadcast it as an instruction, so every node asserted every
+//     other node's identity with no record that an operator asked for it.
+//
+//  2. Its "fundamentally one-shot, idempotent" premise only holds if the
+//     name never legitimately changes. Once it does, the sweep re-asserts
+//     the stale value and UNDOES the correction.
+//
+// Observed 2026-07-28 (Wolf Territories): wolfstack-1 adopted a region
+// cluster's name via the weak-IP gossip bug fixed in v25.5.4, self-reported
+// it, and five peers faithfully mirrored it. v25.5.4 stopped the adoption
+// but the stale value was already replicated, and this sweep pushed it back
+// from four nodes at once — wolfstack-1 reverted within three minutes of
+// every manual correction.
+//
+// Cluster/display identity now travels ONLY through the identity-intent
+// queue below: an operator edit records an intent, `sweep_identity_intents`
+// re-pushes until the owner confirms, then clears it. One authority, and a
+// deliberate operator action behind every change.
 
 // ─── Identity-intent queue (reliable rename / move propagation) ──────
 //
@@ -1729,25 +1699,16 @@ pub async fn push_identity_to_node(node: &Node, intent: &IdentityIntent, cluster
     all_ok
 }
 
-/// True when the owner's current `(display_name, cluster_name)` already match
-/// the intent — so the intent can be cleared. An empty-string intent value
-/// means "cleared", which is confirmed by the owner reporting `None`. Pure so
-/// the convergence-clear rule (a forever-loop risk if wrong) is unit-tested.
-fn identity_intent_confirmed(intent: &IdentityIntent, cur_display: Option<&str>, cur_cluster: Option<&str>) -> bool {
-    let dn_ok = match &intent.display_name {
-        None => true,
-        Some(v) if v.is_empty() => cur_display.is_none(),
-        Some(v) => cur_display == Some(v.as_str()),
-    };
-    let cn_ok = match &intent.cluster_name {
-        None => true,
-        Some(v) if v.is_empty() => cur_cluster.is_none(),
-        // Case-insensitive, like every other cluster-name comparison: a node
-        // that converged via a different-case gossip path must still satisfy
-        // the intent, or the sweep re-pushes forever.
-        Some(v) => cluster_eq(cur_cluster, Some(v.as_str())),
-    };
-    dn_ok && cn_ok
+/// Whether a pending identity intent may be cleared on this sweep.
+///
+/// Successful DELIVERY to the owner is the only admissible evidence. The
+/// tempting alternative — "clear once our own node record matches the intent"
+/// — is unsound: both edit paths (`update_node_settings`, `add_node`) write
+/// the intended value into our `nodes.json` record BEFORE recording the
+/// intent, so that record always matches and would clear an intent the owner
+/// never received. Pure so this rule (silent edit-loss if wrong) is unit-tested.
+fn intent_may_clear(node_online: bool, push_all_ok: bool) -> bool {
+    node_online && push_all_ok
 }
 
 /// Reconcile loop: re-push every pending intent to its owner until the owner's
@@ -1760,17 +1721,28 @@ pub async fn sweep_identity_intents(cluster: Arc<ClusterState>, cluster_secret: 
         let Some(node) = cluster.get_node(&id) else { clear_identity_intent(&id); continue; };
         // Self never needs a push; Proxmox labels are admin-local only.
         if node.is_self || node.node_type != "wolfstack" { clear_identity_intent(&id); continue; }
-        // Already converged? (owner's self-report now matches the intent.)
-        if identity_intent_confirmed(&intent, node.display_name.as_deref(), node.cluster_name.as_deref()) {
+        // DELIVERY is the only evidence that may clear an intent. Do NOT
+        // consult our own nodes.json record here: both edit paths
+        // (update_node_settings, add_node) write the intended value into that
+        // record BEFORE recording the intent, so the mirror always "matches"
+        // and would clear an intent that never reached the owner. Until
+        // v25.5.5 that early clear was masked by the retroactive cluster-name
+        // sweep, which re-pushed the mirror every 30 minutes; with that sweep
+        // gone (see the tombstone above) a mirror-based clear would silently
+        // lose any edit made while the owner was unreachable.
+        //
+        // A successful push IS adoption: the receivers persist synchronously
+        // (self_cluster.json / self display name) before answering 2xx, and
+        // push_identity_to_node only reports true when EVERY requested field
+        // was accepted. So there is no window where we clear ahead of the
+        // owner actually holding the value.
+        // Short-circuits when the owner is unreachable: no HTTP is attempted,
+        // the intent stays pending, and it applies on reconnect.
+        let delivered = node.online
+            && push_identity_to_node(&node, &intent, &cluster_secret).await;
+        if intent_may_clear(node.online, delivered) {
             clear_identity_intent(&id);
-            continue;
         }
-        // Not yet converged. Push only when reachable; otherwise wait for the
-        // node to come back (that's the "applies on reconnect" guarantee).
-        if !node.online { continue; }
-        let _ = push_identity_to_node(&node, &intent, &cluster_secret).await;
-        // Confirmation + clear happens on the next sweep, once the owner has
-        // self-reported the new value back to us.
     }
 }
 
@@ -2794,26 +2766,23 @@ mod convergence_tests {
     }
 
     #[test]
-    fn identity_intent_confirm_and_clear_rules() {
-        // No intent for a field → that field never blocks confirmation.
-        let none = IdentityIntent::default();
-        assert!(identity_intent_confirmed(&none, Some("anything"), Some("anything")));
+    fn identity_intent_clears_only_on_confirmed_delivery() {
+        // Reachable owner accepted every field → the value is persisted on the
+        // owner (the receivers write before answering 2xx), so clear.
+        assert!(intent_may_clear(true, true));
 
-        // Set a display name: confirmed only once the owner reports it.
-        let set = IdentityIntent { display_name: Some("web".into()), cluster_name: None, ts: 1 };
-        assert!(!identity_intent_confirmed(&set, None, None));
-        assert!(!identity_intent_confirmed(&set, Some("old"), None));
-        assert!(identity_intent_confirmed(&set, Some("web"), None));
+        // Reachable but the push failed → keep it and retry next sweep.
+        assert!(!intent_may_clear(true, false));
 
-        // Clear (empty string): confirmed only when the owner reports None.
-        let clear = IdentityIntent { display_name: Some("".into()), cluster_name: None, ts: 1 };
-        assert!(!identity_intent_confirmed(&clear, Some("web"), None), "still set → not yet cleared");
-        assert!(identity_intent_confirmed(&clear, None, None), "owner now reports None → cleared");
-
-        // A move: both fields must match.
-        let mv = IdentityIntent { display_name: Some("db".into()), cluster_name: Some("prod".into()), ts: 1 };
-        assert!(!identity_intent_confirmed(&mv, Some("db"), Some("dev")));
-        assert!(identity_intent_confirmed(&mv, Some("db"), Some("prod")));
+        // Unreachable → keep, so the edit applies on reconnect. This is the
+        // case the pre-v25.5.5 mirror-based rule got wrong: our own nodes.json
+        // record already held the intended value (the edit handler writes it
+        // before recording the intent), so it "confirmed" and cleared an intent
+        // the owner had never seen. The retroactive cluster-name sweep hid the
+        // resulting edit-loss by re-pushing every 30 minutes; that sweep is
+        // gone, so this rule now has to be right on its own.
+        assert!(!intent_may_clear(false, false));
+        assert!(!intent_may_clear(false, true));
     }
 
     #[test]
@@ -2940,7 +2909,6 @@ mod convergence_tests {
     }
 
     #[test]
-    #[test]
     fn gossip_weak_ip_match_must_not_adopt_identity() {
         // A peer gossips back ITS view of us: addressed by the IP it reaches us
         // on (our WireGuard endpoint) and tagged with THAT peer's cluster.
@@ -2970,6 +2938,7 @@ mod convergence_tests {
         assert!(!c && !sc, "a foreign node must not match at all");
     }
 
+    #[test]
     fn prune_keeps_peers_from_other_clusters() {
         // Control-plane replication shows the WHOLE fleet across clusters —
         // `cluster_name` is a display grouping, never a membership boundary.
