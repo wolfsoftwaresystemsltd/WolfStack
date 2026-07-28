@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.5.5: a node can no longer assert another node's cluster identity** _(2026-07-28 — [`a1856364`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a1856364a981a9586f112dee7041cd1f7b52d91a))_
 - **v25.5.4: a peer can no longer drag this node into ITS cluster via gossip** _(2026-07-28 — [`db49f340`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/db49f34067909ed6357f6f2150250a6e6903fdf0))_
 - **v25.5.3: publish 32-bit ARM (armv7) binaries so those hosts stop being stranded by the no-compile rule** _(2026-07-28 — [`aa85bb3b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aa85bb3b9ba74add31c397a31cbebcd5f4ccac63))_
 - **v25.5.2: Docker installs work on Unraid — compose falls back to docker-compose, and resolv.conf comments stop breaking --dns (JJ)** _(2026-07-27 — [`fbb07d00`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fbb07d008bef0de3e7863341e1839b398d89dc6f))_
