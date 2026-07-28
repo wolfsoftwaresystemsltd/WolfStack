@@ -1894,6 +1894,32 @@ fn parse_local_ipv4(json: &[u8]) -> std::collections::HashSet<String> {
     set
 }
 
+/// How strongly does a gossiped node entry identify as *us*?
+///
+/// Returns `(is_self, is_self_strong)`.
+///
+/// * **strong** — the entry carries our global id (`id` or `self_id`). Only a
+///   strong match is authoritative enough to let a peer rewrite our identity
+///   (cluster name, display name).
+/// * **weak** — the entry merely carries one of our own LAN/tunnel IPs. That is
+///   enough to stop admitting ourselves into the node list as a foreign "red"
+///   node (a host behind a reverse-proxy WAN hostname self-identifies by that
+///   hostname, so a peer gossiping our LAN IP back matches neither id), but it
+///   must NOT be treated as authoritative: a peer gossips back *its* view of us,
+///   addressed by whatever IP it reaches us on and tagged with *that peer's*
+///   cluster. Adopting from a weak match silently moves us into their cluster.
+pub(crate) fn gossip_identity_match(
+    known_id: &str,
+    known_self_id: Option<&str>,
+    known_address: &str,
+    self_id: &str,
+    local_ips: &std::collections::HashSet<String>,
+) -> (bool, bool) {
+    let strong = known_id == self_id || known_self_id == Some(self_id);
+    let weak = !known_address.is_empty() && local_ips.contains(known_address);
+    (strong || weak, strong)
+}
+
 /// Every IPv4 address currently configured on this host (each NIC: LAN,
 /// WolfNet, VLAN, storage, swarm overlay…), loopback excluded. Used so the
 /// poll/replicate loops never contact OUR OWN addresses — a self entry under a
@@ -2240,62 +2266,80 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 // node named after our own IP (wabil 2026-06-28: main showed
                                 // a red 192.168.1.10, immich a red 192.168.1.4). `local_ips`
                                 // is the cached set already computed at the top of this fn.
-                                let is_self = known.id == cluster.self_id
-                                    || known.self_id.as_deref() == Some(cluster.self_id.as_str())
-                                    || (!known.address.is_empty()
-                                        && local_ips.contains(&known.address));
+                                let (is_self, is_self_strong) = gossip_identity_match(
+                                    &known.id,
+                                    known.self_id.as_deref(),
+                                    &known.address,
+                                    &cluster.self_id,
+                                    &local_ips,
+                                );
                                 if is_self {
-                                    // Accept cluster_name updates from gossip (admin may have changed it on another node)
-                                    if let Some(ref gossiped_cluster) = known.cluster_name {
-                                        let current_cluster = {
-                                            let nodes_r = cluster.nodes.read().unwrap();
-                                            nodes_r.get(&cluster.self_id).and_then(|n| n.cluster_name.clone())
-                                        };
-                                        // Case-insensitive: a peer gossiping a different-CASE
-                                        // spelling of our own cluster must NOT flip us — only a
-                                        // genuinely different name (a real rename) is adopted.
-                                        if !cluster_eq(current_cluster.as_deref(), Some(gossiped_cluster.as_str())) {
+                                    // Accept cluster_name updates from gossip (admin may have changed it on another node).
+                                    //
+                                    // GATED ON is_self_strong. A weak IP match must never
+                                    // adopt: a peer gossips back ITS view of us, addressed by
+                                    // whatever IP it reaches us on (e.g. our WireGuard endpoint
+                                    // 10.203.0.1), tagged with THAT peer's cluster. The IP is
+                                    // ours, so the weak check said "self" and we adopted the
+                                    // remote cluster's name as our own — repeatedly, because
+                                    // every gossip round re-applied it.
+                                    // Observed 2026-07-28: adding the Wolf-Grid-Regions region
+                                    // servers silently moved wolfstack-1 out of intelligentwolf
+                                    // and into Wolf-Grid-Regions, and it kept coming back after
+                                    // being corrected. cluster_name is a display grouping, so
+                                    // this quietly reorganises an operator's whole fleet view.
+                                    if is_self_strong {
+                                        if let Some(ref gossiped_cluster) = known.cluster_name {
+                                            let current_cluster = {
+                                                let nodes_r = cluster.nodes.read().unwrap();
+                                                nodes_r.get(&cluster.self_id).and_then(|n| n.cluster_name.clone())
+                                            };
+                                            // Case-insensitive: a peer gossiping a different-CASE
+                                            // spelling of our own cluster must NOT flip us — only a
+                                            // genuinely different name (a real rename) is adopted.
+                                            if !cluster_eq(current_cluster.as_deref(), Some(gossiped_cluster.as_str())) {
 
-                                            let mut nodes_w = cluster.nodes.write().unwrap();
-                                            if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
-                                                n.cluster_name = Some(gossiped_cluster.clone());
+                                                let mut nodes_w = cluster.nodes.write().unwrap();
+                                                if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
+                                                    n.cluster_name = Some(gossiped_cluster.clone());
+                                                }
+                                                drop(nodes_w);
+                                                ClusterState::save_self_cluster_name(gossiped_cluster);
+                                                // Our cluster changed (a rename/move learned via
+                                                // gossip before the direct push landed) — bring this
+                                                // node's local cluster-tagged stores along, same as
+                                                // the /api/agent/cluster-name receiver does. Without
+                                                // this, a member that converges via gossip first
+                                                // would satisfy the admin's intent sweep and the
+                                                // push (which carries the migration) never fires.
+                                                let old_label = current_cluster
+                                                    .unwrap_or_else(|| "WolfStack".to_string());
+                                                migrate_local_cluster_tags(&old_label, gossiped_cluster);
                                             }
-                                            drop(nodes_w);
-                                            ClusterState::save_self_cluster_name(gossiped_cluster);
-                                            // Our cluster changed (a rename/move learned via
-                                            // gossip before the direct push landed) — bring this
-                                            // node's local cluster-tagged stores along, same as
-                                            // the /api/agent/cluster-name receiver does. Without
-                                            // this, a member that converges via gossip first
-                                            // would satisfy the admin's intent sweep and the
-                                            // push (which carries the migration) never fires.
-                                            let old_label = current_cluster
-                                                .unwrap_or_else(|| "WolfStack".to_string());
-                                            migrate_local_cluster_tags(&old_label, gossiped_cluster);
                                         }
-                                    }
-                                    // Same gossip-adoption safety net for the display name an
-                                    // admin set on another node. Only adopt a Some value —
-                                    // an older peer that doesn't know the field gossips None,
-                                    // which must NOT wipe an operator-set name.
-                                    if let Some(ref gossiped_name) = known.display_name {
-                                        // Normalise empty → cleared so memory and the
-                                        // on-disk file (which save_* removes on empty)
-                                        // never disagree and re-assert a stale "".
-                                        let want = if gossiped_name.is_empty() { None } else { Some(gossiped_name.clone()) };
-                                        let current_name = {
-                                            let nodes_r = cluster.nodes.read().unwrap();
-                                            nodes_r.get(&cluster.self_id).and_then(|n| n.display_name.clone())
-                                        };
-                                        if current_name != want {
-                                            let mut nodes_w = cluster.nodes.write().unwrap();
-                                            if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
-                                                n.display_name = want.clone();
+                                        // Same gossip-adoption safety net for the display name an
+                                        // admin set on another node. Only adopt a Some value —
+                                        // an older peer that doesn't know the field gossips None,
+                                        // which must NOT wipe an operator-set name.
+                                        if let Some(ref gossiped_name) = known.display_name {
+                                            // Normalise empty → cleared so memory and the
+                                            // on-disk file (which save_* removes on empty)
+                                            // never disagree and re-assert a stale "".
+                                            let want = if gossiped_name.is_empty() { None } else { Some(gossiped_name.clone()) };
+                                            let current_name = {
+                                                let nodes_r = cluster.nodes.read().unwrap();
+                                                nodes_r.get(&cluster.self_id).and_then(|n| n.display_name.clone())
+                                            };
+                                            if current_name != want {
+                                                let mut nodes_w = cluster.nodes.write().unwrap();
+                                                if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
+                                                    n.display_name = want.clone();
+                                                }
+                                                drop(nodes_w);
+                                                ClusterState::save_self_display_name(want.as_deref().unwrap_or(""));
                                             }
-                                            drop(nodes_w);
-                                            ClusterState::save_self_display_name(want.as_deref().unwrap_or(""));
                                         }
-                                    }
+                                    } // end is_self_strong — identity adoption requires a global id match
                                     continue;
                                 }
                                 // Also skip if this is us by hostname+port (gossip may report different address)
@@ -2896,6 +2940,36 @@ mod convergence_tests {
     }
 
     #[test]
+    #[test]
+    fn gossip_weak_ip_match_must_not_adopt_identity() {
+        // A peer gossips back ITS view of us: addressed by the IP it reaches us
+        // on (our WireGuard endpoint) and tagged with THAT peer's cluster.
+        // The IP is genuinely ours, so this must still count as "self" so we do
+        // not admit ourselves as a foreign node — but it must NOT be strong,
+        // because adopting from it silently moves us into the peer's cluster.
+        // Regression: 2026-07-28, adding the Wolf-Grid-Regions region servers
+        // repeatedly dragged wolfstack-1 out of intelligentwolf.
+        let mut ips = std::collections::HashSet::new();
+        ips.insert("10.203.0.1".to_string());
+
+        let (is_self, strong) = super::gossip_identity_match(
+            "node-remote-view", None, "10.203.0.1", "ws-me", &ips);
+        assert!(is_self, "our own IP must still be recognised as self");
+        assert!(!strong, "an IP-only match must never be authoritative for identity");
+
+        // Strong matches remain authoritative, by either id field.
+        let (a, sa) = super::gossip_identity_match("ws-me", None, "", "ws-me", &ips);
+        assert!(a && sa, "matching id is a strong match");
+        let (b, sb) = super::gossip_identity_match(
+            "node-x", Some("ws-me"), "", "ws-me", &ips);
+        assert!(b && sb, "matching self_id is a strong match");
+
+        // A genuinely foreign node is neither.
+        let (c, sc) = super::gossip_identity_match(
+            "node-y", Some("ws-other"), "10.203.0.12", "ws-me", &ips);
+        assert!(!c && !sc, "a foreign node must not match at all");
+    }
+
     fn prune_keeps_peers_from_other_clusters() {
         // Control-plane replication shows the WHOLE fleet across clusters —
         // `cluster_name` is a display grouping, never a membership boundary.
