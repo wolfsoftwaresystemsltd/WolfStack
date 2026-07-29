@@ -20904,7 +20904,13 @@ pub async fn storage_list_mounts(
     state: web::Data<AppState>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    HttpResponse::Ok().json(storage::list_mounts())
+    // Secrets are redacted before the mounts reach the browser: the page
+    // renders a name/bucket table and never needs the S3 secret key or the
+    // SMB password, but the raw structs carried both into the DOM of every
+    // admin session (and into any browser extension or error reporter that
+    // reads a response body). The sentinel is the same one the PUT handler
+    // already treats as "keep the stored value", so an edit round-trips.
+    HttpResponse::Ok().json(storage::list_mounts_redacted())
 }
 
 /// GET /api/storage/available — list mounted storage suitable for container attachment
@@ -20931,6 +20937,14 @@ pub struct CreateMountRequest {
     pub auto_mount: bool,
     #[serde(default)]
     pub s3_config: Option<storage::S3Config>,
+    /// Id of a saved S3 remote to take the credentials from, instead of
+    /// sending them in `s3_config`. Set by the "Saved credentials" picker so
+    /// no secret ever travels to the browser and back.
+    #[serde(default)]
+    pub s3_remote: Option<String>,
+    /// Bucket to mount when creating from a saved remote.
+    #[serde(default)]
+    pub s3_bucket: Option<String>,
     #[serde(default)]
     pub nfs_options: Option<String>,
     #[serde(default)]
@@ -20950,17 +20964,38 @@ pub async fn storage_create_mount(
     body: web::Json<CreateMountRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    
+
+    // A saved remote supplies the credentials, endpoint, region and provider;
+    // the operator only chooses which bucket on it to mount.
+    let (s3_config, source) = match body.s3_remote.as_deref() {
+        Some(remote_id) if !remote_id.is_empty() => {
+            let bucket = body.s3_bucket.clone().unwrap_or_default();
+            if bucket.trim().is_empty() {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "Pick a bucket for this mount"
+                }));
+            }
+            match storage::s3_config_from_remote(remote_id, bucket.trim()) {
+                Ok(cfg) => {
+                    let src = format!("s3:{}", cfg.bucket);
+                    (Some(cfg), src)
+                }
+                Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+            }
+        }
+        _ => (body.s3_config.clone(), body.source.clone()),
+    };
+
     let mount = storage::StorageMount {
         id: String::new(),
         name: body.name.clone(),
         mount_type: body.mount_type.clone(),
-        source: body.source.clone(),
+        source,
         mount_point: body.mount_point.clone(),
         enabled: true,
         global: body.global,
         auto_mount: body.auto_mount,
-        s3_config: body.s3_config.clone(),
+        s3_config,
         nfs_options: body.nfs_options.clone(),
         smb_options: body.smb_options.clone(),
         smb_config: body.smb_config.clone(),
@@ -21186,33 +21221,124 @@ pub struct ImportRcloneRequest {
 }
 
 /// POST /api/storage/import-rclone — import S3 remotes from rclone.conf content
+///
+/// Imports REMOTES (reusable credential sets), not mounts: an rclone remote
+/// carries no bucket, and an S3 mount without a bucket can never mount, so
+/// the previous mount-per-remote import only ever produced broken entries.
 pub async fn storage_import_rclone(
     req: HttpRequest,
     state: web::Data<AppState>,
     body: web::Json<ImportRcloneRequest>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    
-    match storage::import_rclone_config(&body.config) {
-        Ok(mounts) => {
-            let mut created = Vec::new();
-            for mount in mounts {
-                match storage::create_mount(mount, false) {
-                    Ok(m) => created.push(m),
-                    Err(e) => {
-                        return HttpResponse::BadRequest().json(serde_json::json!({
-                            "error": e,
-                            "created": created
-                        }));
-                    }
-                }
-            }
-            HttpResponse::Ok().json(serde_json::json!({
-                "message": format!("Imported {} S3 remotes", created.len()),
-                "mounts": created
-            }))
-        }
+
+    match storage::import_rclone_remotes(&body.config) {
+        Ok(names) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!(
+                "Imported {} S3 remote{}: {}. Pick them under Add Mount \u{2192} S3 \u{2192} Saved credentials.",
+                names.len(),
+                if names.len() == 1 { "" } else { "s" },
+                names.join(", ")
+            ),
+            "remotes": names
+        })),
         Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/storage/s3-remotes — saved S3 credential sets, WITHOUT secrets
+pub async fn storage_list_s3_remotes(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(storage::list_s3_remote_infos())
+}
+
+#[derive(Deserialize)]
+pub struct SaveS3RemoteRequest {
+    pub name: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub region: String,
+    pub access_key_id: String,
+    /// Blank when updating an existing remote = keep the stored secret.
+    #[serde(default)]
+    pub secret_access_key: String,
+}
+
+/// POST /api/storage/s3-remotes — create or update a saved credential set
+pub async fn storage_save_s3_remote(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SaveS3RemoteRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+
+    let remote = storage::S3Remote {
+        id: String::new(),      // assigned from the name by save_s3_remote
+        name: body.name.clone(),
+        provider: if body.provider.is_empty() { "AWS".to_string() } else { body.provider.clone() },
+        endpoint: body.endpoint.clone(),
+        region: body.region.clone(),
+        access_key_id: body.access_key_id.clone(),
+        secret_access_key: body.secret_access_key.clone(),
+        origin: String::new(),  // assigned by save_s3_remote
+    };
+
+    match storage::save_s3_remote(remote) {
+        // Return the secret-free view — the caller gets the assigned id
+        // without the response carrying the key back out to the browser.
+        Ok(saved) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Saved S3 credentials “{}”", saved.name),
+            "id": saved.id,
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// The remote id is carried as a query/body field rather than a path segment:
+/// ids are `<origin>:<name>` and the name is operator-supplied, so a path
+/// segment would break on any name containing a slash.
+#[derive(Deserialize)]
+pub struct S3RemoteIdQuery {
+    pub id: String,
+}
+
+/// POST /api/storage/s3-remotes/delete — forget a saved credential set
+pub async fn storage_delete_s3_remote(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<S3RemoteIdQuery>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match storage::delete_s3_remote(&body.id) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "message": "Saved credentials removed" })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/storage/s3-remotes/buckets?id=… — buckets these credentials see
+///
+/// Lets the operator pick a bucket instead of typing one: a wrong bucket name
+/// is otherwise only discovered when the s3fs daemon fails its startup check.
+pub async fn storage_s3_remote_buckets(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<S3RemoteIdQuery>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = query.id.clone();
+    // web::block — list_remote_buckets builds its own current-thread runtime,
+    // which panics if constructed inside the actix worker's runtime.
+    let result = web::block(move || storage::list_remote_buckets(&id)).await;
+    match result {
+        Ok(Ok(buckets)) => HttpResponse::Ok().json(serde_json::json!({ "buckets": buckets })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
 }
 
@@ -26506,9 +26632,16 @@ pub async fn prepare_install_package(
     // run instead of muddying the terminal with cascaded errors.
     let install_cmd = match pkg_mgr {
         "apt-get" => format!("apt-get update && apt-get install -y {}", pkg_name),
+        // s3fs-fuse is an EPEL package on RHEL-likes — without the repo the
+        // install fails with a bare "No match for argument".
+        // `|| true` because the script runs under `set -e` and epel-release
+        // is absent on Fedora (where s3fs-fuse is in the main repo anyway).
+        "dnf" if pkg_name == "s3fs-fuse" =>
+            format!("dnf install -y epel-release || true; dnf install -y {}", pkg_name),
         "dnf" => format!("dnf install -y {}", pkg_name),
         "zypper" => format!("zypper --non-interactive install {}", pkg_name),
         "pacman" => format!("pacman -Sy --noconfirm {}", pkg_name),
+        "apk" => format!("apk add --no-cache {}", pkg_name),
         other => format!("{} install -y {}", other, pkg_name),
     };
     let script = format!(
@@ -41848,6 +41981,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/mounts", web::post().to(storage_create_mount))
         .route("/api/storage/available", web::get().to(storage_available_mounts))
         .route("/api/storage/import-rclone", web::post().to(storage_import_rclone))
+        .route("/api/storage/s3-remotes", web::get().to(storage_list_s3_remotes))
+        .route("/api/storage/s3-remotes", web::post().to(storage_save_s3_remote))
+        .route("/api/storage/s3-remotes/delete", web::post().to(storage_delete_s3_remote))
+        .route("/api/storage/s3-remotes/buckets", web::get().to(storage_s3_remote_buckets))
         .route("/api/storage/mounts/{id}", web::put().to(storage_update_mount))
         .route("/api/storage/mounts/{id}", web::delete().to(storage_remove_mount))
         .route("/api/storage/mounts/{id}/duplicate", web::post().to(storage_duplicate_mount))
