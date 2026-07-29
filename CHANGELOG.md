@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.6.5: WolfStack stops reloading firewalld every 60 seconds** _(2026-07-29 — [`b9a7829c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b9a7829c1f99913c42985700cba40ea52fcdba23))_
 - **v25.6.4: a toast full of docker output can be closed again, and WolfNet peers that answer are not labelled Offline** _(2026-07-29 — [`ff71b54f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff71b54f49fbe8dca3b5d96de47be1181320629e))_
 - **v25.6.3: S3 mounts stop asking for keys you already configured, and finally say WHY they failed** _(2026-07-29 — [`6d137dee`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6d137dee99a9e7269320792ecff15e62c8d9ab08))_
 - **v25.6.2: deleting a cluster share now deletes it everywhere, and SMB mount failures say what actually went wrong** _(2026-07-29 — [`5e5d9ebc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5e5d9ebc1d7d2d9549b52ad2f868d4e19c641bb4))_
