@@ -17190,7 +17190,12 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     }
     Object.assign(container.style, {
         position: 'fixed', top: '20px', right: '20px', zIndex: '99999',
-        display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none'
+        display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none',
+        // Bound the stack too: several bounded toasts can still add up past the
+        // bottom of the screen, taking their dismiss buttons with them. Scroll
+        // chaining from the toasts (which do take pointer events) makes this
+        // reachable even though the container itself doesn't.
+        maxHeight: 'calc(100vh - 40px)', overflowY: 'auto'
     });
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
@@ -17198,16 +17203,30 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     // queue — give error/warning toasts an assertive alert role on the element.
     if (type === 'error' || type === 'warning') toast.setAttribute('role', 'alert');
     if (id) toast.id = id;
-    const icons = { success: '', error: '', warning: '', info: '' };
+    // Every one of these was an empty string, so the `|| 'ℹ️'` fallback below
+    // gave EVERY toast the info icon — a failed compose pull was flagged with
+    // the same glyph as a routine notice, which is exactly backwards for the
+    // one type the operator must not miss.
+    const icons = { success: '✅', error: '⛔', warning: '⚠️', info: 'ℹ️' };
     const bgColors = { success: 'linear-gradient(135deg, #1a3a2a, #162b22)', error: 'linear-gradient(135deg, #3b1111, #2d0e0e)', warning: 'linear-gradient(135deg, #3b2e0e, #2d2408)', info: 'linear-gradient(135deg, #1a2a3f, #141f30)' };
     const borderColors = { success: '#34d399', error: '#f87171', warning: '#fbbf24', info: '#60a5fa' };
     Object.assign(toast.style, {
         padding: '14px 20px', background: bgColors[type] || bgColors.info,
         borderLeft: '4px solid ' + (borderColors[type] || borderColors.info),
         borderRadius: '8px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-        display: 'flex', alignItems: 'center', gap: '10px',
+        // flex-start, NOT center: a centred dismiss button sits halfway down
+        // the toast, so on a tall one it lands below the fold and cannot be
+        // clicked. Pinned to the top it is always the first thing on screen.
+        display: 'flex', alignItems: 'flex-start', gap: '10px',
         fontSize: '14px', fontWeight: '500', color: '#fff',
         minWidth: '280px', maxWidth: '440px', pointerEvents: 'auto',
+        // Belt-and-braces cap. The height is really governed by the message's
+        // own max-height below — capping only the toast does NOT work, because
+        // this is a ROW flex container, so the message is sized on the CROSS
+        // axis and simply overflows a capped parent (measured: a 4569px message
+        // spilling out of a 420px toast, over the page, since overflow is
+        // visible).
+        maxHeight: 'min(60vh, 420px)',
         transform: 'translateX(120%)', opacity: '0',
         transition: 'opacity 0.35s ease, transform 0.35s cubic-bezier(0.21,1.02,0.73,1)'
     });
@@ -17225,14 +17244,48 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     iconSpan.textContent = icons[type] || 'ℹ️';
     const msgSpan = document.createElement('span');
     msgSpan.className = 'toast-message';
-    msgSpan.style.cssText = 'flex:1;';
+    // The message carries its OWN max-height — this is what actually bounds the
+    // toast. A failed `docker compose pull` returns the whole docker output as
+    // its error, and with duration 0 the toast never went away, so an unbounded
+    // one grew past the viewport and took its × with it (klas 2026-07-29).
+    // The cap lives here rather than on .toast because .toast is a row flex
+    // container: its max-height does not constrain a cross-axis-sized child, so
+    // the message just overflowed it. pre-wrap keeps multi-line command output
+    // readable (it was collapsing into one run-on paragraph); anywhere breaks
+    // the long unbroken tokens such output is full of (image digests).
+    msgSpan.style.cssText = 'flex:1; min-width:0; max-height:min(60vh, 392px); overflow-y:auto; '
+        + 'overflow-wrap:anywhere; white-space:pre-wrap;';
     msgSpan.textContent = String(message ?? '');
-    const dismissSpan = document.createElement('span');
-    dismissSpan.style.cssText = 'cursor:pointer; opacity:0.7; font-size:18px; flex-shrink:0; margin-left:8px; line-height:1;';
-    dismissSpan.title = 'Dismiss';
-    dismissSpan.textContent = '×';
-    dismissSpan.onclick = () => toast.remove();
-    toast.replaceChildren(iconSpan, msgSpan, dismissSpan);
+
+    // Escape also dismisses, bound only for toasts that never time out — those
+    // are the ones an operator can get stuck behind. The listener is removed on
+    // dismissal so a long session doesn't accumulate dead handlers.
+    let escHandler = null;
+    const dismissToast = () => {
+        if (escHandler) {
+            document.removeEventListener('keydown', escHandler);
+            escHandler = null;
+        }
+        toast.remove();
+    };
+    if (duration <= 0) {
+        escHandler = (ev) => { if (ev.key === 'Escape') dismissToast(); };
+        document.addEventListener('keydown', escHandler);
+    }
+
+    // A real <button>: reachable by keyboard and announced as a control. The
+    // <span> it replaces could only ever be clicked with a mouse, so a
+    // never-dismissing error toast was a dead end for keyboard users even when
+    // the × was on screen.
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.style.cssText = 'cursor:pointer; opacity:0.7; font-size:18px; flex-shrink:0; margin-left:8px; '
+        + 'line-height:1; background:none; border:none; color:inherit; padding:0 2px;';
+    dismissBtn.title = 'Dismiss';
+    dismissBtn.setAttribute('aria-label', 'Dismiss notification');
+    dismissBtn.textContent = '×';
+    dismissBtn.onclick = dismissToast;
+    toast.replaceChildren(iconSpan, msgSpan, dismissBtn);
     container.appendChild(toast);
     // Trigger slide-in via transition (not @keyframes — works without stylesheet)
     requestAnimationFrame(() => {
@@ -17245,7 +17298,9 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
         setTimeout(() => {
             toast.style.opacity = '0';
             toast.style.transform = 'translateX(120%)';
-            setTimeout(() => toast.remove(), 350);
+            // dismissToast, not toast.remove — one teardown path, so a future
+            // change that binds something for timed toasts too can't leak it.
+            setTimeout(dismissToast, 350);
         }, duration);
     }
 }
@@ -26469,7 +26524,17 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
             // the persisted value rather than silently pinning a learned address.
             config_endpoint: cp.endpoint || '',
             in_config: true,
+            // The daemon's own view. It reports a peer as connected only if it
+            // has RECEIVED a packet from it in the last 120s, so a wolfnet
+            // restart (every cluster upgrade) resets this to false for every
+            // peer even though the tunnel keeps carrying traffic.
             connected: live ? live.connected : cp.connected,
+            // The backend's independent reachability probe (a ping over the
+            // WolfNet address). Kept ALONGSIDE the daemon's view rather than
+            // being overwritten by it: after an upgrade the daemon said
+            // "offline" while this probe said the peer answered, and the UI
+            // believed the daemon and showed Offline (sabur7 2026-07-29).
+            reachable: !!cp.connected,
             last_seen_secs: live ? live.last_seen_secs : null,
             rx_bytes: live ? live.rx_bytes : 0,
             tx_bytes: live ? live.tx_bytes : 0,
@@ -26491,6 +26556,9 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
                 config_endpoint: '',
                 in_config: false,
                 connected: lp.connected,
+                // PEX-discovered peers aren't in config.toml, so the backend
+                // never probed them — no independent evidence either way.
+                reachable: false,
                 last_seen_secs: lp.last_seen_secs,
                 rx_bytes: lp.rx_bytes || 0,
                 tx_bytes: lp.tx_bytes || 0,
@@ -26504,7 +26572,10 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
     // fragile onclick-string quoting of every field.
     window._wolfnetMergedPeers = mergedPeers;
 
-    const connectedCount = mergedPeers.filter(p => p.connected).length;
+    // A peer that answers over the tunnel is usable, whether or not the daemon
+    // has logged inbound traffic from it yet — count both as up, or the card
+    // reads "0 connected" on a mesh that demonstrably works.
+    const connectedCount = mergedPeers.filter(p => p.connected || p.reachable).length;
     if (connectedEl) connectedEl.textContent = connectedCount;
     if (totalPeersEl) totalPeersEl.textContent = `of ${mergedPeers.length} total`;
 
@@ -26518,11 +26589,17 @@ function renderWolfNetPage(wn, config, localInfo, fullStatus) {
         } else {
             if (empty) empty.style.display = 'none';
             table.innerHTML = mergedPeers.map((p, idx) => {
+                // Four states, not two. "Reachable" is the one that matters
+                // after an upgrade: the peer answers over the tunnel but the
+                // daemon has not recorded inbound traffic from it yet, so
+                // calling it Offline (as this did) contradicts the evidence.
                 const statusBadge = p.connected
                     ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;">● Connected</span>'
-                    : p.relay_via
-                        ? `<span class="badge" style="background:rgba(6, 182, 212,0.15); color:#06b6d4;">◉ Relay via ${escapeHtml(p.relay_via)}</span>`
-                        : '<span class="badge" style="background:rgba(239,68,68,0.15); color:#ef4444;">○ Offline</span>';
+                    : p.reachable
+                        ? '<span class="badge" style="background:rgba(34,197,94,0.15); color:#22c55e;" title="This peer answers over the WolfNet tunnel, but the WolfNet service has not recorded inbound traffic from it yet — usual for a couple of minutes after a service restart or cluster upgrade.">● Reachable</span>'
+                        : p.relay_via
+                            ? `<span class="badge" style="background:rgba(6, 182, 212,0.15); color:#06b6d4;">◉ Relay via ${escapeHtml(p.relay_via)}</span>`
+                            : '<span class="badge" style="background:rgba(239,68,68,0.15); color:#ef4444;">○ Offline</span>';
 
                 const lastSeen = p.last_seen_secs !== null && p.last_seen_secs !== undefined
                     ? `<span style="font-size:11px; color:var(--text-muted);">${formatDuration(p.last_seen_secs)}</span>`

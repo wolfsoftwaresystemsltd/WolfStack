@@ -3255,6 +3255,9 @@ body.sidebar-collapsed #task-log-footer {
     flex-direction: column;
     gap: 10px;
     pointer-events: none;
+    /* Keep the stack on screen — see showToast() for why this matters. */
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
 }
 
 .toast {
@@ -3262,18 +3265,39 @@ body.sidebar-collapsed #task-log-footer {
     border-radius: var(--radius-sm);
     box-shadow: var(--shadow-lg);
     display: flex;
-    align-items: center;
+    /* flex-start so the dismiss × stays at the top of a tall toast rather
+       than halfway down it, where a long message pushes it off-screen. */
+    align-items: flex-start;
     gap: 10px;
     font-size: 14px;
     font-weight: 500;
     color: #fff;
     min-width: 280px;
     max-width: 440px;
+    /* A failed `docker compose pull` puts the entire docker output in the
+       message; without a cap the toast outgrew the viewport and took its
+       dismiss button with it (klas 2026-07-29). The message scrolls instead. */
+    max-height: min(60vh, 420px);
     animation: toastSlideIn 0.35s cubic-bezier(0.21, 1.02, 0.73, 1) forwards;
     transition: opacity 0.3s ease, transform 0.3s ease;
     pointer-events: auto;
     border: none;
     border-left: 4px solid;
+}
+
+/* The message's own max-height is what actually bounds the toast. .toast is a
+   ROW flex container, so its max-height does not constrain a child sized on the
+   cross axis — the message just overflowed it. 392px = the .toast cap less its
+   vertical padding. pre-wrap keeps multi-line command output readable instead
+   of collapsing it into one paragraph; anywhere wraps the long unbroken tokens
+   (image digests, URLs) such output is full of. */
+.toast-message {
+    flex: 1;
+    min-width: 0;
+    max-height: min(60vh, 392px);
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
 }
 
 .toast.success {
