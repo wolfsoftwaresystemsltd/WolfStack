@@ -41,17 +41,13 @@ pub async fn add(
     state: web::Data<Arc<AppState>>,
     body: web::Json<AddKeyRequest>,
 ) -> HttpResponse {
+    // One definition of "is this a public key", shared with the
+    // host-level Authorised Keys manager and the tamper detector — see
+    // crate::ssh_keys. A customer's key and an operator's key are the
+    // same thing, and two validators would eventually disagree.
     let trimmed = body.public_key.trim();
-    if !(trimmed.starts_with("ssh-rsa ")
-         || trimmed.starts_with("ssh-ed25519 ")
-         || trimmed.starts_with("ssh-dss ")
-         || trimmed.starts_with("ecdsa-")
-         || trimmed.starts_with("sk-"))
-    {
-        return HttpResponse::BadRequest()
-            .json(serde_json::json!({"error":
-                "Public key must be in OpenSSH format (ssh-rsa / ssh-ed25519 / ecdsa-… / sk-…)"
-            }));
+    if let Err(e) = crate::ssh_keys::validate(trimmed, &body.label) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
     }
     let backend = match super::da_helper::resolve_backend(&req, &state).await {
         Ok(b) => b, Err(r) => return r,

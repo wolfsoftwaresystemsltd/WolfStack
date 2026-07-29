@@ -1161,8 +1161,8 @@ pub async fn fleet_bruteforce_config(
         Ok(saved) => serde_json::json!({ "ok": true, "config": saved }),
         Err(e) => serde_json::json!({ "ok": false, "error": e }),
     };
-    let results = fleet_fanout_post::<serde_json::Value, _>(
-        &state, "/api/bruteforce/config", payload, local,
+    let results = fleet_fanout_post::<serde_json::Value>(
+        &state, "/api/bruteforce/config", payload, &[], Some(Ok(local())), FANOUT_SLOW,
     ).await;
     HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
 }
@@ -1180,8 +1180,8 @@ pub async fn fleet_bruteforce_scan(
         let sources = state_for_local.bruteforce.rescan();
         serde_json::json!({ "ok": true, "watched_sources": sources })
     };
-    let results = fleet_fanout_post::<serde_json::Value, _>(
-        &state, "/api/bruteforce/scan", serde_json::json!({}), local,
+    let results = fleet_fanout_post::<serde_json::Value>(
+        &state, "/api/bruteforce/scan", serde_json::json!({}), &[], Some(Ok(local())), FANOUT_SLOW,
     ).await;
     HttpResponse::Ok().json(serde_json::json!({ "nodes": results, "self_id": self_id }))
 }
@@ -15742,6 +15742,367 @@ where
     futures::future::join_all(tasks).await
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Authorised keys — root SSH keys, per host or fleet-wide.
+//
+// Every mutation re-anchors the tamper-detection baseline in the same
+// operation (see ssh_keys::write_authorized_keys), so a key added
+// here never surfaces as drift. That is the point of the feature: it
+// gives operators a sanctioned path, which in turn lets
+// predictive::tamper_detection treat every REMAINING authorized_keys
+// change as genuinely out-of-band.
+// ════════════════════════════════════════════════════════════════════
+
+#[derive(Serialize, Deserialize)]
+pub struct SshKeyListResponse {
+    pub keys: Vec<crate::ssh_keys::HostKey>,
+    /// Entries present in the file that this manager doesn't model
+    /// (options-carrying lines, CA delegations). Counted so the UI can
+    /// say "2 entries not shown" instead of implying the list is the
+    /// whole file.
+    pub unmanaged_entries: usize,
+    pub sshd: crate::ssh_keys::SshdKeyPosture,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SshKeyMutationResult {
+    /// "added" | "unchanged" | "removed"
+    pub outcome: String,
+    pub fingerprint: String,
+}
+
+#[derive(Deserialize)]
+pub struct SshKeyAddRequest {
+    pub public_key: String,
+    #[serde(default)]
+    pub label: String,
+    /// Set by a coordinating peer so the audit trail names the human
+    /// who started the fleet operation rather than just "cluster-node".
+    #[serde(default)]
+    pub actor: String,
+}
+
+#[derive(Deserialize)]
+pub struct SshKeyRemoveRequest {
+    pub fingerprint: String,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub actor: String,
+}
+
+#[derive(Deserialize)]
+pub struct SshKeyFleetAddRequest {
+    pub public_key: String,
+    #[serde(default)]
+    pub label: String,
+    /// Empty means every WolfStack node in this cluster.
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SshKeyFleetRemoveRequest {
+    pub fingerprint: String,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Who to record as having made the change.
+///
+/// A peer authenticates as "cluster-node", which on its own would
+/// make every fleet operation anonymous in the baseline audit trail.
+/// When the caller is a peer we therefore accept the operator name it
+/// forwarded — the peer already holds the cluster secret, so this
+/// grants no new authority, it just keeps the trail honest. The value
+/// is sanitised because it lands in a JSON file on disk.
+fn resolve_key_actor(auth_user: &str, forwarded: &str) -> String {
+    if auth_user != "cluster-node" || forwarded.trim().is_empty() {
+        return auth_user.to_string();
+    }
+    let clean: String = forwarded
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
+        .take(64)
+        .collect();
+    if clean.is_empty() {
+        auth_user.to_string()
+    } else {
+        format!("{} (via cluster)", clean)
+    }
+}
+
+/// GET /api/ssh-keys — root's authorised keys on THIS node.
+pub async fn ssh_keys_list(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match tokio::task::spawn_blocking(ssh_keys_list_local).await {
+        Ok(Ok(r)) => HttpResponse::Ok().json(r),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("list task panicked: {}", e) })),
+    }
+}
+
+/// Blocking body of the list — file read plus `sshd -T`.
+fn ssh_keys_list_local() -> Result<SshKeyListResponse, String> {
+    let (keys, unmanaged_entries) = crate::ssh_keys::list_root_keys()?;
+    Ok(SshKeyListResponse {
+        keys,
+        unmanaged_entries,
+        sshd: crate::ssh_keys::sshd_key_posture(),
+    })
+}
+
+/// POST /api/ssh-keys/add-local — authorise a key on THIS node.
+/// Callable by an operator directly or by a fleet coordinator.
+pub async fn ssh_keys_add_local(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SshKeyAddRequest>,
+) -> HttpResponse {
+    let user = match require_auth(&req, &state) { Ok(u) => u, Err(e) => return e };
+    let body = body.into_inner();
+    let actor = resolve_key_actor(&user, &body.actor);
+    // Validate before dispatching to the blocking pool so a bad paste
+    // comes back as a 400, not a 500.
+    let key = match crate::ssh_keys::validate(&body.public_key, &body.label) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    match tokio::task::spawn_blocking(move || ssh_keys_add_blocking(key, actor)).await {
+        Ok(Ok(r)) => HttpResponse::Ok().json(r),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("add task panicked: {}", e) })),
+    }
+}
+
+fn ssh_keys_add_blocking(
+    key: crate::ssh_keys::PublicKey,
+    actor: String,
+) -> Result<SshKeyMutationResult, String> {
+    let fingerprint = key.fingerprint();
+    let outcome = crate::ssh_keys::add_root_key(&key, &actor)?;
+    Ok(SshKeyMutationResult {
+        outcome: match outcome {
+            crate::ssh_keys::AddOutcome::Added => "added".into(),
+            crate::ssh_keys::AddOutcome::AlreadyPresent => "unchanged".into(),
+        },
+        fingerprint,
+    })
+}
+
+/// POST /api/ssh-keys/remove-local — de-authorise a key on THIS node.
+pub async fn ssh_keys_remove_local(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SshKeyRemoveRequest>,
+) -> HttpResponse {
+    let user = match require_auth(&req, &state) { Ok(u) => u, Err(e) => return e };
+    let body = body.into_inner();
+    let actor = resolve_key_actor(&user, &body.actor);
+    let fp = body.fingerprint.clone();
+    let force = body.force;
+    match tokio::task::spawn_blocking(move || ssh_keys_remove_blocking(fp, actor, force)).await {
+        Ok(Ok(r)) => HttpResponse::Ok().json(r),
+        // The lockout refusal is a considered "no", not a server fault —
+        // 409 so the UI can style it as a blocked action rather than an
+        // error to retry.
+        Ok(Err(e)) if e.starts_with("REFUSED") =>
+            HttpResponse::Conflict().json(serde_json::json!({ "error": e })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("remove task panicked: {}", e) })),
+    }
+}
+
+fn ssh_keys_remove_blocking(
+    fingerprint: String,
+    actor: String,
+    force: bool,
+) -> Result<SshKeyMutationResult, String> {
+    crate::ssh_keys::remove_root_key(&fingerprint, &actor, force)?;
+    Ok(SshKeyMutationResult { outcome: "removed".into(), fingerprint })
+}
+
+/// True when `targets` includes this node (or targets everything).
+fn self_is_targeted(state: &web::Data<AppState>, targets: &[String]) -> bool {
+    if targets.is_empty() { return true; }
+    let self_id = state.cluster.self_id.clone();
+    targets.contains(&self_id)
+}
+
+/// GET /api/ssh-keys/fleet — every node's authorised keys, plus a
+/// merged per-key view of which nodes hold it.
+pub async fn ssh_keys_fleet_list(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    // Compute this node's answer off the executor, then hand the
+    // ready value to the fan-out.
+    let local = tokio::task::spawn_blocking(ssh_keys_list_local).await
+        .unwrap_or_else(|e| Err(format!("list task panicked: {}", e)));
+    let local_for_fanout = local.unwrap_or_else(|e| {
+        tracing::warn!("ssh_keys: local key list failed during fleet fan-out: {}", e);
+        SshKeyListResponse {
+            keys: Vec::new(),
+            unmanaged_entries: 0,
+            sshd: crate::ssh_keys::sshd_key_posture(),
+        }
+    });
+    let nodes = fleet_fanout_get::<SshKeyListResponse, _>(
+        &state, "/api/ssh-keys", move || local_for_fanout,
+    ).await;
+
+    // Merge by fingerprint. `missing_on` lists only nodes that
+    // actually answered — a node we couldn't reach is unknown, not
+    // missing, and claiming otherwise would invite someone to "fix"
+    // a gap that isn't there.
+    let mut merged: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+    let answered: Vec<&FleetNodeResult<SshKeyListResponse>> =
+        nodes.iter().filter(|n| n.status == "ok" && n.data.is_some()).collect();
+    for n in &answered {
+        for k in &n.data.as_ref().unwrap().keys {
+            merged.entry(k.fingerprint.clone()).or_insert_with(|| serde_json::json!({
+                "fingerprint": k.fingerprint,
+                "key_type": k.key_type,
+                "comment": k.comment,
+                "present_on": [],
+                "missing_on": [],
+            }));
+        }
+    }
+    for (fp, entry) in merged.iter_mut() {
+        let mut present = Vec::new();
+        let mut missing = Vec::new();
+        for n in &answered {
+            let has = n.data.as_ref().unwrap().keys.iter().any(|k| k.fingerprint == *fp);
+            let who = serde_json::json!({ "node_id": n.node_id, "hostname": n.hostname });
+            if has { present.push(who); } else { missing.push(who); }
+        }
+        entry["present_on"] = serde_json::Value::Array(present);
+        entry["missing_on"] = serde_json::Value::Array(missing);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "nodes": nodes,
+        "keys": merged.into_values().collect::<Vec<_>>(),
+        "nodes_answered": answered.len(),
+        // Lets the UI label "this server" without a second round-trip.
+        "self_id": state.cluster.self_id.clone(),
+    }))
+}
+
+/// POST /api/ssh-keys/add-fleet — authorise one key across the
+/// selected nodes (default: all).
+pub async fn ssh_keys_add_fleet(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SshKeyFleetAddRequest>,
+) -> HttpResponse {
+    let user = match require_auth(&req, &state) { Ok(u) => u, Err(e) => return e };
+    let body = body.into_inner();
+    // Validate once, here, so an invalid key fails as a single clear
+    // 400 instead of an identical failure repeated on every node.
+    let key = match crate::ssh_keys::validate(&body.public_key, &body.label) {
+        Ok(k) => k,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    let local = if self_is_targeted(&state, &body.targets) {
+        let k = key.clone();
+        let a = user.clone();
+        Some(tokio::task::spawn_blocking(move || ssh_keys_add_blocking(k, a)).await
+            .unwrap_or_else(|e| Err(format!("add task panicked: {}", e))))
+    } else { None };
+
+    // Peers receive the canonical rendered key, not the operator's raw
+    // paste, so every node stores byte-identical material.
+    let peer_body = serde_json::json!({
+        "public_key": key.to_line(),
+        "label": key.comment,
+        "actor": user,
+    });
+    let results = fleet_fanout_post::<SshKeyMutationResult>(
+        &state, "/api/ssh-keys/add-local", peer_body, &body.targets, local, FANOUT_QUICK,
+    ).await;
+    HttpResponse::Ok().json(ssh_keys_fleet_summary(results, &key.fingerprint()))
+}
+
+/// POST /api/ssh-keys/remove-fleet — de-authorise one key across the
+/// selected nodes (default: all).
+pub async fn ssh_keys_remove_fleet(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SshKeyFleetRemoveRequest>,
+) -> HttpResponse {
+    let user = match require_auth(&req, &state) { Ok(u) => u, Err(e) => return e };
+    let body = body.into_inner();
+    if body.fingerprint.is_empty() || !body.fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "error": "Invalid key fingerprint" }));
+    }
+    let local = if self_is_targeted(&state, &body.targets) {
+        let fp = body.fingerprint.clone();
+        let a = user.clone();
+        let force = body.force;
+        Some(tokio::task::spawn_blocking(move || ssh_keys_remove_blocking(fp, a, force)).await
+            .unwrap_or_else(|e| Err(format!("remove task panicked: {}", e))))
+    } else { None };
+
+    let peer_body = serde_json::json!({
+        "fingerprint": body.fingerprint,
+        "force": body.force,
+        "actor": user,
+    });
+    let results = fleet_fanout_post::<SshKeyMutationResult>(
+        &state, "/api/ssh-keys/remove-local", peer_body, &body.targets, local, FANOUT_QUICK,
+    ).await;
+    HttpResponse::Ok().json(ssh_keys_fleet_summary(results, &body.fingerprint))
+}
+
+/// Shared response shape for both fleet mutations.
+///
+/// The summary counts "not found on this host" as its own outcome
+/// rather than a failure: removing a key fleet-wide when only three
+/// nodes had it is a complete success, and reporting three failures
+/// would send the operator chasing nothing.
+fn ssh_keys_fleet_summary(
+    results: Vec<FleetNodeResult<SshKeyMutationResult>>,
+    fingerprint: &str,
+) -> serde_json::Value {
+    let changed = results.iter()
+        .filter(|r| r.data.as_ref().is_some_and(|d| d.outcome == "added" || d.outcome == "removed"))
+        .count();
+    let unchanged = results.iter()
+        .filter(|r| r.data.as_ref().is_some_and(|d| d.outcome == "unchanged"))
+        .count();
+    let not_present = results.iter()
+        .filter(|r| r.status == "failed"
+            && r.error.as_deref().is_some_and(|e| e.contains("No key with that fingerprint")))
+        .count();
+    let failed = results.iter().filter(|r| r.status == "failed").count() - not_present;
+    let skipped = results.iter().filter(|r| r.status == "skipped").count();
+    serde_json::json!({
+        "fingerprint": fingerprint,
+        "summary": format!(
+            "{} changed, {} already matched, {} without the key, {} failed, {} skipped",
+            changed, unchanged, not_present, failed, skipped,
+        ),
+        "changed": changed,
+        "unchanged": unchanged,
+        "not_present": not_present,
+        "failed": failed,
+        "skipped": skipped,
+        "results": results,
+    })
+}
+
 /// GET /api/fleet/security/lockouts — aggregated blocked-IP view
 /// across every WolfStack node in this cluster AND every federated
 /// cluster registered here. UI uses this to power the "Fleet blocked
@@ -16669,19 +17030,34 @@ pub async fn fleet_security_host_audit(
 // Fleet-wide install/scan/quarantine. See src/antivirus/mod.rs.
 // ════════════════════════════════════════════════════════════════════
 
-/// Fan a POST out to every WolfStack peer in the cluster. Mirrors
-/// `fleet_fanout_get` but uses POST + JSON body. The local closure
-/// runs in-process for "this" node so we don't waste a loopback HTTP
-/// round-trip.
-async fn fleet_fanout_post<Resp, Local>(
+/// How long a fan-out POST waits per node. Fleet installs shell out
+/// to `apt-get` and legitimately take minutes; an authorised-key edit
+/// is a file write, and making the operator stare at a spinner for
+/// five minutes because one node is unreachable is its own bug.
+pub const FANOUT_SLOW: std::time::Duration = std::time::Duration::from_secs(300);
+pub const FANOUT_QUICK: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Fan a POST out to WolfStack peers in the cluster. Mirrors
+/// `fleet_fanout_get` but uses POST + JSON body.
+///
+/// * `targets` — empty means every node; otherwise only the listed
+///   node ids, and nodes outside the list are omitted entirely rather
+///   than reported as skipped (they were never asked to act).
+/// * `local` — this node's ALREADY-COMPUTED result, or None when self
+///   isn't targeted. Passing the value rather than a closure lets
+///   callers whose local work blocks (filesystem, subprocesses)
+///   compute it on `spawn_blocking` first, off the async executor.
+/// * `timeout` — see `FANOUT_SLOW` / `FANOUT_QUICK`.
+async fn fleet_fanout_post<Resp>(
     state: &web::Data<AppState>,
     path: &str,
     body: serde_json::Value,
-    local: Local,
+    targets: &[String],
+    local: Option<Result<Resp, String>>,
+    timeout: std::time::Duration,
 ) -> Vec<FleetNodeResult<Resp>>
 where
     Resp: serde::de::DeserializeOwned + Serialize + Send + 'static,
-    Local: FnOnce() -> Resp,
 {
     let (self_id, peers) = {
         let n = state.cluster.nodes.read().unwrap();
@@ -16690,9 +17066,12 @@ where
         (self_id, peers)
     };
     let secret = state.cluster_secret.clone();
-    let local_result = std::sync::Mutex::new(Some(local()));
+    let local_result = std::sync::Mutex::new(local);
     let mut tasks = Vec::new();
     for node in peers {
+        if !targets.is_empty() && !targets.contains(&node.id) {
+            continue;
+        }
         let is_self = node.id == self_id;
         let secret_c = secret.clone();
         let path = path.to_string();
@@ -16702,10 +17081,23 @@ where
             g.take()
         } else { None };
         tasks.push(async move {
-            if let Some(data) = local_ref {
-                return FleetNodeResult {
-                    node_id: node.id, hostname: node.hostname, address: node.address,
-                    status: "ok".into(), data: Some(data), error: None,
+            if is_self {
+                return match local_ref {
+                    Some(Ok(data)) => FleetNodeResult {
+                        node_id: node.id, hostname: node.hostname, address: node.address,
+                        status: "ok".into(), data: Some(data), error: None,
+                    },
+                    Some(Err(e)) => FleetNodeResult {
+                        node_id: node.id, hostname: node.hostname, address: node.address,
+                        status: "failed".into(), data: None, error: Some(e),
+                    },
+                    // Only reachable if self appears twice in the node
+                    // map — surface it rather than silently reporting ok.
+                    None => FleetNodeResult {
+                        node_id: node.id, hostname: node.hostname, address: node.address,
+                        status: "failed".into(), data: None,
+                        error: Some("local result already consumed (duplicate self node?)".into()),
+                    },
                 };
             }
             if node.node_type != "wolfstack" {
@@ -16716,14 +17108,12 @@ where
                 };
             }
             let urls = build_node_urls(&node.address, node.port, &path);
-            // 5-minute timeout — `apt-get install` on a fresh mirror
-            // refresh can legitimately take a couple of minutes.
             // Shared pooled inter-node client (identical TLS policy).
             let client = &*API_HTTP_CLIENT;
             let mut errors: Vec<String> = Vec::new();
             for url in &urls {
                 let resp = client.post(url)
-                    .timeout(std::time::Duration::from_secs(300))
+                    .timeout(timeout)
                     .header("X-WolfStack-Secret", &secret_c)
                     .json(&body_c)
                     .send().await;
@@ -16740,8 +17130,14 @@ where
                     Ok(r) => {
                         let status = r.status();
                         let body = r.text().await.unwrap_or_default();
-                        let preview = body.chars().take(300).collect::<String>();
-                        errors.push(format!("{} -> HTTP {}: {}", url, status, preview));
+                        // The remote's own message is the useful part
+                        // (e.g. a considered refusal), so lift it out of
+                        // the JSON envelope when there is one.
+                        let detail = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|j| j.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                            .unwrap_or_else(|| body.chars().take(300).collect());
+                        errors.push(format!("{} -> HTTP {}: {}", url, status, detail));
                     }
                     Err(e) => errors.push(format!("{} -> transport: {}", url, e)),
                 }
@@ -17101,8 +17497,8 @@ pub async fn fleet_antivirus_install(
         });
         serde_json::json!({ "ok": true, "started": true })
     };
-    let results = fleet_fanout_post::<serde_json::Value, _>(
-        &state, "/api/antivirus/install", serde_json::json!({}), local,
+    let results = fleet_fanout_post::<serde_json::Value>(
+        &state, "/api/antivirus/install", serde_json::json!({}), &[], Some(Ok(local())), FANOUT_SLOW,
     ).await;
     HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
 }
@@ -17125,8 +17521,8 @@ pub async fn fleet_antivirus_scan(
         std::thread::spawn(move || { let _ = crate::antivirus::run_full_scan(&av); });
         serde_json::json!({ "ok": true, "started": true })
     };
-    let results = fleet_fanout_post::<serde_json::Value, _>(
-        &state, "/api/antivirus/scan", serde_json::json!({}), local,
+    let results = fleet_fanout_post::<serde_json::Value>(
+        &state, "/api/antivirus/scan", serde_json::json!({}), &[], Some(Ok(local())), FANOUT_SLOW,
     ).await;
     HttpResponse::Ok().json(serde_json::json!({ "nodes": results }))
 }
@@ -19394,6 +19790,214 @@ pub struct PbsConfigRequest {
     /// Store content as native pxar (file-level) so PBS per-file restore works.
     #[serde(default)]
     pub pbs_file_level: bool,
+}
+
+// ─── Additional PBS destinations ──────────────────────────────────
+//
+// One PBS server can host several datastores with different backends
+// — PBS 4 added external S3 alongside local/NAS — and operators want
+// to choose per backup. These endpoints manage the extra destinations;
+// `backup::merge_pbs_secrets` binds a backup to one via
+// `pbs_target_id`. Empty fields on a destination inherit from the
+// primary connection, so a second datastore on the same server needs
+// only a name and a datastore name.
+
+/// Strip secrets from a destination before it goes over the wire.
+/// Mirrors `pbs_config_get`: the UI needs to know whether a credential
+/// is set, never what it is.
+fn pbs_target_public(t: &backup::PbsTarget) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id,
+        "name": t.name,
+        "pbs_server": t.pbs_server,
+        "pbs_datastore": t.pbs_datastore,
+        "pbs_user": t.pbs_user,
+        "pbs_token_name": t.pbs_token_name,
+        "pbs_fingerprint": t.pbs_fingerprint,
+        "pbs_namespace": t.pbs_namespace,
+        "pbs_file_level": t.pbs_file_level,
+        "pbs_file_level_set": t.pbs_file_level_set,
+        "has_token_secret": !t.pbs_token_secret.is_empty(),
+        "has_password": !t.pbs_password.is_empty(),
+    })
+}
+
+/// GET /api/backups/pbs/targets — additional PBS destinations, with
+/// each one's effective (post-inheritance) server and datastore so the
+/// UI can show where a backup would actually land.
+pub async fn pbs_targets_list(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let targets = backup::load_pbs_targets();
+    let out: Vec<serde_json::Value> = targets.iter().map(|t| {
+        let resolved = backup::resolve_pbs_target(t);
+        let mut v = pbs_target_public(t);
+        v["effective_server"] = serde_json::json!(resolved.pbs_server);
+        v["effective_datastore"] = serde_json::json!(resolved.pbs_datastore);
+        v
+    }).collect();
+    HttpResponse::Ok().json(out)
+}
+
+#[derive(Deserialize)]
+pub struct PbsTargetRequest {
+    /// Empty on create; set when editing an existing destination.
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub pbs_server: String,
+    pub pbs_datastore: String,
+    #[serde(default)]
+    pub pbs_user: String,
+    #[serde(default)]
+    pub pbs_token_name: String,
+    #[serde(default)]
+    pub pbs_token_secret: String,
+    #[serde(default)]
+    pub pbs_password: String,
+    #[serde(default)]
+    pub pbs_fingerprint: String,
+    #[serde(default)]
+    pub pbs_namespace: String,
+    #[serde(default)]
+    pub pbs_file_level: bool,
+    #[serde(default)]
+    pub pbs_file_level_set: bool,
+}
+
+/// Build a `PbsTarget` from a request, carrying forward secrets the
+/// operator didn't re-type (the form never receives them back, so an
+/// empty field means "unchanged", not "clear it").
+fn pbs_target_from_request(body: &PbsTargetRequest, existing: Option<&backup::PbsTarget>) -> backup::PbsTarget {
+    backup::PbsTarget {
+        id: existing.map(|e| e.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        name: body.name.trim().to_string(),
+        pbs_server: body.pbs_server.trim().to_string(),
+        pbs_datastore: body.pbs_datastore.trim().to_string(),
+        pbs_user: body.pbs_user.trim().to_string(),
+        pbs_token_name: body.pbs_token_name.trim().to_string(),
+        pbs_token_secret: if body.pbs_token_secret.is_empty() {
+            existing.map(|e| e.pbs_token_secret.clone()).unwrap_or_default()
+        } else { body.pbs_token_secret.clone() },
+        pbs_password: if body.pbs_password.is_empty() {
+            existing.map(|e| e.pbs_password.clone()).unwrap_or_default()
+        } else { body.pbs_password.clone() },
+        pbs_fingerprint: body.pbs_fingerprint.trim().to_string(),
+        pbs_namespace: body.pbs_namespace.trim().to_string(),
+        pbs_file_level: body.pbs_file_level,
+        pbs_file_level_set: body.pbs_file_level_set,
+    }
+}
+
+/// POST /api/backups/pbs/targets — create or update a destination.
+pub async fn pbs_targets_save(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<PbsTargetRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let body = body.into_inner();
+    if body.name.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "error": "Give this destination a name" }));
+    }
+    if body.pbs_datastore.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "error": "Datastore is required — it's what makes this a separate destination" }));
+    }
+    let mut targets = backup::load_pbs_targets();
+    let existing = targets.iter().find(|t| t.id == body.id).cloned();
+    if !body.id.is_empty() && existing.is_none() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({ "error": "That PBS destination no longer exists" }));
+    }
+    let target = pbs_target_from_request(&body, existing.as_ref());
+    match targets.iter_mut().find(|t| t.id == target.id) {
+        Some(slot) => *slot = target.clone(),
+        None => targets.push(target.clone()),
+    }
+    if let Err(e) = backup::save_pbs_targets(&targets) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    let resolved = backup::resolve_pbs_target(&target);
+    tracing::info!(
+        "backup: saved PBS destination '{}' -> {}:{}",
+        target.name, resolved.pbs_server, resolved.pbs_datastore,
+    );
+    HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "target": pbs_target_public(&target),
+        "effective_server": resolved.pbs_server,
+        "effective_datastore": resolved.pbs_datastore,
+    }))
+}
+
+/// POST /api/backups/pbs/targets/test — prove a destination works.
+/// Accepts an unsaved destination so the operator can verify a
+/// datastore name BEFORE committing a schedule to it.
+pub async fn pbs_targets_test(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<PbsTargetRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let body = body.into_inner();
+    let existing = if body.id.is_empty() { None } else { backup::find_pbs_target(&body.id) };
+    let target = pbs_target_from_request(&body, existing.as_ref());
+    let resolved = backup::resolve_pbs_target(&target);
+    // proxmox-backup-client is a subprocess — keep it off the executor.
+    let result = tokio::task::spawn_blocking(move || backup::test_pbs_target(&target)).await;
+    match result {
+        Ok(Ok(count)) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": true,
+            "server": resolved.pbs_server,
+            "datastore": resolved.pbs_datastore,
+            "snapshot_count": count,
+        })),
+        Ok(Err(e)) => HttpResponse::Ok().json(serde_json::json!({
+            "ok": false,
+            "server": resolved.pbs_server,
+            "datastore": resolved.pbs_datastore,
+            "error": e,
+        })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("PBS test task panicked: {}", e) })),
+    }
+}
+
+/// DELETE /api/backups/pbs/targets/{id} — remove a destination.
+///
+/// Refuses while a schedule still points at it: deleting anyway would
+/// leave that schedule failing every night with nothing to explain why.
+pub async fn pbs_targets_delete(
+    req: HttpRequest, state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = path.into_inner();
+    let users: Vec<String> = backup::list_schedules().into_iter()
+        .filter(|s| s.storage.pbs_target_id == id)
+        .map(|s| s.name)
+        .collect();
+    if !users.is_empty() {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "{} schedule(s) still back up to this destination: {}. Point them somewhere else first.",
+                users.len(), users.join(", "),
+            ),
+        }));
+    }
+    let mut targets = backup::load_pbs_targets();
+    let before = targets.len();
+    targets.retain(|t| t.id != id);
+    if targets.len() == before {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({ "error": "That PBS destination no longer exists" }));
+    }
+    if let Err(e) = backup::save_pbs_targets(&targets) {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
 
 /// GET /api/backups/pbs/config/full — return PBS config INCLUDING secrets (for node-to-node copy)
@@ -41335,6 +41939,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Emergency security actions — fleet-wide root password rotation
         .route("/api/security/rotate-root-local", web::post().to(security_rotate_root_local))
         .route("/api/security/rotate-fleet", web::post().to(security_rotate_fleet))
+        // Authorised keys — root SSH keys per host or fleet-wide. Every
+        // mutation reseeds the tamper baseline (see ssh_keys module).
+        .route("/api/ssh-keys", web::get().to(ssh_keys_list))
+        .route("/api/ssh-keys/add-local", web::post().to(ssh_keys_add_local))
+        .route("/api/ssh-keys/remove-local", web::post().to(ssh_keys_remove_local))
+        .route("/api/ssh-keys/fleet", web::get().to(ssh_keys_fleet_list))
+        .route("/api/ssh-keys/add-fleet", web::post().to(ssh_keys_add_fleet))
+        .route("/api/ssh-keys/remove-fleet", web::post().to(ssh_keys_remove_fleet))
         // Brute-force lockout management
         .route("/api/security/auth-config", web::get().to(security_auth_config_get))
         .route("/api/security/auth-config", web::post().to(security_auth_config_set))
@@ -41476,6 +42088,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/pbs/config/full", web::get().to(pbs_config_get_full))
         .route("/api/backups/pbs/config", web::get().to(pbs_config_get))
         .route("/api/backups/pbs/config", web::post().to(pbs_config_save))
+        // Additional PBS destinations — /test before /{id} so the
+        // literal path can't be captured as a destination id.
+        .route("/api/backups/pbs/targets/test", web::post().to(pbs_targets_test))
+        .route("/api/backups/pbs/targets", web::get().to(pbs_targets_list))
+        .route("/api/backups/pbs/targets", web::post().to(pbs_targets_save))
+        .route("/api/backups/pbs/targets/{id}", web::delete().to(pbs_targets_delete))
         // Generic backup {id} routes — after specific routes
         .route("/api/backups/{id}", web::delete().to(backup_delete))
         .route("/api/backups/{id}/restore/stream", web::post().to(backup_restore_stream))

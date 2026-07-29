@@ -1865,28 +1865,92 @@ pub fn ensure_ipset_installed() {
     }
 }
 
-/// Ensure `-m set --match-set <set> src -j DROP` exists at the top of `chain`
-/// for the given iptables variant. Idempotent (`-C` then `-I`). Returns true
-/// if the rule is present (or the binary is simply absent — e.g. no ip6tables,
-/// which is not fatal for the other family); false only if the rule genuinely
-/// could not be installed (e.g. the `set` match module is missing).
+/// The blocklist DROP rule for one ipset.
+///
+/// `--ctstate NEW` is load-bearing, not decoration. A brute-force
+/// lockout is a statement about INBOUND connection attempts — "new
+/// connections fail at SYN", as the design note above says. Without
+/// the conntrack match the rule drops *every* packet from that
+/// address, including the SYN-ACK answering a connection THIS host
+/// initiated. Blocking an abusive IP then silently destroys our
+/// ability to reach it, which is the opposite of what a lockout means
+/// and presents as a remote outage rather than a local firewall rule.
+///
+/// That is not hypothetical: WolfStack locked out 116.202.127.11 on
+/// 2026-07-28, and every outbound HTTPS call from a region host to
+/// that address returned nothing for the next 48 hours — the SYNs
+/// left fine and our own INPUT rule dropped the replies.
+///
+/// `predictive::threat_intel::rule_spec` has always had this match on
+/// INPUT; this is the same fix applied to the auth blocklist. The two
+/// modules differ deliberately elsewhere: threat-intel also carries an
+/// OUTPUT rule because severing traffic TO a listed C2 address is its
+/// job. A lockout has no OUTPUT rule and should not behave as if it
+/// did.
+fn block_rule_spec(set: &str) -> Vec<&str> {
+    vec!["-m", "conntrack", "--ctstate", "NEW",
+         "-m", "set", "--match-set", set, "src", "-j", "DROP"]
+}
+
+/// Pre-v25.6.0 stateless form. Kept solely so existing installs can
+/// have it removed — a deployed host already has this sitting at
+/// position 1 of INPUT and FORWARD, and inserting the corrected rule
+/// above it changes nothing while the old one still matches.
+fn legacy_block_rule_spec(set: &str) -> Vec<&str> {
+    vec!["-m", "set", "--match-set", set, "src", "-j", "DROP"]
+}
+
+/// Delete every copy of the stateless pre-v25.6.0 rule from `chain`.
+///
+/// Bounded loop because `-D` removes one match per call: a host that
+/// somehow stacked copies gets all of them cleared, and the loop can't
+/// spin if the delete starts succeeding forever.
+fn remove_legacy_stateless_rule(cmd: &str, chain: &str, set: &str) {
+    let legacy = legacy_block_rule_spec(set);
+    for _ in 0..8 {
+        let removed = std::process::Command::new(cmd)
+            .arg("-D").arg(chain).args(&legacy)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !removed { break; }
+        tracing::warn!(
+            "auth: removed legacy stateless blocklist rule from {} {} — it was \
+             dropping replies to connections this host initiated",
+            cmd, chain,
+        );
+    }
+}
+
+/// Ensure the blocklist DROP rule exists at the top of `chain` for the
+/// given iptables variant, and that the legacy stateless form is gone.
+/// Idempotent (`-C` then `-I`). Returns true if the rule is present (or
+/// the binary is simply absent — e.g. no ip6tables, which is not fatal
+/// for the other family); false only if the rule genuinely could not be
+/// installed (e.g. the `set` match module is missing).
+///
+/// Order matters: install the corrected rule BEFORE deleting the legacy
+/// one, so there is never a window in which a locked-out address is
+/// unblocked.
 fn ensure_match_set_rule(cmd: &str, chain: &str, set: &str) -> bool {
-    if let Ok(o) = std::process::Command::new(cmd)
-        .args(["-C", chain, "-m", "set", "--match-set", set, "src", "-j", "DROP"])
+    let rule = block_rule_spec(set);
+    let present = std::process::Command::new(cmd)
+        .arg("-C").arg(chain).args(&rule)
         .output()
-    {
-        if o.status.success() {
-            return true;
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !present {
+        match std::process::Command::new(cmd)
+            .arg("-I").arg(chain).arg("1").args(&rule)
+            .output()
+        {
+            Ok(o) if o.status.success() => {}
+            Err(_) => return true, // variant binary missing — don't fail the other family
+            Ok(_) => return false, // present but couldn't install (xt_set missing) → fall back
         }
     }
-    match std::process::Command::new(cmd)
-        .args(["-I", chain, "1", "-m", "set", "--match-set", set, "src", "-j", "DROP"])
-        .output()
-    {
-        Ok(o) if o.status.success() => true,
-        Err(_) => true, // variant binary missing — don't fail the other family
-        Ok(_) => false, // present but couldn't install (xt_set missing) → fall back
-    }
+    remove_legacy_stateless_rule(cmd, chain, set);
+    true
 }
 
 /// Idempotently create the auto-block ipset for ONE family (v4 or v6) and its
@@ -2057,21 +2121,43 @@ pub fn kernel_block_ip(ip: &str) {
     trigger_macvlan_reconcile();
 }
 
-/// Idempotently insert `-I <chain> 1 -s <ip> -j DROP` for the given
-/// iptables variant. No-op if the rule already exists.
+/// Per-IP DROP spec used when ipset isn't available. Carries the same
+/// `--ctstate NEW` match as the ipset rule and for the same reason: a
+/// lockout must drop the attacker's new connection attempts without
+/// also dropping replies to connections this host made. See
+/// `block_rule_spec`.
+fn per_ip_rule_spec(ip: &str) -> Vec<&str> {
+    vec!["-m", "conntrack", "--ctstate", "NEW", "-s", ip, "-j", "DROP"]
+}
+
+/// Pre-v25.6.0 stateless per-IP form, for removal only.
+fn legacy_per_ip_rule_spec(ip: &str) -> Vec<&str> {
+    vec!["-s", ip, "-j", "DROP"]
+}
+
+/// Idempotently insert the per-IP DROP at the top of `chain` for the
+/// given iptables variant, and clear any stateless copy left by an
+/// older WolfStack. No-op if the correct rule already exists.
 fn insert_drop_rule(cmd: &str, chain: &str, ip: &str) {
+    let rule = per_ip_rule_spec(ip);
     let check = std::process::Command::new(cmd)
-        .args(["-C", chain, "-s", ip, "-j", "DROP"])
+        .arg("-C").arg(chain).args(&rule)
         .output();
     if let Ok(out) = check {
-        if out.status.success() { return; }  // rule already present
+        if out.status.success() {
+            // Already correct — still sweep the legacy form, which an
+            // upgrade from a pre-fix build leaves sitting below it.
+            remove_legacy_per_ip_rule(cmd, chain, ip);
+            return;
+        }
     }
     let r = std::process::Command::new(cmd)
-        .args(["-I", chain, "1", "-s", ip, "-j", "DROP"])
+        .arg("-I").arg(chain).arg("1").args(&rule)
         .output();
     match r {
         Ok(o) if o.status.success() => {
             tracing::warn!("auth: kernel-blocked {} in {}/{}", ip, cmd, chain);
+            remove_legacy_per_ip_rule(cmd, chain, ip);
         }
         Ok(o) => {
             tracing::error!(
@@ -2082,6 +2168,26 @@ fn insert_drop_rule(cmd: &str, chain: &str, ip: &str) {
         Err(e) => {
             tracing::error!("auth: could not run {} to block {} in {}: {}", cmd, ip, chain, e);
         }
+    }
+}
+
+/// Delete every stateless pre-v25.6.0 per-IP rule for `ip` from `chain`.
+/// Only called once the corrected rule is in place, so the address is
+/// never briefly unblocked.
+fn remove_legacy_per_ip_rule(cmd: &str, chain: &str, ip: &str) {
+    let legacy = legacy_per_ip_rule_spec(ip);
+    for _ in 0..10 {
+        let removed = std::process::Command::new(cmd)
+            .arg("-D").arg(chain).args(&legacy)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !removed { break; }
+        tracing::warn!(
+            "auth: removed legacy stateless DROP for {} from {} {} — it was \
+             dropping replies to connections this host initiated",
+            ip, cmd, chain,
+        );
     }
 }
 
@@ -2114,14 +2220,24 @@ pub fn kernel_unblock_ip(ip: &str) {
     trigger_macvlan_reconcile();
 }
 
+/// Remove every per-IP DROP for `ip` from `chain` — BOTH the current
+/// conntrack form and the stateless pre-v25.6.0 one.
+///
+/// Both forms must be swept. A host upgraded mid-lockout has the new
+/// rule, one that never restarted has the old, and one blocked before
+/// the upgrade and unblocked after has both. Deleting only the form
+/// this build happens to write would leave the other in place and the
+/// address blocked forever with nothing in the UI to explain it.
 fn remove_drop_rule(cmd: &str, chain: &str, ip: &str) {
-    for _ in 0..10 {
-        let r = std::process::Command::new(cmd)
-            .args(["-D", chain, "-s", ip, "-j", "DROP"])
-            .output();
-        match r {
-            Ok(o) if o.status.success() => continue,
-            _ => break,
+    for rule in [per_ip_rule_spec(ip), legacy_per_ip_rule_spec(ip)] {
+        for _ in 0..10 {
+            let r = std::process::Command::new(cmd)
+                .arg("-D").arg(chain).args(&rule)
+                .output();
+            match r {
+                Ok(o) if o.status.success() => continue,
+                _ => break,
+            }
         }
     }
 }
@@ -2281,15 +2397,18 @@ fn reconcile_one_netns(t: &crate::containers::NetnsTarget, cmd: &str, want: &[St
         if want.iter().any(|w| w == ip) {
             continue;
         }
-        for _ in 0..10 {
-            let removed = nsenter_ipt(
-                t.pid, cmd,
-                &["-D", "INPUT", "-s", ip, "-m", "comment", "--comment", NS_BLOCK_TAG, "-j", "DROP"],
-            )
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-            if !removed {
-                break;
+        // Sweep both the conntrack form and the stateless pre-v25.6.0
+        // one — see remove_drop_rule for why both must go.
+        for spec in [ns_block_spec(ip), legacy_ns_block_spec(ip)] {
+            for _ in 0..10 {
+                let mut args = vec!["-D", "INPUT"];
+                args.extend(spec.iter().copied());
+                let removed = nsenter_ipt(t.pid, cmd, &args)
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !removed {
+                    break;
+                }
             }
         }
         tracing::info!("auth: lifted ns-block {} in {} ({})", ip, t.label, cmd);
@@ -2300,25 +2419,54 @@ fn reconcile_one_netns(t: &crate::containers::NetnsTarget, cmd: &str, want: &[St
         if have.iter().any(|h| h == ip) {
             continue;
         }
-        let exists = nsenter_ipt(
-            t.pid, cmd,
-            &["-C", "INPUT", "-s", ip, "-m", "comment", "--comment", NS_BLOCK_TAG, "-j", "DROP"],
-        )
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-        if exists {
-            continue;
+        let spec = ns_block_spec(ip);
+        let mut check = vec!["-C", "INPUT"];
+        check.extend(spec.iter().copied());
+        let exists = nsenter_ipt(t.pid, cmd, &check)
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !exists {
+            let mut insert = vec!["-I", "INPUT", "1"];
+            insert.extend(spec.iter().copied());
+            let added = nsenter_ipt(t.pid, cmd, &insert)
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if added {
+                tracing::warn!("auth: ns-blocked {} in {} ({})", ip, t.label, cmd);
+            } else {
+                continue; // couldn't install — leave any legacy rule doing its job
+            }
         }
-        let added = nsenter_ipt(
-            t.pid, cmd,
-            &["-I", "INPUT", "1", "-s", ip, "-m", "comment", "--comment", NS_BLOCK_TAG, "-j", "DROP"],
-        )
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-        if added {
-            tracing::warn!("auth: ns-blocked {} in {} ({})", ip, t.label, cmd);
+        // Correct rule is in place; clear the stateless form an older
+        // WolfStack left in this namespace.
+        let legacy = legacy_ns_block_spec(ip);
+        for _ in 0..10 {
+            let mut del = vec!["-D", "INPUT"];
+            del.extend(legacy.iter().copied());
+            let removed = nsenter_ipt(t.pid, cmd, &del)
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !removed { break; }
+            tracing::warn!(
+                "auth: removed legacy stateless ns-block for {} in {} ({})",
+                ip, t.label, cmd,
+            );
         }
     }
+}
+
+/// Tagged DROP spec mirrored into a container netns. Carries the same
+/// `--ctstate NEW` match as the host rules — see `block_rule_spec`.
+/// `parse_ns_tagged_drop` locates `-s` positionally, so the extra
+/// leading match doesn't disturb detection of existing rules.
+fn ns_block_spec(ip: &str) -> Vec<&str> {
+    vec!["-m", "conntrack", "--ctstate", "NEW",
+         "-s", ip, "-m", "comment", "--comment", NS_BLOCK_TAG, "-j", "DROP"]
+}
+
+/// Pre-v25.6.0 stateless namespace form, for removal only.
+fn legacy_ns_block_spec(ip: &str) -> Vec<&str> {
+    vec!["-s", ip, "-m", "comment", "--comment", NS_BLOCK_TAG, "-j", "DROP"]
 }
 
 /// Run the host iptables/ip6tables binary inside container PID's network
@@ -2991,6 +3139,94 @@ mod protected_node_tests {
         // Real CIDR blocks are preserved verbatim.
         assert_eq!(normalise_host_cidr("10.0.0.0/24"), "10.0.0.0/24");
         assert_eq!(normalise_host_cidr("fd00::/64"), "fd00::/64");
+    }
+
+    // ── Blocklist rule shape ─────────────────────────────────────
+    //
+    // A lockout must drop the attacker's NEW connections without
+    // dropping replies to connections THIS host made. Before v25.6.0
+    // every one of these rules was stateless, so locking out an
+    // address also severed our outbound path to it — WolfStack blocked
+    // 116.202.127.11 on 2026-07-28 and every outbound HTTPS call to it
+    // silently returned nothing for 48 hours.
+
+    /// Every rule form must carry the conntrack match, or the bug is
+    /// back on whichever path lacks it. Checked as a set so a new
+    /// blocking path can't be added without it.
+    #[test]
+    fn every_current_block_form_matches_new_connections_only() {
+        for spec in [
+            block_rule_spec("wolfstack_block4"),
+            per_ip_rule_spec("1.2.3.4"),
+            ns_block_spec("1.2.3.4"),
+        ] {
+            let joined = spec.join(" ");
+            assert!(joined.contains("-m conntrack --ctstate NEW"),
+                "stateless rule form would drop our own inbound replies: {}", joined);
+            assert!(joined.ends_with("-j DROP"), "must still DROP: {}", joined);
+        }
+    }
+
+    /// The legacy forms are exactly the current ones minus the
+    /// conntrack match. If this drifts, the migration `-D` stops
+    /// matching what older builds actually wrote and the broken rule
+    /// survives the upgrade.
+    #[test]
+    fn legacy_forms_are_the_current_forms_without_conntrack() {
+        let strip = |v: Vec<&str>| -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            let mut it = v.into_iter();
+            while let Some(tok) = it.next() {
+                if tok == "-m" {
+                    // Drop only the conntrack match pair, keep others
+                    // (the ns form legitimately carries -m comment).
+                    let next = it.next().unwrap_or("");
+                    if next == "conntrack" {
+                        let _ = it.next(); // --ctstate
+                        let _ = it.next(); // NEW
+                        continue;
+                    }
+                    out.push(tok.to_string());
+                    out.push(next.to_string());
+                    continue;
+                }
+                out.push(tok.to_string());
+            }
+            out
+        };
+        assert_eq!(strip(block_rule_spec("s")),
+            legacy_block_rule_spec("s").iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(strip(per_ip_rule_spec("1.2.3.4")),
+            legacy_per_ip_rule_spec("1.2.3.4").iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(strip(ns_block_spec("1.2.3.4")),
+            legacy_ns_block_spec("1.2.3.4").iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    }
+
+    /// The legacy forms are what pre-v25.6.0 builds literally wrote.
+    /// Pinned verbatim: these strings are what `iptables -D` has to
+    /// match on an upgraded host, so they must never be "tidied".
+    #[test]
+    fn legacy_forms_match_what_older_builds_wrote() {
+        assert_eq!(legacy_block_rule_spec("wolfstack_block4"),
+            vec!["-m", "set", "--match-set", "wolfstack_block4", "src", "-j", "DROP"]);
+        assert_eq!(legacy_per_ip_rule_spec("1.2.3.4"),
+            vec!["-s", "1.2.3.4", "-j", "DROP"]);
+        assert_eq!(legacy_ns_block_spec("1.2.3.4"),
+            vec!["-s", "1.2.3.4", "-m", "comment", "--comment", NS_BLOCK_TAG, "-j", "DROP"]);
+    }
+
+    /// The netns reconciler finds existing rules by locating `-s`
+    /// positionally, so prefixing the conntrack match must not hide
+    /// them — otherwise every reconcile would re-add a rule that is
+    /// already there.
+    #[test]
+    fn ns_rule_with_conntrack_is_still_detected() {
+        assert_eq!(
+            parse_ns_tagged_drop(
+                "-A INPUT -m conntrack --ctstate NEW -s 1.2.3.4/32 -m comment --comment wolfstack-ns-block -j DROP"
+            ),
+            Some("1.2.3.4".to_string())
+        );
     }
 
     #[test]

@@ -76,6 +76,7 @@ mod mail_relay;
 mod ups;
 mod systemcheck;
 mod security;
+mod ssh_keys;
 mod secret_audit;
 mod secret_rotation;
 mod at_rest_crypto;
