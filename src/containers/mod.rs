@@ -47,6 +47,60 @@ pub fn wolfnet_init() {
     setup_wolfnet_forwarding();
 }
 
+/// Put (and keep) WolfStack's wolfnet0 ACCEPT rules at the head of a filter
+/// chain. `with_conntrack` adds the ESTABLISHED,RELATED accept that the Docker
+/// chains need; the FORWARD chain already carries one of its own.
+///
+/// Re-applies only when a rule has actually gone missing. The caller runs from
+/// the 60s reconciliation loop, and the delete-then-insert-at-1 dance this
+/// replaces rewrote a perfectly healthy ruleset on every single pass — a
+/// permanent drip of NETFILTER_CFG audit records on every WolfStack host, plus
+/// a window each minute where the rules were briefly absent. `iptables -C`
+/// compares the parsed rule rather than its text, so `--ctstate
+/// ESTABLISHED,RELATED` still matches a rule iptables prints back as
+/// `RELATED,ESTABLISHED`.
+///
+/// Presence is checked, not position: position 1 was never actually held in
+/// steady state anyway. Docker re-inserts its own `-j DOCKER-USER` jump above
+/// ours whenever it rebuilds, and that jump enters a chain we accept wolfnet0
+/// traffic at the head of — so precedence survives where it matters, exactly
+/// as it did before.
+fn apply_wolfnet_accepts(chain: &str, with_conntrack: bool) {
+    // Desired head-of-chain rules, in top-down order.
+    let mut rules: Vec<Vec<&str>> = vec![
+        vec!["-i", "wolfnet0", "-j", "ACCEPT"],
+        vec!["-o", "wolfnet0", "-j", "ACCEPT"],
+    ];
+    if with_conntrack {
+        rules.push(vec!["-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"]);
+    }
+
+    let all_present = rules.iter().all(|rule| {
+        let mut args = vec!["-C", chain];
+        args.extend_from_slice(rule);
+        Command::new("iptables").args(&args).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+    });
+    if all_present { return; }
+
+    // At least one is gone (Docker restarted, firewalld reloaded, someone
+    // flushed the chain). Clear any survivors first — twice, in case an
+    // earlier pass stacked a duplicate — then re-insert the whole set at the
+    // head so the final order matches `rules`.
+    for rule in &rules {
+        for _ in 0..2 {
+            let mut args = vec!["-D", chain];
+            args.extend_from_slice(rule);
+            let _ = Command::new("iptables").args(&args).output();
+        }
+    }
+    for rule in rules.iter().rev() {
+        let mut args = vec!["-I", chain, "1"];
+        args.extend_from_slice(rule);
+        let _ = Command::new("iptables").args(&args).output();
+    }
+}
+
 /// Core forwarding setup — called from wolfnet_init() and cleanup_stale_wolfnet_routes().
 /// Idempotent — safe to call repeatedly.
 pub fn setup_wolfnet_forwarding() {
@@ -71,12 +125,7 @@ pub fn setup_wolfnet_forwarding() {
     // ── Blanket FORWARD rules for wolfnet0 ──
     // Any traffic in/out of wolfnet0 must be allowed — inserted at position 1
     // so they run before Docker's FORWARD jump to DOCKER-USER → DOCKER-ISOLATION
-    for _ in 0..2 {
-        let _ = Command::new("iptables").args(["-D", "FORWARD", "-i", "wolfnet0", "-j", "ACCEPT"]).output();
-        let _ = Command::new("iptables").args(["-D", "FORWARD", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-    }
-    let _ = Command::new("iptables").args(["-I", "FORWARD", "1", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-    let _ = Command::new("iptables").args(["-I", "FORWARD", "1", "-i", "wolfnet0", "-j", "ACCEPT"]).output();
+    apply_wolfnet_accepts("FORWARD", false);
 
     // ── Docker chains: DOCKER-USER, DOCKER-ISOLATION-STAGE-1/2 ──
     for chain in &["DOCKER-USER", "DOCKER-ISOLATION-STAGE-1", "DOCKER-ISOLATION-STAGE-2"] {
@@ -84,14 +133,7 @@ pub fn setup_wolfnet_forwarding() {
             .map(|o| o.status.success()).unwrap_or(false);
         if !exists { continue; }
 
-        for _ in 0..2 {
-            let _ = Command::new("iptables").args(["-D", chain, "-i", "wolfnet0", "-j", "ACCEPT"]).output();
-            let _ = Command::new("iptables").args(["-D", chain, "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-            let _ = Command::new("iptables").args(["-D", chain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"]).output();
-        }
-        let _ = Command::new("iptables").args(["-I", chain, "1", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"]).output();
-        let _ = Command::new("iptables").args(["-I", chain, "1", "-o", "wolfnet0", "-j", "ACCEPT"]).output();
-        let _ = Command::new("iptables").args(["-I", chain, "1", "-i", "wolfnet0", "-j", "ACCEPT"]).output();
+        apply_wolfnet_accepts(chain, true);
     }
 
     // ── MASQUERADE for non-WolfNet source IPs going out wolfnet0 ──
@@ -126,6 +168,11 @@ pub fn ensure_firewalld_trusted(ifaces: &[&str]) {
         .unwrap_or(false);
     if !running { return; }
 
+    // Did we actually write anything to firewalld's *permanent* config this
+    // pass?  Only then is a reload warranted — see the reload comment below
+    // for why an unconditional one is destructive.
+    let mut changed = false;
+
     for iface in ifaces {
         // Docker manages its own bridges' firewalld zone (the `docker` zone,
         // target ACCEPT). If we bind docker0 / br-<id> to `trusted` instead,
@@ -159,34 +206,86 @@ pub fn ensure_firewalld_trusted(ifaces: &[&str]) {
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if in_trusted {
-                let _ = Command::new("firewall-cmd")
+                let removed = Command::new("firewall-cmd")
                     .args(["--permanent", "--zone=trusted", "--remove-interface", iface])
-                    .output();
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                changed |= removed;
             }
             continue;
         }
 
-        // Check if already in trusted zone (avoid unnecessary reloads)
-        let already = Command::new("firewall-cmd")
+        // Check if already in trusted zone (avoid unnecessary reloads).
+        // Permanent AND runtime, because they can disagree: a permanent add
+        // whose reload never landed leaves the interface trusted on disk but
+        // still filtered in the live ruleset, and WolfNet traffic stays
+        // blocked. The old unconditional reload papered over that; now we
+        // have to notice it and reload deliberately.
+        let already_permanent = Command::new("firewall-cmd")
             .args(["--permanent", "--zone=trusted", "--query-interface", iface])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        if already { continue; }
+        let already_runtime = Command::new("firewall-cmd")
+            .args(["--zone=trusted", "--query-interface", iface])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if already_permanent {
+            // On disk but not live — the reload below is exactly the fix.
+            changed |= !already_runtime;
+            continue;
+        }
 
-        // Remove from any other zone first, then add to trusted
-        let _ = Command::new("firewall-cmd")
+        let added = Command::new("firewall-cmd")
             .args(["--permanent", "--zone=trusted", "--add-interface", iface])
-            .output();
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        changed |= added;
     }
 
-    // Enable masquerading in trusted zone so container NAT works
-    let _ = Command::new("firewall-cmd")
-        .args(["--permanent", "--zone=trusted", "--add-masquerade"])
-        .output();
+    // Enable masquerading in trusted zone so container NAT works. Ask before
+    // setting: `--add-masquerade` on an already-masqueraded zone is a no-op
+    // that logs `WARNING: ALREADY_ENABLED: masquerade` and, worse, used to
+    // drag the unconditional reload below along with it. Same permanent-vs-
+    // runtime split as the interfaces above.
+    let masq_permanent = Command::new("firewall-cmd")
+        .args(["--permanent", "--zone=trusted", "--query-masquerade"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if masq_permanent {
+        let masq_runtime = Command::new("firewall-cmd")
+            .args(["--zone=trusted", "--query-masquerade"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        changed |= !masq_runtime;
+    } else {
+        let enabled = Command::new("firewall-cmd")
+            .args(["--permanent", "--zone=trusted", "--add-masquerade"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        changed |= enabled;
+    }
 
-    // Reload to apply permanent changes
-    let _ = Command::new("firewall-cmd").args(["--reload"]).output();
+    // Reload to apply permanent changes — ONLY if we made some.
+    //
+    // This function is called from the 60s WolfNet reconciliation loop, so an
+    // unconditional reload here meant a full firewalld rebuild every minute on
+    // every firewalld host, forever. Docker's `iptables+firewalld` backend
+    // reacts to each reload by tearing down and re-installing its own v4 and
+    // v6 chains (DOCKER-FORWARD, DOCKER-BRIDGE, DOCKER-CT …), so container
+    // forwarding had a hole in it once a minute, any runtime-only rule anyone
+    // else added was wiped just as often, and the audit log filled with tens
+    // of thousands of NETFILTER_CFG records a day. In steady state there is
+    // nothing to apply, so there is nothing to reload.
+    if changed {
+        let _ = Command::new("firewall-cmd").args(["--reload"]).output();
+    }
 }
 
 // ─── WolfNet Route Cache ───
