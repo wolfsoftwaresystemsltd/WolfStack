@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.6.1: the browser Back button navigates WolfStack instead of leaving it** _(2026-07-29 — [`ce42da02`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ce42da023b83f4cc1632b993d75175c93c00bfb9))_
+- **v25.6.0: manage root SSH keys from the UI, and send PBS backups to different datastores** _(2026-07-29 — [`c94edadc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c94edadc09fc6de7fb848e6e58ba18510a34e95f))_
 - **v25.5.5: a node can no longer assert another node's cluster identity** _(2026-07-28 — [`a1856364`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a1856364a981a9586f112dee7041cd1f7b52d91a))_
 - **v25.5.4: a peer can no longer drag this node into ITS cluster via gossip** _(2026-07-28 — [`db49f340`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/db49f34067909ed6357f6f2150250a6e6903fdf0))_
 - **v25.5.3: publish 32-bit ARM (armv7) binaries so those hosts stop being stranded by the no-compile rule** _(2026-07-28 — [`aa85bb3b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aa85bb3b9ba74add31c397a31cbebcd5f4ccac63))_
