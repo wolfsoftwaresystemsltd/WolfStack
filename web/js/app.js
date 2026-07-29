@@ -2147,6 +2147,22 @@ function selectView(page) {
     }
     currentPage = page;
     currentNodeId = null;
+    // Give the browser a history entry so Back returns to the previous
+    // view instead of leaving WolfStack entirely (klasSponsor
+    // 2026-07-29). A `hashchange` route handler has always existed, but
+    // nothing ever wrote the hash, so it never fired for in-app
+    // navigation and the SPA created no history at all.
+    //
+    // pushState rather than assigning location.hash: it does NOT fire
+    // hashchange, so this cannot re-enter selectView. It sits AFTER the
+    // unsaved-changes guard above deliberately — a navigation that guard
+    // refuses must not move the address bar.
+    try {
+        const targetHash = '#' + page;
+        if (location.hash !== targetHash && typeof history.pushState === 'function') {
+            history.pushState({ page }, '', targetHash);
+        }
+    } catch (_) { /* history blocked (sandboxed iframe) — navigation still works */ }
     try { updateClusterPill(); } catch (_) {}
 
     document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
@@ -7112,17 +7128,31 @@ function jitterCoords(baseLat, baseLon, hostname) {
 
 
 
-// Handle hash navigation
-window.addEventListener('hashchange', () => {
+// Handle hash navigation — both the Back/Forward buttons and a pasted
+// deep link land here.
+//
+// Bound to `popstate` AND `hashchange` because which one fires for a
+// fragment-only history traversal is not worth depending on: pushState
+// entries surface as popstate, a hand-edited address bar as hashchange,
+// and some traversals raise both. The `currentPage` check below makes a
+// double fire a no-op, so listening to both is safe and neither case
+// can be missed.
+function routeFromLocation() {
     const page = location.hash.replace('#', '') || 'datacenter';
+    // Already showing it — either we pushed this entry ourselves, or the
+    // sibling event beat us to it. Re-rendering would refetch the whole
+    // view for nothing.
+    if (currentPage === page) return;
     selectView(page);
     // If the unsaved-changes guard intercepted, currentPage stays put while
     // the address bar already moved. Resync the hash (without refiring this
     // handler) so the route isn't soft-locked on a repeat of the same target.
     if (currentPage !== page && typeof history.replaceState === 'function') {
-        history.replaceState(null, '', '#' + currentPage);
+        history.replaceState({ page: currentPage }, '', '#' + currentPage);
     }
-});
+}
+window.addEventListener('hashchange', routeFromLocation);
+window.addEventListener('popstate', routeFromLocation);
 if (location.hash) selectView(location.hash.replace('#', ''));
 
 // ─── Formatting Helpers ───
