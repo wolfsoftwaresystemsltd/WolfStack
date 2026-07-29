@@ -10321,6 +10321,7 @@ function renderStorageMounts(mounts) {
 function showCreateMountModal() {
     document.getElementById('create-mount-modal').classList.add('active');
     onMountTypeChange();
+    loadS3Remotes();
 }
 
 function closeMountModal() {
@@ -10329,14 +10330,122 @@ function closeMountModal() {
     document.getElementById('mount-name').value = '';
     document.getElementById('mount-point').value = '';
     document.getElementById('mount-type').value = 's3';
+    document.getElementById('s3-remote').value = '';
     document.getElementById('s3-bucket').value = '';
     document.getElementById('s3-access-key').value = '';
     document.getElementById('s3-secret-key').value = '';
     document.getElementById('s3-region').value = '';
     document.getElementById('s3-endpoint').value = '';
+    document.getElementById('s3-save-remote').checked = false;
     document.getElementById('mount-global').checked = false;
     document.getElementById('mount-auto').checked = true;
+    onS3RemoteChange();
     onMountTypeChange();
+}
+
+// ─── Saved S3 credentials ("remotes") ───
+// Credentials configured once — in WolfStack, in rclone.conf, or on an
+// existing mount — are reusable for any bucket on that account. The picker
+// exists because the Add Mount dialog used to be the only place S3 keys
+// could live, so an operator who had already configured their provider was
+// asked to retype the access key and secret for every mount, with no way to
+// see what was already there (Paul, 2026-07-29 — IDrive e2 on wolfstack-2).
+//
+// The secret is never sent to the browser: the list carries only a masked
+// access-key hint, and the mount is created by remote id.
+let s3Remotes = [];
+
+async function loadS3Remotes() {
+    const sel = document.getElementById('s3-remote');
+    if (!sel) return;
+    const previous = sel.value;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        s3Remotes = await resp.json();
+    } catch (e) {
+        s3Remotes = [];
+        showToast('Could not load saved S3 credentials: ' + e.message, 'error');
+    }
+    sel.innerHTML = '<option value="">Enter credentials manually</option>'
+        + s3Remotes.map(r => {
+            const where = r.origin ? ` — ${r.origin}` : '';
+            return `<option value="${escapeAttr(r.id)}">${escapeHtml(r.name)} (${escapeHtml(r.access_key_hint)})${escapeHtml(where)}</option>`;
+        }).join('');
+    // Keep the operator's selection across a Refresh.
+    sel.value = s3Remotes.some(r => r.id === previous) ? previous : '';
+    onS3RemoteChange();
+}
+
+// Picking a saved remote replaces the whole manual credential block with a
+// bucket chooser — provider, endpoint, region and keys all come from the
+// remote, so leaving those fields on screen would only invite conflicting
+// edits that the backend ignores.
+function onS3RemoteChange() {
+    const sel = document.getElementById('s3-remote');
+    if (!sel) return;
+    const usingRemote = !!sel.value;
+    const remote = s3Remotes.find(r => r.id === sel.value);
+    document.getElementById('s3-manual-fields').style.display = usingRemote ? 'none' : 'grid';
+    document.getElementById('s3-bucket-picker-group').style.display = usingRemote ? 'block' : 'none';
+    // Only WolfStack's own saved remotes can be deleted — ones read from
+    // rclone.conf belong to the rclone CLI, and ones taken from an existing
+    // mount are deleted by deleting that mount.
+    document.getElementById('s3-remote-forget').style.display =
+        (remote && remote.editable) ? '' : 'none';
+    if (usingRemote) loadS3RemoteBuckets(sel.value);
+}
+
+async function forgetS3Remote() {
+    const sel = document.getElementById('s3-remote');
+    const remote = s3Remotes.find(r => r.id === sel.value);
+    if (!remote) return;
+    if (!(await showConfirm(
+        `Forget the saved S3 credentials “${remote.name}”?\n\n` +
+        `Storage mounts already created from them keep working — they store their own copy.`))) return;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/delete'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: remote.id }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Delete failed');
+        showToast(data.message || 'Saved credentials removed', 'success');
+        sel.value = '';
+        await loadS3Remotes();
+    } catch (e) {
+        showModal('Could not remove saved credentials: ' + e.message);
+    }
+}
+
+async function loadS3RemoteBuckets(remoteId) {
+    const sel = document.getElementById('s3-bucket-picker');
+    const status = document.getElementById('s3-bucket-picker-status');
+    sel.innerHTML = '<option value="">Loading buckets…</option>';
+    status.textContent = '';
+    status.style.color = 'var(--text-muted)';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/buckets?id=' + encodeURIComponent(remoteId)));
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Could not list buckets');
+        const buckets = data.buckets || [];
+        if (buckets.length === 0) {
+            sel.innerHTML = '<option value="">No buckets on this account</option>';
+            status.textContent = 'These credentials work, but the account has no buckets.';
+            return;
+        }
+        sel.innerHTML = buckets.map(b =>
+            `<option value="${escapeAttr(b)}">${escapeHtml(b)}</option>`).join('');
+        status.textContent = `${buckets.length} bucket${buckets.length === 1 ? '' : 's'} available.`;
+    } catch (e) {
+        // A failure here is the credentials failing, and it's worth saying so
+        // loudly — this is the same check the s3fs daemon does at mount time,
+        // just early enough to fix before anything is created.
+        sel.innerHTML = '<option value="">Could not list buckets</option>';
+        status.textContent = e.message;
+        status.style.color = 'var(--danger)';
+    }
 }
 
 function showImportRcloneModal() {
@@ -10407,24 +10516,51 @@ async function createStorageMount() {
 
     let source = '';
     let s3_config = null;
+    let s3_remote = null;
+    let s3_bucket = null;
     let nfs_options = null;
     let smb_config = null;
     let smb_options = null;
 
     if (type === 's3') {
-        const bucket = document.getElementById('s3-bucket').value.trim();
-        const access_key_id = document.getElementById('s3-access-key').value.trim();
-        const secret_access_key = document.getElementById('s3-secret-key').value.trim();
-        if (!access_key_id || !secret_access_key) return showModal('S3 Access Key and Secret Key are required');
-        s3_config = {
-            access_key_id,
-            secret_access_key,
-            region: document.getElementById('s3-region').value.trim(),
-            endpoint: document.getElementById('s3-endpoint').value.trim(),
-            provider: document.getElementById('s3-provider').value,
-            bucket
-        };
-        source = bucket ? `s3:${bucket}` : 's3:';
+        const remoteId = document.getElementById('s3-remote').value;
+        if (remoteId) {
+            // Saved credentials: the backend resolves the keys, so the browser
+            // sends only which remote and which bucket.
+            s3_bucket = document.getElementById('s3-bucket-picker').value;
+            if (!s3_bucket) return showModal('Pick a bucket for this mount');
+            s3_remote = remoteId;
+        } else {
+            const bucket = document.getElementById('s3-bucket').value.trim();
+            const access_key_id = document.getElementById('s3-access-key').value.trim();
+            const secret_access_key = document.getElementById('s3-secret-key').value.trim();
+            if (!bucket) return showModal('Bucket is required for S3 mounts');
+            if (!access_key_id || !secret_access_key) return showModal('S3 Access Key and Secret Key are required');
+            s3_config = {
+                access_key_id,
+                secret_access_key,
+                region: document.getElementById('s3-region').value.trim(),
+                endpoint: document.getElementById('s3-endpoint').value.trim(),
+                provider: document.getElementById('s3-provider').value,
+                bucket
+            };
+            source = `s3:${bucket}`;
+
+            // Optionally keep these credentials so the next bucket on the same
+            // account doesn't need them retyped. Done before the mount so a
+            // mount that fails on a bad bucket doesn't lose working keys.
+            if (document.getElementById('s3-save-remote').checked) {
+                const saved = await saveS3Remote({
+                    name,
+                    provider: s3_config.provider,
+                    endpoint: s3_config.endpoint,
+                    region: s3_config.region,
+                    access_key_id,
+                    secret_access_key,
+                });
+                if (!saved) return;   // saveS3Remote already reported why
+            }
+        }
     } else if (type === 'nfs') {
         source = document.getElementById('nfs-source').value.trim();
         nfs_options = document.getElementById('nfs-options').value.trim() || null;
@@ -10456,7 +10592,7 @@ async function createStorageMount() {
         nfs_options = document.getElementById('disk-options').value.trim() || null;
     }
 
-    const payload = { name, type, source, mount_point, global, auto_mount, s3_config, nfs_options, smb_config, smb_options, do_mount: true };
+    const payload = { name, type, source, mount_point, global, auto_mount, s3_config, s3_remote, s3_bucket, nfs_options, smb_config, smb_options, do_mount: true };
 
     try {
         const resp = await fetch(apiUrl('/api/storage/mounts'), {
@@ -10470,8 +10606,43 @@ async function createStorageMount() {
         closeMountModal();
         loadStorageMounts();
     } catch (e) {
+        // A missing mount helper (s3fs-fuse, cifs-utils, nfs-common) is not a
+        // configuration mistake — offer to install it in a live terminal and
+        // then mount the entry, which the backend has already saved.
+        const parsed = parseMissingPackageError(e.message);
+        if (parsed) {
+            closeMountModal();
+            await loadStorageMounts();
+            const created = allStorageMounts.find(m => m.name === name);
+            const installed = await offerPackageInstall(parsed);
+            if (installed && created) return mountStorage(created.id);
+            return;
+        }
         showModal('Error creating mount: ' + e.message);
         taskLog('Create storage mount: ' + name, 'failed');
+        // The backend saves the entry before attempting the mount, so it now
+        // exists in an error state — show it rather than leaving a stale table
+        // that suggests nothing happened.
+        loadStorageMounts();
+    }
+}
+
+/// Save a reusable S3 credential set. Returns true on success; reports and
+/// returns false otherwise, so callers can abort cleanly.
+async function saveS3Remote(remote) {
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(remote),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to save credentials');
+        showToast(data.message || 'S3 credentials saved', 'success');
+        return true;
+    } catch (e) {
+        showModal('Could not save S3 credentials: ' + e.message);
+        return false;
     }
 }
 
@@ -10569,7 +10740,12 @@ function offerPackageInstall({ binary, debianPkg }) {
         overlay.querySelector('#pkg-install-ok').onclick = async () => {
             overlay.remove();
             try {
-                const resp = await fetch('/api/system/prepare-install-package', {
+                // apiUrl(), not a bare path: the storage pages are per-node, so
+                // a package needed by a mount on a remote node must be prepared
+                // (and run) on THAT node. A bare path always hit the local host,
+                // which installed nothing where it was needed and reported
+                // success.
+                const resp = await fetch(apiUrl('/api/system/prepare-install-package'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ binary }),
@@ -10580,7 +10756,11 @@ function offerPackageInstall({ binary, debianPkg }) {
                     resolve(false);
                     return;
                 }
-                const url = `/console.html?type=pkg-install&name=${encodeURIComponent(data.session_id)}`;
+                let url = `/console.html?type=pkg-install&name=${encodeURIComponent(data.session_id)}`;
+                // The terminal must attach to the same node the script was
+                // written on — console.html reads node_id for remote sessions.
+                const remoteNodeId = consoleRemoteNodeId();
+                if (remoteNodeId) url += `&node_id=${encodeURIComponent(remoteNodeId)}`;
                 const w = window.open(url, 'pkg_install_' + data.session_id, 'width=820,height=420,menubar=no,toolbar=no,scrollbars=yes,resizable=yes');
                 // Wait for the console window to close — that's our signal
                 // the install finished (success OR failure; the retry will
@@ -10801,7 +10981,9 @@ async function importRcloneConfig() {
         if (!resp.ok) throw new Error(data.error || 'Import failed');
         closeImportRcloneModal();
         showModal(data.message || 'Import complete', 'Import');
-        loadStorageMounts();
+        // Remotes, not mounts — refresh the picker so the imported credentials
+        // are immediately selectable.
+        loadS3Remotes();
     } catch (e) {
         showModal('Import error: ' + e.message);
     }
@@ -32684,14 +32866,18 @@ function _openShellTab(type, name, nodeId, extra) {
     }
 }
 
+// The node id a console session must attach to: empty for this host (the
+// server the browser is talking to), the node's id when a remote node is
+// selected, so the session is proxied there.
+function consoleRemoteNodeId() {
+    if (!currentNodeId) return '';
+    const node = allNodes.find(n => n.id === currentNodeId);
+    return (node && !node.is_self) ? node.id : '';
+}
+
 function openConsole(type, name) {
     // For remote nodes, proxy through the local server via node_id.
-    let nodeId = '';
-    if (currentNodeId) {
-        const node = allNodes.find(n => n.id === currentNodeId);
-        if (node && !node.is_self) nodeId = node.id;
-    }
-    _openShellTab(type, name, nodeId);
+    _openShellTab(type, name, consoleRemoteNodeId());
 }
 
 // ─── Inline Terminal (rendered inside the page content area) ───
@@ -53336,7 +53522,29 @@ async function loadStorageProviders() {
     }
 }
 
+// OS-package providers install through the live-terminal flow so the
+// operator watches apt/dnf run rather than staring at a spinner that either
+// silently succeeds or reports a one-line failure with the real output
+// discarded. The values are the helper binary each provider supplies —
+// storage::package_for_helper maps them to the per-distro package — and the
+// Debian package name, used only in the confirm dialog.
+const PROVIDER_PACKAGES = {
+    nfs:   { binary: 'mount.nfs', debianPkg: 'nfs-common' },
+    sshfs: { binary: 'sshfs',     debianPkg: 'sshfs' },
+    s3fs:  { binary: 's3fs',      debianPkg: 's3fs' },
+};
+
 async function installProvider(name) {
+    const pkg = PROVIDER_PACKAGES[name];
+    if (pkg) {
+        // offerPackageInstall resolves once the terminal window closes.
+        await offerPackageInstall(pkg);
+        await loadStorageProviders();
+        return;
+    }
+
+    // WolfDisk is a WolfStack component, not an OS package — it keeps its own
+    // installer, which finishes by opening the config editor.
     if (!(await showConfirm(`Install storage provider "${name}"? This may take a moment.`))) return;
     showToast(`Installing ${name}...`, 'info');
     try {
@@ -53383,13 +53591,20 @@ async function openProviderSettings(name, icon, label, configPath) {
     document.getElementById('provider-settings-label').textContent = label;
     document.getElementById('provider-config-path').textContent = configPath || 'N/A';
 
-    // Load config
-    const editor = document.getElementById('provider-config-editor');
-    editor.value = 'Loading...';
     document.getElementById('provider-settings-modal').classList.add('active');
+    await reloadProviderConfigEditor();
+}
 
+// Read the current provider's config file into the editor. Separate from
+// openProviderSettings so a save can refresh the view: saving s3fs
+// credentials can rewrite the file into s3fs's own format, and leaving the
+// editor showing what was typed would misrepresent what is on disk.
+async function reloadProviderConfigEditor() {
+    const editor = document.getElementById('provider-config-editor');
+    if (!editor || !_currentProviderName) return;
+    editor.value = 'Loading...';
     try {
-        const resp = await fetch(apiUrl(`/api/storage/providers/${name}/config`));
+        const resp = await fetch(apiUrl(`/api/storage/providers/${_currentProviderName}/config`));
         const data = await resp.json();
         editor.value = data.content || '';
         if (data.error) {
@@ -53416,7 +53631,22 @@ async function saveProviderConfig() {
         });
         const data = await resp.json();
         if (resp.ok) {
-            showToast(data.message || 'Config saved', 'success');
+            const msg = data.message || 'Config saved';
+            // Saving s3fs credentials can report a conversion (an rclone.conf
+            // pasted here becomes saved remotes). That explanation is too long
+            // to read in a toast before it dismisses itself, so anything beyond
+            // a short confirmation gets a modal the operator dismisses.
+            if (msg.length > 120) {
+                showModal(msg, 'Saved');
+            } else {
+                showToast(msg, 'success');
+            }
+            if (_currentProviderName === 's3fs') {
+                // The save may have created remotes — keep the picker current
+                // and show what actually landed on disk.
+                loadS3Remotes();
+                reloadProviderConfigEditor();
+            }
         } else {
             showToast(data.error || 'Save failed', 'error');
         }

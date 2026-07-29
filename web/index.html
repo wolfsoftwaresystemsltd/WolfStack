@@ -10016,41 +10016,75 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
 
                         <!-- S3 Fields -->
                         <div id="s3-fields" style="grid-column: 1 / -1;">
+                            <div class="form-group">
+                                <label for="s3-remote">Saved credentials</label>
+                                <div style="display:flex; gap:8px;">
+                                    <select class="form-control" id="s3-remote" onchange="onS3RemoteChange()"
+                                        style="flex:1;" aria-describedby="s3-remote-help">
+                                        <option value="">Enter credentials manually</option>
+                                    </select>
+                                    <button type="button" class="btn btn-sm" onclick="loadS3Remotes()"
+                                        title="Re-read saved credentials">Refresh</button>
+                                    <button type="button" class="btn btn-sm btn-danger" id="s3-remote-forget"
+                                        onclick="forgetS3Remote()" style="display:none;"
+                                        title="Delete these saved credentials">Forget</button>
+                                </div>
+                                <small id="s3-remote-help"
+                                    style="color:var(--text-muted); font-size:11px;">Credential sets found in
+                                    WolfStack, in <code>rclone.conf</code> on this host, and on existing S3
+                                    mounts. Use <strong>Import rclone.conf</strong> to add more.</small>
+                            </div>
                             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                                <div class="form-group" id="s3-bucket-picker-group" style="display:none;">
+                                    <label for="s3-bucket-picker">Bucket</label>
+                                    <select class="form-control" id="s3-bucket-picker"></select>
+                                    <small id="s3-bucket-picker-status"
+                                        style="color:var(--text-muted); font-size:11px;"></small>
+                                </div>
+                            </div>
+                            <div id="s3-manual-fields"
+                                style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                                 <div class="form-group">
-                                    <label>Provider</label>
+                                    <label for="s3-provider">Provider</label>
                                     <select class="form-control" id="s3-provider">
                                         <option value="AWS">Amazon S3</option>
                                         <option value="Cloudflare">Cloudflare R2</option>
                                         <option value="DigitalOcean">DigitalOcean Spaces</option>
                                         <option value="Wasabi">Wasabi</option>
                                         <option value="Backblaze">Backblaze B2</option>
+                                        <option value="IDrive">IDrive e2</option>
                                         <option value="Minio">MinIO</option>
                                         <option value="Other">Other S3-compatible</option>
                                     </select>
                                 </div>
                                 <div class="form-group">
-                                    <label>Bucket</label>
+                                    <label for="s3-bucket">Bucket</label>
                                     <input type="text" class="form-control" id="s3-bucket" placeholder="my-bucket">
                                 </div>
                                 <div class="form-group">
-                                    <label>Access Key ID</label>
+                                    <label for="s3-access-key">Access Key ID</label>
                                     <input type="text" class="form-control" id="s3-access-key" placeholder="AKIA...">
                                 </div>
                                 <div class="form-group">
-                                    <label>Secret Access Key</label>
+                                    <label for="s3-secret-key">Secret Access Key</label>
                                     <input type="password" class="form-control" id="s3-secret-key" placeholder="secret">
                                 </div>
                                 <div class="form-group">
-                                    <label>Region</label>
+                                    <label for="s3-region">Region</label>
                                     <input type="text" class="form-control" id="s3-region" placeholder="us-east-1">
                                 </div>
                                 <div class="form-group">
-                                    <label>Endpoint (optional)</label>
+                                    <label for="s3-endpoint">Endpoint (optional)</label>
                                     <input type="text" class="form-control" id="s3-endpoint"
                                         placeholder="https://s3.example.com">
                                     <small style="color:var(--text-muted); font-size:11px;">For non-AWS
                                         providers</small>
+                                </div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <label style="display:flex; align-items:center; gap:8px; font-weight:500;">
+                                        <input type="checkbox" id="s3-save-remote">
+                                        Save these credentials for reuse on other buckets
+                                    </label>
                                 </div>
                             </div>
                         </div>
@@ -10207,8 +10241,10 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                 </div>
                 <div class="modal-body">
                     <p style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">
-                        Paste your <code>rclone.conf</code> contents below. All S3-compatible remotes will be
-                        imported as storage mounts.
+                        Paste your <code>rclone.conf</code> contents below. Every S3-compatible remote is saved
+                        as a reusable set of credentials — pick it under <strong>Add Mount &rarr; S3 &rarr; Saved
+                        credentials</strong> and choose which bucket to mount. Remotes have no bucket of their
+                        own, so nothing is mounted by importing.
                     </p>
                     <textarea id="rclone-config-paste" class="form-control" rows="12"
                         style="font-family: var(--font-mono); font-size:12px; resize:vertical;" placeholder="[myremote]
@@ -10266,6 +10302,7 @@ region = us-east-1"></textarea>
                                         <option value="DigitalOcean">DigitalOcean Spaces</option>
                                         <option value="Wasabi">Wasabi</option>
                                         <option value="Backblaze">Backblaze B2</option>
+                                        <option value="IDrive">IDrive e2</option>
                                         <option value="Minio">MinIO</option>
                                         <option value="Other">Other S3-compatible</option>
                                     </select>

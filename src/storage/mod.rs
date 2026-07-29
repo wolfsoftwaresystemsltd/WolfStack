@@ -184,6 +184,38 @@ pub fn list_mounts() -> Vec<StorageMount> {
     config.mounts
 }
 
+/// Placeholder the API substitutes for stored secrets, and that update_mount
+/// treats as "leave the stored value alone". One constant so the read side
+/// and the write side can never disagree about what the sentinel is.
+pub const REDACTED_SECRET: &str = "••••••••";
+
+/// `list_mounts` with every stored secret replaced by REDACTED_SECRET.
+/// Used by the browser-facing API; the cluster replication path keeps using
+/// `list_mounts`, because a peer applying a replicated mount needs the real
+/// credentials to mount it.
+pub fn list_mounts_redacted() -> Vec<StorageMount> {
+    // A secret that was never set stays empty: the edit dialog uses "is there
+    // a stored secret?" to decide between "leave blank to keep unchanged" and
+    // "enter secret key", and a blanket sentinel would claim every mount had
+    // credentials.
+    fn redact(secret: &mut String) {
+        if !secret.is_empty() {
+            *secret = REDACTED_SECRET.to_string();
+        }
+    }
+
+    let mut mounts = list_mounts();
+    for m in &mut mounts {
+        if let Some(s3) = m.s3_config.as_mut() {
+            redact(&mut s3.secret_access_key);
+        }
+        if let Some(smb) = m.smb_config.as_mut() {
+            redact(&mut smb.password);
+        }
+    }
+    mounts
+}
+
 // ─── Mount Operations ───
 
 // ─── Shutdown ordering for WebUI network mounts ─────────────────────────────
@@ -624,7 +656,7 @@ pub fn update_mount(id: &str, updates: serde_json::Value) -> Result<StorageMount
         }
         if let Some(v) = smb_updates.get("password").and_then(|v| v.as_str()) {
             // Matches S3 pattern — only overwrite when the UI actually sent a new value
-            if v != "••••••••" {
+            if v != REDACTED_SECRET {
                 smb.password = v.to_string();
             }
         }
@@ -651,7 +683,7 @@ pub fn update_mount(id: &str, updates: serde_json::Value) -> Result<StorageMount
         }
         if let Some(v) = s3_updates.get("secret_access_key").and_then(|v| v.as_str()) {
             // Only update if not the placeholder
-            if v != "••••••••" {
+            if v != REDACTED_SECRET {
                 s3.secret_access_key = v.to_string();
             }
         }
@@ -703,13 +735,23 @@ fn mount_s3(mount: &StorageMount) -> Result<String, String> {
     if has_s3fs() {
         return mount_s3_via_s3fs(mount, s3);
     }
-    install_s3fs().ok();
-    if has_s3fs() {
-        return mount_s3_via_s3fs(mount, s3);
+
+    // s3fs is missing. Where FUSE exists, installing it is the right answer
+    // and the operator should be the one to approve it: hand the frontend the
+    // MISSING_PACKAGE marker so it offers the same watch-it-happen terminal
+    // install used for nfs-common/cifs-utils, instead of silently apt-getting
+    // behind the operator's back or — worse — degrading to a bind mount whose
+    // writes never reach the bucket.
+    if Path::new("/dev/fuse").exists() {
+        return Err(format!(
+            "{}s3fs|{}|{}",
+            MISSING_PACKAGE_MARKER, "s3fs", "s3fs-fuse"
+        ));
     }
-    // No s3fs and it couldn't be installed — fall back to the read-only
-    // rust-s3 bind so the bucket is at least readable.
-    warn!("s3fs/FUSE unavailable for {} — falling back to a READ-ONLY rust-s3 bind mount (writes not supported in this mode)", mount.mount_point);
+
+    // No FUSE device at all (a FUSE-less container, ppc64le): installing s3fs
+    // would not help, so fall back to the read-only rust-s3 bind and say so.
+    warn!("FUSE unavailable for {} — falling back to a READ-ONLY rust-s3 bind mount (writes not supported in this mode)", mount.mount_point);
     mount_s3_via_rust_s3(mount, s3)
 }
 
@@ -746,6 +788,33 @@ fn effective_s3_region(s3: &S3Config) -> String {
         r.to_string()
     } else {
         String::new()
+    }
+}
+
+/// Prefix a bare `host[:port]` endpoint with https://. The GUI field accepts
+/// what the provider's dashboard prints (`l8k1.fra21.idrivee2-12.com`), which
+/// is not a URL — s3fs and rust-s3 both need the scheme.
+fn endpoint_url(endpoint: &str) -> String {
+    let e = endpoint.trim();
+    if e.starts_with("http://") || e.starts_with("https://") {
+        e.to_string()
+    } else {
+        format!("https://{}", e)
+    }
+}
+
+/// The rust-s3 `Region` for a config. Single definition so the mount path,
+/// the sync-back path and the bucket lister can't drift apart on endpoint
+/// scheme handling or on R2's mandatory "auto" region.
+fn build_s3_region(s3: &S3Config) -> s3::region::Region {
+    use s3::region::Region;
+    if s3.endpoint.trim().is_empty() {
+        return s3.region.parse::<Region>().unwrap_or(Region::UsEast1);
+    }
+    let region = effective_s3_region(s3);
+    Region::Custom {
+        region: if region.is_empty() { "us-east-1".to_string() } else { region },
+        endpoint: endpoint_url(&s3.endpoint),
     }
 }
 
@@ -797,6 +866,26 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
         format!("{}:{}", s3.access_key_id, s3.secret_access_key))
         .map_err(|e| format!("Failed to write credentials: {}", e))?;
     
+    // s3fs daemonises, so its real failure reason (bad credentials, wrong
+    // endpoint, NoSuchBucket) is written by the DAEMON, not by the process we
+    // wait on — it goes to syslog, where nothing on a default Debian host
+    // collects it. Confirmed on wolfstack-2 (2026-07-29): a failed mount left
+    // no trace in the journal at all, so the operator was told only "it did
+    // not come up". `-o logfile=` (s3fs ≥1.85) redirects that output to a file
+    // we own, and `dbglevel=err` keeps the [CRT]/[ERR] lines — including the
+    // provider's own error XML — without the flood of [INF] request tracing.
+    // Truncated per mount attempt, so the file only ever holds the current
+    // attempt's errors and cannot grow without bound.
+    let log_path = s3fs_log_path(&mount.id);
+    ensure_s3fs_log_dir(&log_path);
+    let _ = fs::remove_file(&log_path);
+
+    // s3fs's local file cache. Uses the configured cache dir rather than
+    // /tmp: /tmp is tmpfs (RAM) on a normal systemd host, and a cache of a
+    // multi-TB bucket landing there is the same failure that filled
+    // wolfstack-1's RAM from backup staging (v25.5.1).
+    let cache_dir = format!("{}/{}", crate::paths::get().s3_cache_dir, mount.id);
+
     // Build s3fs arguments
     let mut args = vec![
         s3.bucket.clone(),
@@ -804,25 +893,22 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
         "-o".to_string(), format!("passwd_file={}", creds_path),
         "-o".to_string(), "allow_other".to_string(),
         "-o".to_string(), "mp_umask=022".to_string(),
-        "-o".to_string(), "use_cache=/tmp/wolfstack-s3cache".to_string(),
+        "-o".to_string(), format!("use_cache={}", cache_dir),
         "-o".to_string(), "ensure_diskfree=1024".to_string(),  // keep 1GB free
         "-o".to_string(), "connect_timeout=10".to_string(),
         "-o".to_string(), "retries=3".to_string(),
+        "-o".to_string(), format!("logfile={}", log_path),
+        "-o".to_string(), "dbglevel=err".to_string(),
     ];
-    
-    // Custom endpoint for non-AWS providers (R2, MinIO, Wasabi, etc.)
+
+    // Custom endpoint for non-AWS providers (R2, MinIO, Wasabi, IDrive e2…)
     if !s3.endpoint.is_empty() {
-        let endpoint = if !s3.endpoint.starts_with("http://") && !s3.endpoint.starts_with("https://") {
-            format!("https://{}", s3.endpoint)
-        } else {
-            s3.endpoint.clone()
-        };
         args.push("-o".to_string());
-        args.push(format!("url={}", endpoint));
+        args.push(format!("url={}", endpoint_url(&s3.endpoint)));
         args.push("-o".to_string());
         args.push("use_path_request_style".to_string());
     }
-    
+
     // Region for SigV4 signing (s3fs's `-o endpoint=` is the legacy alias
     // for `-o region=`). R2 needs "auto" — without a usable region s3fs
     // signs for us-east-1, the request fails, and it falls back to SigV2
@@ -856,11 +942,96 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
         // reported success but never mounted (2026-06-16). A genuinely-slow
         // mount that appears later self-corrects on the next status refresh.
         warn!("s3fs started but the mount never came up for {}", mount.mount_point);
-        Err("s3fs started but the mount never came up — the s3fs daemon likely failed its startup bucket check (see `journalctl`/syslog for the s3fs error). This is most often an S3 credentials problem: re-check the Access Key and Secret Key and re-enter the Secret in the GUI (for Cloudflare R2 leave the Region blank).".to_string())
+        match read_s3fs_error(&log_path) {
+            Some(detail) => Err(with_s3_credential_hint(format!(
+                "s3fs failed to mount: {}", detail
+            ))),
+            // No daemon log either — s3fs older than 1.85 has no `logfile`
+            // option and ignores it, so keep the guidance that got operators
+            // to the answer before the log existed.
+            None => Err(format!(
+                "s3fs started but the mount never came up, and it wrote no error to {}. \
+                 The s3fs daemon most likely failed its startup bucket check — check the \
+                 bucket name, endpoint and credentials (for Cloudflare R2 leave the Region blank).",
+                log_path
+            )),
+        }
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(with_s3_credential_hint(format!("s3fs mount failed: {}", stderr.trim())))
+        let detail = match read_s3fs_error(&log_path) {
+            Some(logged) if stderr.trim().is_empty() => logged,
+            Some(logged) => format!("{} ({})", stderr.trim(), logged),
+            None => stderr.trim().to_string(),
+        };
+        Err(with_s3_credential_hint(format!("s3fs mount failed: {}", detail)))
     }
+}
+
+/// Where the s3fs daemon for a mount writes its errors. Same directory
+/// setup.sh already uses for the install manifests.
+fn s3fs_log_path(mount_id: &str) -> String {
+    format!("/var/log/wolfstack/s3fs-{}.log", mount_id)
+}
+
+/// Create the log directory if setup.sh hasn't (a source build, a container
+/// image), restricted to root: an s3fs error log quotes the provider's own
+/// response, which can name buckets and keys.
+fn ensure_s3fs_log_dir(log_path: &str) {
+    let Some(parent) = Path::new(log_path).parent() else { return };
+    if parent.exists() {
+        return;
+    }
+    if fs::create_dir_all(parent).is_ok() {
+        #[cfg(unix)]
+        let _ = fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o750));
+    }
+}
+
+/// Pull the operator-meaningful failure out of an s3fs daemon log.
+///
+/// Lines look like:
+///   `2026-07-29T11:55:19.875Z [CRT] s3fs.cpp:s3fs_check_service(4498): Failed to
+///    check bucket and directory for mount point : Bucket or directory not
+///    found(host=https://…, message=The specified bucket does not exist)`
+/// and the preceding `[ERR]` line carries the provider's raw error document.
+/// Both matter, so keep the [CRT]/[ERR] lines and strip the timestamp,
+/// severity and C++ source location — none of which help the operator.
+fn read_s3fs_error(log_path: &str) -> Option<String> {
+    let content = fs::read_to_string(log_path).ok()?;
+    let mut messages: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        if !line.contains("[CRT]") && !line.contains("[ERR]") {
+            continue;
+        }
+        // Everything after the `file.cpp:func(line): ` prefix is the message.
+        // Falling back to the whole line keeps unexpected formats readable
+        // rather than dropping the only diagnostic we have.
+        let msg = match line.find("): ") {
+            Some(pos) => line[pos + 3..].trim(),
+            None => line.trim(),
+        };
+        // s3fs logs its own log-level change as [CRT] on every start — pure
+        // noise, and reporting it as the failure would be actively wrong.
+        if msg.is_empty() || msg.contains("change debug level") {
+            continue;
+        }
+        let msg = msg.replace('\n', " ");
+        if !messages.contains(&msg) {
+            messages.push(msg);
+        }
+    }
+
+    if messages.is_empty() {
+        return None;
+    }
+    // Cap the length: an error document can be a full XML blob and this
+    // string ends up in a toast/modal.
+    let mut joined = messages.join(" | ");
+    if joined.chars().count() > 600 {
+        joined = joined.chars().take(600).collect::<String>() + "…";
+    }
+    Some(joined)
 }
 
 /// Mount S3 using rust-s3 — pure Rust, native, works on IBM Power/ppc64le
@@ -868,7 +1039,6 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
 fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, String> {
     use s3::bucket::Bucket;
     use s3::creds::Credentials;
-    use s3::region::Region;
 
     // Build credentials
     let credentials = Credentials::new(
@@ -877,28 +1047,7 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
         None, None, None,
     ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
 
-    // Build region
-    let region = if !s3.endpoint.is_empty() {
-        // Ensure endpoint has a scheme
-        let endpoint = if !s3.endpoint.starts_with("http://") && !s3.endpoint.starts_with("https://") {
-            format!("https://{}", s3.endpoint)
-        } else {
-            s3.endpoint.clone()
-        };
-
-        // R2 requires region "auto" for SigV4; effective_s3_region supplies
-        // it. Empty (non-R2, no explicit region) falls back to us-east-1.
-        let region = effective_s3_region(s3);
-        Region::Custom {
-            region: if region.is_empty() { "us-east-1".to_string() } else { region },
-            endpoint,
-        }
-    } else {
-        let region = s3.region.parse::<Region>()
-            .unwrap_or(Region::UsEast1);
-
-        region
-    };
+    let region = build_s3_region(s3);
 
     // Create bucket handle
     let bucket = Bucket::new(&s3.bucket, region, credentials)
@@ -1046,13 +1195,32 @@ pub fn package_for_helper(binary: &str) -> Option<(&'static str, &'static str)> 
         ("mount.nfs", DistroFamily::RedHat)  => Some(("dnf",     "nfs-utils")),
         ("mount.nfs", DistroFamily::Suse)    => Some(("zypper",  "nfs-client")),
         ("mount.nfs", DistroFamily::Arch)    => Some(("pacman",  "nfs-utils")),
+        ("mount.nfs", DistroFamily::Alpine)  => Some(("apk",     "nfs-utils")),
         ("mount.nfs", DistroFamily::Unknown) => Some(("apt-get", "nfs-common")),
 
         ("mount.cifs", DistroFamily::Debian)  => Some(("apt-get", "cifs-utils")),
         ("mount.cifs", DistroFamily::RedHat)  => Some(("dnf",     "cifs-utils")),
         ("mount.cifs", DistroFamily::Suse)    => Some(("zypper",  "cifs-utils")),
         ("mount.cifs", DistroFamily::Arch)    => Some(("pacman",  "cifs-utils")),
+        ("mount.cifs", DistroFamily::Alpine)  => Some(("apk",     "cifs-utils")),
         ("mount.cifs", DistroFamily::Unknown) => Some(("apt-get", "cifs-utils")),
+
+        ("sshfs", DistroFamily::Debian)  => Some(("apt-get", "sshfs")),
+        ("sshfs", DistroFamily::RedHat)  => Some(("dnf",     "fuse-sshfs")),
+        ("sshfs", DistroFamily::Suse)    => Some(("zypper",  "sshfs")),
+        ("sshfs", DistroFamily::Arch)    => Some(("pacman",  "sshfs")),
+        ("sshfs", DistroFamily::Alpine)  => Some(("apk",     "sshfs")),
+        ("sshfs", DistroFamily::Unknown) => Some(("apt-get", "sshfs")),
+
+        // s3fs-fuse. Debian/Ubuntu call the package `s3fs`; the RPM and Arch
+        // families call it `s3fs-fuse`. On RHEL-likes it lives in EPEL, which
+        // prepare_install_package enables as part of the install command.
+        ("s3fs", DistroFamily::Debian)  => Some(("apt-get", "s3fs")),
+        ("s3fs", DistroFamily::RedHat)  => Some(("dnf",     "s3fs-fuse")),
+        ("s3fs", DistroFamily::Suse)    => Some(("zypper",  "s3fs")),
+        ("s3fs", DistroFamily::Arch)    => Some(("pacman",  "s3fs-fuse")),
+        ("s3fs", DistroFamily::Alpine)  => Some(("apk",     "s3fs-fuse")),
+        ("s3fs", DistroFamily::Unknown) => Some(("apt-get", "s3fs")),
 
         _ => None,
     }
@@ -1647,39 +1815,10 @@ pub fn wolfdisk_dedicate_disk(device: &str, fstype: &str) -> Result<String, Stri
     ))
 }
 
-fn install_s3fs() -> Result<(), String> {
-
-    let distro = crate::installer::detect_distro();
-    let (pkg_mgr, pkg_name) = match distro {
-        crate::installer::DistroFamily::Debian => ("apt-get", "s3fs"),
-        crate::installer::DistroFamily::RedHat => ("dnf", "s3fs-fuse"),
-        crate::installer::DistroFamily::Suse => ("zypper", "s3fs"),
-        crate::installer::DistroFamily::Arch => ("pacman", "s3fs-fuse"),
-        crate::installer::DistroFamily::Alpine => ("apk", "s3fs-fuse"),
-        crate::installer::DistroFamily::Unknown => ("apt-get", "s3fs"),
-    };
-    // RHEL/CentOS may need EPEL for s3fs-fuse
-    if distro == crate::installer::DistroFamily::RedHat {
-        let _ = Command::new("dnf").args(["install", "-y", "epel-release"]).output();
-    }
-    let output = Command::new(pkg_mgr)
-        .args(["install", "-y", pkg_name])
-        .output()
-        .map_err(|e| format!("Failed to install {}: {}", pkg_name, e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("{} installation failed: {}",
-            pkg_name, String::from_utf8_lossy(&output.stderr)))
-    }
-}
-
 /// Sync local changes back to S3 bucket (called on unmount or periodic sync)
 pub fn sync_to_s3(id: &str) -> Result<String, String> {
     use s3::bucket::Bucket;
     use s3::creds::Credentials;
-    use s3::region::Region;
 
     let config = load_config();
     let mount = config.mounts.iter().find(|m| m.id == id)
@@ -1694,17 +1833,11 @@ pub fn sync_to_s3(id: &str) -> Result<String, String> {
         None, None, None,
     ).map_err(|e| format!("Invalid credentials: {}", e))?;
 
-    let region = if !s3.endpoint.is_empty() {
-        // R2 requires region "auto" for SigV4 (same fix as the mount path —
-        // effective_s3_region supplies it; empty/non-R2 → us-east-1).
-        let r = effective_s3_region(s3);
-        Region::Custom {
-            region: if r.is_empty() { "us-east-1".to_string() } else { r },
-            endpoint: s3.endpoint.clone(),
-        }
-    } else {
-        s3.region.parse::<Region>().unwrap_or(Region::UsEast1)
-    };
+    // build_s3_region also supplies the https:// scheme a bare-hostname
+    // endpoint needs — the local copy this replaced passed the endpoint
+    // through verbatim, so a sync against `s3.example.com` (no scheme, the
+    // form WolfStack's own placeholder invites) never reached the provider.
+    let region = build_s3_region(s3);
 
     let bucket = Bucket::new(&s3.bucket, region, credentials)
         .map_err(|e| format!("Failed to create bucket handle: {}", e))?
@@ -1764,90 +1897,411 @@ async fn sync_dir_to_s3(
     Ok(())
 }
 
-// ─── Rclone Config Import ───
+// ─── S3 Remotes (saved credential sets) ─────────────────────────────────────
+//
+// A "remote" is one set of S3 credentials + endpoint + region, saved once and
+// reused for every bucket on that account — exactly what rclone calls a remote.
+// Before this existed the Add Mount dialog was the ONLY place S3 credentials
+// could live, so an operator who had already configured their provider (in
+// rclone.conf, or in the s3fs provider Settings editor) was still asked to
+// retype the access key and secret for every single mount, with no way to see
+// what was already configured (Paul, 2026-07-29 — IDrive e2 on wolfstack-2).
+//
+// Remotes come from three places, all merged by list_s3_remotes():
+//   • WolfStack's own store (s3-remotes.json, 0600) — editable in the UI
+//   • rclone config files on the host — read-only, so we never rewrite a file
+//     the operator maintains with the rclone CLI
+//   • existing S3 mounts — their credentials are already stored, so they can
+//     be reused for a second bucket without retyping
+//
+// Secrets never leave the host: the API serves S3RemoteInfo (no secret) and
+// the mount is created by REFERENCE (s3_remote = "<id>"), with the backend
+// resolving the credentials server-side.
 
-/// Parse an rclone.conf file contents and extract S3 remotes as StorageMount definitions
-pub fn import_rclone_config(rclone_conf: &str) -> Result<Vec<StorageMount>, String> {
-    let mut mounts = Vec::new();
-    let mut current_section: Option<String> = None;
-    let mut current_props: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    
-    for line in rclone_conf.lines() {
-        let trimmed = line.trim();
-        
-        // New section
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            // Save previous section
-            if let Some(ref name) = current_section {
-                if let Some(mount) = rclone_section_to_mount(name, &current_props) {
-                    mounts.push(mount);
-                }
-            }
-            current_section = Some(trimmed[1..trimmed.len()-1].to_string());
-            current_props.clear();
-            continue;
-        }
-        
-        // Key = value
-        if let Some(eq_pos) = trimmed.find('=') {
-            let key = trimmed[..eq_pos].trim().to_string();
-            let value = trimmed[eq_pos+1..].trim().to_string();
-            current_props.insert(key, value);
-        }
-    }
-    
-    // Don't forget the last section
-    if let Some(ref name) = current_section {
-        if let Some(mount) = rclone_section_to_mount(name, &current_props) {
-            mounts.push(mount);
-        }
-    }
-    
-    if mounts.is_empty() {
-        return Err("No S3-compatible remotes found in rclone.conf".to_string());
-    }
-    
-    Ok(mounts)
+/// Rclone remote types that are S3-compatible enough for s3fs to mount.
+/// `b2`/`gcs` are only usable via their S3-compatible endpoints, which is
+/// why they still need an explicit `endpoint` in the config to work.
+const S3_COMPATIBLE_RCLONE_TYPES: [&str; 4] = ["s3", "b2", "gcs", "r2"];
+
+/// Rclone config files WolfStack reads remotes out of. Read-only: WolfStack
+/// never writes these — an operator running `rclone config` owns them.
+const RCLONE_CONFIG_PATHS: [&str; 3] = [
+    "/root/.config/rclone/rclone.conf",
+    "/root/.rclone.conf",
+    "/etc/rclone.conf",
+];
+
+/// A saved set of S3 credentials, reusable across mounts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3Remote {
+    /// Stable identifier — `<origin-kind>:<name>`, e.g. `wolfstack:idrive-e2`.
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_s3_provider")]
+    pub provider: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub access_key_id: String,
+    #[serde(default)]
+    pub secret_access_key: String,
+    /// Human-readable source of this remote, shown in the picker so the
+    /// operator knows whose credentials they're about to mount with.
+    #[serde(default)]
+    pub origin: String,
 }
 
-fn rclone_section_to_mount(
-    name: &str, 
-    props: &std::collections::HashMap<String, String>
-) -> Option<StorageMount> {
+/// The API-facing view of a remote. Deliberately a SEPARATE struct rather
+/// than `#[serde(skip)]` on S3Remote's secret: S3Remote is what gets
+/// persisted, so a skip attribute there would silently drop the secret on
+/// every save. Keeping the two apart makes it impossible to leak the secret
+/// by adding a field in the wrong place later.
+#[derive(Debug, Clone, Serialize)]
+pub struct S3RemoteInfo {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub endpoint: String,
+    pub region: String,
+    pub origin: String,
+    /// Access key with the middle masked — enough to tell two accounts
+    /// apart in the picker without printing the whole key into the DOM.
+    pub access_key_hint: String,
+    /// True when the remote lives in WolfStack's own store, i.e. the UI may
+    /// edit or delete it. Remotes discovered in rclone.conf are read-only.
+    pub editable: bool,
+}
+
+impl S3Remote {
+    fn info(&self) -> S3RemoteInfo {
+        S3RemoteInfo {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            provider: self.provider.clone(),
+            endpoint: self.endpoint.clone(),
+            region: self.region.clone(),
+            origin: self.origin.clone(),
+            access_key_hint: mask_access_key(&self.access_key_id),
+            editable: self.id.starts_with("wolfstack:"),
+        }
+    }
+
+    /// Credentials for a mount, with the bucket filled in by the caller.
+    pub fn to_s3_config(&self, bucket: &str) -> S3Config {
+        S3Config {
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+            region: self.region.clone(),
+            endpoint: self.endpoint.clone(),
+            provider: self.provider.clone(),
+            bucket: bucket.to_string(),
+        }
+    }
+}
+
+/// `e2xP52VNa4XYAGPWpHTN` → `e2xP…pHTN`. Short keys are masked entirely
+/// rather than revealing most of themselves.
+fn mask_access_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() < 12 {
+        return "•".repeat(chars.len());
+    }
+    format!(
+        "{}…{}",
+        chars[..4].iter().collect::<String>(),
+        chars[chars.len() - 4..].iter().collect::<String>()
+    )
+}
+
+fn remotes_path() -> String {
+    let storage = config_path();
+    let dir = Path::new(&storage).parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/etc/wolfstack".to_string());
+    format!("{}/s3-remotes.json", dir)
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct S3RemoteStore {
+    #[serde(default)]
+    remotes: Vec<S3Remote>,
+}
+
+fn load_remote_store() -> S3RemoteStore {
+    match fs::read_to_string(remotes_path()) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+            error!("Failed to parse {}: {}", remotes_path(), e);
+            S3RemoteStore::default()
+        }),
+        Err(_) => S3RemoteStore::default(),
+    }
+}
+
+fn save_remote_store(store: &S3RemoteStore) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(store)
+        .map_err(|e| format!("Failed to serialize S3 remotes: {}", e))?;
+    // write_secure, not fs::write — this file holds secret access keys, and
+    // 0600 must hold from the moment the file is created.
+    crate::paths::write_secure(&remotes_path(), json)
+        .map_err(|e| format!("Failed to write {}: {}", remotes_path(), e))
+}
+
+/// Parse INI/rclone-style `[section]` + `key = value` text into sections.
+/// Shared by the rclone importer and the "did the operator paste an
+/// rclone.conf into the s3fs credentials editor?" detector, so the two can
+/// never disagree about what counts as a valid section.
+fn parse_ini_sections(text: &str) -> Vec<(String, std::collections::HashMap<String, String>)> {
+    let mut sections: Vec<(String, std::collections::HashMap<String, String>)> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let name = trimmed[1..trimmed.len() - 1].trim().to_string();
+            if !name.is_empty() {
+                sections.push((name, std::collections::HashMap::new()));
+            }
+            continue;
+        }
+        if let Some(eq) = trimmed.find('=') {
+            // A key before the first [section] header belongs to nothing —
+            // drop it rather than attaching it to whatever section comes next.
+            let Some((_, props)) = sections.last_mut() else { continue };
+            let key = trimmed[..eq].trim().to_ascii_lowercase();
+            let value = trimmed[eq + 1..].trim().to_string();
+            props.insert(key, value);
+        }
+    }
+    sections
+}
+
+/// Turn one parsed INI section into a remote, if it is an S3-compatible one.
+/// `origin` describes where it came from and `id_prefix` namespaces the id so
+/// two files can both define a `[backups]` remote without colliding.
+fn section_to_remote(
+    id_prefix: &str,
+    origin: &str,
+    name: &str,
+    props: &std::collections::HashMap<String, String>,
+) -> Option<S3Remote> {
     let rtype = props.get("type").map(|s| s.as_str()).unwrap_or("");
-    
-    // Only import S3-compatible types
-    if rtype != "s3" && rtype != "b2" && rtype != "gcs" && rtype != "r2" {
+    if !S3_COMPATIBLE_RCLONE_TYPES.contains(&rtype) {
         return None;
     }
-    
-    let s3_config = S3Config {
-        access_key_id: props.get("access_key_id").cloned().unwrap_or_default(),
-        secret_access_key: props.get("secret_access_key").cloned().unwrap_or_default(),
-        region: props.get("region").cloned().unwrap_or_default(),
-        endpoint: props.get("endpoint").cloned().unwrap_or_default(),
-        provider: props.get("provider").cloned().unwrap_or_else(|| "AWS".to_string()),
-        bucket: String::new(),
-    };
-    
-    let id = generate_id(name);
-    Some(StorageMount {
-        id: id.clone(),
+    let access_key_id = props.get("access_key_id").cloned().unwrap_or_default();
+    let secret_access_key = props.get("secret_access_key").cloned().unwrap_or_default();
+    // A remote with no credentials cannot mount anything. env_auth remotes
+    // (rclone reading AWS_* from the environment) land here too — s3fs has no
+    // equivalent, so offering them in the picker would only produce a mount
+    // that fails its bucket check.
+    if access_key_id.is_empty() || secret_access_key.is_empty() {
+        return None;
+    }
+    Some(S3Remote {
+        id: format!("{}:{}", id_prefix, name),
         name: name.to_string(),
-        mount_type: MountType::S3,
-        source: format!("{}:", name),
-        mount_point: format!("{}/{}", MOUNT_BASE, id),
-        enabled: false,
-        global: false,
-        auto_mount: false,
-        s3_config: Some(s3_config),
-        nfs_options: None,
-        smb_options: None,
-        smb_config: None,
-        status: "unmounted".to_string(),
-        error_message: None,
-        created_at: Utc::now().to_rfc3339(),
+        provider: props.get("provider").cloned().unwrap_or_else(default_s3_provider),
+        endpoint: props.get("endpoint").cloned().unwrap_or_default(),
+        region: props.get("region").cloned().unwrap_or_default(),
+        access_key_id,
+        secret_access_key,
+        origin: origin.to_string(),
     })
+}
+
+/// Extract every S3-compatible remote from rclone.conf-formatted text.
+pub fn parse_rclone_remotes(conf: &str, id_prefix: &str, origin: &str) -> Vec<S3Remote> {
+    parse_ini_sections(conf)
+        .iter()
+        .filter_map(|(name, props)| section_to_remote(id_prefix, origin, name, props))
+        .collect()
+}
+
+/// Every S3 remote WolfStack can mount with, from all three sources.
+/// Earlier sources win on id collision; ids are namespaced per source so a
+/// collision only happens between two entries that really are the same remote.
+pub fn list_s3_remotes() -> Vec<S3Remote> {
+    let mut remotes: Vec<S3Remote> = load_remote_store().remotes;
+
+    for path in RCLONE_CONFIG_PATHS {
+        if let Ok(content) = fs::read_to_string(path) {
+            remotes.extend(parse_rclone_remotes(&content, "rclone", path));
+        }
+    }
+
+    // The s3fs provider Settings editor writes /etc/passwd-s3fs, and an
+    // operator reasonably reads "S3 (s3fs-fuse) → Settings" as "where my S3
+    // config goes" and pastes an rclone remote in. That file is NOT rclone
+    // format, so s3fs ignores it — but the credentials in it are real, so
+    // surface them here rather than pretending nothing is configured. (New
+    // saves are converted by save_provider_config; this covers hosts that
+    // already have the bad file.)
+    if let Ok(content) = fs::read_to_string(S3FS_PASSWD_PATH) {
+        remotes.extend(parse_rclone_remotes(&content, "s3fs-config", S3FS_PASSWD_PATH));
+    }
+
+    // Existing mounts: their credentials are already on this host, so let a
+    // second bucket on the same account be added without retyping them.
+    for mount in load_config().mounts {
+        if let Some(s3) = mount.s3_config {
+            if s3.access_key_id.is_empty() || s3.secret_access_key.is_empty() {
+                continue;
+            }
+            remotes.push(S3Remote {
+                id: format!("mount:{}", mount.id),
+                name: mount.name.clone(),
+                provider: s3.provider,
+                endpoint: s3.endpoint,
+                region: s3.region,
+                access_key_id: s3.access_key_id,
+                secret_access_key: s3.secret_access_key,
+                origin: format!("mount “{}”", mount.name),
+            });
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    remotes.retain(|r| seen.insert(r.id.clone()));
+    remotes
+}
+
+/// Secret-free listing for the API.
+pub fn list_s3_remote_infos() -> Vec<S3RemoteInfo> {
+    list_s3_remotes().iter().map(|r| r.info()).collect()
+}
+
+pub fn find_s3_remote(id: &str) -> Option<S3Remote> {
+    list_s3_remotes().into_iter().find(|r| r.id == id)
+}
+
+/// Resolve a remote reference into the credentials a mount needs. This is
+/// how credentials get into a mount without ever passing through the
+/// browser: the UI posts `s3_remote` + `bucket`, never a secret.
+pub fn s3_config_from_remote(remote_id: &str, bucket: &str) -> Result<S3Config, String> {
+    let remote = find_s3_remote(remote_id).ok_or_else(|| {
+        format!(
+            "Saved S3 credentials '{}' no longer exist — pick another set, or enter the keys directly",
+            remote_id
+        )
+    })?;
+    Ok(remote.to_s3_config(bucket))
+}
+
+/// Create or replace a remote in WolfStack's own store. `name` is the
+/// identity — saving the same name twice updates it rather than duplicating.
+/// An empty `secret_access_key` keeps the stored secret (the UI never round-
+/// trips a secret it was never given).
+pub fn save_s3_remote(mut remote: S3Remote) -> Result<S3Remote, String> {
+    if remote.name.trim().is_empty() {
+        return Err("Remote name is required".to_string());
+    }
+    remote.name = remote.name.trim().to_string();
+    // The id is `<origin>:<name>`, so a name carrying ':' or '/' would make
+    // ids ambiguous and unroutable. Control characters would also let a name
+    // corrupt any log line it appears in.
+    if remote.name.contains(':')
+        || remote.name.contains('/')
+        || remote.name.chars().any(|c| c.is_control())
+    {
+        return Err("Remote name cannot contain ':' or '/'".to_string());
+    }
+    remote.id = format!("wolfstack:{}", remote.name);
+    remote.origin = "WolfStack".to_string();
+    if remote.access_key_id.trim().is_empty() {
+        return Err("Access Key ID is required".to_string());
+    }
+
+    let mut store = load_remote_store();
+    match store.remotes.iter_mut().find(|r| r.id == remote.id) {
+        Some(existing) => {
+            if remote.secret_access_key.is_empty() {
+                remote.secret_access_key = existing.secret_access_key.clone();
+            }
+            *existing = remote.clone();
+        }
+        None => {
+            if remote.secret_access_key.is_empty() {
+                return Err("Secret Access Key is required".to_string());
+            }
+            store.remotes.push(remote.clone());
+        }
+    }
+    save_remote_store(&store)?;
+    Ok(remote)
+}
+
+pub fn delete_s3_remote(id: &str) -> Result<(), String> {
+    let mut store = load_remote_store();
+    let before = store.remotes.len();
+    store.remotes.retain(|r| r.id != id);
+    if store.remotes.len() == before {
+        return Err(format!(
+            "Remote '{}' is not one of WolfStack's own saved remotes — remotes read from rclone.conf are managed with the rclone CLI",
+            id
+        ));
+    }
+    save_remote_store(&store)
+}
+
+/// Import every S3-compatible remote from pasted rclone.conf text into
+/// WolfStack's store. Returns the names imported.
+///
+/// This deliberately imports REMOTES, not mounts: an rclone remote has no
+/// bucket, and a WolfStack S3 mount without a bucket can never mount
+/// ("Bucket name is required for S3 mounts"), so the old import produced a
+/// table full of permanently-broken entries.
+pub fn import_rclone_remotes(conf: &str) -> Result<Vec<String>, String> {
+    let parsed = parse_rclone_remotes(conf, "wolfstack", "WolfStack");
+    if parsed.is_empty() {
+        return Err(
+            "No S3-compatible remotes with credentials found. WolfStack imports rclone \
+             sections whose type is s3, b2, gcs or r2 and that carry both access_key_id \
+             and secret_access_key."
+                .to_string(),
+        );
+    }
+    let mut imported = Vec::new();
+    for remote in parsed {
+        let name = remote.name.clone();
+        save_s3_remote(remote)?;
+        imported.push(name);
+    }
+    Ok(imported)
+}
+
+/// List the buckets a remote's credentials can see, so the operator picks a
+/// bucket from a list instead of typing one and finding out it was wrong only
+/// when the s3fs daemon fails its startup bucket check.
+pub fn list_remote_buckets(id: &str) -> Result<Vec<String>, String> {
+    use s3::bucket::Bucket;
+    use s3::creds::Credentials;
+
+    let remote = find_s3_remote(id).ok_or_else(|| format!("Remote '{}' not found", id))?;
+    let s3 = remote.to_s3_config("");
+
+    let credentials = Credentials::new(
+        Some(&s3.access_key_id),
+        Some(&s3.secret_access_key),
+        None, None, None,
+    ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
+
+    let region = build_s3_region(&s3);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create runtime: {}", e))?;
+
+    let response = rt.block_on(Bucket::list_buckets(region, credentials))
+        .map_err(|e| with_s3_credential_hint(format!("Could not list buckets: {}", e)))?;
+
+    let mut names: Vec<String> = response.bucket_names().collect();
+    names.sort();
+    Ok(names)
 }
 
 // ─── Auto-mount on boot ───
@@ -2343,28 +2797,40 @@ pub fn provider_action_targeted(name: &str, action: &str, target: &crate::config
     }
 }
 
+/// s3fs's global credentials file. Format is one `access_key:secret_key` per
+/// line (optionally `bucket:access_key:secret_key`) — NOT rclone's INI.
+pub const S3FS_PASSWD_PATH: &str = "/etc/passwd-s3fs";
+
+fn provider_config_path(name: &str) -> Result<&'static str, String> {
+    match name {
+        "nfs" => Ok("/etc/exports"),
+        "sshfs" => Ok("/etc/fuse.conf"),
+        "s3fs" => Ok(S3FS_PASSWD_PATH),
+        "wolfdisk" => Ok("/etc/wolfdisk/config.toml"),
+        _ => Err(format!("Unknown provider: {}", name)),
+    }
+}
+
 /// Read a provider's config file contents
 pub fn provider_config(name: &str) -> Result<String, String> {
-    let path = match name {
-        "nfs" => "/etc/exports",
-        "sshfs" => "/etc/fuse.conf",
-        "s3fs" => "/etc/passwd-s3fs",
-        "wolfdisk" => "/etc/wolfdisk/config.toml",
-        _ => return Err(format!("Unknown provider: {}", name)),
-    };
+    let path = provider_config_path(name)?;
     std::fs::read_to_string(path)
         .map_err(|e| format!("Cannot read {}: {}", path, e))
 }
 
 /// Write a provider's config file contents
 pub fn save_provider_config(name: &str, content: &str) -> Result<String, String> {
-    let path = match name {
-        "nfs" => "/etc/exports",
-        "sshfs" => "/etc/fuse.conf",
-        "s3fs" => "/etc/passwd-s3fs",
-        "wolfdisk" => "/etc/wolfdisk/config.toml",
-        _ => return Err(format!("Unknown provider: {}", name)),
-    };
+    let path = provider_config_path(name)?;
+
+    // s3fs credentials get their own path: the file holds secrets (so 0600,
+    // which s3fs also *requires* — it refuses to start against a credentials
+    // file with group/other permissions), and an operator who pastes an
+    // rclone remote in here has configured something real that s3fs would
+    // otherwise silently ignore.
+    if name == "s3fs" {
+        return save_s3fs_passwd(path, content);
+    }
+
     // Ensure the parent directory exists before writing. WolfDisk's
     // /etc/wolfdisk is normally created by its installer, but the dashboard
     // lets the operator save the config before/independently of the install,
@@ -2382,6 +2848,65 @@ pub fn save_provider_config(name: &str, content: &str) -> Result<String, String>
         let _ = Command::new("exportfs").arg("-ra").output();
     }
     Ok(format!("Config saved to {}", path))
+}
+
+/// Save /etc/passwd-s3fs, converting a pasted rclone.conf into saved remotes.
+///
+/// "S3 (s3fs-fuse) → Settings" reads as "where my S3 configuration goes", so
+/// operators paste an rclone remote block into it (Paul, 2026-07-29). s3fs
+/// cannot read that — it would ignore the file and report nothing — so rather
+/// than storing something inert, import the remotes into WolfStack's own
+/// store (where the Add Mount picker finds them) and write s3fs the
+/// `access_key:secret_key` lines it actually understands.
+fn save_s3fs_passwd(path: &str, content: &str) -> Result<String, String> {
+    let rclone_remotes = parse_rclone_remotes(content, "wolfstack", "WolfStack");
+
+    if !rclone_remotes.is_empty() {
+        let mut names = Vec::new();
+        let mut passwd_lines = Vec::new();
+        for remote in rclone_remotes {
+            passwd_lines.push(format!("{}:{}", remote.access_key_id, remote.secret_access_key));
+            names.push(remote.name.clone());
+            save_s3_remote(remote)?;
+        }
+        // Dedupe: two remotes on the same account produce an identical line.
+        // Vec::dedup only removes CONSECUTIVE duplicates, and duplicates here
+        // need not be adjacent — keep the first occurrence of each instead.
+        let mut seen = std::collections::HashSet::new();
+        passwd_lines.retain(|l| seen.insert(l.clone()));
+        crate::paths::write_secure(path, format!("{}\n", passwd_lines.join("\n")))
+            .map_err(|e| format!("Cannot write {}: {}", path, e))?;
+        return Ok(format!(
+            "That is rclone.conf format, which s3fs cannot read — saved {} as reusable S3 remote{} instead \
+             (pick them under Add Mount → S3 → Saved credentials), and wrote the matching \
+             access_key:secret_key line{} to {}.",
+            names.join(", "),
+            if names.len() == 1 { "" } else { "s" },
+            if passwd_lines.len() == 1 { "" } else { "s" },
+            path
+        ));
+    }
+
+    // Plain s3fs format. Validate before writing so a typo is caught here
+    // rather than surfacing hours later as a mount that won't come up.
+    for (n, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let fields = trimmed.split(':').count();
+        if !(2..=3).contains(&fields) {
+            return Err(format!(
+                "Line {} is not valid for {}: expected `access_key:secret_key` \
+                 (or `bucket:access_key:secret_key`), got `{}`.",
+                n + 1, path, trimmed
+            ));
+        }
+    }
+
+    crate::paths::write_secure(path, content)
+        .map_err(|e| format!("Cannot write {}: {}", path, e))?;
+    Ok(format!("Config saved to {} (permissions 0600, as s3fs requires)", path))
 }
 
 /// Install a storage provider by name
@@ -3295,5 +3820,235 @@ mod mount_dropin_tests {
         assert_eq!(replicated_mount_match(&existing, &sm("new", "/mnt/c")), None);
         // Empty incoming id never matches on id — falls through to mount_point.
         assert_eq!(replicated_mount_match(&existing, &sm("", "/mnt/b")), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod s3_remote_tests {
+    use super::*;
+
+    /// The exact block Paul pasted into the s3fs provider Settings editor on
+    /// wolfstack-2 (2026-07-29). It is rclone.conf format, which s3fs cannot
+    /// read — WolfStack must recognise it and turn it into a usable remote
+    /// rather than storing an inert file and reporting nothing configured.
+    const IDRIVE_RCLONE: &str = "\
+[ff2]
+type = s3
+provider = IDrive
+env_auth = false
+region = eu-central-1
+location_constraint = 
+server_side_encryption = 
+endpoint = l8k1.fra21.idrivee2-12.com
+access_key_id = AKIAEXAMPLEKEY123456
+secret_access_key = ExampleSecretKeyValueForUnitTestOnly1234
+";
+
+    #[test]
+    fn parses_an_idrive_rclone_remote() {
+        let remotes = parse_rclone_remotes(IDRIVE_RCLONE, "wolfstack", "WolfStack");
+        assert_eq!(remotes.len(), 1);
+        let r = &remotes[0];
+        assert_eq!(r.id, "wolfstack:ff2");
+        assert_eq!(r.name, "ff2");
+        assert_eq!(r.provider, "IDrive");
+        assert_eq!(r.region, "eu-central-1");
+        assert_eq!(r.endpoint, "l8k1.fra21.idrivee2-12.com");
+        assert_eq!(r.access_key_id, "AKIAEXAMPLEKEY123456");
+        assert_eq!(r.secret_access_key, "ExampleSecretKeyValueForUnitTestOnly1234");
+    }
+
+    /// Blank values in the pasted config (location_constraint,
+    /// server_side_encryption) must not be mistaken for missing sections, and
+    /// comments must not become keys.
+    #[test]
+    fn ignores_comments_and_blank_values() {
+        let conf = "\
+# a comment
+; another comment
+
+[withblank]
+type = s3
+region =
+access_key_id = AKIAEXAMPLEKEY123456
+secret_access_key = SecretValueLongEnoughToBeRealistic123456
+";
+        let remotes = parse_rclone_remotes(conf, "rclone", "/etc/rclone.conf");
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].region, "");
+        assert_eq!(remotes[0].origin, "/etc/rclone.conf");
+    }
+
+    /// Non-S3 remotes and credential-less ones (env_auth, or an rclone remote
+    /// whose secret lives in the obscured form rclone writes) must be skipped:
+    /// offering them in the picker would only produce a mount that fails its
+    /// bucket check.
+    #[test]
+    fn skips_non_s3_and_credential_less_remotes() {
+        let conf = "\
+[dropbox]
+type = dropbox
+token = {}
+
+[nokeys]
+type = s3
+region = us-east-1
+
+[keyonly]
+type = s3
+access_key_id = AKIAEXAMPLEKEY123456
+";
+        assert!(parse_rclone_remotes(conf, "rclone", "test").is_empty());
+    }
+
+    /// Every S3-compatible rclone type is accepted, not just `s3`.
+    #[test]
+    fn accepts_every_s3_compatible_type() {
+        for t in S3_COMPATIBLE_RCLONE_TYPES {
+            let conf = format!(
+                "[r]\ntype = {}\naccess_key_id = AKIAEXAMPLEKEY123456\nsecret_access_key = SecretValueLongEnoughToBeRealistic123456\n",
+                t
+            );
+            assert_eq!(parse_rclone_remotes(&conf, "rclone", "test").len(), 1, "type {} rejected", t);
+        }
+    }
+
+    /// A key-value line before any section header has no section to belong to
+    /// and must not panic or be silently attached to the next one.
+    #[test]
+    fn tolerates_keys_before_any_section() {
+        let sections = parse_ini_sections("stray = value\n[real]\ntype = s3\n");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "real");
+        assert!(!sections[0].1.contains_key("stray"));
+    }
+
+    #[test]
+    fn access_keys_are_masked_not_printed() {
+        assert_eq!(mask_access_key("AKIAEXAMPLEKEY123456"), "AKIA…3456");
+        // Anything short enough that a 4+4 reveal would expose most of it is
+        // hidden entirely.
+        assert_eq!(mask_access_key("short"), "•••••");
+        assert_eq!(mask_access_key(""), "");
+    }
+
+    /// The remote picker exposes an S3RemoteInfo; a secret must not be
+    /// reachable through it, and read-only sources must be marked so.
+    #[test]
+    fn remote_info_carries_no_secret() {
+        let remote = S3Remote {
+            id: "rclone:ff2".to_string(),
+            name: "ff2".to_string(),
+            provider: "IDrive".to_string(),
+            endpoint: "l8k1.fra21.idrivee2-12.com".to_string(),
+            region: "eu-central-1".to_string(),
+            access_key_id: "AKIAEXAMPLEKEY123456".to_string(),
+            secret_access_key: "ExampleSecretKeyValueForUnitTestOnly1234".to_string(),
+            origin: "/root/.config/rclone/rclone.conf".to_string(),
+        };
+        let json = serde_json::to_string(&remote.info()).unwrap();
+        assert!(!json.contains("ExampleSecretKeyValueForUnitTestOnly1234"));
+        assert!(!json.contains("AKIAEXAMPLEKEY123456"));
+        // Not WolfStack's own store → the UI must not offer to edit it.
+        assert!(!remote.info().editable);
+    }
+
+    /// A remote supplies everything except the bucket, which is per-mount.
+    #[test]
+    fn remote_to_config_takes_bucket_from_caller() {
+        let remote = S3Remote {
+            id: "wolfstack:e2".to_string(),
+            name: "e2".to_string(),
+            provider: "IDrive".to_string(),
+            endpoint: "l8k1.fra21.idrivee2-12.com".to_string(),
+            region: "eu-central-1".to_string(),
+            access_key_id: "AKIAEXAMPLEKEY123456".to_string(),
+            secret_access_key: "SecretValueLongEnoughToBeRealistic123456".to_string(),
+            origin: "WolfStack".to_string(),
+        };
+        let cfg = remote.to_s3_config("backups");
+        assert_eq!(cfg.bucket, "backups");
+        assert_eq!(cfg.endpoint, "l8k1.fra21.idrivee2-12.com");
+        assert_eq!(cfg.region, "eu-central-1");
+    }
+
+    /// A provider dashboard prints `host` — s3fs and rust-s3 both need a URL.
+    #[test]
+    fn bare_endpoint_hosts_get_a_scheme() {
+        assert_eq!(endpoint_url("l8k1.fra21.idrivee2-12.com"), "https://l8k1.fra21.idrivee2-12.com");
+        assert_eq!(endpoint_url("https://s3.example.com"), "https://s3.example.com");
+        assert_eq!(endpoint_url("http://minio.lan:9000"), "http://minio.lan:9000");
+        assert_eq!(endpoint_url("  s3.example.com  "), "https://s3.example.com");
+    }
+}
+
+#[cfg(test)]
+mod s3fs_log_tests {
+    use super::*;
+
+    /// Verbatim output from s3fs 1.95 on wolfstack-2 mounting a bucket that
+    /// does not exist (2026-07-29). s3fs EXITS 0 here — the daemon fails its
+    /// startup bucket check afterwards — so this log is the only place the
+    /// real reason exists, and nothing on a default host collects syslog.
+    const NO_SUCH_BUCKET_LOG: &str = "\
+2026-07-29T11:55:19.780Z [CRT] s3fs_logger.cpp:LowSetLogLevel(233): change debug level from [CRT] to [INF] 
+2026-07-29T11:55:19.782Z [INF] s3fs.cpp:s3fs_check_service(4382): check services.
+2026-07-29T11:55:19.875Z [ERR] curl.cpp:CheckBucket(3833): Check bucket failed, S3 response: <Error><Code>NoSuchBucket</Code></Error>
+2026-07-29T11:55:19.875Z [CRT] s3fs.cpp:s3fs_check_service(4498): Failed to check bucket and directory for mount point : Bucket or directory not found(host=https://l8k1.fra21.idrivee2-12.com, message=The specified bucket does not exist)
+2026-07-29T11:55:19.875Z [ERR] s3fs.cpp:s3fs_exit_fuseloop(4199): Exiting FUSE event loop due to errors
+";
+
+    fn write_temp_log(name: &str, content: &str) -> String {
+        let path = format!("{}/wolfstack-s3fs-test-{}.log", std::env::temp_dir().display(), name);
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn extracts_the_real_failure_from_the_daemon_log() {
+        let path = write_temp_log("nosuchbucket", NO_SUCH_BUCKET_LOG);
+        let err = read_s3fs_error(&path).expect("failure lines should be found");
+        let _ = fs::remove_file(&path);
+
+        assert!(err.contains("The specified bucket does not exist"), "got: {}", err);
+        assert!(err.contains("NoSuchBucket"), "got: {}", err);
+        // The C++ source location and severity tag are noise for an operator.
+        assert!(!err.contains("s3fs.cpp"), "got: {}", err);
+        assert!(!err.contains("[CRT]"), "got: {}", err);
+        // s3fs logs its own log-level change as [CRT] on EVERY start; reporting
+        // that as the failure would be actively misleading.
+        assert!(!err.contains("change debug level"), "got: {}", err);
+    }
+
+    #[test]
+    fn a_clean_log_yields_no_error() {
+        let path = write_temp_log(
+            "clean",
+            "2026-07-29T11:55:19.780Z [CRT] s3fs_logger.cpp:LowSetLogLevel(233): change debug level from [CRT] to [INF]\n\
+             2026-07-29T11:55:19.782Z [INF] s3fs.cpp:s3fs_init(4209): init v1.95\n",
+        );
+        let err = read_s3fs_error(&path);
+        let _ = fs::remove_file(&path);
+        assert!(err.is_none(), "got: {:?}", err);
+    }
+
+    /// s3fs older than 1.85 ignores `-o logfile`, so no file is written. The
+    /// caller must fall back to its own guidance rather than showing nothing.
+    #[test]
+    fn missing_log_yields_no_error() {
+        assert!(read_s3fs_error("/nonexistent/wolfstack-s3fs-missing.log").is_none());
+    }
+
+    #[test]
+    fn error_text_is_capped_for_a_dialog() {
+        let long = format!(
+            "2026-07-29T11:55:19.875Z [ERR] curl.cpp:CheckBucket(3833): {}\n",
+            "x".repeat(5000)
+        );
+        let path = write_temp_log("long", &long);
+        let err = read_s3fs_error(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(err.chars().count() <= 601, "length {}", err.chars().count());
+        assert!(err.ends_with('…'));
     }
 }
