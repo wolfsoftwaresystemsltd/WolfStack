@@ -38932,9 +38932,18 @@ pub async fn gateways_sync(req: HttpRequest, state: web::Data<AppState>, body: w
         return HttpResponse::Unauthorized().finish();
     }
     let incoming = body.into_inner();
+    // Who sent this. A peer that identifies itself is authoritative for
+    // the shares it owns, so absence from its snapshot means "deleted"
+    // rather than "no information" — the difference between a delete
+    // propagating and living on every other node forever. Absent header
+    // = pre-v25.6.2 peer; merge-only, exactly as before.
+    let sender_id = req.headers().get("X-WolfStack-Node-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && *s != state.cluster.self_id);
     let changed = {
         let mut s = state.gateways.write().unwrap_or_else(|e| e.into_inner());
-        s.merge_from_peer(incoming)
+        s.merge_from_peer_owned_by(incoming, sender_id)
     };
     if changed {
         let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
@@ -39037,6 +39046,28 @@ async fn apply_and_persist(state: &web::Data<AppState>, g: crate::gateway::Gatew
 /// Push the local gateway snapshot to every online wolfstack peer.
 /// Best-effort — peers that are slow / offline catch up on their next
 /// boot via merge_from_peer in the receive path.
+/// How often every node re-broadcasts its share set.
+///
+/// Delivery on change is best-effort — `push_to_peers` skips peers that
+/// are offline at that instant and ignores transport failures — so a
+/// node that was down when a share was deleted would otherwise keep it
+/// forever. This loop is what makes the sync eventually consistent
+/// rather than dependent on one fire-and-forget delivery landing.
+const GATEWAY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Re-broadcast this node's share set on a timer, so peers that missed
+/// a push converge. Cheap: a JSON POST per peer every 5 minutes, and
+/// the receiver only writes to disk when something actually changed.
+pub async fn gateway_resync_loop(state: web::Data<AppState>) {
+    // Let cluster discovery settle before the first broadcast — pushing
+    // into an empty peer list just wastes the tick.
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    loop {
+        push_to_peers(&state).await;
+        tokio::time::sleep(GATEWAY_RESYNC_INTERVAL).await;
+    }
+}
+
 async fn push_to_peers(state: &web::Data<AppState>) {
     let snapshot: Vec<crate::gateway::Gateway> = {
         let s = state.gateways.read().unwrap_or_else(|e| e.into_inner());
@@ -39047,6 +39078,7 @@ async fn push_to_peers(state: &web::Data<AppState>) {
         .collect();
     if peers.is_empty() { return; }
     let secret = state.cluster_secret.clone();
+    let self_id = state.cluster.self_id.clone();
     let client = (*API_HTTP_CLIENT).clone();
     tokio::spawn(async move {
         for peer in peers {
@@ -39055,6 +39087,9 @@ async fn push_to_peers(state: &web::Data<AppState>) {
                 let res = client.post(&url)
                     .timeout(std::time::Duration::from_secs(5))
                     .header("X-WolfStack-Secret", &secret)
+                    // Lets the receiver treat us as authoritative for our
+                    // own shares, so a delete actually propagates.
+                    .header("X-WolfStack-Node-Id", &self_id)
                     .json(&snapshot)
                     .send().await;
                 if let Ok(resp) = res {

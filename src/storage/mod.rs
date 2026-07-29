@@ -1139,7 +1139,66 @@ fn mount_smb(mount: &StorageMount) -> Result<String, String> {
     if output.status.success() {
         Ok("SMB storage mounted".to_string())
     } else {
-        Err(format!("SMB mount failed: {}", String::from_utf8_lossy(&output.stderr)))
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let used_guest = !matches!(cfg, Some(c) if !c.username.is_empty());
+        Err(format!(
+            "SMB mount failed: {}{}",
+            stderr.trim(),
+            explain_cifs_failure(&stderr, &source, used_guest),
+        ))
+    }
+}
+
+/// Turn mount.cifs's errno into something an operator can act on.
+///
+/// The raw text is always kept — this only appends. `mount error(2): No
+/// such file or directory` is the motivating case: it names neither
+/// WHICH thing was not found (the share? the mount point? a
+/// subdirectory?) nor the fact that we may have connected anonymously,
+/// so it reads as "the path is wrong" when the server is actually
+/// saying "I have no share by that name, at least not for you"
+/// (klasSponsor 2026-07-29, mounting //10.10.10.20/paperless).
+fn explain_cifs_failure(stderr: &str, source: &str, used_guest: bool) -> String {
+    let guest_note = if used_guest {
+        " This mount connected as guest because no username was set — a share \
+         that requires credentials answers exactly this way."
+    } else {
+        ""
+    };
+    // Match on the errno mount.cifs prints, not on message wording,
+    // which varies between cifs-utils versions.
+    if stderr.contains("mount error(2)") {
+        format!(
+            "\n\nThe server answered that it has no share matching '{}'. The mount point \
+             exists (WolfStack creates it), so this is the server refusing the share name.{}\
+             \n\nCheck: is it a share, or a folder INSIDE one? A NAS app folder is usually \
+             the latter — mount the parent share instead. Share names are also case-sensitive \
+             on many servers. `smbclient -L {} -U <user>` lists what the server actually \
+             publishes.",
+            source, guest_note,
+            source.trim_start_matches('/').split('/').next().unwrap_or(""),
+        )
+    } else if stderr.contains("mount error(13)") {
+        format!(
+            "\n\nThe server rejected the credentials for '{}'.{}",
+            source,
+            if used_guest {
+                " No username was set, so this was an anonymous attempt — add credentials."
+            } else {
+                " Check the username, password and domain."
+            },
+        )
+    } else if stderr.contains("mount error(112)") || stderr.contains("mount error(115)") {
+        format!("\n\nCould not reach the server for '{}' — check it is up and port 445 is open.", source)
+    } else if stderr.contains("mount error(95)") {
+        // vers=3.0 is our default; very old NAS boxes need vers=1.0/2.0.
+        format!(
+            "\n\nThe server refused the SMB protocol version. WolfStack defaults to vers=3.0; \
+             for an older NAS add `vers=2.0` (or `vers=1.0`) to the mount options for '{}'.",
+            source,
+        )
+    } else {
+        String::new()
     }
 }
 
