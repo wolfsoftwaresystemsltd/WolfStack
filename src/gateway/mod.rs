@@ -344,13 +344,58 @@ impl GatewayStore {
     /// Merge a peer's snapshot into this store. Most-recent
     /// `updated_at` wins — matches how other config files are
     /// reconciled across the cluster.
-    pub fn merge_from_peer(&mut self, peer_list: Vec<Gateway>) -> bool {
+    /// Merge a peer's snapshot, and — when we know which node sent it —
+    /// treat that node's snapshot as authoritative for the shares IT
+    /// owns, deleting any of its shares that are absent.
+    ///
+    /// Why the sender's identity is required: a snapshot contains every
+    /// gateway the sender knows about, including ones it merely learned
+    /// from other peers. Replacing our whole set with it would let one
+    /// node silently delete another node's shares. Scoping the prune to
+    /// `origin_node_id == sender` is safe because deletion is already
+    /// gated by `require_owner`, so only the owner can have removed it.
+    ///
+    /// `sender_id: None` means an older peer that doesn't identify
+    /// itself — fall back to merge-only, which is exactly the previous
+    /// behaviour. A share it deleted stays until it upgrades, which is
+    /// the pre-existing bug, not a new one.
+    ///
+    /// Without this, deletion could not propagate AT ALL: absence from
+    /// a snapshot was read as "no information", so a share removed on
+    /// one node lived forever on every other (klasSponsor 2026-07-29).
+    pub fn merge_from_peer_owned_by(
+        &mut self,
+        peer_list: Vec<Gateway>,
+        sender_id: Option<&str>,
+    ) -> bool {
         let mut changed = false;
+        let incoming_ids: std::collections::HashSet<String> =
+            peer_list.iter().map(|g| g.id.clone()).collect();
+
         for incoming in peer_list {
             match self.gateways.get(&incoming.id) {
                 Some(existing) if existing.updated_at >= incoming.updated_at => {}
                 _ => {
                     self.gateways.insert(incoming.id.clone(), incoming);
+                    changed = true;
+                }
+            }
+        }
+
+        // Prune the sender's own shares that it no longer has.
+        if let Some(sender) = sender_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let stale: Vec<String> = self.gateways.values()
+                .filter(|g| g.origin_node_id == sender && !incoming_ids.contains(&g.id))
+                .map(|g| g.id.clone())
+                .collect();
+            for id in stale {
+                if let Some(g) = self.gateways.remove(&id) {
+                    tracing::info!(
+                        target: "wolfstack::gateway",
+                        "removed share '{}' — owner {} no longer has it",
+                        g.name, sender,
+                    );
+                    self.runtime.remove(&id);
                     changed = true;
                 }
             }
@@ -666,6 +711,110 @@ mod tests {
         assert_eq!(performance_tier(&g), "cold");
     }
 
+    // ── Deletion propagation ─────────────────────────────────────
+    //
+    // Removing a share only removed it on the node the operator used;
+    // every other node kept it forever, because a share absent from a
+    // peer's snapshot was read as "no information" rather than
+    // "deleted" (klasSponsor 2026-07-29). The prune is scoped to the
+    // SENDER's own shares — a snapshot also carries gateways the sender
+    // merely learned from others, and pruning on those would let one
+    // node delete another's shares.
+
+    fn owned_gateway(id: &str, owner: &str) -> Gateway {
+        let mut g = ok_gateway(id);
+        g.id = id.into();
+        g.origin_node_id = owner.into();
+        g
+    }
+
+    #[test]
+    fn owners_snapshot_deletes_its_own_missing_shares() {
+        let mut store = GatewayStore::default();
+        store.gateways.insert("a1".into(), owned_gateway("a1", "node-a"));
+        store.gateways.insert("a2".into(), owned_gateway("a2", "node-a"));
+
+        // node-a now only has a1 — a2 was deleted there.
+        let changed = store.merge_from_peer_owned_by(
+            vec![owned_gateway("a1", "node-a")], Some("node-a"));
+
+        assert!(changed);
+        assert!(store.gateways.contains_key("a1"));
+        assert!(!store.gateways.contains_key("a2"),
+            "a share its owner no longer has must not survive here");
+    }
+
+    #[test]
+    fn a_peer_cannot_delete_another_nodes_shares() {
+        // The security property. node-a's snapshot omits node-b's share
+        // (it may not know about it, or may be stale) — that must never
+        // be read as node-b having deleted it.
+        let mut store = GatewayStore::default();
+        store.gateways.insert("b1".into(), owned_gateway("b1", "node-b"));
+        store.gateways.insert("a1".into(), owned_gateway("a1", "node-a"));
+
+        store.merge_from_peer_owned_by(
+            vec![owned_gateway("a1", "node-a")], Some("node-a"));
+
+        assert!(store.gateways.contains_key("b1"),
+            "node-a must not be able to delete node-b's share");
+    }
+
+    #[test]
+    fn our_own_shares_survive_a_peer_snapshot() {
+        // We own it; a peer's snapshot simply not listing it says
+        // nothing. Only OUR delete removes it locally.
+        let mut store = GatewayStore::default();
+        store.gateways.insert("mine".into(), owned_gateway("mine", "node-self"));
+
+        store.merge_from_peer_owned_by(
+            vec![owned_gateway("a1", "node-a")], Some("node-a"));
+
+        assert!(store.gateways.contains_key("mine"));
+    }
+
+    #[test]
+    fn unidentified_sender_never_prunes() {
+        // A pre-v25.6.2 peer sends no node id. Merge-only, exactly as
+        // before — better a stale share than one deleted on a guess.
+        let mut store = GatewayStore::default();
+        store.gateways.insert("a2".into(), owned_gateway("a2", "node-a"));
+
+        store.merge_from_peer_owned_by(vec![owned_gateway("a1", "node-a")], None);
+        assert!(store.gateways.contains_key("a2"));
+
+        // Blank/whitespace id is treated the same as absent.
+        store.merge_from_peer_owned_by(vec![owned_gateway("a1", "node-a")], Some("   "));
+        assert!(store.gateways.contains_key("a2"));
+    }
+
+    #[test]
+    fn empty_snapshot_deletes_all_of_that_owners_shares() {
+        // The last share on a node being removed is the case a
+        // "prune only what's in the snapshot" design would miss.
+        let mut store = GatewayStore::default();
+        store.gateways.insert("a1".into(), owned_gateway("a1", "node-a"));
+        store.gateways.insert("b1".into(), owned_gateway("b1", "node-b"));
+
+        let changed = store.merge_from_peer_owned_by(vec![], Some("node-a"));
+
+        assert!(changed);
+        assert!(!store.gateways.contains_key("a1"));
+        assert!(store.gateways.contains_key("b1"), "other owners untouched");
+    }
+
+    #[test]
+    fn merge_with_no_changes_reports_unchanged() {
+        // `changed` gates a disk write and a cache invalidation on every
+        // node, and the resync loop now fires this every 5 minutes — a
+        // false positive would mean needless writes fleet-wide, forever.
+        let mut store = GatewayStore::default();
+        let g = owned_gateway("a1", "node-a");
+        store.gateways.insert("a1".into(), g.clone());
+
+        assert!(!store.merge_from_peer_owned_by(vec![g], Some("node-a")));
+    }
+
     #[test]
     fn merge_from_peer_uses_most_recent_updated_at() {
         let mut store = GatewayStore::default();
@@ -681,7 +830,7 @@ mod tests {
         newer.updated_at = "2099-06-01T00:00:00Z".into();
         newer.options.readonly = true; // distinguishing change
 
-        let changed = store.merge_from_peer(vec![newer]);
+        let changed = store.merge_from_peer_owned_by(vec![newer], None);
         assert!(changed);
         let stored = store.get("g1").unwrap();
         assert_eq!(stored.updated_at, "2099-06-01T00:00:00Z");
@@ -703,7 +852,7 @@ mod tests {
         older.updated_at = "2026-01-01T00:00:00Z".into();
         older.options.readonly = false;
 
-        let changed = store.merge_from_peer(vec![older]);
+        let changed = store.merge_from_peer_owned_by(vec![older], None);
         assert!(!changed, "older payload must not overwrite newer");
         assert!(store.get("g1").unwrap().options.readonly);
     }

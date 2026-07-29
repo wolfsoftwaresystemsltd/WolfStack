@@ -2348,6 +2348,15 @@ async fn main() -> std::io::Result<()> {
             crate::telegram_bot::supervise_forever(telegram_state).await;
         });
 
+        // Background: re-broadcast this node's shares so peers that were
+        // offline during a create/delete still converge. Delivery on
+        // change is best-effort and skips offline peers, which is how a
+        // deleted share could survive on some nodes indefinitely.
+        let gateway_sync_state = app_state.clone();
+        tokio::spawn(async move {
+            crate::api::gateway_resync_loop(gateway_sync_state).await;
+        });
+
         // Background: session + login rate limiter + reset token cleanup.
         // Also sweeps expired OIDC pending-flow state tokens — pre-v18.7.30
         // that map grew without bound because the TTL was only checked
