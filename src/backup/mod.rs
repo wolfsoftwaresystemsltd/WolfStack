@@ -189,6 +189,15 @@ pub struct BackupStorage {
     /// PBS namespace (optional, for organizing backups)
     #[serde(default)]
     pub pbs_namespace: String,
+    /// Which saved PBS destination this backup goes to. Empty means the
+    /// primary connection (`/etc/wolfstack/pbs/config.json`) — which is
+    /// every pre-existing config, so absent field → empty → byte-identical
+    /// behaviour. A non-empty id selects one of the additional destinations
+    /// in `/etc/wolfstack/pbs/targets.json`, letting one schedule write to
+    /// an S3-backed datastore while others keep going to the NAS-backed one
+    /// (klasSponsor 2026-07-28).
+    #[serde(default)]
+    pub pbs_target_id: String,
     /// PBS file-level (pxar) backup. When false (the default, and what every
     /// existing config has) WolfStack uploads its `.tar.gz` wrapped in a
     /// single `backup.pxar` — opaque, restorable only as a whole. When true,
@@ -306,6 +315,7 @@ impl Default for BackupStorage {
             pbs_password: String::new(),
             pbs_fingerprint: String::new(),
             pbs_namespace: String::new(),
+            pbs_target_id: String::new(),
             pbs_file_level: false,
             pbs_file_level_set: false,
             nfs_source: String::new(),
@@ -511,6 +521,116 @@ mod tests {
         assert!(resolve_pbs_file_level(false, false, true), "unset adopts saved (on)");
         assert!(!resolve_pbs_file_level(false, false, false), "unset adopts saved (off)");
         assert!(resolve_pbs_file_level(false, true, false), "legacy: request-true still wins");
+    }
+
+    // ── Additional PBS destinations ──────────────────────────────
+    //
+    // The inheritance order is per-backup value → destination →
+    // primary connection. Get it wrong and a backup silently lands in
+    // a different datastore than the operator picked, which is the
+    // exact failure this feature exists to prevent (klasSponsor).
+
+    fn pbs_target_fixture() -> PbsTarget {
+        PbsTarget {
+            id: "t1".into(),
+            name: "S3 cold".into(),
+            pbs_datastore: "s3-cold".into(),
+            ..PbsTarget::default()
+        }
+    }
+
+    #[test]
+    fn pbs_target_fills_only_empty_fields() {
+        // The common case: a second datastore on the SAME server, so
+        // the destination carries a datastore and nothing else.
+        let mut storage = BackupStorage {
+            storage_type: StorageType::Pbs,
+            ..BackupStorage::default()
+        };
+        apply_pbs_target(&mut storage, &pbs_target_fixture());
+        assert_eq!(storage.pbs_datastore, "s3-cold");
+        assert!(storage.pbs_server.is_empty(),
+            "server stays empty so it inherits from the primary connection");
+    }
+
+    #[test]
+    fn per_backup_datastore_beats_the_destination() {
+        let mut storage = BackupStorage {
+            storage_type: StorageType::Pbs,
+            pbs_datastore: "explicit-store".into(),
+            ..BackupStorage::default()
+        };
+        apply_pbs_target(&mut storage, &pbs_target_fixture());
+        assert_eq!(storage.pbs_datastore, "explicit-store",
+            "a value already on the backup must never be overwritten");
+    }
+
+    #[test]
+    fn destination_can_point_at_a_different_server() {
+        let target = PbsTarget {
+            pbs_server: "pbs2.example".into(),
+            pbs_datastore: "offsite".into(),
+            pbs_user: "backup@pbs".into(),
+            ..pbs_target_fixture()
+        };
+        let mut storage = BackupStorage {
+            storage_type: StorageType::Pbs,
+            ..BackupStorage::default()
+        };
+        apply_pbs_target(&mut storage, &target);
+        assert_eq!(storage.pbs_server, "pbs2.example");
+        assert_eq!(storage.pbs_datastore, "offsite");
+        assert_eq!(storage.pbs_user, "backup@pbs");
+    }
+
+    #[test]
+    fn destination_file_level_applies_only_when_deliberate() {
+        // Not deliberately set → leave the flag alone so the primary
+        // connection's default still decides.
+        let mut storage = BackupStorage {
+            storage_type: StorageType::Pbs,
+            ..BackupStorage::default()
+        };
+        apply_pbs_target(&mut storage, &PbsTarget {
+            pbs_file_level: true, pbs_file_level_set: false, ..pbs_target_fixture()
+        });
+        assert!(!storage.pbs_file_level_set, "must not claim an explicit choice");
+
+        // Deliberately set → adopt it AND mark it explicit, otherwise an
+        // off-by-default primary connection would override the choice.
+        let mut storage = BackupStorage {
+            storage_type: StorageType::Pbs,
+            ..BackupStorage::default()
+        };
+        apply_pbs_target(&mut storage, &PbsTarget {
+            pbs_file_level: true, pbs_file_level_set: true, ..pbs_target_fixture()
+        });
+        assert!(storage.pbs_file_level && storage.pbs_file_level_set);
+    }
+
+    #[test]
+    fn per_backup_file_level_choice_beats_the_destination() {
+        let mut storage = BackupStorage {
+            storage_type: StorageType::Pbs,
+            pbs_file_level: false,
+            pbs_file_level_set: true,
+            ..BackupStorage::default()
+        };
+        apply_pbs_target(&mut storage, &PbsTarget {
+            pbs_file_level: true, pbs_file_level_set: true, ..pbs_target_fixture()
+        });
+        assert!(!storage.pbs_file_level,
+            "an explicit per-backup OFF must survive a destination set to ON");
+    }
+
+    #[test]
+    fn storage_without_a_target_id_is_unchanged_by_default() {
+        // Golden Rule: every pre-existing config deserialises with an
+        // empty pbs_target_id and must behave exactly as before.
+        let json = r#"{"type":"pbs","pbs_server":"nas","pbs_datastore":"store"}"#;
+        let storage: BackupStorage = serde_json::from_str(json).unwrap();
+        assert!(storage.pbs_target_id.is_empty());
+        assert_eq!(storage.pbs_datastore, "store");
     }
 
     #[test]
@@ -8459,6 +8579,30 @@ pub fn check_pbs_status(storage: &BackupStorage) -> serde_json::Value {
 /// "no password input mechanism".
 pub fn merge_pbs_secrets(storage: &mut BackupStorage) {
     if storage.storage_type != StorageType::Pbs { return; }
+    // A backup bound to an additional destination takes that
+    // destination's fields first; anything the destination leaves
+    // blank still inherits from the primary connection below. Order
+    // matters — per-backup value, then destination, then primary.
+    if !storage.pbs_target_id.is_empty() {
+        match find_pbs_target(&storage.pbs_target_id) {
+            Some(t) => apply_pbs_target(storage, &t),
+            None => {
+                // Falling through to the primary connection would send
+                // this backup to a DIFFERENT datastore than the operator
+                // chose. Blank the server instead so the run fails loudly
+                // — a failed backup is recoverable, one silently written
+                // to the wrong place is not.
+                tracing::error!(
+                    "backup: PBS destination '{}' no longer exists — refusing to \
+                     fall back to the primary datastore",
+                    storage.pbs_target_id,
+                );
+                storage.pbs_server.clear();
+                storage.pbs_datastore.clear();
+                return;
+            }
+        }
+    }
     let saved = load_pbs_config();
     if storage.pbs_server.is_empty()      { storage.pbs_server      = saved.pbs_server; }
     if storage.pbs_datastore.is_empty()   { storage.pbs_datastore   = saved.pbs_datastore; }
@@ -8496,6 +8640,162 @@ pub fn load_pbs_config() -> BackupStorage {
         storage_type: StorageType::Pbs,
         ..BackupStorage::default()
     }
+}
+
+// ─── Additional PBS destinations ──────────────────────────────────
+//
+// PBS 4 can back a datastore with external S3 as well as local/NAS
+// storage, and operators want that per-workload: the important things
+// to the S3-backed datastore, everything else to the NAS-backed one
+// (klasSponsor 2026-07-28). A datastore is chosen by the repository
+// string, so "another destination" is just another set of PBS fields.
+//
+// Empty fields on a target INHERIT from the primary connection. That
+// is the common case by a wide margin — a second datastore on the
+// same server needs only a name and a datastore, not a re-typed set
+// of credentials — and it means rotating the token in one place still
+// fixes every destination.
+//
+// Note we cannot offer a datastore picker: `proxmox-backup-client`
+// (the only PBS interface WolfStack uses) has no command that lists
+// datastores — every subcommand is scoped to one repository. So the
+// operator types the name, and `test_pbs_target` proves it works
+// before they rely on it.
+
+/// One saved PBS destination beyond the primary connection.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PbsTarget {
+    /// Stable id used by `BackupStorage::pbs_target_id`.
+    pub id: String,
+    /// Operator-facing name, shown in the destination dropdown.
+    pub name: String,
+    #[serde(default)]
+    pub pbs_server: String,
+    #[serde(default)]
+    pub pbs_datastore: String,
+    #[serde(default)]
+    pub pbs_user: String,
+    #[serde(default)]
+    pub pbs_token_name: String,
+    #[serde(default)]
+    pub pbs_token_secret: String,
+    #[serde(default)]
+    pub pbs_password: String,
+    #[serde(default)]
+    pub pbs_fingerprint: String,
+    #[serde(default)]
+    pub pbs_namespace: String,
+    /// Store content as native pxar for backups sent here.
+    #[serde(default)]
+    pub pbs_file_level: bool,
+    /// True when this target sets `pbs_file_level` deliberately, so an
+    /// explicit `false` survives against an on-by-default primary
+    /// connection. Same distinction `pbs_file_level_set` draws on a
+    /// per-backup override.
+    #[serde(default)]
+    pub pbs_file_level_set: bool,
+}
+
+const PBS_TARGETS_PATH: &str = "/etc/wolfstack/pbs/targets.json";
+
+/// Every additional PBS destination. Missing or unreadable file → no
+/// extra destinations, which is exactly the pre-feature state.
+pub fn load_pbs_targets() -> Vec<PbsTarget> {
+    match fs::read_to_string(PBS_TARGETS_PATH) {
+        Ok(content) => serde_json::from_str::<Vec<PbsTarget>>(&content).unwrap_or_else(|e| {
+            // Don't silently behave as "no targets" — a parse error here
+            // would send scheduled backups to the primary datastore
+            // without anyone noticing they'd moved.
+            tracing::error!(
+                "backup: {} is unreadable ({}); additional PBS destinations are \
+                 UNAVAILABLE and backups selecting one will fail rather than \
+                 silently write to the primary datastore",
+                PBS_TARGETS_PATH, e,
+            );
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Persist the full set of additional destinations. Mode 0600 — these
+/// carry PBS tokens.
+pub fn save_pbs_targets(targets: &[PbsTarget]) -> Result<(), String> {
+    fs::create_dir_all("/etc/wolfstack/pbs")
+        .map_err(|e| format!("Failed to create PBS config dir: {}", e))?;
+    let json = serde_json::to_string_pretty(targets)
+        .map_err(|e| format!("Failed to serialize PBS destinations: {}", e))?;
+    let tmp = format!("{}.tmp", PBS_TARGETS_PATH);
+    fs::write(&tmp, json).map_err(|e| format!("Failed to write PBS destinations: {}", e))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    fs::rename(&tmp, PBS_TARGETS_PATH)
+        .map_err(|e| format!("Failed to install PBS destinations: {}", e))?;
+    Ok(())
+}
+
+pub fn find_pbs_target(id: &str) -> Option<PbsTarget> {
+    load_pbs_targets().into_iter().find(|t| t.id == id)
+}
+
+/// Fill empty fields on `storage` from a saved destination.
+///
+/// Pure and separated from disk access so the inheritance order —
+/// per-backup value, then destination, then primary connection — is
+/// unit-testable. Getting this order wrong sends someone's backup to
+/// the wrong datastore, which is the exact failure this feature is
+/// supposed to prevent.
+fn apply_pbs_target(storage: &mut BackupStorage, target: &PbsTarget) {
+    if storage.pbs_server.is_empty()      { storage.pbs_server      = target.pbs_server.clone(); }
+    if storage.pbs_datastore.is_empty()   { storage.pbs_datastore   = target.pbs_datastore.clone(); }
+    if storage.pbs_user.is_empty()        { storage.pbs_user        = target.pbs_user.clone(); }
+    if storage.pbs_token_name.is_empty()  { storage.pbs_token_name  = target.pbs_token_name.clone(); }
+    if storage.pbs_token_secret.is_empty(){ storage.pbs_token_secret= target.pbs_token_secret.clone(); }
+    if storage.pbs_password.is_empty()    { storage.pbs_password    = target.pbs_password.clone(); }
+    if storage.pbs_fingerprint.is_empty() { storage.pbs_fingerprint = target.pbs_fingerprint.clone(); }
+    if storage.pbs_namespace.is_empty()   { storage.pbs_namespace   = target.pbs_namespace.clone(); }
+    // The destination's file-level choice counts as an explicit one for
+    // any backup that didn't make its own — otherwise a target set to
+    // pxar would be overridden by an off-by-default primary connection.
+    if !storage.pbs_file_level_set && target.pbs_file_level_set {
+        storage.pbs_file_level = target.pbs_file_level;
+        storage.pbs_file_level_set = true;
+    }
+}
+
+/// A PBS destination with every inherited field resolved, ready to
+/// build a repository string from.
+///
+/// `pbs_target_id` is deliberately left empty while merging: the
+/// target's fields are applied from the value in hand, so re-looking
+/// it up on disk would be redundant — and would break `test_pbs_target`
+/// for a destination the operator is testing BEFORE saving it, which
+/// is precisely when testing is most useful. The id is stamped on
+/// afterwards.
+pub fn resolve_pbs_target(target: &PbsTarget) -> BackupStorage {
+    let mut storage = BackupStorage {
+        storage_type: StorageType::Pbs,
+        ..BackupStorage::default()
+    };
+    apply_pbs_target(&mut storage, target);
+    merge_pbs_secrets(&mut storage);
+    storage.pbs_target_id = target.id.clone();
+    storage
+}
+
+/// Prove a destination works before anyone schedules a backup to it.
+/// Uses the same snapshot listing the primary connection's test uses,
+/// so a wrong datastore name fails here rather than at 3am.
+pub fn test_pbs_target(target: &PbsTarget) -> Result<usize, String> {
+    let storage = resolve_pbs_target(target);
+    if storage.pbs_server.is_empty() {
+        return Err("No PBS server — set one on this destination or on the primary connection".into());
+    }
+    if storage.pbs_datastore.is_empty() {
+        return Err("No datastore set for this destination".into());
+    }
+    let snapshots = list_pbs_snapshots(&storage)?;
+    Ok(snapshots.as_array().map(|a| a.len()).unwrap_or(0))
 }
 
 /// Save PBS configuration

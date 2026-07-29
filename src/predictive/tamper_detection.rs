@@ -36,6 +36,28 @@
 //! via `/api/predictive/baselines/reseed/<name>` when the operator
 //! makes an intentional change.
 //!
+//! ## When we DON'T auto-revert
+//!
+//! Reverting is destructive, so two rules bound it. Both exist
+//! because the analyzer cannot tell an operator apart from an
+//! attacker by file content alone, and a revert that fires every
+//! 5-minute tick silently undoes legitimate work forever.
+//!
+//! 1. **One-shot per baseline anchor.** We revert a given file at
+//!    most once; after that we detect and alert only, until the
+//!    operator reseeds. See `baselines::autofix_already_applied`.
+//!
+//! 2. **Pure key additions to `authorized_keys` are never reverted.**
+//!    Adding an SSH key is routine administration. Deleting the
+//!    operator's newly-added key — repeatedly, with no visible
+//!    cause — is a worse outcome than leaving an unreviewed key in
+//!    place next to a Critical inbox card naming its fingerprint.
+//!    Anything else in that file (a baselined key REMOVED or its
+//!    blob changed, an options-carrying or malformed line added)
+//!    is treated as tampering and reverted under rule 1. This
+//!    mirrors the `/etc/passwd` safe-addition carve-out below,
+//!    which exists for exactly the same reason.
+//!
 //! ## Why baselines, not "good values"
 //!
 //! We deliberately do NOT ship a "correct sshd_config". Operators
@@ -109,6 +131,13 @@ pub struct TamperedPath {
     pub verdict_label: String,
     pub current_sha256: Option<String>,
     pub baseline_sha256: Option<String>,
+    /// True iff the remediation pass actually rewrote this file back
+    /// to its baseline this tick. Drives the proposal wording — a
+    /// card that claims "WolfStack auto-restored this file" when it
+    /// deliberately left the file alone sends the operator hunting
+    /// for a change that never happened.
+    #[serde(default)]
+    pub restored: bool,
 }
 
 pub async fn sample_now_async(_timeout: Duration) -> TamperFacts {
@@ -219,6 +248,7 @@ fn verdict_to_path(p: &str) -> TamperedPath {
         verdict_label: label,
         current_sha256: cur,
         baseline_sha256: base,
+        restored: false,
     }
 }
 
@@ -312,8 +342,12 @@ fn remediate_blocking(
 
     // Group by indicator class so a single ack on sshd_config
     // suppresses all sshd_config drift remediations etc.
-    let needs_fix = facts.paths.clone();
-    for tp in needs_fix {
+    //
+    // Indexed rather than iterating a clone: a successful restore has
+    // to be recorded back onto `facts.paths[i].restored` so `analyze`
+    // can describe what actually happened.
+    for i in 0..facts.paths.len() {
+        let tp = facts.paths[i].clone();
         if tp.verdict_label != "drift" && tp.verdict_label != "file_missing" {
             continue;
         }
@@ -343,7 +377,67 @@ fn remediate_blocking(
             continue;
         }
 
+        // /root/.ssh/authorized_keys: adding a key is routine admin
+        // work, and silently deleting the operator's new key every
+        // tick is the worst possible response to it. Alert on the
+        // addition — naming each new key — and leave the file alone.
+        // Removals, blob changes and non-key lines fall through to
+        // the restore path below. (See the module header.)
+        let key_additions = if tp.path == ROOT_AUTHORIZED_KEYS && tp.verdict_label == "drift" {
+            authorized_keys_added_only(&tp.path)
+        } else {
+            None
+        };
+        if let Some(added) = key_additions {
+            tracing::warn!(
+                "tamper_detection: {} gained {} new SSH key(s) and lost none — \
+                 alerting WITHOUT reverting; reseed the baseline to accept them",
+                tp.path, added.len(),
+            );
+            facts.remediations.push(RemediationOutcome {
+                action: format!("alert-only (no revert): {}", tp.path),
+                ok: true,
+                detail: format!(
+                    "{} new SSH key(s) were ADDED and no baselined key was removed or \
+                     altered, so WolfStack did NOT modify the file. Added: {}. \
+                     If you added these, reseed the baseline to stop the alert. If you \
+                     did NOT, remove them now — this is live SSH access to root.",
+                    added.len(),
+                    added.join("; "),
+                ),
+            });
+            continue;
+        }
+
+        // One-shot: we already reverted this file once since its
+        // baseline was seeded. Reverting again every tick fights an
+        // operator who meant it, and buys nothing against an attacker
+        // who can simply re-apply. Detect and alert instead.
+        if baselines::autofix_already_applied(&tp.path) {
+            tracing::warn!(
+                "tamper_detection: {} drifted again after an earlier auto-restore — \
+                 NOT reverting; operator action needed",
+                tp.path,
+            );
+            facts.remediations.push(RemediationOutcome {
+                action: format!("auto-restore of {} withheld", tp.path),
+                ok: false,
+                detail: format!(
+                    "WolfStack already auto-restored {} once since its baseline was seeded, \
+                     and it has drifted again. Auto-restore is one-shot per baseline, so the \
+                     file was left as-is this time. Reseed the baseline to accept the current \
+                     contents (which re-arms auto-restore), or restore it yourself.",
+                    tp.path,
+                ),
+            });
+            continue;
+        }
+
         let outcome = restore_from_baseline(&tp.path);
+        if outcome.ok {
+            facts.paths[i].restored = true;
+            baselines::record_autofix(&tp.path);
+        }
         facts.remediations.push(outcome);
     }
 
@@ -617,7 +711,16 @@ fn build_tamper_proposal(
         why,
         evidence,
         RemediationPlan::Manual {
-            instructions: "WolfStack auto-restored each affected file from its baseline snapshot and captured the suspected-tampered version to /var/lib/wolfstack/forensics/tamper/. If the Auto-fix evidence above shows a failure (e.g. missing content snapshot for a pre-23.2.0 baseline), restore from your own backup and run /api/predictive/baselines/reseed/<slug> to re-anchor.".into(),
+            // A class can cover several files (sudoers.d/*), and they
+            // can land differently — one restored, one deliberately
+            // left alone. Only claim a restore when EVERY flagged file
+            // in this card actually got one; otherwise point the
+            // operator at the per-file Auto-fix evidence.
+            instructions: if paths.iter().all(|p| p.restored) {
+                "WolfStack auto-restored each affected file from its baseline snapshot and captured the suspected-tampered version to /var/lib/wolfstack/forensics/tamper/. If the Auto-fix evidence above shows a failure (e.g. missing content snapshot for a pre-23.2.0 baseline), restore from your own backup and run /api/predictive/baselines/reseed/<slug> to re-anchor. Auto-restore is one-shot: if this file drifts again WolfStack will alert but NOT revert it, so the next change is yours to accept or undo.".to_string()
+            } else {
+                "WolfStack left some or all of these files UNCHANGED — the Auto-fix evidence above says which, and why, file by file. A file is deliberately not reverted when the change is a plain SSH-key addition (nothing removed or rewritten), or when it was already auto-restored once since its baseline was seeded (auto-restore is one-shot per baseline). If YOU made this change, run /api/predictive/baselines/reseed/<slug> to accept it and stop the alert. If you did NOT, this is live unauthorised access: remove the change now, check /var/lib/wolfstack/forensics/tamper/ for earlier captures, then reseed.".to_string()
+            },
             commands: {
                 let mut v = vec!["# Inspect what changed:".to_string()];
                 v.extend(manual_cmds);
@@ -794,6 +897,117 @@ fn is_safe_service_user_line(line: &str) -> bool {
     uid < 1000 && no_login_shells.iter().any(|s| *s == shell)
 }
 
+// ─────────────────────────────────────────────────────────────────
+// authorized_keys addition analysis
+// ─────────────────────────────────────────────────────────────────
+
+/// One parsed line of an authorized_keys file.
+struct AuthKeyLine {
+    /// Set-comparison identity. Two lines are the same key when the
+    /// key type and base64 blob match — the trailing comment is a
+    /// label, and re-labelling a key grants no new access, so it must
+    /// not read as "a key was removed and another added". Lines that
+    /// don't parse as a plain key keep their raw text as identity, so
+    /// a new one can never be mistaken for a benign key addition.
+    id: String,
+    /// Operator-facing description used in the alert.
+    summary: String,
+    /// False for anything that isn't a bare `<type> <blob> [comment]`
+    /// — an options prefix (`command="…" ssh-rsa …`), a malformed
+    /// blob, or junk. Those are never treated as routine additions.
+    is_plain_key: bool,
+}
+
+/// What counts as a key, and how it's fingerprinted, is defined once
+/// in `crate::ssh_keys` and shared with the hosting portal and the
+/// host-level Authorised Keys manager. Certificate types
+/// (`ssh-rsa-cert-v01@openssh.com`), `cert-authority` and
+/// options-carrying lines are outside that definition, so they land
+/// here as non-key lines and are treated as tampering on first sight.
+fn parse_authorized_keys(text: &str) -> Vec<AuthKeyLine> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        match crate::ssh_keys::parse_line(t) {
+            Some(k) => out.push(AuthKeyLine {
+                id: format!("key\u{1}{}\u{1}{}", k.key_type, k.blob),
+                summary: format!(
+                    "{} sha256:{} {}",
+                    k.key_type,
+                    crate::ssh_keys::short_fp(&k.fingerprint()),
+                    if k.comment.is_empty() { "(no comment)" } else { k.comment.as_str() },
+                ),
+                is_plain_key: true,
+            }),
+            None => out.push(AuthKeyLine {
+                id: format!("raw\u{1}{}", t),
+                summary: format!("non-key line: {}", t),
+                is_plain_key: false,
+            }),
+        }
+    }
+    out
+}
+
+/// Decide whether authorized_keys drift is purely operator-style key
+/// ADDITION. `Some(summaries)` means every baselined line is still
+/// present and everything new is a well-formed public key — safe to
+/// alert without reverting. `None` means something was removed or
+/// rewritten, or a non-key line appeared: treat as tampering.
+///
+/// Split from the file I/O so it is directly testable without
+/// touching the on-disk baselines directory.
+fn authorized_keys_added_only_in(
+    baseline_text: &str,
+    current_text: &str,
+) -> Option<Vec<String>> {
+    let baseline = parse_authorized_keys(baseline_text);
+    let current = parse_authorized_keys(current_text);
+
+    let baseline_ids: HashSet<&str> = baseline.iter().map(|l| l.id.as_str()).collect();
+    let current_ids: HashSet<&str> = current.iter().map(|l| l.id.as_str()).collect();
+
+    // A baselined line that is gone means a key was removed or its
+    // blob rewritten — the lockout / key-substitution case. Revert.
+    if baseline_ids.iter().any(|id| !current_ids.contains(id)) {
+        return None;
+    }
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut added: Vec<&AuthKeyLine> = Vec::new();
+    for l in &current {
+        if baseline_ids.contains(l.id.as_str()) { continue; }
+        if seen.insert(l.id.as_str()) {
+            added.push(l);
+        }
+    }
+
+    // Drift with nothing added: whitespace, ordering, or a comment
+    // rewrite. Not an addition, so it takes the normal path.
+    if added.is_empty() { return None; }
+    // An options prefix (`command=…`, `environment=…`) or a malformed
+    // line is not routine key management.
+    if added.iter().any(|l| !l.is_plain_key) { return None; }
+
+    Some(added.iter().map(|l| l.summary.clone()).collect())
+}
+
+/// File-reading wrapper around `authorized_keys_added_only_in`.
+/// Returns None when there's no baseline content snapshot — without
+/// the original bytes we can't tell an addition from a rewrite, and
+/// the safe reading of an unknown change is "tampering".
+fn authorized_keys_added_only(path: &str) -> Option<Vec<String>> {
+    let content_path = baselines::baselines_dir()
+        .join(format!("{}.content", baselines::slug_for(path)));
+    let baseline_bytes = std::fs::read(&content_path).ok()?;
+    let baseline_text = String::from_utf8_lossy(&baseline_bytes);
+    let current_text = std::fs::read_to_string(path).ok()?;
+    authorized_keys_added_only_in(&baseline_text, &current_text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,6 +1047,124 @@ mod tests {
     fn parse_fail2ban_recognizes_legacy_ssh_section() {
         let body = "[ssh]\nenabled = true\n";
         assert!(parse_fail2ban_body(body));
+    }
+
+    // ── authorized_keys addition analysis ────────────────────────
+    //
+    // These drive the rule that stops WolfStack deleting an SSH key
+    // the operator just added. `authorized_keys_added_only_in` takes
+    // both texts as arguments precisely so these run without touching
+    // the real /var/lib/wolfstack/baselines directory.
+
+    /// Real base64 so `key_blob_fingerprint` decodes it — a blob that
+    /// fails to decode is deliberately NOT treated as a plain key.
+    fn blob(seed: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(seed.as_bytes())
+    }
+
+    #[test]
+    fn authorized_keys_pure_addition_is_not_reverted() {
+        let base = format!("ssh-ed25519 {} paul@wolf\n", blob("key-a"));
+        let cur = format!(
+            "ssh-ed25519 {} paul@wolf\nssh-rsa {} deploy@ci\n",
+            blob("key-a"), blob("key-b"),
+        );
+        let added = authorized_keys_added_only_in(&base, &cur)
+            .expect("adding a key while keeping the baselined one is an addition");
+        assert_eq!(added.len(), 1);
+        assert!(added[0].starts_with("ssh-rsa "), "got {}", added[0]);
+        assert!(added[0].contains("deploy@ci"), "got {}", added[0]);
+    }
+
+    #[test]
+    fn authorized_keys_multiple_additions_all_reported() {
+        let base = format!("ssh-ed25519 {} paul@wolf\n", blob("key-a"));
+        let cur = format!(
+            "ssh-ed25519 {} paul@wolf\nssh-rsa {} a\nssh-rsa {} b\n",
+            blob("key-a"), blob("key-b"), blob("key-c"),
+        );
+        let added = authorized_keys_added_only_in(&base, &cur).expect("two additions");
+        assert_eq!(added.len(), 2);
+    }
+
+    #[test]
+    fn authorized_keys_removal_is_tampering() {
+        let base = format!(
+            "ssh-ed25519 {} paul@wolf\nssh-rsa {} deploy@ci\n",
+            blob("key-a"), blob("key-b"),
+        );
+        let cur = format!("ssh-ed25519 {} paul@wolf\n", blob("key-a"));
+        assert!(
+            authorized_keys_added_only_in(&base, &cur).is_none(),
+            "removing a baselined key is the lockout case — must still revert",
+        );
+    }
+
+    #[test]
+    fn authorized_keys_blob_substitution_is_tampering() {
+        // Same comment, different blob: the classic "swap the
+        // operator's key for mine" move. The comment must not make
+        // this look like the same key.
+        let base = format!("ssh-ed25519 {} paul@wolf\n", blob("key-a"));
+        let cur = format!("ssh-ed25519 {} paul@wolf\n", blob("attacker"));
+        assert!(authorized_keys_added_only_in(&base, &cur).is_none());
+    }
+
+    #[test]
+    fn authorized_keys_options_prefixed_addition_is_tampering() {
+        let base = format!("ssh-ed25519 {} paul@wolf\n", blob("key-a"));
+        let cur = format!(
+            "ssh-ed25519 {} paul@wolf\ncommand=\"/bin/sh\" ssh-rsa {} x\n",
+            blob("key-a"), blob("key-b"),
+        );
+        assert!(
+            authorized_keys_added_only_in(&base, &cur).is_none(),
+            "an options-carrying line is not routine key management",
+        );
+    }
+
+    #[test]
+    fn authorized_keys_malformed_addition_is_tampering() {
+        let base = format!("ssh-ed25519 {} paul@wolf\n", blob("key-a"));
+        let cur = format!(
+            "ssh-ed25519 {} paul@wolf\nssh-rsa !!!not-base64!!! x\n",
+            blob("key-a"),
+        );
+        assert!(authorized_keys_added_only_in(&base, &cur).is_none());
+    }
+
+    #[test]
+    fn authorized_keys_relabel_is_not_an_addition() {
+        // Only the trailing comment changed. Nothing was added, so
+        // this is not the addition case and takes the normal path
+        // (revert once, then alert-only).
+        let base = format!("ssh-ed25519 {} old-label\n", blob("key-a"));
+        let cur = format!("ssh-ed25519 {} new-label\n", blob("key-a"));
+        assert!(authorized_keys_added_only_in(&base, &cur).is_none());
+    }
+
+    #[test]
+    fn authorized_keys_comments_and_blanks_ignored() {
+        let base = format!("# managed by wolfstack\n\nssh-ed25519 {} paul@wolf\n", blob("key-a"));
+        let cur = format!(
+            "ssh-ed25519 {} paul@wolf\n\n# a note\nssh-rsa {} deploy@ci\n",
+            blob("key-a"), blob("key-b"),
+        );
+        let added = authorized_keys_added_only_in(&base, &cur)
+            .expect("comment and blank lines are not keys");
+        assert_eq!(added.len(), 1);
+    }
+
+    #[test]
+    fn authorized_keys_reordering_alone_is_not_an_addition() {
+        let base = format!(
+            "ssh-ed25519 {} a\nssh-rsa {} b\n", blob("key-a"), blob("key-b"),
+        );
+        let cur = format!(
+            "ssh-rsa {} b\nssh-ed25519 {} a\n", blob("key-b"), blob("key-a"),
+        );
+        assert!(authorized_keys_added_only_in(&base, &cur).is_none());
     }
 
     /// Helper exposed for testing the parser without needing

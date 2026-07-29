@@ -864,6 +864,61 @@
 
         </div>
 
+        <!-- ═══ Authorised Keys — root SSH keys, per host or fleet ═══
+             Every change made here reseeds the tamper-detection
+             baseline server-side, so keys added through WolfStack
+             never surface as drift. -->
+        <div id="page-ssh-keys" class="page-view" style="display:none;">
+            <div class="card" style="margin-bottom:24px;">
+                <div class="card-body" style="display:flex; align-items:center; gap:18px; padding:24px 28px; flex-wrap:wrap;">
+                    <div style="width:56px; height:56px; background:var(--accent); border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:26px; color:#fff;"><span class="ws-icon-clean-wrap" data-icon="key"></span></div>
+                    <div style="flex:1; min-width:300px;">
+                        <h2 style="font-size:22px; margin-bottom:2px; color:var(--text-primary); font-weight:700;">Authorised Keys</h2>
+                        <p style="color:var(--text-secondary); font-size:13px; margin:0;">Root SSH keys — add or remove on one server or across the fleet. WolfStack re-anchors its tamper baseline for you, so keys added here are never flagged as drift.</p>
+                    </div>
+                    <button class="btn btn-secondary" onclick="sshKeysLoad()">Refresh</button>
+                </div>
+            </div>
+
+            <!-- Populated by sshKeysRenderPosture: warns when sshd won't
+                 accept keys at all, so nobody adds one to a host that
+                 silently can't use it. -->
+            <div id="ssh-keys-posture" role="status" aria-live="polite"></div>
+
+            <div class="card" style="margin-bottom:24px;">
+                <div class="card-header"><h3 class="card-title">Add a key</h3></div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label for="ssh-key-input">Public key</label>
+                        <textarea class="form-control" id="ssh-key-input" rows="3"
+                            spellcheck="false" autocomplete="off"
+                            aria-describedby="ssh-key-input-help"
+                            placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... you@laptop"></textarea>
+                        <div id="ssh-key-input-help" style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                            One key, one line. Paste the contents of your <code>.pub</code> file — never the private key.
+                        </div>
+                        <div id="ssh-key-input-error" style="font-size:12px;color:#f87171;margin-top:6px;display:none;"></div>
+                    </div>
+                    <div class="form-group">
+                        <label for="ssh-key-label">Label <span style="color:var(--text-muted);font-weight:400;">(optional — replaces the comment on the key)</span></label>
+                        <input class="form-control" id="ssh-key-label" autocomplete="off" placeholder="ci-deploy">
+                    </div>
+                    <fieldset style="border:1px solid var(--border-color);border-radius:8px;padding:12px 14px;margin:0 0 14px 0;">
+                        <legend style="font-size:12px;color:var(--text-muted);padding:0 6px;">Apply to</legend>
+                        <div id="ssh-keys-targets"></div>
+                    </fieldset>
+                    <button class="btn btn-primary" id="ssh-key-add-btn" onclick="sshKeysAdd()">Add key</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h3 class="card-title">Authorised keys</h3></div>
+                <div class="card-body" style="overflow-x:auto;">
+                    <div id="ssh-keys-list">Loading…</div>
+                </div>
+            </div>
+        </div>
+
         <!-- ═══ Security Page (per-node) ═══ -->
         <!-- ═══ Fleet Security page — cross-cluster ops ═══ -->
         <div id="page-fleet-security" class="page-view" style="display:none;">
@@ -4245,6 +4300,93 @@
                                     </span>
                                 </span>
                             </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ Additional PBS destinations ═══
+                 One PBS server can host several datastores with
+                 different backends — PBS 4 added external S3 alongside
+                 local/NAS — so a backup can be pointed at whichever
+                 suits it. Blank fields inherit from the connection
+                 above, so a second datastore on the same server needs
+                 only a name and a datastore. -->
+            <div class="card" id="pbs-targets-card" style="display:none;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>Additional datastores</h3>
+                    <button class="btn btn-sm btn-primary" onclick="pbsTargetEdit('')">Add destination</button>
+                </div>
+                <div class="card-body">
+                    <p style="font-size:12px; color:var(--text-muted); margin-top:0;">
+                        Send some backups to a different datastore — an S3-backed one for the
+                        things that matter most, the NAS-backed one for everything else. Each
+                        destination appears in the backup and schedule destination lists.
+                        Anything you leave blank is inherited from the connection above, so a
+                        second datastore on the same server only needs a name and a datastore.
+                    </p>
+                    <div id="pbs-targets-list"></div>
+
+                    <!-- Editor, revealed by pbsTargetEdit() -->
+                    <div id="pbs-target-form" style="display:none; border-top:1px solid var(--border-color); margin-top:16px; padding-top:16px;">
+                        <input type="hidden" id="pbs-target-id">
+                        <div class="form-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px;">
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">Name</label>
+                                <input type="text" id="pbs-target-name" class="form-control" placeholder="S3 cold storage">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">Datastore</label>
+                                <input type="text" id="pbs-target-datastore" class="form-control" placeholder="s3-cold">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">Server <span style="color:var(--text-muted);">(blank = same as above)</span></label>
+                                <input type="text" id="pbs-target-server" class="form-control" placeholder="">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">Namespace <span style="color:var(--text-muted);">(optional)</span></label>
+                                <input type="text" id="pbs-target-namespace" class="form-control" placeholder="">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">Username <span style="color:var(--text-muted);">(blank = inherit)</span></label>
+                                <input type="text" id="pbs-target-user" class="form-control" placeholder="">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">API Token Name <span style="color:var(--text-muted);">(blank = inherit)</span></label>
+                                <input type="text" id="pbs-target-token-name" class="form-control" placeholder="">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">API Token Secret <span style="color:var(--text-muted);">(blank = unchanged)</span></label>
+                                <input type="password" id="pbs-target-token-secret" class="form-control" placeholder="">
+                            </div>
+                            <div class="form-group">
+                                <label style="font-size:12px; color:var(--text-secondary);">Fingerprint <span style="color:var(--text-muted);">(blank = inherit)</span></label>
+                                <input type="text" id="pbs-target-fingerprint" class="form-control" placeholder="">
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-top:8px;">
+                            <label style="font-size:13px; color:var(--text-secondary); cursor:pointer; display:flex; align-items:flex-start; gap:8px;">
+                                <input type="checkbox" id="pbs-target-file-level-set" style="margin-top:3px;"
+                                    onchange="document.getElementById('pbs-target-file-level').disabled = !this.checked;">
+                                <span>
+                                    <span style="font-weight:500;">Set file-level (pxar) for this destination</span>
+                                    <span style="display:block; font-size:11px; color:var(--text-muted); margin-top:2px;">
+                                        Leave unticked to inherit the connection's setting.
+                                    </span>
+                                </span>
+                            </label>
+                            <label style="font-size:13px; color:var(--text-secondary); cursor:pointer; display:flex; align-items:center; gap:8px; margin-left:24px; margin-top:4px;">
+                                <input type="checkbox" id="pbs-target-file-level" disabled>
+                                <span>Store as native pxar (per-file restore)</span>
+                            </label>
+                        </div>
+                        <div id="pbs-target-result" role="status" aria-live="polite" style="font-size:12px; margin:8px 0; min-height:16px;"></div>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn btn-primary btn-sm" onclick="pbsTargetSave()">Save destination</button>
+                            <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border-color);"
+                                onclick="pbsTargetTest()">Test</button>
+                            <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border-color);"
+                                onclick="pbsTargetCancel()">Cancel</button>
                         </div>
                     </div>
                 </div>

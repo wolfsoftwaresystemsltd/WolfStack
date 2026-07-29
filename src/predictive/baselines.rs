@@ -29,9 +29,11 @@
 //!
 //! * **Stored on disk under `/var/lib/wolfstack/baselines/`.**
 //!   Persistent across reboots and process restarts. JSON file per
-//!   baselined path. The actual baselined content is NOT stored
-//!   (privacy + size): only the SHA-256 hash plus a "captured at"
-//!   timestamp.
+//!   baselined path holding the SHA-256 plus a "captured at"
+//!   timestamp, and a `<slug>.content` companion holding the exact
+//!   bytes at seed time (`save_with_content`) — without those bytes
+//!   tamper detection could only DETECT drift, never revert it. Both
+//!   are mode 0600.
 //!
 //! * **Operator can reseed.** When the operator legitimately changes
 //!   `/etc/ssh/sshd_config`, they hit the "Reseed baseline" button
@@ -220,10 +222,74 @@ pub fn auto_seed(path: &str) -> Option<Baseline> {
     Some(b)
 }
 
+/// Path of the one-shot marker recording that tamper detection has
+/// already auto-restored `path` from the current baseline anchor.
+fn autofix_marker_for(path: &str) -> PathBuf {
+    baselines_dir().join(format!("{}.autofixed", slug_for(path)))
+}
+
+/// True when tamper detection has already auto-restored `path` since
+/// the baseline was last seeded.
+///
+/// Auto-restore is deliberately ONE-SHOT per baseline anchor. The
+/// first time a security-critical file drifts we revert it — that
+/// undoes an attacker's edit without waiting for a human to read the
+/// inbox. If the same file drifts *again* we detect and alert but do
+/// NOT revert, because a second drift after a revert is nearly always
+/// intentional (an operator re-adding the SSH key we just deleted),
+/// and reverting on every 5-minute tick fights that operator forever
+/// with no way out. It buys little against a real attacker either: a
+/// root-level intruder can re-apply the change, stop WolfStack, or
+/// rewrite the baseline snapshot outright. Detection and alerting is
+/// the durable protection; the destructive revert is a one-time
+/// courtesy.
+///
+/// `reseed` clears the marker — re-anchoring is the operator saying
+/// "this content is correct now", which re-arms one-shot protection
+/// against the *next* change.
+pub fn autofix_already_applied(path: &str) -> bool {
+    autofix_marker_for(path).exists()
+}
+
+/// Record that we auto-restored `path`, disarming further automatic
+/// restores of it until the baseline is reseeded. Best-effort: if the
+/// marker can't be written we log and carry on — the cost is that the
+/// next tick may restore once more, which is the pre-existing
+/// behaviour, not a new failure mode.
+pub fn record_autofix(path: &str) {
+    let dir = baselines_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("baselines: create {:?} for autofix marker: {}", dir, e);
+        return;
+    }
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let marker = autofix_marker_for(path);
+    match std::fs::write(&marker, format!("{}\n", ts)) {
+        Ok(()) => {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600));
+        }
+        Err(e) => tracing::warn!("baselines: write autofix marker {:?}: {}", marker, e),
+    }
+}
+
+/// Clear the one-shot auto-restore marker for `path`. Called by
+/// `reseed` so an intentional re-anchor re-arms auto-restore.
+pub fn clear_autofix(path: &str) {
+    let marker = autofix_marker_for(path);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!("baselines: remove autofix marker {:?}: {}", marker, e),
+    }
+}
+
 /// Re-seed an existing baseline because the operator made an
 /// intentional change. Captures the new content snapshot so future
 /// restores use the corrected version. Records who and why for the
-/// audit trail.
+/// audit trail. Also re-arms one-shot auto-restore (see
+/// `autofix_already_applied`).
 pub fn reseed(path: &str, by: &str, reason: &str) -> Result<Baseline, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("read {}: {}", path, e))?;
@@ -243,6 +309,7 @@ pub fn reseed(path: &str, by: &str, reason: &str) -> Result<Baseline, String> {
         reason: reason.to_string(),
     };
     save_with_content(&b, &bytes)?;
+    clear_autofix(path);
     Ok(b)
 }
 
@@ -430,6 +497,45 @@ mod tests {
 
         // After reseed: match.
         assert_eq!(check(&target_str), Verdict::Match);
+
+        unsafe { std::env::remove_var("WOLFSTACK_BASELINES_DIR"); }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The one-shot auto-restore latch: set once we've reverted a
+    /// file, cleared when the operator re-anchors the baseline. This
+    /// is what stops tamper detection reverting an operator's change
+    /// on every 5-minute tick forever.
+    #[test]
+    fn autofix_marker_is_one_shot_and_reseed_rearms_it() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let root = temp_root();
+        let baselines = root.join("baselines");
+        let target = root.join("target.txt");
+        std::fs::write(&target, b"v1\n").unwrap();
+
+        unsafe { std::env::set_var("WOLFSTACK_BASELINES_DIR", &baselines); }
+        let target_str = target.to_string_lossy().into_owned();
+
+        check(&target_str); // seed v1
+        assert!(!autofix_already_applied(&target_str),
+            "a freshly seeded baseline has not auto-restored anything yet");
+
+        // Pretend tamper detection reverted it once.
+        record_autofix(&target_str);
+        assert!(autofix_already_applied(&target_str),
+            "after one auto-restore the latch must hold off further reverts");
+
+        // Reseeding is the operator accepting the current content —
+        // it re-arms one-shot protection for the NEXT change.
+        std::fs::write(&target, b"v2\n").unwrap();
+        reseed(&target_str, "operator", "intentional change").unwrap();
+        assert!(!autofix_already_applied(&target_str),
+            "reseed must clear the latch or auto-restore never fires again");
+
+        // Clearing an already-clear latch is not an error.
+        clear_autofix(&target_str);
+        assert!(!autofix_already_applied(&target_str));
 
         unsafe { std::env::remove_var("WOLFSTACK_BASELINES_DIR"); }
         let _ = std::fs::remove_dir_all(&root);

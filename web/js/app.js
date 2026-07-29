@@ -2157,7 +2157,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', wolfhost: 'WolfHost', exposure: 'Internet Exposure' };
+    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', wolfhost: 'WolfHost', exposure: 'Internet Exposure', 'ssh-keys': 'Authorised Keys' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -2191,6 +2191,8 @@ function selectView(page) {
             loadAiStatus();
             loadAiAlerts();
         }
+    } else if (page === 'ssh-keys') {
+        sshKeysLoad();
     } else if (page === 'appstore') {
         loadAppStoreApps();
     } else if (page === 'kubernetes') {
@@ -34367,14 +34369,31 @@ async function populateStorageDropdown() {
         console.error('Failed to load storage mounts for backup dropdown:', e);
     }
     onBackupStorageChange();
-    // Add PBS option if configured — make it the default
+    // Add PBS options if configured — the primary connection becomes
+    // the default, and each additional destination gets its own entry
+    // so a schedule can send its data to a different datastore (e.g. an
+    // S3-backed one) without touching the others.
     try {
         const pbsResp = await fetch(apiUrl('/api/backups/pbs/config'));
         if (pbsResp.ok) {
             const pbs = await pbsResp.json();
             if (pbs.pbs_server) {
+                let extra = '';
+                try {
+                    const tResp = await fetch(apiUrl('/api/backups/pbs/targets'));
+                    if (tResp.ok) {
+                        const targets = await tResp.json();
+                        _cachedPbsTargets = Array.isArray(targets) ? targets : [];
+                        for (const t of _cachedPbsTargets) {
+                            const where = `${t.effective_server || ''}/${t.effective_datastore || ''}`;
+                            extra += `<option value="pbs:target:${escapeHtml(t.id)}">PBS — ${escapeHtml(t.name)} (${escapeHtml(where)})</option>`;
+                        }
+                    }
+                } catch (e) { /* extra destinations unavailable — primary still works */ }
                 const pbsVal = `pbs:${pbs.pbs_server}`;
-                sel.innerHTML = `<option value="${escapeHtml(pbsVal)}">PBS — ${escapeHtml(pbs.pbs_server)}/${escapeHtml(pbs.pbs_datastore)}</option>` + sel.innerHTML;
+                sel.innerHTML =
+                    `<option value="${escapeHtml(pbsVal)}">PBS — ${escapeHtml(pbs.pbs_server)}/${escapeHtml(pbs.pbs_datastore)}</option>`
+                    + extra + sel.innerHTML;
                 sel.value = pbsVal;
             }
         }
@@ -34977,6 +34996,12 @@ function setScheduleModalMode(mode, noteText) {
 
 // Cached PBS config for use as storage target
 let _cachedPbsConfig = null;
+// Additional PBS destinations, cached alongside the primary connection.
+// onBackupStorageChange needs them to show the RIGHT pxar default when a
+// destination is selected — showing the primary connection's default and
+// then submitting it as an explicit per-backup choice would silently
+// override whatever that destination was configured to do.
+let _cachedPbsTargets = [];
 
 /// Show or hide the "Subdirectory" input + browse button based on
 /// which storage destination is currently selected. Only WolfDisk
@@ -35019,7 +35044,13 @@ function onBackupStorageChange() {
     const flCb = document.getElementById('backup-pbs-filelevel');
     if (flWrap) flWrap.style.display = isPbs ? 'inline-flex' : 'none';
     if (isPbs && flCb) {
-        if (_cachedPbsConfig) {
+        // An additional destination may carry its own deliberate pxar
+        // choice; show that rather than the primary connection's.
+        const tId = val.startsWith('pbs:target:') ? val.slice('pbs:target:'.length) : '';
+        const tgt = tId ? _cachedPbsTargets.find(t => t.id === tId) : null;
+        if (tgt && tgt.pbs_file_level_set) {
+            flCb.checked = !!tgt.pbs_file_level;
+        } else if (_cachedPbsConfig) {
             flCb.checked = !!_cachedPbsConfig.pbs_file_level;
         } else {
             fetch(apiUrl('/api/backups/pbs/config'))
@@ -35109,6 +35140,23 @@ async function getSelectedStorage() {
         // Legacy encoding (mount:<mount_point>) — pre-this-feature
         // dropdowns persisted with the old format; treat as local.
         return { type: 'local', path: rest };
+    } else if (val.startsWith('pbs:target:')) {
+        // An additional PBS destination. Send only the id and the
+        // per-backup pxar choice — the backend resolves server,
+        // datastore, credentials and namespace via merge_pbs_secrets.
+        // Copying resolved fields in here would freeze them into the
+        // schedule, so editing the destination later (rotating a token,
+        // correcting a datastore) would silently not apply.
+        const targetId = val.slice('pbs:target:'.length);
+        const cb = document.getElementById('backup-pbs-filelevel');
+        const wrap = document.getElementById('backup-pbs-filelevel-wrap');
+        const explicit = !!(cb && wrap && wrap.style.display !== 'none');
+        const out = { type: 'pbs', pbs_target_id: targetId };
+        if (explicit) {
+            out.pbs_file_level = !!cb.checked;
+            out.pbs_file_level_set = true;
+        }
+        return out;
     } else if (val.startsWith('pbs:')) {
         // Load the full PBS config so the backend has all fields
         if (!_cachedPbsConfig) {
@@ -36212,15 +36260,212 @@ async function loadPbsConfig() {
             showPbsConfigSaved(cfg);
             updatePbsStatusBadge();
             loadPbsSnapshots();
+            // Extra datastores only make sense once there's a primary
+            // connection to inherit credentials from.
+            loadPbsTargets();
         } else {
             // No config yet — show the form
             showPbsConfigForm();
             setPbsBadge('Not configured', 'var(--bg-tertiary)', 'var(--text-muted)');
+            const card = document.getElementById('pbs-targets-card');
+            if (card) card.style.display = 'none';
         }
     } catch (e) {
         console.error('Failed to load PBS config:', e);
     }
 }
+
+// ─── Additional PBS destinations ──────────────────────────────────
+//
+// PBS 4 can back a datastore with external S3 as well as local/NAS
+// storage. Operators want that choice per backup — the important
+// things offsite, the bulk on the NAS (klasSponsor 2026-07-28) — so
+// each extra datastore is saved as a named destination that shows up
+// in the backup and schedule destination lists.
+//
+// There is deliberately no datastore dropdown: proxmox-backup-client,
+// the only PBS interface WolfStack uses, has no command that lists
+// datastores. Hence the Test button — it proves the name works before
+// a schedule depends on it.
+
+let _pbsTargets = [];
+
+async function loadPbsTargets() {
+    const card = document.getElementById('pbs-targets-card');
+    const list = document.getElementById('pbs-targets-list');
+    if (card) card.style.display = '';
+    if (!list) return;
+    try {
+        const r = await fetch(apiUrl('/api/backups/pbs/targets'));
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        _pbsTargets = await r.json();
+        if (!Array.isArray(_pbsTargets)) _pbsTargets = [];
+    } catch (e) {
+        list.innerHTML = `<div role="alert" style="font-size:13px;color:#f87171;">Could not load destinations: ${escapeHtml(e.message || String(e))}</div>`;
+        return;
+    }
+    if (!_pbsTargets.length) {
+        list.innerHTML = `<div style="font-size:13px;color:var(--text-muted);">No additional datastores yet — every backup goes to the connection above.</div>`;
+        return;
+    }
+    let html = `<table class="data-table" style="width:100%;"><thead><tr>
+        <th>Name</th><th>Server</th><th>Datastore</th><th>pxar</th><th style="text-align:right;">Actions</th>
+    </tr></thead><tbody>`;
+    for (const t of _pbsTargets) {
+        html += `<tr>
+            <td>${escapeHtml(t.name || '')}</td>
+            <td style="font-size:12px;color:var(--text-muted);">${escapeHtml(t.effective_server || '')}${t.pbs_server ? '' : ' <em>(inherited)</em>'}</td>
+            <td style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(t.effective_datastore || '')}</td>
+            <td style="font-size:12px;color:var(--text-muted);">${t.pbs_file_level_set ? (t.pbs_file_level ? 'on' : 'off') : 'inherited'}</td>
+            <td style="text-align:right;white-space:nowrap;">
+                <button class="btn btn-sm" style="background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color);"
+                    onclick="pbsTargetEdit('${escapeAttr(t.id)}')">Edit</button>
+                <button class="btn btn-sm btn-danger" onclick="pbsTargetDelete('${escapeAttr(t.id)}')">Delete</button>
+            </td>
+        </tr>`;
+    }
+    html += `</tbody></table>`;
+    list.innerHTML = html;
+}
+
+function pbsTargetSetResult(msg, kind) {
+    const el = document.getElementById('pbs-target-result');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.style.color = kind === 'error' ? '#f87171' : (kind === 'ok' ? '#34d399' : 'var(--text-muted)');
+    // Failures must interrupt assistive tech rather than queue politely.
+    el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+}
+
+function pbsTargetEdit(id) {
+    const form = document.getElementById('pbs-target-form');
+    if (!form) return;
+    const t = _pbsTargets.find(x => x.id === id) || {};
+    const setVal = (elId, v) => { const el = document.getElementById(elId); if (el) el.value = v || ''; };
+    setVal('pbs-target-id', t.id || '');
+    setVal('pbs-target-name', t.name);
+    setVal('pbs-target-datastore', t.pbs_datastore);
+    setVal('pbs-target-server', t.pbs_server);
+    setVal('pbs-target-namespace', t.pbs_namespace);
+    setVal('pbs-target-user', t.pbs_user);
+    setVal('pbs-target-token-name', t.pbs_token_name);
+    setVal('pbs-target-fingerprint', t.pbs_fingerprint);
+    const secret = document.getElementById('pbs-target-token-secret');
+    if (secret) {
+        secret.value = '';
+        secret.placeholder = t.has_token_secret ? '(saved — enter new value to change)' : '';
+    }
+    const flSet = document.getElementById('pbs-target-file-level-set');
+    const fl = document.getElementById('pbs-target-file-level');
+    if (flSet) flSet.checked = !!t.pbs_file_level_set;
+    if (fl) { fl.checked = !!t.pbs_file_level; fl.disabled = !(flSet && flSet.checked); }
+    pbsTargetSetResult('', 'info');
+    form.style.display = '';
+    const name = document.getElementById('pbs-target-name');
+    if (name) name.focus();
+}
+
+function pbsTargetCancel() {
+    const form = document.getElementById('pbs-target-form');
+    if (form) form.style.display = 'none';
+    pbsTargetSetResult('', 'info');
+}
+
+/// Read the editor into the request shape both save and test use.
+function pbsTargetBody() {
+    const getVal = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+    const flSet = document.getElementById('pbs-target-file-level-set');
+    const fl = document.getElementById('pbs-target-file-level');
+    return {
+        id: getVal('pbs-target-id'),
+        name: getVal('pbs-target-name'),
+        pbs_datastore: getVal('pbs-target-datastore'),
+        pbs_server: getVal('pbs-target-server'),
+        pbs_namespace: getVal('pbs-target-namespace'),
+        pbs_user: getVal('pbs-target-user'),
+        pbs_token_name: getVal('pbs-target-token-name'),
+        pbs_token_secret: getVal('pbs-target-token-secret'),
+        pbs_fingerprint: getVal('pbs-target-fingerprint'),
+        pbs_file_level_set: !!(flSet && flSet.checked),
+        pbs_file_level: !!(fl && fl.checked),
+    };
+}
+
+async function pbsTargetTest() {
+    const body = pbsTargetBody();
+    if (!body.pbs_datastore) { pbsTargetSetResult('Enter a datastore name first.', 'error'); return; }
+    pbsTargetSetResult('Testing…', 'info');
+    try {
+        const r = await fetch(apiUrl('/api/backups/pbs/targets/test'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) { pbsTargetSetResult(data.error || `HTTP ${r.status}`, 'error'); return; }
+        if (data.ok) {
+            pbsTargetSetResult(
+                `Reached ${data.server}/${data.datastore} — ${data.snapshot_count} snapshot(s).`, 'ok');
+        } else {
+            pbsTargetSetResult(data.error || 'Could not reach that datastore.', 'error');
+        }
+    } catch (e) {
+        pbsTargetSetResult(`Network error: ${e.message || e}`, 'error');
+    }
+}
+
+async function pbsTargetSave() {
+    const body = pbsTargetBody();
+    if (!body.name) { pbsTargetSetResult('Give this destination a name.', 'error'); return; }
+    if (!body.pbs_datastore) { pbsTargetSetResult('Datastore is required.', 'error'); return; }
+    try {
+        const r = await fetch(apiUrl('/api/backups/pbs/targets'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) { pbsTargetSetResult(data.error || `HTTP ${r.status}`, 'error'); return; }
+        showToast(`Destination "${body.name}" saved — ${data.effective_server}/${data.effective_datastore}`, 'success');
+        pbsTargetCancel();
+        await loadPbsTargets();
+        // Refresh the backup destination dropdown so the new entry is
+        // usable immediately rather than after a page reload.
+        if (typeof loadBackupStorageOptions === 'function') loadBackupStorageOptions();
+    } catch (e) {
+        pbsTargetSetResult(`Network error: ${e.message || e}`, 'error');
+    }
+}
+
+async function pbsTargetDelete(id) {
+    const t = _pbsTargets.find(x => x.id === id);
+    if (!t) return;
+    if (!await wolfConfirm(
+        `Delete the PBS destination "${t.name}"?\n\n` +
+        `Backups already stored in ${t.effective_datastore || 'that datastore'} are NOT removed — ` +
+        `this only stops WolfStack sending new ones there.`,
+        'Delete PBS destination', { okText: 'Delete', danger: true })) return;
+    try {
+        const r = await fetch(apiUrl(`/api/backups/pbs/targets/${encodeURIComponent(id)}`), { method: 'DELETE' });
+        const data = await r.json();
+        if (!r.ok) {
+            // A 409 means schedules still point here — that text names
+            // them, so it must not auto-dismiss.
+            showToast(data.error || `HTTP ${r.status}`, 'error', 0);
+            return;
+        }
+        showToast(`Destination "${t.name}" deleted`, 'success');
+        await loadPbsTargets();
+        if (typeof loadBackupStorageOptions === 'function') loadBackupStorageOptions();
+    } catch (e) {
+        showToast(`Network error: ${e.message || e}`, 'error', 0);
+    }
+}
+
+window.loadPbsTargets = loadPbsTargets;
+window.pbsTargetEdit = pbsTargetEdit;
+window.pbsTargetCancel = pbsTargetCancel;
+window.pbsTargetSave = pbsTargetSave;
+window.pbsTargetTest = pbsTargetTest;
+window.pbsTargetDelete = pbsTargetDelete;
 
 function showPbsConfigSaved(cfg) {
     const saved = document.getElementById('pbs-config-saved');
@@ -74591,6 +74836,10 @@ const APP_DRAWER_TILES = [
         desc: 'Calm, step-by-step courses — pick your level: Getting Started, Going Further, or Defend Your Systems. Start anywhere.',
     },
     {
+        id: 'ssh-keys', icon: '', name: 'Authorised Keys',
+        desc: 'Root SSH keys — add or remove on one server or the whole fleet. WolfStack re-anchors its tamper baseline, so keys added here are never flagged as drift.',
+    },
+    {
         id: 'fleet-security', icon: '', name: 'Fleet Security',
         desc: 'Fleet-wide root-password rotation, lockout policy, blocked IPs, exposed ports — every cluster you manage, one screen.',
     },
@@ -74803,6 +75052,366 @@ function appDrawerNav(pageId) {
 window.openAppDrawer = openAppDrawer;
 window.closeAppDrawer = closeAppDrawer;
 window.appDrawerNav = appDrawerNav;
+
+// ─── Authorised Keys ──────────────────────────────────────────────
+//
+// Root SSH keys for one server or the whole fleet. The server-side
+// endpoints reseed the tamper-detection baseline as part of every
+// mutation, which is the entire reason this screen exists: it gives
+// operators a sanctioned path, so predictive tamper detection can go
+// on treating every OTHER authorized_keys edit as suspicious.
+//
+// One "Apply to" selector drives both add and remove — two selectors
+// on one screen invites acting on the wrong scope.
+
+const _skState = {
+    nodes: [],          // [{node_id, hostname, status, error, data}]
+    keys: [],           // merged [{fingerprint, key_type, comment, present_on, missing_on}]
+    selfId: null,
+    target: 'self',     // 'self' | 'all' | 'choose'
+    chosen: new Set(),  // node ids ticked under 'choose'
+};
+
+async function sshKeysLoad() {
+    const list = document.getElementById('ssh-keys-list');
+    if (!list) return;
+    list.textContent = 'Loading…';
+    try {
+        const r = await fetch(apiUrl('/api/ssh-keys/fleet'));
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        _skState.nodes = Array.isArray(data.nodes) ? data.nodes : [];
+        _skState.keys = Array.isArray(data.keys) ? data.keys : [];
+        _skState.selfId = data.self_id || null;
+        // Drop ticks for nodes that have gone away, so a stale
+        // selection can't silently target nothing.
+        const known = new Set(_skState.nodes.map(n => n.node_id));
+        _skState.chosen = new Set([..._skState.chosen].filter(id => known.has(id)));
+        sshKeysRenderTargets();
+        sshKeysRenderPosture();
+        sshKeysRenderList();
+    } catch (e) {
+        list.textContent = '';
+        const err = document.createElement('div');
+        err.setAttribute('role', 'alert');
+        err.style.cssText = 'color:#f87171;font-size:13px;';
+        err.textContent = `Could not load authorised keys: ${e.message || e}`;
+        list.appendChild(err);
+    }
+}
+
+/// Label for a node, preferring hostname and falling back to the id.
+function sshKeysNodeLabel(n) {
+    const base = n.hostname || n.node_id || 'unknown';
+    return n.node_id === _skState.selfId ? `${base} (this server)` : base;
+}
+
+function sshKeysRenderTargets() {
+    const box = document.getElementById('ssh-keys-targets');
+    if (!box) return;
+    const reachable = _skState.nodes.filter(n => n.status === 'ok');
+    const unreachable = _skState.nodes.filter(n => n.status !== 'ok');
+    const opt = (val, label, hint) => `
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:6px;cursor:pointer;">
+            <input type="radio" name="ssh-key-target" value="${escapeAttr(val)}"
+                ${_skState.target === val ? 'checked' : ''}
+                onchange="sshKeysSetTarget('${escapeAttr(val)}')" style="margin-top:3px;">
+            <span><span style="color:var(--text-primary);">${escapeHtml(label)}</span>
+            ${hint ? `<span style="color:var(--text-muted);"> — ${escapeHtml(hint)}</span>` : ''}</span>
+        </label>`;
+    let html = '';
+    html += opt('self', 'This server only', 'lowest blast radius');
+    html += opt('all', `Every server (${reachable.length})`, 'all WolfStack nodes in this cluster');
+    html += opt('choose', 'Choose servers…', '');
+    if (_skState.target === 'choose') {
+        html += `<div style="margin:8px 0 0 24px;display:flex;flex-direction:column;gap:4px;">`;
+        for (const n of reachable) {
+            html += `
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                    <input type="checkbox" value="${escapeAttr(n.node_id)}"
+                        ${_skState.chosen.has(n.node_id) ? 'checked' : ''}
+                        onchange="sshKeysToggleNode('${escapeAttr(n.node_id)}', this.checked)">
+                    <span>${escapeHtml(sshKeysNodeLabel(n))}</span>
+                </label>`;
+        }
+        if (!reachable.length) {
+            html += `<div style="font-size:12px;color:var(--text-muted);">No reachable nodes.</div>`;
+        }
+        html += `</div>`;
+    }
+    if (unreachable.length) {
+        // Naming them matters: an operator who picks "Every server"
+        // should know up front which ones won't actually be changed.
+        html += `<div style="margin-top:10px;font-size:12px;color:#fbbf24;">
+            ${unreachable.length} node(s) not reachable and will be skipped:
+            ${escapeHtml(unreachable.map(sshKeysNodeLabel).join(', '))}</div>`;
+    }
+    box.innerHTML = html;
+}
+
+function sshKeysSetTarget(v) {
+    _skState.target = v;
+    sshKeysRenderTargets();
+}
+
+function sshKeysToggleNode(id, on) {
+    if (on) _skState.chosen.add(id); else _skState.chosen.delete(id);
+}
+
+/// Node ids the current selection resolves to. Empty array means
+/// "every node" — the same convention the API uses.
+///
+/// Returns null when the selection cannot be resolved. That case is
+/// specifically "This server only" before we know our own node id:
+/// falling through to an empty array there would silently promote a
+/// single-server action into a fleet-wide one, which is the worst
+/// possible way to be wrong on this screen.
+function sshKeysTargetIds() {
+    if (_skState.target === 'all') return [];
+    if (_skState.target === 'self') return _skState.selfId ? [_skState.selfId] : null;
+    return [..._skState.chosen];
+}
+
+function sshKeysRenderPosture() {
+    const box = document.getElementById('ssh-keys-posture');
+    if (!box) return;
+    const warnings = [];
+    for (const n of _skState.nodes) {
+        const s = n.data && n.data.sshd;
+        if (!s) continue;
+        if (!s.pubkey_authentication) {
+            warnings.push(`${sshKeysNodeLabel(n)}: sshd has PubkeyAuthentication disabled — keys on this host will not be accepted.`);
+        } else if (s.permit_root_login === 'no') {
+            warnings.push(`${sshKeysNodeLabel(n)}: sshd has PermitRootLogin no — root keys are authorised but root SSH login is refused.`);
+        }
+    }
+    if (!warnings.length) { box.innerHTML = ''; return; }
+    box.innerHTML = `
+        <div class="card" style="margin-bottom:24px;border-left:4px solid #fbbf24;">
+            <div class="card-body" style="font-size:13px;color:var(--text-secondary);">
+                <strong style="color:#fbbf24;">These keys may not work as expected</strong>
+                <ul style="margin:8px 0 0 18px;line-height:1.6;">
+                    ${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}
+                </ul>
+            </div>
+        </div>`;
+}
+
+function sshKeysRenderList() {
+    const box = document.getElementById('ssh-keys-list');
+    if (!box) return;
+    const answered = _skState.nodes.filter(n => n.status === 'ok').length;
+    if (!_skState.keys.length) {
+        box.innerHTML = `<div style="font-size:13px;color:var(--text-muted);">
+            No authorised keys found on any reachable server.</div>`;
+        return;
+    }
+    const unmanaged = _skState.nodes.reduce(
+        (t, n) => t + ((n.data && n.data.unmanaged_entries) || 0), 0);
+
+    let html = `<table class="data-table" style="width:100%;">
+        <thead><tr>
+            <th>Key</th><th>Label</th><th>Servers</th><th style="text-align:right;">Actions</th>
+        </tr></thead><tbody>`;
+    for (const k of _skState.keys) {
+        const present = k.present_on || [];
+        const missing = k.missing_on || [];
+        const short = String(k.fingerprint || '').slice(0, 16);
+        const coverage = missing.length
+            ? `<span style="color:#fbbf24;">on ${present.length} of ${answered}</span>`
+            : `<span style="color:#34d399;">on all ${present.length}</span>`;
+        html += `<tr>
+            <td style="font-family:var(--font-mono);font-size:12px;">
+                <div>${escapeHtml(k.key_type || '')}</div>
+                <div style="color:var(--text-muted);">sha256:${escapeHtml(short)}</div>
+            </td>
+            <td style="font-size:13px;">${escapeHtml(k.comment || '—')}</td>
+            <td style="font-size:12px;">
+                ${coverage}
+                <div style="color:var(--text-muted);margin-top:2px;">
+                    ${escapeHtml(present.map(p => p.hostname || p.node_id).join(', ')) || '—'}
+                </div>
+                ${missing.length ? `<div style="color:var(--text-muted);margin-top:2px;">missing: ${escapeHtml(missing.map(p => p.hostname || p.node_id).join(', '))}</div>` : ''}
+            </td>
+            <td style="text-align:right;">
+                <button class="btn btn-danger btn-sm"
+                    onclick="sshKeysRemove('${escapeAttr(k.fingerprint)}')">Remove</button>
+            </td>
+        </tr>`;
+    }
+    html += `</tbody></table>`;
+    if (unmanaged > 0) {
+        // Don't imply the table is the whole file when it isn't.
+        html += `<div style="font-size:12px;color:var(--text-muted);margin-top:10px;">
+            ${unmanaged} entr${unmanaged === 1 ? 'y' : 'ies'} in authorized_keys ${unmanaged === 1 ? 'is' : 'are'} not shown —
+            options-carrying lines (<code>command="…"</code>) and certificate entries aren't managed here.
+            Edit those on the host directly.</div>`;
+    }
+    box.innerHTML = html;
+}
+
+function sshKeysShowInputError(msg) {
+    const el = document.getElementById('ssh-key-input-error');
+    const input = document.getElementById('ssh-key-input');
+    if (!el) return;
+    if (!msg) {
+        el.style.display = 'none';
+        el.textContent = '';
+        if (input) input.removeAttribute('aria-invalid');
+        return;
+    }
+    // Inline, beside the field it belongs to — a transient toast is
+    // the wrong home for a validation message the operator has to act on.
+    el.textContent = msg;
+    el.style.display = 'block';
+    if (input) input.setAttribute('aria-invalid', 'true');
+}
+
+async function sshKeysAdd() {
+    const input = document.getElementById('ssh-key-input');
+    const labelEl = document.getElementById('ssh-key-label');
+    const btn = document.getElementById('ssh-key-add-btn');
+    if (!input) return;
+    const publicKey = input.value.trim();
+    sshKeysShowInputError('');
+    if (!publicKey) {
+        sshKeysShowInputError('Paste a public key first.');
+        input.focus();
+        return;
+    }
+    if (/BEGIN [A-Z ]*PRIVATE KEY/.test(publicKey)) {
+        sshKeysShowInputError('That looks like a PRIVATE key. Paste the .pub file instead — never the private half.');
+        input.focus();
+        return;
+    }
+    const targets = sshKeysTargetIds();
+    if (targets === null) {
+        sshKeysShowInputError('This server could not be identified yet — refresh and try again.');
+        return;
+    }
+    if (_skState.target === 'choose' && !targets.length) {
+        sshKeysShowInputError('Pick at least one server, or choose a different scope.');
+        return;
+    }
+    const scopeLabel = _skState.target === 'all'
+        ? 'every reachable server'
+        : (_skState.target === 'self' ? 'this server' : `${targets.length} selected server(s)`);
+    if (_skState.target !== 'self') {
+        const ok = await wolfConfirm(
+            `Authorise this key for root on ${scopeLabel}?`,
+            'Add authorised key', { okText: 'Add key' });
+        if (!ok) return;
+    }
+
+    if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+    try {
+        const r = await fetch(apiUrl('/api/ssh-keys/add-fleet'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                public_key: publicKey,
+                label: labelEl ? labelEl.value : '',
+                targets,
+            }),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+            sshKeysShowInputError(data.error || `HTTP ${r.status}`);
+            return;
+        }
+        input.value = '';
+        if (labelEl) labelEl.value = '';
+        sshKeysReportOutcome(data, 'added');
+        await sshKeysLoad();
+    } catch (e) {
+        showToast(`Network error adding key: ${e.message || e}`, 'error', 0);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Add key'; }
+    }
+}
+
+async function sshKeysRemove(fingerprint) {
+    const key = _skState.keys.find(k => k.fingerprint === fingerprint);
+    if (!key) return;
+    const selected = sshKeysTargetIds();
+    if (selected === null) {
+        showToast('This server could not be identified yet — refresh and try again.', 'error', 0);
+        return;
+    }
+    const present = (key.present_on || []).map(p => p.node_id);
+    // Only touch servers that actually hold the key, intersected with
+    // the operator's chosen scope.
+    const affected = selected.length
+        ? present.filter(id => selected.includes(id))
+        : present;
+    if (!affected.length) {
+        showToast('None of the servers in the selected scope have this key.', 'warning', 0);
+        return;
+    }
+    const names = (key.present_on || [])
+        .filter(p => affected.includes(p.node_id))
+        .map(p => p.hostname || p.node_id);
+    const lastOnAny = affected.length === present.length;
+    const ok = await wolfConfirm(
+        `Remove this key from root on ${names.join(', ')}?\n\n` +
+        `${key.key_type} sha256:${String(fingerprint).slice(0, 16)}` +
+        `${key.comment ? ` (${key.comment})` : ''}\n\n` +
+        `Anyone using this key loses access to ${names.length === 1 ? 'that server' : 'those servers'} immediately.` +
+        (lastOnAny ? '\n\nThis removes it everywhere it is currently authorised.' : ''),
+        'Remove authorised key',
+        { okText: 'Remove key', danger: true });
+    if (!ok) return;
+
+    try {
+        const r = await fetch(apiUrl('/api/ssh-keys/remove-fleet'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fingerprint, targets: affected, force: false }),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+            showToast(data.error || `HTTP ${r.status}`, 'error', 0);
+            return;
+        }
+        sshKeysReportOutcome(data, 'removed');
+        await sshKeysLoad();
+    } catch (e) {
+        showToast(`Network error removing key: ${e.message || e}`, 'error', 0);
+    }
+}
+
+/// Report a fleet result honestly: a partial success is not a success.
+/// Failures never auto-dismiss, because the per-node reason is the
+/// part the operator actually needs to read.
+function sshKeysReportOutcome(data, verb) {
+    const changed = data.changed || 0;
+    const failures = (data.results || []).filter(r => r.status === 'failed');
+    // A node that simply didn't hold the key isn't a failure — the
+    // backend counts those separately.
+    const realFailures = failures.filter(
+        r => !(r.error || '').includes('No key with that fingerprint'));
+    if (realFailures.length) {
+        const detail = realFailures
+            .map(r => `${r.hostname || r.node_id}: ${r.error || 'unknown error'}`)
+            .join(' | ');
+        showToast(
+            `Key ${verb} on ${changed} server(s), but ${realFailures.length} failed — ${detail}`,
+            'error', 0);
+        return;
+    }
+    const skipped = data.skipped || 0;
+    showToast(
+        `Key ${verb} on ${changed} server(s)` +
+        (data.unchanged ? `, already present on ${data.unchanged}` : '') +
+        (skipped ? `, ${skipped} skipped` : ''),
+        'success');
+}
+
+window.sshKeysLoad = sshKeysLoad;
+window.sshKeysAdd = sshKeysAdd;
+window.sshKeysRemove = sshKeysRemove;
+window.sshKeysSetTarget = sshKeysSetTarget;
+window.sshKeysToggleNode = sshKeysToggleNode;
 
 // ─── Dashboard Sync ───────────────────────────────────────────────
 //
