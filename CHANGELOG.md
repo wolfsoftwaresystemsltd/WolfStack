@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.6.7: a subnet route's gateway can be edited again** _(2026-07-30 — [`020c81f3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/020c81f3eb57b18ecb658ef7393a15e5f3a7a141))_
 - **v25.6.6: container memory stops counting page cache as usage, and shows the split** _(2026-07-30 — [`bba46363`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bba46363ed5b059060928301750e9e3473611a88))_
 - **v25.6.5: WolfStack stops reloading firewalld every 60 seconds** _(2026-07-29 — [`b9a7829c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b9a7829c1f99913c42985700cba40ea52fcdba23))_
 - **v25.6.4: a toast full of docker output can be closed again, and WolfNet peers that answer are not labelled Offline** _(2026-07-29 — [`ff71b54f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff71b54f49fbe8dca3b5d96de47be1181320629e))_
