@@ -9038,6 +9038,117 @@ fn scrub_config_snapshots(target: &BackupServerRef) -> Result<usize, String> {
 }
 
 #[cfg(test)]
+mod existing_config_compatibility_tests {
+    use super::*;
+
+    /// A real pre-upgrade `/etc/wolfstack/backups.json`, shaped like the one
+    /// found on wolf1: one PBS schedule and one history entry, written by a
+    /// version that had never heard of fleet scope or credential redaction.
+    const V25_6_7_BACKUPS_JSON: &str = r#"{
+      "schedules": [
+        {
+          "id": "b3f1c2de-0000-4444-8888-abcdef012345",
+          "name": "Nightly",
+          "frequency": "daily",
+          "time": "02:00",
+          "retention": 7,
+          "backup_all": true,
+          "targets": [],
+          "storage": {
+            "type": "pbs",
+            "pbs_server": "node3.dreamhosting.at:8007",
+            "pbs_datastore": "store1",
+            "pbs_user": "backup@pbs",
+            "pbs_password": "hunter2",
+            "pbs_fingerprint": "aa:bb:cc"
+          },
+          "enabled": true,
+          "last_run": "2026-07-30T08:21:00Z",
+          "created_at": "2026-07-30T08:19:56Z"
+        }
+      ],
+      "entries": [
+        {
+          "id": "entry-1",
+          "target": { "type": "docker", "name": "web" },
+          "storage": {
+            "type": "pbs",
+            "pbs_server": "node3.dreamhosting.at:8007",
+            "pbs_datastore": "store1",
+            "pbs_password": "hunter2"
+          },
+          "filename": "web-20260730.tar.gz",
+          "size_bytes": 1234,
+          "created_at": "2026-07-30T08:21:00Z",
+          "status": "completed"
+        }
+      ]
+    }"#;
+
+    /// The upgrade must not change how an existing config is understood. This
+    /// is the guard against the whole class of "it worked until they upgraded".
+    #[test]
+    fn an_existing_config_still_loads_with_every_value_intact() {
+        let cfg: BackupConfig = serde_json::from_str(V25_6_7_BACKUPS_JSON)
+            .expect("a config written before this release must still load");
+
+        assert_eq!(cfg.schedules.len(), 1);
+        let s = &cfg.schedules[0];
+        assert_eq!(s.id, "b3f1c2de-0000-4444-8888-abcdef012345", "ids must be stable");
+        assert_eq!(s.name, "Nightly");
+        assert_eq!(s.time, "02:00");
+        assert_eq!(s.retention, 7);
+        assert!(s.backup_all);
+        assert!(s.enabled);
+        assert_eq!(s.last_run, "2026-07-30T08:21:00Z", "freshness clock preserved");
+        assert_eq!(s.created_at, "2026-07-30T08:19:56Z");
+        // The credential is still THERE on disk — redaction is a display
+        // concern. A schedule that lost its password on upgrade would fail at
+        // 02:00 with an auth error.
+        assert_eq!(s.storage.pbs_password, "hunter2");
+        assert_eq!(s.storage.pbs_server, "node3.dreamhosting.at:8007");
+        assert_eq!(s.storage.pbs_datastore, "store1");
+        // Fields this release did not add still default sanely.
+        assert_eq!(s.pre_command, "");
+        assert_eq!(s.storage.pbs_target_id, "", "absent field → primary connection");
+
+        assert_eq!(cfg.entries.len(), 1);
+        assert_eq!(cfg.entries[0].storage.pbs_password, "hunter2");
+    }
+
+    /// Re-saving an untouched config must not drop or alter anything — the
+    /// permissions change is a mode change, not a content change.
+    #[test]
+    fn re_saving_an_existing_config_preserves_every_field() {
+        let cfg: BackupConfig = serde_json::from_str(V25_6_7_BACKUPS_JSON).unwrap();
+        let round_tripped: BackupConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(round_tripped.schedules.len(), cfg.schedules.len());
+        assert_eq!(round_tripped.entries.len(), cfg.entries.len());
+        let a = &cfg.schedules[0];
+        let b = &round_tripped.schedules[0];
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.storage.pbs_password, b.storage.pbs_password);
+        assert_eq!(a.storage.pbs_server, b.storage.pbs_server);
+        assert_eq!(a.last_run, b.last_run);
+        assert_eq!(a.created_at, b.created_at);
+    }
+
+    /// Removal must be an explicit operator action and nothing else. A config
+    /// that mentions some OTHER server has to come through a removal untouched.
+    #[test]
+    fn removing_one_server_leaves_an_unrelated_one_alone() {
+        let cfg: BackupConfig = serde_json::from_str(V25_6_7_BACKUPS_JSON).unwrap();
+        let unrelated = BackupServerRef {
+            server: "pbs.somewhere-else.example".into(),
+            datastore: String::new(),
+        };
+        assert!(!storage_references_server(&cfg.schedules[0].storage, &unrelated));
+        assert!(!storage_references_server(&cfg.entries[0].storage, &unrelated));
+    }
+}
+
+#[cfg(test)]
 mod remove_backup_server_tests {
     use super::*;
 
