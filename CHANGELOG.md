@@ -8,7 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
-- **ci: give the cross builds room to finish, so a slow arch can't sink the whole release** _(2026-07-30 — [`49a93031`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/49a93031f6015302c32eaf25f6c432a32656cf23))_
+- **v25.6.6: container memory stops counting page cache as usage, and shows the split** _(2026-07-30 — [`bba46363`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bba46363ed5b059060928301750e9e3473611a88))_
 - **v25.6.5: WolfStack stops reloading firewalld every 60 seconds** _(2026-07-29 — [`b9a7829c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b9a7829c1f99913c42985700cba40ea52fcdba23))_
 - **v25.6.4: a toast full of docker output can be closed again, and WolfNet peers that answer are not labelled Offline** _(2026-07-29 — [`ff71b54f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff71b54f49fbe8dca3b5d96de47be1181320629e))_
 - **v25.6.3: S3 mounts stop asking for keys you already configured, and finally say WHY they failed** _(2026-07-29 — [`6d137dee`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6d137dee99a9e7269320792ecff15e62c8d9ab08))_
@@ -137,7 +137,6 @@ release._
 - **v25.2.6: backup pre/post commands + WolfFlow 'Run Backup Schedule' step (wabil)** _(2026-07-03 — [`520c3333`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/520c3333da504f3e2f07636aa8deb2ac8578ddf6))_
 - **v25.2.5: WolfFunctions UI — triggers column alignment + cluster-aware replicas default (KO4BSR/Gary)** _(2026-07-03 — [`a895f00f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a895f00ff2e6be886c797f9fcc00132aaa6af430))_
 - **v25.2.5: WolfFunctions UI — triggers column alignment + cluster-aware replicas default (KO4BSR/Gary)** _(2026-07-03 — [`963d1e3b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/963d1e3b393bbb2e37532d204279317eda391bb7))_
-- **Remove scratch/helper files committed by mistake in v25.2.4** _(2026-07-02 — [`fd437785`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/fd43778589ae50ff882e1fe6d340b71b41757580))_
 - **v25.2.4: WolfFunctions public HTTP trigger honours the response shape (KO4BSR/Gary)** _(2026-07-02 — [`ca65fefe`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ca65fefe04d3df58b6c6804ba81c6f41720320c3))_
 - **v25.2.3: fix container->WolfNet DNAT accumulation + orphans (KO4BSR/Gary)** _(2026-07-02 — [`f7e6924b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f7e6924b1197def2b04235104684ed78989fcb15))_
 - **v25.2.3: fix container→WolfNet DNAT accumulation + orphans (KO4BSR/Gary)** _(2026-07-02 — [`393c3dbd`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/393c3dbdee712b4d3ada730d835c8718fb8f012e))_
@@ -434,7 +433,6 @@ release._
 - **v24.7.0: LXC-style network presets for VMs — WolfNet/Bridge/vSwitch/NAT** _(2026-05-24 — [`cd3fb5e8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cd3fb5e84b352a596dcdab83b6e744142d21229e))_
 - **v24.6.1: Proxmox/libvirt VMs visible in backup picker; running-VM actions stay visible** _(2026-05-24 — [`827c7e11`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/827c7e11936d077bfd3ebc1c6df829ab0e2a1101))_
 - **v24.6.0: cross-platform VM backup, clone, and migration preflight** _(2026-05-24 — [`12cf9968`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/12cf996887ddf72e3286865f9357cdcfc1ccca60))_
-- **service worker: stop NetworkError on Cache.put for redirected responses** _(2026-05-23 — [`dee1ef34`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dee1ef346c8c561cfeb5451aca9ddf26fad7f2df))_
 - **v24.5.0: cluster-secret migration + WolfRouter fixes + beta-channel reform + at-rest AES** _(2026-05-23 — [`4dfc04ca`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4dfc04cacf660374b49697f2ad48baaf586264d8))_
 - **v24.3.16: clearing Proxmox CPU Cores actually drops the limit** _(2026-05-23 — [`c711a8be`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c711a8bef99ac5aa231b2c4ccfd08ca8e478c18a))_
 - **v24.3.15: restore dialog warns when the target name is already taken** _(2026-05-22 — [`3ffbbd39`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3ffbbd3929c4f61a15fe7a9c6d3c86b66787853f))_
@@ -463,7 +461,6 @@ release._
 - **v23.12.18: threat-intel diagnostics — per-node card + fleet table + feed test** _(2026-05-19 — [`ddaa370c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ddaa370c08d0ed8974f33faeb0b6002e16e13417))_
 - **v23.12.17: Simple/Verbose alerting + cluster+host labels on every alert** _(2026-05-19 — [`5161b89b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5161b89b7cfbfab81e976aeca3748bac7da1979a))_
 - **v23.12.16: fix abuse-report Send — drop double-confirm hidden behind modal** _(2026-05-18 — [`cf3ae105`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cf3ae10531ebf56a64daf7bd6d06099108b5d257))_
-- **ci: harden release workflow against GHCR docker-pull flakes** _(2026-05-18 — [`e9dbe995`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e9dbe995b9165be7b5d77830b6a62e5279b75759))_
 - **v23.12.15: abuse-report is MANUAL ONLY — locked in with build-time test** _(2026-05-18 — [`443664b5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/443664b55c0c09e6cd943ed1babbdc80ed0d0d8e))_
 - **v23.12.14: in-app abuse reporting — whois lookup, evidence, SMTP send** _(2026-05-18 — [`d1927f92`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d1927f9224141bd36eba3dd090f7ad46a6012478))_
 - **v23.12.13: auto-block at 3 strikes, federation propagation, FORWARD-chain, last-20 view** _(2026-05-18 — [`8021128c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8021128c0a8967304b8334b9ce54a54d2f8859b8))_
@@ -552,7 +549,6 @@ release._
 - **v22.9.39: production hardening of XCP-ng / tenant federation surface** _(2026-05-07 — [`8d5b813d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d5b813d67677de89a2fab08e7ee5f5f758283f8))_
 - **v22.9.38: XCP-ng/XO P2 + P3 + P4 — lifecycle, provisioning, tenant federation** _(2026-05-07 — [`19c7803c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/19c7803cb30c1e6c7fba2e00e59f57a27630ac75))_
 - **v22.9.37: XCP-ng / Xen Orchestra integration (P1 — read-only inventory)** _(2026-05-07 — [`f4453034`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f44530345a641e4578ca322b556a3bb70f72c792))_
-- **fix: plugin store URLs back to GitHub releases — bypass StackProtect** _(2026-05-07 — [`052a75b3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/052a75b332ca6125b11c54b0038a890f12e5a6ca))_
 - **v22.9.36: plugin store URLs go through wolfstack.org/pkg/** _(2026-05-07 — [`914c462c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/914c462ceb112168e09195016cf0a9b698d2c2a1))_
 - **v22.9.35: revert wolfhost plugin URL — wolfhost repo is private** _(2026-05-07 — [`8b1f57e4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8b1f57e45c8bab041deddd4c295ebe1b101b2c1b))_
 - **v22.9.34: wolfhost plugin store URL — point at wolfhost repo's own releases** _(2026-05-07 — [`809e075b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/809e075b0e1836865a81294b08190c9c00a571c5))_
@@ -872,28 +868,9 @@ release._
 - **v16.24.0: surface WolfUSB kernel module status in the UI** _(2026-04-12 — [`96544e8f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/96544e8f945607322018e6c69f2ef30747d0589c))_
 - **v16.23.1: auto-install USB/IP kernel modules per distro** _(2026-04-12 — [`a780a7c3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a780a7c3d5fe87a339369b623e17245204217342))_
 - **v16.23.0: load usbip-host kernel module for WolfUSB server-side passthrough** _(2026-04-12 — [`a85b306e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a85b306e91052cd9c1c587b7187c6eb503b66b6a))_
-- **fix: 400-600% CPU — move all monitor.lock() calls to spawn_blocking** _(2026-04-08 — [`72f5169d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/72f5169de382d00fc7d256d802dfc975a83874e7))_
 - **v16.11.0** _(2026-04-07 — [`ac835e68`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ac835e686edbe719e05c9106cf88c2f1261a3f91))_
-- **feat: plugin data storage API for WolfCustom white-label branding** _(2026-04-07 — [`17d0621b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/17d0621bec8c20f1c5879fc0d5395491d0d3bbde))_
-- **feat: top CPU and memory processes on server dashboard with kill** _(2026-04-07 — [`9173f90f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9173f90fda5929d363f48fbdc29ad9c212613a6c))_
-- **perf: smart polling — only fetch when user is looking, mobile fixes** _(2026-04-07 — [`9075cd51`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9075cd51d5da46bc324756a4e788197b684ab5f8))_
-- **perf: reduce polling frequency, cache API responses, throttle UI** _(2026-04-07 — [`cba6cd70`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cba6cd70fb37c98d0b426de85cea231050154fe0))_
-- **fix: web console 100% CPU on low-spec client machines** _(2026-04-06 — [`4a8c10a5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4a8c10a5f86c53bf3c540e504cbff5916caf47b4))_
-- **fix: blocking subprocess calls causing 100% CPU on busy servers** _(2026-04-06 — [`06ec67d7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/06ec67d785fc41ee6704fde85865c92ebe1054df))_
 - **v16.9.2** _(2026-04-06 — [`5a50edf9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5a50edf9b1c3ca4fdc8f98f0b17ac4bcdf6deb86))_
 - **v16.9.1** _(2026-04-06 — [`28415b03`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/28415b03dc2c0acf9a79e9f2fd2acbaad02bd3af))_
-- **feat: plugin system for extensible WolfStack functionality** _(2026-04-06 — [`f2938a6e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f2938a6e9c2a499b450d5a8733e7ed8cb535c810))_
-- **feat: new wolf/STACK logo with red slash, theme-aware logo swapping** _(2026-04-05 — [`e3c6e11f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e3c6e11fd1a1b0c29142f30e6a2037e4092547eb))_
-- **feat: PostgreSQL + WolfScale structured settings, cross-distro support** _(2026-04-05 — [`794ce64c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/794ce64c2d9a038f4ffc5f64114b67e5caa6c8b2))_
-- **feat: MariaDB structured settings with Galera cluster support** _(2026-04-05 — [`8d8d2f69`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d8d2f69a528ce77f2641545601a9686cd226442))_
-- **feat: settings tab allows pasting platform key with auto-restart** _(2026-04-05 — [`03ff731b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/03ff731b02053ebca9fc4446007c83cc263f621e))_
-- **feat: platform compatibility layer with access token management** _(2026-04-05 — [`7958701c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7958701c121f0125faa50b69efcba7637dafab33))_
-- **feat: enterprise license badge replaces sponsor banner in header** _(2026-04-05 — [`693c2b9d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/693c2b9d49794ed9a707c07105141f5a68b2b610))_
-- **feat: enterprise API key management with Ed25519 license verification** _(2026-04-05 — [`168d9a09`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/168d9a09e9e70453c3afc97103d7ff06e751d54e))_
-- **fix: WolfProxy install uses correct repo URL and creates default nginx config** _(2026-04-05 — [`35426640`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/354266404b251bcc284d3d034f046235b5cba7dd))_
-- **feat: advanced settings for appstore Docker installs, cache container counts** _(2026-04-04 — [`dc512f6f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dc512f6feb4dd7ceb583c9e000a828c96c01ce00))_
-- **fix: reduce CPU usage on low-spec hardware, add hardware tier detection** _(2026-04-04 — [`8778a821`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8778a821d9d4c90f7116834fcf2aa0613a157d6c))_
-- **fix: install MariaDB via package manager instead of missing remote script** _(2026-04-04 — [`9df3ea3c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9df3ea3cf83aae971b79c51212d5ea8fd4ca345b))_
 - **v16.7.0: Wolfram memory compression page & monochrome icon mode** _(2026-04-04 — [`974b1c55`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/974b1c5512c33e8c12f0d999eb1479c20ce25ee0))_
 - **v16.6.1: fix Docker volume paths on Proxmox ZFS storage** _(2026-04-03 — [`e17a9ce6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e17a9ce60e57ea328c1948869fb90182c187ac19))_
 - **v16.6.0: WolfDisk cluster management page** _(2026-04-03 — [`6237da09`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6237da0909d4d57f6774ed73013c4c8452dc3154))_
@@ -916,7 +893,6 @@ release._
 - **v15.12.0: Docker backup/restore with full config, PBS streaming progress, bookmark import/export, WolfFlow docs** _(2026-03-19 — [`180b82d8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/180b82d8308f35b587e187057fe47154689f962e))_
 - **v15.11.1: fix PBS restore password fallback for Docker containers** _(2026-03-19 — [`70304277`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/70304277983f3913d52e7c5f014a5fa950d48170))_
 - **v15.11.0: Full WolfFlow system integration complete** _(2026-03-19 — [`be120a6f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/be120a6fd9b31af0ca38d33596add644a0c5ef05))_
-- **fix: use different file path for custom cluster secret to avoid v11.26.3 leftovers** _(2026-03-03 — [`d844c817`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d844c81701709ce031fad54b16379c6f1cd17a31))_
 - **v11.5.4: Fix WolfRun offline status, Proxmox speed, terminal resize, performance** _(2026-02-25 — [`00d0262d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/00d0262d1fe18e7d69b56246cc9872574cc57c18))_
 - **v11.5.3: Container memory alerting + memory display improvements** _(2026-02-23 — [`e4fef3dc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e4fef3dcd7427559e9424b462ae861c92c72f4b6))_
 - **v11.5.2: WolfRun cluster sync, proxy, on-demand reconcile** _(2026-02-23 — [`c77395b5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c77395b57b0d844d287ad4a61c78f7abb886a14e))_
@@ -1079,3 +1055,4 @@ release._
 - **v5.4.5: Fix container IPv4 (systemd-networkd DHCPv4), console new window, real stats** _(2026-02-10 — [`8d846897`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d846897c2a33caec714727ed563a641c2a7450a))_
 - **v5.4.5: Real LXC stats (memory/CPU/network via lxc-cgroup), console fix** _(2026-02-10 — [`13aea966`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/13aea9666782a5797e4ba30ee62cc76f21c8e935))_
 - **v5.4.4: Fix WolfNet container networking - bridge IP + static fallback** _(2026-02-10 — [`5caa3eb3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5caa3eb3aedaeb34db73b0829ca2432e8b446eab))_
+
