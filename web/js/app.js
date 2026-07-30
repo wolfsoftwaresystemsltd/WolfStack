@@ -7171,6 +7171,63 @@ function formatUptime(secs) {
     return secs + 's';
 }
 
+// Colour for reclaimable page cache in memory bars. Deliberately not on the
+// green/amber/red pressure scale — cache is not a warning, it is the kernel
+// doing its job, and giving it a scale colour is what made 8 GB of cache look
+// like a container in trouble. Slate reads as "present but inert" in both
+// themes and stays distinguishable from the green end of the scale for the
+// red-green colour blind, who cannot separate #10b981 from #ef4444.
+const MEM_CACHE_COLOR = '#64748b';
+
+function memPressureColor(pct) {
+    return pct > 90 ? '#ef4444' : pct > 70 ? '#f59e0b' : '#10b981';
+}
+
+/// Split a container's memory into the segments a bar should draw, as
+/// percentages of its limit.
+///
+/// `memory_usage` is already cache-excluded by the back-end; `memory_cache` is
+/// the reclaimable page cache that used to be folded into it. Older nodes in a
+/// mixed-version cluster send neither of the new fields, so cache comes through
+/// as 0 and the bar renders exactly as it did before — one segment.
+function memorySegments(s) {
+    const limit = s.memory_limit || 0;
+    if (!limit || !s.memory_usage) return null;
+    const used = s.memory_usage;
+    const cache = s.memory_cache || 0;
+    const usedPct = Math.min((used / limit) * 100, 100);
+    // Cache fills what's left of the track, never pushing the total past 100%.
+    const cachePct = Math.min((cache / limit) * 100, Math.max(0, 100 - usedPct));
+    const parts = [formatBytes(used) + ' in use'];
+    if (s.memory_anon) parts.push(formatBytes(s.memory_anon) + ' anonymous');
+    if (s.memory_shmem) parts.push(formatBytes(s.memory_shmem) + ' tmpfs/shm');
+    if (s.memory_kernel) parts.push(formatBytes(s.memory_kernel) + ' kernel');
+    if (cache) parts.push(formatBytes(cache) + ' reclaimable cache (not counted as used)');
+    return {
+        usedPct: usedPct,
+        cachePct: cachePct,
+        usedColor: memPressureColor(usedPct),
+        // Round for the label only — the bar widths keep full precision.
+        label: formatBytes(used) + ' / ' + formatBytes(limit) + ' (' + Math.round(usedPct) + '%)'
+            + (cache ? ' + ' + formatBytes(cache) + ' cache' : ''),
+        title: parts.join('\n'),
+    };
+}
+
+/// A memory bar with used and cache drawn as separate segments in one track.
+/// Returns '' when the container reports no usable memory figures.
+function memoryBarSeg(s) {
+    const m = memorySegments(s);
+    if (!m) return '';
+    return '<div title="' + escapeHtml(m.title) + '" style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">'
+        + '<div style="flex:1;height:8px;display:flex;background:var(--bg-tertiary,#333);border-radius:4px;overflow:hidden;">'
+            + '<div style="width:' + m.usedPct + '%;height:100%;background:' + m.usedColor + ';transition:width 0.3s;"></div>'
+            + '<div style="width:' + m.cachePct + '%;height:100%;background:' + MEM_CACHE_COLOR + ';transition:width 0.3s;"></div>'
+        + '</div>'
+        + '<span style="white-space:nowrap;">' + escapeHtml(m.label) + '</span>'
+    + '</div>';
+}
+
 function formatUptimeShort(secs) {
     if (secs >= 86400) return Math.floor(secs / 86400) + 'd ' + Math.floor((secs % 86400) / 3600) + 'h';
     if (secs >= 3600) return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
@@ -27282,7 +27339,7 @@ function dockerCardHtml(c) {
                 ${c.gateway ? `<span>GW: ${escapeHtml(c.gateway)}</span>` : ''}${c.mac_address ? `<span>MAC: ${escapeHtml(c.mac_address)}</span>` : ''}
                 <span>${c.autostart ? 'Autostart' : 'Manual'}</span>
                 ${hasStorage ? `<span>${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
-                ${memPct >= 0 ? `<span>${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
+                ${memPct >= 0 ? `<span title="${escapeHtml((memorySegments(s) || {}).title || '')}">${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}${s.memory_cache ? ` <span style="color:${MEM_CACHE_COLOR};">+${formatBytes(s.memory_cache)} cache</span>` : ''}</span>` : ''}
                 ${cpuPct >= 0 ? `<span title="${escapeHtml(cpu.title)}">${cpu.text}</span>` : ''}
                 ${portWarning}
             </div>
@@ -27365,7 +27422,7 @@ function lxcCardHtml(c, s) {
                     ${c.gateway ? `<span>GW: ${escapeHtml(c.gateway)}</span>` : ''}
                     ${c.mac_address ? `<span>MAC: ${escapeHtml(c.mac_address)}</span>` : ''}
                     ${hasStorage ? `<span>${formatBytes(c.disk_usage)}/${formatBytes(c.disk_total)}</span>` : ''}
-                    ${memPct >= 0 ? `<span>${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}</span>` : ''}
+                    ${memPct >= 0 ? `<span title="${escapeHtml((memorySegments(s) || {}).title || '')}">${formatBytes(s.memory_usage)}/${formatBytes(s.memory_limit)}${s.memory_cache ? ` <span style="color:${MEM_CACHE_COLOR};">+${formatBytes(s.memory_cache)} cache</span>` : ''}</span>` : ''}
                     ${cpuPct >= 0 ? `<span title="${escapeHtml(cpu.title)}">${cpu.text}</span>` : ''}
                     ${c.fs_type ? `<span>FS: ${escapeHtml(c.fs_type)}</span>` : ''}
                 </div>
@@ -27850,8 +27907,6 @@ function renderDockerContainers(containers) {
         const cpu = containerCpu(s);
         const cpuPct = cpu ? cpu.share : -1;
         const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
-        const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
-        const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
         const barSeg = (icon, pctVal, color, label, title) => `<div title="${title || ''}" style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
             <span>${icon}</span>
@@ -27863,7 +27918,8 @@ function renderDockerContainers(containers) {
 
         const statsSegs = [];
         if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, cpu.text, cpu.title));
-        if (memPct >= 0) statsSegs.push(barSeg('', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        const memSeg = memoryBarSeg(s);
+        if (memSeg) statsSegs.push(memSeg);
         if (hasStorage) statsSegs.push(barSeg('', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
         const statsSubRow = statsSegs.length > 0 ? `<tr class="storage-sub-row" data-stats="${c.name}" style="background:var(--bg-secondary);"><td colspan="7" style="padding:4px 16px 6px 24px;border-top:none;">
@@ -28685,8 +28741,6 @@ function renderLxcContainers(containers, stats) {
         const cpu = containerCpu(s);
         const cpuPct = cpu ? cpu.share : -1;
         const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
-        const memPct = (s.memory_usage && s.memory_limit) ? Math.min(Math.round((s.memory_usage / s.memory_limit) * 100), 100) : -1;
-        const memColor = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
 
         const barSeg = (icon, pctVal, color, label, title) => `<div title="${title || ''}" style="flex:1;display:flex;align-items:center;gap:6px;min-width:0;">
             <span>${icon}</span>
@@ -28698,7 +28752,8 @@ function renderLxcContainers(containers, stats) {
 
         const statsSegs = [];
         if (cpuPct >= 0) statsSegs.push(barSeg('', cpuPct, cpuColor, cpu.text, cpu.title));
-        if (memPct >= 0) statsSegs.push(barSeg('', memPct, memColor, formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memPct + '%)'));
+        const memSeg = memoryBarSeg(s);
+        if (memSeg) statsSegs.push(memSeg);
         if (hasStorage) statsSegs.push(barSeg('', pct, barColor, formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + pct + '%)'));
 
         const statsSubRow = statsSegs.length > 0 ? `<tr class="storage-sub-row" style="background:var(--bg-secondary);"><td colspan="6" style="padding:4px 16px 6px 24px;border-top:none;">
@@ -43950,16 +44005,13 @@ async function loadFleetContainers() {
         '</div>';
     }
 
-    function makeStatsSubRow(cpuPct, cpuLabel, cpuTitle, memPct, memLabel, diskPct, diskLabel) {
+    function makeStatsSubRow(cpuPct, cpuLabel, cpuTitle, memSegHtml, diskPct, diskLabel) {
         var segs = [];
         if (cpuPct >= 0) {
             var cc = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#f59e0b' : '#10b981';
             segs.push(barSeg('', cpuPct, cc, cpuLabel, cpuTitle));
         }
-        if (memPct >= 0) {
-            var mc = memPct > 90 ? '#ef4444' : memPct > 70 ? '#f59e0b' : '#10b981';
-            segs.push(barSeg('', memPct, mc, memLabel));
-        }
+        if (memSegHtml) segs.push(memSegHtml);
         if (diskPct >= 0) {
             var dc = diskPct > 90 ? '#ef4444' : diskPct > 70 ? '#f59e0b' : '#10b981';
             segs.push(barSeg('', diskPct, dc, diskLabel));
@@ -44085,7 +44137,7 @@ async function loadFleetContainers() {
                     var diskP = (c.disk_usage !== undefined && c.disk_total) ? Math.round((c.disk_usage / c.disk_total) * 100) : -1;
                     var sub = makeStatsSubRow(
                         cpuP, cpuP >= 0 ? cpu.text : '', cpu ? cpu.title : '',
-                        memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
+                        memoryBarSeg(s),
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
                     var dSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';
@@ -44114,7 +44166,7 @@ async function loadFleetContainers() {
                     var diskP = (c.disk_usage !== undefined && c.disk_total) ? Math.round((c.disk_usage / c.disk_total) * 100) : -1;
                     var sub = makeStatsSubRow(
                         cpuP, cpuP >= 0 ? cpu.text : '', cpu ? cpu.title : '',
-                        memP, memP >= 0 ? (formatBytes(s.memory_usage) + ' / ' + formatBytes(s.memory_limit) + ' (' + memP + '%)') : '',
+                        memoryBarSeg(s),
                         diskP, diskP >= 0 ? (formatBytes(c.disk_usage) + ' / ' + formatBytes(c.disk_total) + ' (' + diskP + '%)') : ''
                     );
                     var lSvcBadges = (c.services && c.services.length > 0) ? '<div style="margin-top:3px;">' + c.services.map(function(s) { var sc = s.status === 'running' ? '#10b981' : '#ef4444'; return '<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:' + sc + '22;color:' + sc + ';border:1px solid ' + sc + '44;margin-right:4px;">' + escapeHtml(s.name) + '</span>'; }).join('') + '</div>' : '';

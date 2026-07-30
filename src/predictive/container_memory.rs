@@ -284,6 +284,7 @@ mod tests {
             cpu_percent: 0.0, cpu_capacity_percent: 100.0, host_cpu_cores: 1,
             memory_usage: 999, memory_limit: 0,
             memory_percent: 100.0,
+            memory_cache: 0, memory_anon: 999, memory_shmem: 0, memory_kernel: 0,
             net_input: 0, net_output: 0, block_read: 0, block_write: 0,
             pids: 1, runtime: "docker".into(),
         };

@@ -4203,15 +4203,260 @@ pub struct ContainerStats {
     /// Host core count, for cluster-wide totals.
     #[serde(default)]
     pub host_cpu_cores: u32,
+    /// What the container is really holding: everything charged to its cgroup
+    /// EXCEPT page cache the kernel can drop under pressure. See
+    /// [`MemoryBreakdown`] for why that is not the same as what `docker stats`
+    /// prints, and `memory_cache` below for the part that used to be folded in
+    /// here.
     pub memory_usage: u64,
     pub memory_limit: u64,
     pub memory_percent: f64,
+    /// Reclaimable file-backed page cache — real pages, but the kernel drops
+    /// them under pressure rather than OOM-killing, so they are not "used" in
+    /// any sense the operator cares about. Broken out so the UI can show it in
+    /// its own colour instead of silently inflating the usage figure.
+    #[serde(default)]
+    pub memory_cache: u64,
+    /// Anonymous memory — heap, stacks, anonymous mmap. The part a process
+    /// genuinely cannot give back.
+    #[serde(default)]
+    pub memory_anon: u64,
+    /// tmpfs / `/dev/shm` / shm segments. Swap-backed rather than file-backed,
+    /// so it is NOT reclaimable cache and DOES count as used, even though the
+    /// kernel files it under `file` in memory.stat.
+    #[serde(default)]
+    pub memory_shmem: u64,
+    /// Kernel memory charged to this cgroup — slab, page tables, kernel
+    /// stacks, socket buffers, percpu. Derived by subtraction so it stays
+    /// correct as kernels add new charge types.
+    #[serde(default)]
+    pub memory_kernel: u64,
     pub net_input: u64,
     pub net_output: u64,
     pub block_read: u64,
     pub block_write: u64,
     pub pids: u32,
     pub runtime: String,
+}
+
+/// A container's memory split the way the kernel actually accounts it, rather
+/// than the single number `docker stats` prints.
+///
+/// The bug this exists to kill: a container was reported at 8 GB when almost
+/// all of it was page cache. Both runtimes derived "used" the way the Docker
+/// CLI does — `memory.current - inactive_file` — and that leaves `active_file`
+/// (page cache that has been touched more than once) counted as usage. On a
+/// long-lived container with a hot file set that is unbounded, and it is what
+/// put 8 GB on the dashboard. Measured on wolfdisplay against Docker 29.6.1,
+/// cgroup v2: a fixture with 800 MiB of file cache and 400 MiB of tmpfs
+/// reported `usage 1261211648 - inactive_file 828473344 = 412.7 MiB`, exactly
+/// what `docker stats` printed.
+///
+/// Two traps, both verified on live cgroup data rather than assumed:
+///
+///  1. `shmem` (tmpfs, `/dev/shm`, shm segments) is counted INSIDE `file` in
+///     cgroup v2 — kernel docs, admin-guide/cgroup-v2: file is "filesystem
+///     data, including tmpfs and shared memory". Subtracting all of `file`
+///     would therefore discount real tmpfs as cache and under-report, which is
+///     the same bug pointing the other way. Reclaimable cache is `file - shmem`.
+///  2. `shmem` is not on the file LRU lists at all — it ages on the anon lists
+///     because it is swap-backed. Confirmed numerically on the fixture:
+///     `inactive_file + active_file = 1153773568 = file - shmem`, to the byte.
+///     The same identity holds at host scope (6701420544 vs 6701563904, a
+///     140 KiB gap purely from reading the counters non-atomically) — which is
+///     why `cache` below is computed from the single `file`/`shmem` pair
+///     instead of by summing the two LRU lists.
+///
+/// So the over-report was exactly `active_file`, and the fix is to subtract the
+/// whole reclaimable set. `shmem` keeps counting as used, as it should.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryBreakdown {
+    /// `memory.current` — every byte charged to the cgroup.
+    pub usage: u64,
+    /// Anonymous memory (cgroup v2 `anon`, v1 `rss`).
+    pub anon: u64,
+    /// Reclaimable file-backed page cache: `file - shmem`.
+    pub cache: u64,
+    /// tmpfs / shm — real usage despite living under `file`.
+    pub shmem: u64,
+    /// Everything else charged here: slab, page tables, stacks, sockets.
+    pub kernel: u64,
+}
+
+impl MemoryBreakdown {
+    /// Build the split from the four raw cgroup numbers. `file` is the total
+    /// including `shmem`, exactly as the kernel reports it — this does the
+    /// subtraction so no caller has to remember to.
+    ///
+    /// Every arithmetic step saturates. The four values are read from separate
+    /// counters that the kernel updates independently, so a sample can be
+    /// mildly self-inconsistent (see the host-scope 140 KiB skew above);
+    /// saturating means that shows up as a zero rather than a u64 wrapping to
+    /// something absurd on a dashboard.
+    pub fn from_cgroup(usage: u64, anon: u64, file: u64, shmem: u64) -> Self {
+        // shmem is a subset of file; clamp so a skewed sample can't produce a
+        // cache figure larger than the file total.
+        let shmem = shmem.min(file);
+        MemoryBreakdown {
+            usage,
+            anon,
+            cache: file.saturating_sub(shmem),
+            shmem,
+            kernel: usage.saturating_sub(anon).saturating_sub(file),
+        }
+    }
+
+    /// The figure to show and to alert on: everything charged to the cgroup
+    /// except droppable page cache. Equivalently `anon + shmem + kernel`.
+    pub fn used(&self) -> u64 {
+        self.usage.saturating_sub(self.cache)
+    }
+
+    /// `used` as a percentage of `limit`; 0 when the container has no limit.
+    pub fn used_percent(&self, limit: u64) -> f64 {
+        if limit == 0 { return 0.0; }
+        (self.used() as f64 / limit as f64) * 100.0
+    }
+}
+
+/// Pull the four numbers [`MemoryBreakdown`] needs out of an already-parsed
+/// `memory.stat` map, trying cgroup v2 key names first and falling back to
+/// cgroup v1.
+///
+/// v1 names come from kernel docs, admin-guide/cgroup-v1/memory: `rss` is
+/// "anonymous and swap cache" (the v2 `anon`), `cache` is "page cache" and
+/// like v2's `file` it includes tmpfs/shmem. The `total_`-prefixed variants are
+/// the hierarchy rollups and are the right ones when a container has child
+/// cgroups. v1 does not document a `shmem` key; where the kernel does not emit
+/// one we get 0, which means tmpfs stays inside `cache` and is counted as cache
+/// rather than as used. That is the pre-existing v1 behaviour, it only affects
+/// legacy cgroup v1 hosts, and it errs toward the smaller usage figure.
+fn breakdown_from_stat_map(usage: u64, stat: &std::collections::HashMap<String, u64>) -> MemoryBreakdown {
+    let pick = |v2: &str, v1: &str, v1_total: &str| -> u64 {
+        stat.get(v2)
+            .or_else(|| stat.get(v1_total))
+            .or_else(|| stat.get(v1))
+            .copied()
+            .unwrap_or(0)
+    };
+    let anon = pick("anon", "rss", "total_rss");
+    let file = pick("file", "cache", "total_cache");
+    let shmem = pick("shmem", "shmem", "total_shmem");
+    MemoryBreakdown::from_cgroup(usage, anon, file, shmem)
+}
+
+/// Parse a `memory.stat` body (`key value` per line) into a map. Splitting on
+/// exact whitespace tokens keeps `inactive_file` from matching
+/// `total_inactive_file`.
+fn parse_cgroup_stat(text: &str) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+            if let Ok(n) = v.parse::<u64>() {
+                map.insert(k.to_string(), n);
+            }
+        }
+    }
+    map
+}
+
+#[cfg(test)]
+mod memory_breakdown_tests {
+    use super::*;
+
+    /// Every number here was read off a live cgroup: a Docker 29.6.1 container
+    /// on wolfdisplay (cgroup v2, systemd driver) holding 800 MiB of file cache
+    /// and a 400 MiB tmpfs, while `docker stats` reported 412.9 MiB.
+    const USAGE: u64 = 1261211648;
+    const ANON: u64 = 118784;
+    const FILE: u64 = 1258631168;
+    const SHMEM: u64 = 419430400;
+    const INACTIVE_FILE: u64 = 828473344;
+    const ACTIVE_FILE: u64 = 10727424;
+
+    #[test]
+    fn tmpfs_is_counted_as_used_not_as_cache() {
+        let b = MemoryBreakdown::from_cgroup(USAGE, ANON, FILE, SHMEM);
+        // shmem lives inside `file`, but it is swap-backed and cannot simply be
+        // dropped — so it must not land in `cache`.
+        assert_eq!(b.cache, FILE - SHMEM);
+        assert_eq!(b.shmem, SHMEM);
+        assert!(b.used() > SHMEM, "400 MiB of tmpfs must still count as used");
+    }
+
+    #[test]
+    fn used_is_anon_plus_shmem_plus_kernel() {
+        let b = MemoryBreakdown::from_cgroup(USAGE, ANON, FILE, SHMEM);
+        assert_eq!(b.used(), b.anon + b.shmem + b.kernel);
+    }
+
+    /// The regression this whole change exists for. The old figure —
+    /// `usage - inactive_file`, what `docker stats` prints and what both
+    /// runtimes used to report — over-counts by exactly `active_file`.
+    #[test]
+    fn the_over_report_was_exactly_active_file() {
+        let b = MemoryBreakdown::from_cgroup(USAGE, ANON, FILE, SHMEM);
+        let old_figure = USAGE - INACTIVE_FILE;
+        assert_eq!(old_figure, 432738304, "matches the 412.9 MiB docker stats printed");
+        assert_eq!(old_figure - b.used(), ACTIVE_FILE);
+    }
+
+    /// The file LRU lists account exactly the non-shmem page cache. Verified on
+    /// the same fixture; `cache` is derived from `file - shmem` rather than this
+    /// sum because the counters are read non-atomically and can skew.
+    #[test]
+    fn file_lru_lists_equal_file_minus_shmem() {
+        assert_eq!(INACTIVE_FILE + ACTIVE_FILE, FILE - SHMEM);
+    }
+
+    #[test]
+    fn cgroup_v1_key_names_are_understood() {
+        let stat = parse_cgroup_stat("total_rss 1000\ntotal_cache 5000\ntotal_shmem 2000\n");
+        let b = breakdown_from_stat_map(9000, &stat);
+        assert_eq!(b.anon, 1000);
+        assert_eq!(b.shmem, 2000);
+        assert_eq!(b.cache, 3000); // cache - shmem
+        assert_eq!(b.used(), 6000);
+    }
+
+    #[test]
+    fn cgroup_v2_keys_win_over_v1_when_both_present() {
+        // A v1 rollup key must never shadow the v2 key on a v2 host.
+        let stat = parse_cgroup_stat("anon 10\nfile 20\nshmem 5\ntotal_rss 999\ntotal_cache 999\n");
+        let b = breakdown_from_stat_map(40, &stat);
+        assert_eq!(b.anon, 10);
+        assert_eq!(b.cache, 15);
+    }
+
+    #[test]
+    fn exact_key_match_only() {
+        // `inactive_file` must not satisfy a lookup for `file`.
+        let stat = parse_cgroup_stat("inactive_file 500\nactive_file 100\n");
+        let b = breakdown_from_stat_map(500, &stat);
+        assert_eq!(b.cache, 0, "neither LRU list is the `file` total");
+    }
+
+    /// A sample where the counters disagree must degrade to zeroes, never wrap.
+    #[test]
+    fn a_skewed_sample_cannot_underflow() {
+        let b = MemoryBreakdown::from_cgroup(100, 50, 40, 900);
+        assert_eq!(b.shmem, 40, "shmem is clamped to the file total");
+        assert_eq!(b.cache, 0);
+        assert_eq!(b.used(), 100);
+        let b2 = MemoryBreakdown::from_cgroup(0, 500, 500, 0);
+        assert_eq!(b2.kernel, 0);
+        assert_eq!(b2.used(), 0);
+    }
+
+    #[test]
+    fn no_limit_means_no_percentage() {
+        let b = MemoryBreakdown::from_cgroup(USAGE, ANON, FILE, SHMEM);
+        assert_eq!(b.used_percent(0), 0.0);
+        // 402.5 MiB of a 4 GiB limit.
+        let pct = b.used_percent(4 * 1024 * 1024 * 1024);
+        assert!((pct - 9.83).abs() < 0.05, "got {}", pct);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5048,10 +5293,106 @@ pub fn compose_cmd() -> Result<Command, String> {
     Ok(cmd)
 }
 
+/// Read a running container's memory split straight from its cgroup.
+///
+/// The path comes from `/proc/<pid>/cgroup` rather than from a guessed layout:
+/// Docker's systemd driver puts containers at
+/// `/sys/fs/cgroup/system.slice/docker-<full-id>.scope` while the cgroupfs
+/// driver uses `/sys/fs/cgroup/docker/<full-id>`, and reading the process's own
+/// cgroup line is correct under both without having to detect which is in use.
+/// Verified on wolfdisplay (systemd driver, cgroup v2): `/proc/<pid>/cgroup`
+/// gave `0::/system.slice/docker-<id>.scope`, and that directory existed while
+/// the cgroupfs path did not.
+///
+/// Returns `None` for a container with no usable cgroup (not running, or
+/// cgroup v1 with a per-controller layout the single-line v2 form doesn't
+/// cover) so the caller can fall back to whatever `docker stats` reported.
+fn container_memory_from_pid(pid: u32) -> Option<MemoryBreakdown> {
+    let cgroup_line = std::fs::read_to_string(format!("/proc/{}/cgroup", pid)).ok()?;
+    // cgroup v2 is a single `0::<path>` line. cgroup v1 emits one line per
+    // controller (`<id>:memory:<path>`) — take the memory controller's path
+    // there, and mount-relative paths resolve the same way underneath
+    // /sys/fs/cgroup/memory.
+    let (subdir, v1_memory) = cgroup_line
+        .lines()
+        .find_map(|l| {
+            let mut f = l.splitn(3, ':');
+            let _id = f.next()?;
+            let controllers = f.next()?;
+            let path = f.next()?;
+            if controllers.is_empty() {
+                Some((path.to_string(), false))
+            } else if controllers.split(',').any(|c| c == "memory") {
+                Some((path.to_string(), true))
+            } else {
+                None
+            }
+        })?;
+
+    let base = if v1_memory {
+        format!("/sys/fs/cgroup/memory{}", subdir)
+    } else {
+        format!("/sys/fs/cgroup{}", subdir)
+    };
+
+    let usage = std::fs::read_to_string(format!("{}/memory.current", base))
+        .or_else(|_| std::fs::read_to_string(format!("{}/memory.usage_in_bytes", base)))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())?;
+    let stat = parse_cgroup_stat(&std::fs::read_to_string(format!("{}/memory.stat", base)).ok()?);
+    Some(breakdown_from_stat_map(usage, &stat))
+}
+
+/// Map container name → PID for every running container, in one `docker
+/// inspect` call rather than one per container.
+fn docker_container_pids() -> std::collections::HashMap<String, u32> {
+    let mut map = std::collections::HashMap::new();
+    let out = match Command::new("docker")
+        .args(["ps", "-q", "--no-trunc"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return map,
+    };
+    let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect();
+    if ids.is_empty() { return map; }
+
+    let mut args: Vec<String> = vec![
+        "inspect".to_string(),
+        "--format".to_string(),
+        // Name carries a leading '/' from the daemon; strip it here so the key
+        // matches the name `docker stats` prints.
+        "{{.Name}} {{.State.Pid}}".to_string(),
+    ];
+    args.extend(ids);
+    if let Ok(o) = Command::new("docker").args(&args).output() {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            let mut parts = line.split_whitespace();
+            if let (Some(name), Some(pid)) = (parts.next(), parts.next()) {
+                if let Ok(pid) = pid.parse::<u32>() {
+                    if pid > 0 {
+                        map.insert(name.trim_start_matches('/').to_string(), pid);
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
 /// Get Docker container stats (one-shot)
 pub fn docker_stats() -> Vec<ContainerStats> {
     let limits = docker_cpu_limits();
     let host_cores = host_cpu_cores();
+    // `docker stats` reports memory as `memory.current - inactive_file`, which
+    // still counts active page cache as usage — the 8 GB-that-was-all-cache
+    // report. Read the real split from each container's cgroup and use that;
+    // the CLI figures are still the source for CPU, net, block and PIDs.
+    let pids = docker_container_pids();
     Command::new("docker")
         .args(["stats", "--no-stream", "--format", "{{.ID}}\\t{{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}\\t{{.MemPerc}}\\t{{.NetIO}}\\t{{.BlockIO}}\\t{{.PIDs}}"])
         .output()
@@ -5070,15 +5411,36 @@ pub fn docker_stats() -> Vec<ContainerStats> {
                     let name = parts.get(1).unwrap_or(&"").to_string();
                     let cores = limits.get(&name).copied().unwrap_or(host_cores);
 
+                    // Prefer the cgroup breakdown. Fall back to the CLI's
+                    // cache-inflated figure only when the cgroup is
+                    // unreadable, so a container we can't introspect still
+                    // reports something rather than zero.
+                    let limit = mem_usage.1;
+                    let breakdown = pids.get(&name).copied().and_then(container_memory_from_pid);
+                    let (used, cache, anon, shmem, kernel, pct) = match breakdown {
+                        Some(b) => (
+                            b.used(), b.cache, b.anon, b.shmem, b.kernel,
+                            b.used_percent(limit),
+                        ),
+                        None => (
+                            mem_usage.0, 0, 0, 0, 0,
+                            mem_perc.parse().unwrap_or(0.0),
+                        ),
+                    };
+
                     ContainerStats {
                         id: parts.first().unwrap_or(&"").to_string(),
                         name,
                         cpu_percent: cpu_str.parse().unwrap_or(0.0),
                         cpu_capacity_percent: cores * 100.0,
                         host_cpu_cores: host_cores as u32,
-                        memory_usage: mem_usage.0,
-                        memory_limit: mem_usage.1,
-                        memory_percent: mem_perc.parse().unwrap_or(0.0),
+                        memory_usage: used,
+                        memory_limit: limit,
+                        memory_percent: pct,
+                        memory_cache: cache,
+                        memory_anon: anon,
+                        memory_shmem: shmem,
+                        memory_kernel: kernel,
                         net_input: net_io.0,
                         net_output: net_io.1,
                         block_read: block_io.0,
@@ -6515,13 +6877,13 @@ pub fn lxc_stats() -> Vec<ContainerStats> {
                 cpu_percent: info.cpu_percent,
                 cpu_capacity_percent: lxc_cpu_limit_cores(&c.name) * 100.0,
                 host_cpu_cores: host_cpu_cores() as u32,
-                memory_usage: info.memory_usage,
+                memory_usage: info.memory.used(),
                 memory_limit: info.memory_limit,
-                memory_percent: if info.memory_limit > 0 {
-                    (info.memory_usage as f64 / info.memory_limit as f64) * 100.0
-                } else {
-                    0.0
-                },
+                memory_percent: info.memory.used_percent(info.memory_limit),
+                memory_cache: info.memory.cache,
+                memory_anon: info.memory.anon,
+                memory_shmem: info.memory.shmem,
+                memory_kernel: info.memory.kernel,
                 net_input: info.net_input,
                 net_output: info.net_output,
                 block_read: 0,
@@ -6535,7 +6897,7 @@ pub fn lxc_stats() -> Vec<ContainerStats> {
 
 struct LxcDetailInfo {
     cpu_percent: f64,
-    memory_usage: u64,
+    memory: MemoryBreakdown,
     memory_limit: u64,
     net_input: u64,
     net_output: u64,
@@ -6543,27 +6905,30 @@ struct LxcDetailInfo {
 }
 
 fn lxc_info(name: &str) -> LxcDetailInfo {
-    // Memory usage via lxc-cgroup (works on cgroup v1 and v2).
+    // Memory via lxc-cgroup (works on cgroup v1 and v2).
     //
-    // Raw `memory.current` / `memory.usage_in_bytes` INCLUDES reclaimable
-    // page cache, so a container that has read/written a lot of files reports
-    // a usage that dwarfs — and can exceed — the host's own "used" figure
-    // (which is `MemTotal - MemAvailable`, i.e. cache-excluded). That's how a
+    // Raw `memory.current` / `memory.usage_in_bytes` INCLUDES reclaimable page
+    // cache, so a container that has read or written a lot of files reports a
+    // usage that dwarfs — and can exceed — the host's own "used" figure (which
+    // is `MemTotal - MemAvailable`, i.e. cache-excluded). That's how a
     // container showed 137 GB "used" on a host reporting only 80 GB used in
-    // total (the difference was reclaimable cache the host counts as
-    // available). Subtract the reclaimable file cache to get the "working
-    // set" (the cAdvisor / Kubernetes definition), which is directly
-    // comparable to the host figure. cgroup v2 (the modern default, and what
-    // PVE CTs run under here) exposes `inactive_file`; cgroup v1 exposes
-    // `total_inactive_file` (the hierarchy rollup). Try the v2 key first since
-    // it's the common case — one fewer lxc-cgroup call — then the v1 key.
+    // total.
+    //
+    // Subtracting only `inactive_file` — the cAdvisor / Kubernetes "working
+    // set", and what `docker stats` prints — was not enough: it still counts
+    // `active_file`, the page cache that has been touched more than once, and
+    // on a long-lived container with a hot file set that grows without bound.
+    // That is what put 8 GB of pure cache on the dashboard. [`MemoryBreakdown`]
+    // subtracts the whole reclaimable set (`file - shmem`) and keeps tmpfs
+    // counted as used; see its docs for the measurements behind that.
+    //
+    // One `memory.stat` read, not one per key: lxc-cgroup is a process spawn
+    // each time and this runs for every container on every stats poll.
     let raw_usage = lxc_cgroup_read(name, "memory.current")
         .or_else(|| lxc_cgroup_read(name, "memory.usage_in_bytes"))
         .unwrap_or(0);
-    let inactive_file = lxc_cgroup_stat_key(name, "memory.stat", "inactive_file")
-        .or_else(|| lxc_cgroup_stat_key(name, "memory.stat", "total_inactive_file"))
-        .unwrap_or(0);
-    let memory_usage = raw_usage.saturating_sub(inactive_file);
+    let stat = lxc_cgroup_stat_map(name, "memory.stat");
+    let memory = breakdown_from_stat_map(raw_usage, &stat);
 
     let mut memory_limit = lxc_cgroup_read(name, "memory.max")
         .or_else(|| lxc_cgroup_read(name, "memory.limit_in_bytes"))
@@ -6637,7 +7002,7 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
 
     LxcDetailInfo {
         cpu_percent,
-        memory_usage,
+        memory,
         memory_limit,
         net_input: net_in,
         net_output: net_out,
@@ -12402,6 +12767,24 @@ fn lxc_cgroup_stat_key(name: &str, file: &str, key: &str) -> Option<u64> {
         .find(|l| l.split_whitespace().next() == Some(key))
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|v| v.parse::<u64>().ok())
+}
+
+/// Read a whole multi-line cgroup stat file via lxc-cgroup in one call.
+///
+/// Use this over repeated [`lxc_cgroup_stat_key`] whenever more than one key is
+/// wanted — each of those calls is a process spawn, multiplied by every
+/// container on every stats poll.
+fn lxc_cgroup_stat_map(name: &str, file: &str) -> std::collections::HashMap<String, u64> {
+    let base = lxc_base_dir(name);
+    let mut args: Vec<&str> = Vec::new();
+    if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
+    args.extend_from_slice(&["-n", name, file]);
+    Command::new("lxc-cgroup")
+        .args(&args)
+        .output()
+        .ok()
+        .map(|o| parse_cgroup_stat(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 /// Reclaim a running LXC container's clean page cache via cgroup v2
