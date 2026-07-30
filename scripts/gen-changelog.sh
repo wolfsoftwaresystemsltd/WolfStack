@@ -36,9 +36,24 @@ edit this file by hand — your changes will be overwritten on the next
 release._
 
 HEAD
-  git log --grep='^v[0-9]' \
-    --pretty=format:"- **%s** _(%ad — [\`%h\`](${REPO_URL}/commit/%H))_" \
-    --date=short
+  # Match the SUBJECT only. `git log --grep` searches the whole commit
+  # message, so any commit whose *body* had a line starting `v<digit>` became
+  # a phantom release entry — a release note saying "v25.6.5 built x86_64 and
+  # armv7 clean" put its own non-release commit in the changelog, and 25 such
+  # entries had accumulated since April. Read the subject out as its own field
+  # and test that.
+  #
+  # \x1f (unit separator) as the delimiter: subjects contain spaces, commas and
+  # tabs, but not control characters.
+  git log --pretty=format:"%H%x1f%h%x1f%ad%x1f%s" --date=short \
+  | while IFS=$'\x1f' read -r full short date subject; do
+      case "$subject" in
+        v[0-9]*)
+          printf -- '- **%s** _(%s — [`%s`](%s/commit/%s))_\n' \
+            "$subject" "$date" "$short" "$REPO_URL" "$full"
+          ;;
+      esac
+    done
   echo
 } > "$OUT"
 
