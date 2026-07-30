@@ -18119,6 +18119,16 @@ pub struct CreateScheduleRequest {
     pub pre_command: String,
     #[serde(default)]
     pub post_command: String,
+    /// Where this schedule applies. Absent → `Node` → the exact behaviour every
+    /// existing caller already gets, so old frontends are unaffected. `Fleet`
+    /// writes it to every WolfStack node in the cluster and reports per node.
+    #[serde(default)]
+    pub scope: BackupScope,
+    /// With `scope: fleet`, restrict the write to these node ids. Empty (the
+    /// default) means every WolfStack node — which is what "fleet" means unless
+    /// the operator narrowed it in the node picker.
+    #[serde(default)]
+    pub target_nodes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -19438,11 +19448,333 @@ pub async fn backup_container_mounts(
 }
 
 /// GET /api/backups/schedules — list schedules
+// ─── Fleet-scope backup configuration ───
+//
+// A schedule saved at FLEET scope in the GUI landed only on the node that
+// served the request: wolf1 got `schedules[0]` and ran a backup two minutes
+// later, while wolf2 and wolf3 kept `schedules: []` and would never have run
+// one. Nothing was logged, so it looked like it had worked (production report,
+// 3-node "wolf" cluster, 2026-07-30).
+//
+// The transport was never the problem — the same cluster fans auth lockouts out
+// fine ("kernel-blocked <ip> via fleet propagation from ws-xxxx"). The backup
+// path simply never used it. This is that path, built on the same pieces
+// `propagate_kernel_block_to_peers` uses: peers from ClusterState, the
+// HTTPS-first `build_node_urls` chain, `X-WolfStack-Secret`, the pooled client.
+//
+// Doing it server-side rather than in the browser matters: `pushClusterSchedule`
+// already fanned out client-side, which silently requires the OPERATOR'S BROWSER
+// to reach every node directly. On a cluster whose peers talk over WolfNet but
+// aren't individually reachable from the admin's laptop, that fails per node —
+// and the browser can only report what it could reach.
+
+/// Where a backup configuration write applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackupScope {
+    /// This node only. The default, and what every existing caller sends by
+    /// omitting the field — so their behaviour is byte-identical.
+    #[default]
+    Node,
+    /// Every WolfStack node in the cluster.
+    Fleet,
+}
+
+/// Aggregate per-node results into the response body the GUI renders.
+///
+/// `failed > 0` is what the GUI keys its visible error off. A fleet write that
+/// reached two nodes out of three is NOT a success — the third has no schedule
+/// and will never run one, which is the whole defect. `skipped` is counted
+/// separately: a PVE or TrueNAS member has no backups.json and its absence from
+/// the write is correct, not a failure to wave at the operator.
+pub fn fleet_result_summary<T: Serialize>(results: &[FleetNodeResult<T>]) -> serde_json::Value {
+    let succeeded = results.iter().filter(|r| r.status == "ok").count();
+    let failed = results.iter().filter(|r| r.status == "failed").count();
+    let skipped = results.iter().filter(|r| r.status == "skipped").count();
+    serde_json::json!({
+        "scope": "fleet",
+        "total": succeeded + failed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+        "results": results,
+    })
+}
+
+/// The hostnames that did NOT take a fleet write, formatted for an operator.
+pub fn fleet_failed_nodes<T: Serialize>(results: &[FleetNodeResult<T>]) -> Vec<String> {
+    results.iter()
+        .filter(|r| r.status == "failed")
+        .map(|r| format!("{} ({})", r.hostname, r.error.clone().unwrap_or_default()))
+        .collect()
+}
+
+#[cfg(test)]
+mod fleet_backup_scope_tests {
+    use super::*;
+
+    fn result(host: &str, status: &str, err: Option<&str>) -> FleetNodeResult<serde_json::Value> {
+        FleetNodeResult {
+            node_id: format!("ws-{}", host),
+            hostname: host.to_string(),
+            address: format!("10.0.0.{}", host.len()),
+            status: status.to_string(),
+            data: if status == "ok" { Some(serde_json::json!({"ok": true})) } else { None },
+            error: err.map(|e| e.to_string()),
+        }
+    }
+
+    /// The defect, as a test: a fleet-scope write must land on ALL N nodes.
+    /// Production had wolf1 with the schedule and wolf2/wolf3 with
+    /// `schedules: []`, reported as success.
+    #[test]
+    fn a_fleet_write_that_reaches_every_node_reports_all_of_them() {
+        let results = vec![
+            result("wolf1", "ok", None),
+            result("wolf2", "ok", None),
+            result("wolf3", "ok", None),
+        ];
+        let s = fleet_result_summary(&results);
+        assert_eq!(s["total"], 3, "all three nodes accounted for");
+        assert_eq!(s["succeeded"], 3);
+        assert_eq!(s["failed"], 0);
+        assert!(fleet_failed_nodes(&results).is_empty());
+    }
+
+    /// The production symptom must now be reported as a failure, not silence.
+    #[test]
+    fn a_write_that_reached_only_the_serving_node_is_a_failure() {
+        let results = vec![
+            result("wolf1", "ok", None),
+            result("wolf2", "failed", Some("transport: connection refused")),
+            result("wolf3", "failed", Some("HTTP 403: Invalid cluster secret")),
+        ];
+        let s = fleet_result_summary(&results);
+        assert_eq!(s["succeeded"], 1);
+        assert_eq!(s["failed"], 2, "two nodes have NO schedule — that is an error");
+        let failed = fleet_failed_nodes(&results);
+        assert_eq!(failed.len(), 2);
+        // The operator needs to know WHICH node and WHY, not just a count.
+        assert!(failed[0].contains("wolf2") && failed[0].contains("connection refused"));
+        assert!(failed[1].contains("wolf3") && failed[1].contains("Invalid cluster secret"));
+    }
+
+    /// A node that legitimately has no backups.json must not be reported as a
+    /// failure, or every mixed cluster would show a permanent red cross.
+    #[test]
+    fn non_wolfstack_members_are_skipped_not_failed() {
+        let results = vec![
+            result("wolf1", "ok", None),
+            result("pve1", "skipped", Some("non-WolfStack node")),
+        ];
+        let s = fleet_result_summary(&results);
+        assert_eq!(s["total"], 1, "skipped nodes are not part of the N");
+        assert_eq!(s["succeeded"], 1);
+        assert_eq!(s["failed"], 0);
+        assert_eq!(s["skipped"], 1);
+        assert!(fleet_failed_nodes(&results).is_empty());
+    }
+
+    /// Absent `scope` must mean node-local, so every existing frontend and any
+    /// stored request shape keeps its exact behaviour.
+    #[test]
+    fn scope_defaults_to_node_for_callers_that_never_heard_of_it() {
+        let req: CreateScheduleRequest = serde_json::from_value(serde_json::json!({
+            "name": "nightly",
+            "frequency": "daily",
+            "time": "02:00",
+            "retention": 7,
+            "backup_all": true,
+            "storage": { "type": "local", "path": "/var/backups" }
+        })).expect("a pre-fleet request body must still deserialize");
+        assert_eq!(req.scope, BackupScope::Node);
+        assert!(req.enabled, "enabled still defaults true");
+    }
+
+    #[test]
+    fn fleet_scope_is_opt_in_by_name() {
+        let req: CreateScheduleRequest = serde_json::from_value(serde_json::json!({
+            "name": "nightly", "frequency": "daily", "time": "02:00",
+            "retention": 7, "backup_all": true,
+            "storage": { "type": "local", "path": "/var/backups" },
+            "scope": "fleet"
+        })).unwrap();
+        assert_eq!(req.scope, BackupScope::Fleet);
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct RemoveBackupServerRequest {
+    /// Host, optionally with a port — "node3.dreamhosting.at:8007".
+    pub server: String,
+    /// Narrow to one datastore/bucket/share; empty removes every reference.
+    #[serde(default)]
+    pub datastore: String,
+    /// Proceed even though schedules still target the server, deleting them.
+    /// Default false: the first call REPORTS what would break, and the operator
+    /// confirms.
+    #[serde(default)]
+    pub force: bool,
+    /// Restrict to these node ids; empty means the whole fleet.
+    #[serde(default)]
+    pub target_nodes: Vec<String>,
+}
+
+/// POST /api/backups/servers/remove — remove a backup server fleet-wide.
+///
+/// Idempotent: re-running against clean nodes reports zeroes and succeeds,
+/// which is what makes a partial fan-out safe to retry.
+pub async fn backup_server_remove(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<RemoveBackupServerRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let request = body.into_inner();
+    if request.server.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "error": "A server hostname is required" }));
+    }
+    let payload = serde_json::to_value(&request).unwrap_or(serde_json::json!({}));
+
+    let self_targeted = request.target_nodes.is_empty()
+        || request.target_nodes.contains(&state.cluster.self_id);
+    let local = if self_targeted {
+        let target = backup::BackupServerRef {
+            server: request.server.clone(),
+            datastore: request.datastore.clone(),
+        };
+        let force = request.force;
+        // Filesystem work — off the async executor.
+        Some(web::block(move || backup::remove_backup_server(&target, force))
+            .await
+            .unwrap_or_else(|e| Err(format!("local removal panicked: {}", e)))
+            .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string())))
+    } else {
+        None
+    };
+
+    let results = fleet_fanout_post::<serde_json::Value>(
+        &state, "/api/backups/servers/remove-local", payload, &request.target_nodes,
+        local, FANOUT_SLOW,
+    ).await;
+
+    // A node that refused because a schedule still targets the server is NOT a
+    // failure — it is the guard doing its job, and it must be reported
+    // distinctly so the GUI can offer "remove anyway" rather than "retry".
+    let mut blocked: Vec<String> = Vec::new();
+    for r in &results {
+        if let Some(data) = &r.data {
+            let names: Vec<String> = data.get("blocking_schedules")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            if !names.is_empty() {
+                blocked.push(format!("{}: {}", r.hostname, names.join(", ")));
+            }
+        }
+    }
+
+    let summary = fleet_result_summary(&results);
+    let failed = summary["failed"].as_u64().unwrap_or(0);
+    tracing::info!(
+        "backup server removal '{}': {} ok, {} failed, {} blocked by schedules",
+        request.server, summary["succeeded"], failed, blocked.len(),
+    );
+
+    let mut payload = serde_json::json!({
+        "server": request.server,
+        "fleet": summary,
+        "blocked_by_schedules": blocked,
+    });
+    if !blocked.is_empty() && !request.force {
+        payload["error"] = serde_json::Value::String(format!(
+            "Schedules still back up to {} on: {}. Repoint or delete them, or re-run with force to delete them.",
+            request.server, blocked.join("; "),
+        ));
+        return HttpResponse::Conflict().json(payload);
+    }
+    if failed > 0 {
+        payload["error"] = serde_json::Value::String(format!(
+            "{} node(s) still hold this server's configuration: {}",
+            failed, fleet_failed_nodes(&results).join("; "),
+        ));
+        return HttpResponse::MultiStatus().json(payload);
+    }
+    HttpResponse::Ok().json(payload)
+}
+
+/// POST /api/backups/servers/remove-local — inter-node receiver. Removes on
+/// THIS node only and never fans out again.
+pub async fn backup_server_remove_local(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<RemoveBackupServerRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let request = body.into_inner();
+    let target = backup::BackupServerRef {
+        server: request.server.clone(),
+        datastore: request.datastore.clone(),
+    };
+    let force = request.force;
+    match web::block(move || backup::remove_backup_server(&target, force)).await {
+        Ok(Ok(report)) => {
+            if !report.blocking_schedules.is_empty() {
+                tracing::info!(
+                    "backup server removal '{}' refused: schedules still target it: {}",
+                    request.server, report.blocking_schedules.join(", "),
+                );
+            } else if !report.is_noop() {
+                tracing::info!(
+                    "backup server removal '{}': {}",
+                    request.server, report.details.join("; "),
+                );
+            }
+            HttpResponse::Ok().json(report)
+        }
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("removal task failed: {}", e) })),
+    }
+}
+
+/// POST /api/backups/schedules/fleet-apply — inter-node receiver.
+///
+/// Applies a schedule locally and does NOT fan out again; the originating node
+/// talks to every peer directly, so a peer that re-propagated would multiply
+/// the write by N on every hop. Same loop-avoidance the federation kernel-block
+/// endpoint relies on.
+pub async fn backup_schedule_fleet_apply(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<backup::BackupSchedule>,
+) -> HttpResponse {
+    // require_auth accepts a peer's cluster secret OR an operator session —
+    // matching security_kernel_block_ip, which had to be widened for exactly
+    // this reason (peers running a custom cluster secret were rejected).
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let schedule = body.into_inner();
+    let name = schedule.name.clone();
+    match backup::save_schedule(schedule) {
+        Ok(s) => {
+            tracing::info!("backup fleet apply: stored schedule '{}' ({})", s.name, s.id);
+            HttpResponse::Ok().json(serde_json::json!({ "ok": true, "id": s.id }))
+        }
+        Err(e) => {
+            tracing::warn!("backup fleet apply: refused schedule '{}': {}", name, e);
+            HttpResponse::BadRequest().json(serde_json::json!({ "ok": false, "error": e }))
+        }
+    }
+}
+
 pub async fn backup_schedules_list(
     req: HttpRequest, state: web::Data<AppState>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    HttpResponse::Ok().json(backup::list_schedules())
+    // Redacted: this response reached the browser carrying `pbs_password` and
+    // friends in cleartext. The edit dialog re-posts the schedule it was shown,
+    // so `backup_schedule_create` restores any sentinel from the stored
+    // schedule before saving — without that pairing an edit would persist the
+    // bullets and the 02:00 run would fail to authenticate.
+    HttpResponse::Ok().json(crate::secrets::to_redacted_json(&backup::list_schedules()))
 }
 
 /// POST /api/backups/test-storage — try to set up the destination (mount
@@ -19483,13 +19815,29 @@ pub async fn backup_schedule_create(
             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
         }
     }
-    backup::merge_pbs_secrets(&mut storage);
     // Edit vs create: when the body carries an existing id, update that schedule in
     // place and PRESERVE its created_at + last_run (otherwise an edit would reset the
     // freshness clock and lose "last ran" history). Absent id = brand-new schedule.
     let editing = body.id.as_deref()
         .filter(|id| !id.is_empty())
         .and_then(|id| backup::list_schedules().into_iter().find(|s| s.id == id));
+
+    // Put back any credential the browser sent as the redaction sentinel.
+    // `backup_schedules_list` masks secrets, and the edit dialog re-posts the
+    // schedule it was shown verbatim (`storage = editing.storage`), so every
+    // edit arrives with "••••••••" where the password was. Restoring from the
+    // stored schedule keeps the credential; the merge also guarantees no
+    // sentinel is ever persisted, so a sentinel with nothing behind it becomes
+    // empty and `merge_pbs_secrets` fills it from the saved connection below.
+    // This must run BEFORE merge_pbs_secrets: an empty field is what tells that
+    // function to supply the saved value.
+    storage = match crate::secrets::merge_incoming_secrets(
+        &storage, editing.as_ref().map(|s| &s.storage),
+    ) {
+        Ok(s) => s,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    backup::merge_pbs_secrets(&mut storage);
     let is_edit = editing.is_some();
     let schedule = backup::BackupSchedule {
         id: editing.as_ref().map(|s| s.id.clone())
@@ -19509,13 +19857,83 @@ pub async fn backup_schedule_create(
         pre_command: body.pre_command.clone(),
         post_command: body.post_command.clone(),
     };
-    match backup::save_schedule(schedule) {
-        Ok(s) => HttpResponse::Ok().json(serde_json::json!({
-            "message": format!("Schedule '{}' {}", s.name, if is_edit { "updated" } else { "created" }),
-            "schedule": s,
-        })),
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    // Node scope: unchanged from before fleet scope existed.
+    if body.scope == BackupScope::Node {
+        return match backup::save_schedule(schedule) {
+            Ok(s) => HttpResponse::Ok().json(serde_json::json!({
+                "message": format!("Schedule '{}' {}", s.name, if is_edit { "updated" } else { "created" }),
+                // Redacted like the list response — this echo carried the same
+                // cleartext credentials straight back to the browser.
+                "schedule": crate::secrets::to_redacted_json(&s),
+            })),
+            Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        };
     }
+
+    // Fleet scope. The SAME id goes to every node — a shared id means a later
+    // edit or delete at fleet scope updates that one row everywhere, instead of
+    // accumulating a near-duplicate schedule per node.
+    let payload = serde_json::to_value(&schedule).unwrap_or(serde_json::json!({}));
+    // Only write locally when THIS node is actually targeted. The local save
+    // happens here rather than inside the fan-out (fleet_fanout_post takes an
+    // already-computed result so blocking work stays off the async executor),
+    // which means an unconditional save would write the schedule to the serving
+    // node even when the operator's node picker excluded it.
+    let self_targeted = body.target_nodes.is_empty()
+        || body.target_nodes.contains(&state.cluster.self_id);
+    let local = if self_targeted {
+        let sched_for_local = schedule.clone();
+        let outcome = web::block(move || backup::save_schedule(sched_for_local).map(|s| s.id))
+            .await
+            .unwrap_or_else(|e| Err(format!("local save panicked: {}", e)))
+            .map(|id| serde_json::json!({ "ok": true, "id": id }));
+        if let Err(e) = &outcome {
+            tracing::warn!("backup fleet write: local save failed: {}", e);
+        }
+        Some(outcome)
+    } else {
+        None
+    };
+    // An empty target list means every WolfStack node; a non-empty one is the
+    // operator's node picker. Note fleet_fanout_post omits non-targeted nodes
+    // entirely rather than reporting them skipped — they were never asked to
+    // act, so they don't belong in the success/failure count either way.
+    let targets = body.target_nodes.clone();
+    let results = fleet_fanout_post::<serde_json::Value>(
+        &state, "/api/backups/schedules/fleet-apply", payload, &targets, local, FANOUT_SLOW,
+    ).await;
+
+    let summary = fleet_result_summary(&results);
+    let failed = summary["failed"].as_u64().unwrap_or(0);
+    let succeeded = summary["succeeded"].as_u64().unwrap_or(0);
+    let total = summary["total"].as_u64().unwrap_or(0);
+    tracing::info!(
+        "backup fleet write: schedule '{}' applied on {}/{} node(s)",
+        schedule.name, succeeded, total,
+    );
+
+    let mut payload = serde_json::json!({
+        "message": format!(
+            "Schedule '{}' {} on {} of {} node(s)",
+            schedule.name,
+            if is_edit { "updated" } else { "created" },
+            succeeded, total,
+        ),
+        "schedule": crate::secrets::to_redacted_json(&schedule),
+        "fleet": summary,
+    });
+    if failed > 0 {
+        // A partial fan-out is an ERROR, not a success with a footnote: the
+        // nodes that missed it have no schedule and will never run a backup —
+        // which is exactly how this went unnoticed in production. The GUI keys
+        // its non-dismissing alert off this field.
+        payload["error"] = serde_json::Value::String(format!(
+            "{} of {} node(s) did not receive this schedule and will NOT back up: {}",
+            failed, total, fleet_failed_nodes(&results).join("; "),
+        ));
+        return HttpResponse::MultiStatus().json(payload);
+    }
+    HttpResponse::Ok().json(payload)
 }
 
 /// POST /api/backups/schedules/{id}/run — run a scheduled backup on demand.
@@ -42197,6 +42615,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backup/mounts/{type}/{name}", web::get().to(backup_container_mounts))
         .route("/api/backups/schedules", web::get().to(backup_schedules_list))
         .route("/api/backups/schedules", web::post().to(backup_schedule_create))
+        .route("/api/backups/schedules/fleet-apply", web::post().to(backup_schedule_fleet_apply))
+        .route("/api/backups/servers/remove", web::post().to(backup_server_remove))
+        .route("/api/backups/servers/remove-local", web::post().to(backup_server_remove_local))
         .route("/api/backups/test-storage", web::post().to(backup_test_storage))
         .route("/api/backups/schedules/{id}", web::delete().to(backup_schedule_delete))
         .route("/api/backups/schedules/{id}/run", web::post().to(backup_schedule_run))

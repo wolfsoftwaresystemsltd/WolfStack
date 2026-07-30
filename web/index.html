@@ -4675,6 +4675,13 @@
                             style="background:var(--bg-secondary); border:1px solid var(--border);">
                             <span class="ws-icon-clean-wrap" data-icon="download"></span> Pull Config from a Node
                         </button>
+                        <!-- Destructive, so it is visually separated and pushed to the
+                             right rather than sitting next to the two routine actions. -->
+                        <button class="btn" onclick="removeBackupServerFleetWide()"
+                            title="Delete this server's stored connection on every node and scrub its credentials from backup history and config snapshots"
+                            style="margin-left:auto; background:var(--bg-secondary); border:1px solid #ef4444; color:#ef4444;">
+                            <span class="ws-icon-clean-wrap" data-icon="trash"></span> Remove Backup Server (Fleet-wide)
+                        </button>
                     </div>
                 </div>
             </div>

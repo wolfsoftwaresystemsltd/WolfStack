@@ -38769,6 +38769,112 @@ function toggleClusterPbsNodes(checked) {
     document.querySelectorAll('.cb-pbs-node-cb:not(:disabled)').forEach(cb => cb.checked = checked);
 }
 
+// Remove a backup server everywhere, credentials included.
+//
+// There was no way to do this. After migrating off an old PBS, its hostname,
+// datastore, user and PLAINTEXT password stayed behind on every node — in
+// backups.json history entries, in ~12 config snapshots, and in
+// pbs/config.json — and three nodes had to be purged by hand (2026-07-30).
+//
+// Two-phase deliberately: the first call REPORTS which schedules still back up
+// to the server rather than silently deleting them, because a schedule whose
+// credentials vanish fails every night at 02:00 with an auth error instead of
+// telling anyone. The operator then confirms.
+async function removeBackupServerFleetWide(prefillServer) {
+    const server = (prefillServer || (document.getElementById('cb-pbs-server') || {}).value || '').trim();
+    if (!server) { showToast('Enter the backup server to remove', 'error'); return; }
+
+    if (!await showConfirm(
+        `Remove backup server "${server}" from every node?\n\n`
+        + `This deletes its stored connection, removes it from saved destinations, `
+        + `and scrubs its credentials from backup history and config snapshots.\n\n`
+        + `Backup history is kept — only the stored passwords are removed.`
+    )) return;
+
+    const post = async (force) => {
+        const res = await fetch(apiUrl('/api/backups/servers/remove'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ server, datastore: '', force, target_nodes: [] }),
+        });
+        return { status: res.status, data: await res.json().catch(() => ({})) };
+    };
+
+    let out;
+    try {
+        out = await post(false);
+    } catch (e) {
+        showBackupFleetError(`Could not remove "${server}"`, [e.message || String(e)]);
+        return;
+    }
+
+    // 409 — schedules still target it. Offer the destructive path explicitly.
+    if (out.status === 409) {
+        const blocked = out.data.blocked_by_schedules || [];
+        const ok = await showConfirm(
+            `Schedules still back up to "${server}":\n\n${blocked.join('\n')}\n\n`
+            + `Removing the server DELETES those schedules. Those workloads will no `
+            + `longer be backed up anywhere until you create a replacement schedule.\n\n`
+            + `Delete them and remove the server?`
+        );
+        if (!ok) return;
+        try {
+            out = await post(true);
+        } catch (e) {
+            showBackupFleetError(`Could not remove "${server}"`, [e.message || String(e)]);
+            return;
+        }
+    }
+
+    if (out.data && out.data.error) {
+        const fleet = out.data.fleet || {};
+        const failures = (fleet.results || [])
+            .filter(r => r.status === 'failed')
+            .map(r => `${r.hostname}: ${r.error || 'unknown error'}`);
+        showBackupFleetError(out.data.error, failures.length ? failures : [out.data.error]);
+        return;
+    }
+
+    const fleet = (out.data && out.data.fleet) || {};
+    const lines = (fleet.results || [])
+        .filter(r => r.status === 'ok' && r.data)
+        .map(r => {
+            const d = r.data.details || [];
+            return `${r.hostname}: ${d.length ? d.join('; ') : 'nothing to remove'}`;
+        });
+    showBackupServerRemovalReport(server, lines);
+    if (typeof loadClusterBackups === 'function') loadClusterBackups();
+}
+
+// Per-node account of what was removed. Stays on screen: "what did this
+// actually delete on three nodes" is not a four-second toast.
+function showBackupServerRemovalReport(server, lines) {
+    const existing = document.getElementById('backup-removal-report');
+    if (existing) existing.remove();
+    const box = document.createElement('div');
+    box.id = 'backup-removal-report';
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+    box.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:10000;'
+        + 'max-width:min(720px,92vw);background:var(--bg-secondary,#1b1b1f);color:var(--text,#f4f4f5);'
+        + 'border:1px solid #10b981;border-left:4px solid #10b981;border-radius:6px;'
+        + 'padding:14px 16px;box-shadow:0 8px 24px rgba(0,0,0,0.45);font-size:13px;';
+    box.innerHTML =
+        '<div style="display:flex;align-items:flex-start;gap:12px;">'
+        + '<div style="flex:1;min-width:0;">'
+        + '<div style="font-weight:600;margin-bottom:6px;color:#10b981;">Removed "'
+        + escapeHtml(server) + '" from the fleet</div>'
+        + '<ul style="margin:0 0 0 16px;padding:0;max-height:40vh;overflow:auto;">'
+        + lines.map(l => '<li style="margin:2px 0;word-break:break-word;">' + escapeHtml(l) + '</li>').join('')
+        + '</ul>'
+        + '</div>'
+        + '<button type="button" class="btn" style="flex:none;">Dismiss</button>'
+        + '</div>';
+    box.querySelector('button').addEventListener('click', () => box.remove());
+    document.body.appendChild(box);
+    box.querySelector('button').focus();
+}
+
 async function copyPbsConfigToNodes() {
     const getVal = id => (document.getElementById(id) || {}).value || '';
     const body = {
@@ -38997,11 +39103,69 @@ async function pushClusterSchedule() {
         storage = { type: 'local', path: _backupLocalDir };
     }
 
-    let success = 0, failed = 0;
+    // ONE server-side fleet write, not a POST per node from the browser.
+    //
+    // The per-node loop this replaces required the OPERATOR'S BROWSER to reach
+    // every node directly. On a cluster whose peers talk over WolfNet but
+    // aren't individually routable from the admin's laptop, the nodes it
+    // couldn't reach were simply counted as failures — and when the fleet
+    // control posted to the local node only, the other two silently kept
+    // `schedules: []` and would never have run a backup (wolf1/2/3,
+    // 2026-07-30). The backend fans out over the same inter-node transport
+    // that already carries auth lockouts, and reports per node.
+    //
+    // Per-node target lists can't be expressed in a single fleet write, so
+    // "select" scope keeps the per-node path — there the body genuinely differs
+    // per node.
+    if (scope === 'select') {
+        return pushClusterSchedulePerNode(nodes, perNodeTargets, { name, frequency, time, retention, storage });
+    }
+
+    let data;
+    try {
+        const res = await fetch(apiUrl('/api/backups/schedules'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name, frequency, time, retention,
+                backup_all: true, targets: [], storage, enabled: true,
+                scope: 'fleet',
+                target_nodes: nodes.map(n => n.id),
+            }),
+        });
+        data = await res.json();
+    } catch (e) {
+        showBackupFleetError(`Schedule "${name}" could not be saved`, [e.message || String(e)]);
+        return;
+    }
+
+    const fleet = data && data.fleet;
+    if (data && data.error) {
+        // Partial fan-out. A toast that fades is wrong here: the named nodes
+        // have NO schedule and will never run a backup, so the operator must be
+        // able to read and copy the list.
+        const failures = (fleet && fleet.results || [])
+            .filter(r => r.status === 'failed')
+            .map(r => `${r.hostname}: ${r.error || 'unknown error'}`);
+        showBackupFleetError(data.error, failures.length ? failures : [data.error]);
+    } else {
+        const n = fleet ? fleet.succeeded : nodes.length;
+        showToast(`Schedule "${name}" created on all ${n} node(s)`, 'success');
+    }
+
+    loadClusterBackups();
+}
+
+// Per-node fallback for "select" scope, where each node gets a different
+// target list and so genuinely needs its own request.
+async function pushClusterSchedulePerNode(nodes, perNodeTargets, common) {
+    const { name, frequency, time, retention, storage } = common;
+    let success = 0;
+    const failures = [];
     const results = await Promise.allSettled(nodes.map(async (node) => {
         let backupAll = true;
         let targets = [];
-        if (scope === 'select' && perNodeTargets[node.id] !== undefined) {
+        if (perNodeTargets[node.id] !== undefined) {
             if (perNodeTargets[node.id] === null) {
                 backupAll = true;
             } else {
@@ -39009,12 +39173,9 @@ async function pushClusterSchedule() {
                 targets = perNodeTargets[node.id];
             }
         }
-
         const body = { name, frequency, time, retention, backup_all: backupAll, targets, storage, enabled: true };
-
         try {
-            const url = nodeApiUrl(node.id, '/api/backups/schedules');
-            const res = await fetch(url, {
+            const res = await fetch(nodeApiUrl(node.id, '/api/backups/schedules'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -39029,18 +39190,53 @@ async function pushClusterSchedule() {
     }));
 
     for (const r of results) {
-        const res = r.status === 'fulfilled' ? r.value : { ok: false };
+        const res = r.status === 'fulfilled' ? r.value : { ok: false, node: { hostname: '?' }, error: 'request failed' };
         if (res.ok) success++;
-        else failed++;
+        else failures.push(`${res.node.hostname}: ${res.error || 'unknown error'}`);
     }
 
-    if (failed === 0) {
+    if (failures.length === 0) {
         showToast(`Schedule "${name}" created on all ${success} node(s)`, 'success');
     } else {
-        showToast(`Schedule: ${success} succeeded, ${failed} failed`, failed > 0 ? 'error' : 'success');
+        showBackupFleetError(
+            `${failures.length} of ${nodes.length} node(s) did not receive this schedule and will NOT back up`,
+            failures,
+        );
     }
 
     loadClusterBackups();
+}
+
+// A blocking, non-dismissing report of a partial fleet write.
+//
+// Deliberately not a toast: a node without the schedule never backs up, and a
+// message that fades after four seconds is how that goes unnoticed. role=alert
+// + aria-live=assertive so it is announced, and the node list stays on screen
+// until the operator dismisses it so it can be read and copied.
+function showBackupFleetError(headline, lines) {
+    const existing = document.getElementById('backup-fleet-error');
+    if (existing) existing.remove();
+    const box = document.createElement('div');
+    box.id = 'backup-fleet-error';
+    box.setAttribute('role', 'alert');
+    box.setAttribute('aria-live', 'assertive');
+    box.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:10000;'
+        + 'max-width:min(720px,92vw);background:var(--bg-secondary,#1b1b1f);color:var(--text,#f4f4f5);'
+        + 'border:1px solid #ef4444;border-left:4px solid #ef4444;border-radius:6px;'
+        + 'padding:14px 16px;box-shadow:0 8px 24px rgba(0,0,0,0.45);font-size:13px;';
+    box.innerHTML =
+        '<div style="display:flex;align-items:flex-start;gap:12px;">'
+        + '<div style="flex:1;min-width:0;">'
+        + '<div style="font-weight:600;margin-bottom:6px;color:#ef4444;">' + escapeHtml(headline) + '</div>'
+        + '<ul style="margin:0 0 0 16px;padding:0;max-height:40vh;overflow:auto;">'
+        + lines.map(l => '<li style="margin:2px 0;word-break:break-word;">' + escapeHtml(l) + '</li>').join('')
+        + '</ul>'
+        + '</div>'
+        + '<button type="button" class="btn" style="flex:none;">Dismiss</button>'
+        + '</div>';
+    box.querySelector('button').addEventListener('click', () => box.remove());
+    document.body.appendChild(box);
+    box.querySelector('button').focus();
 }
 
 async function loadPbsConfigFromNode() {
