@@ -1382,7 +1382,15 @@ pub fn save_config(config: &BackupConfig) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize backup config: {}", e))?;
-    fs::write(&path, json)
+    // 0600, not whatever the umask happens to be. This file holds
+    // `pbs_password`, `smb_password`, `secret_key`, `access_key` and
+    // `pbs_token_secret` in cleartext, and a plain `fs::write` shipped it
+    // 0644 root:root — any local user could read the backup server's password
+    // (production report, 3-node "wolf" cluster, 2026-07-30). `write_secure`
+    // also re-chmods a file that already exists with looser permissions, so an
+    // install that has been leaking since v18 is fixed by its next write;
+    // `paths::harden_existing` catches the ones that never write again.
+    crate::paths::write_secure(&path, json)
         .map_err(|e| format!("Failed to write backup config: {}", e))
 }
 
@@ -8738,6 +8746,469 @@ pub fn find_pbs_target(id: &str) -> Option<PbsTarget> {
     load_pbs_targets().into_iter().find(|t| t.id == id)
 }
 
+// ─── Removing a backup server, fleet-wide ─────────────────────────
+//
+// There was no way to remove one. After migrating off an old PBS
+// (node3.dreamhosting.at:8007) its hostname, datastore, user and PLAINTEXT
+// password stayed behind on every node — in backups.json history entries (6 of
+// 7 on wolf1, 7 of 7 on wolf2, 2 of 2 on wolf3), in ~12 config snapshots under
+// /etc/wolfstack/config-backups/, and in /etc/wolfstack/pbs/config.json. The
+// operator purged three nodes by hand (production report, 2026-07-30).
+//
+// Everything here is idempotent: a second run over an already-clean node
+// reports zeroes and succeeds. That matters because this is fanned out across
+// the fleet and a partial failure is retried by re-running it.
+
+/// Which backup server to remove. Named by host because that is the one thing
+/// every storage type spells the same way — the field it lives in varies
+/// (`pbs_server`, `endpoint`, `remote_url`, an NFS/SMB `path`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupServerRef {
+    /// Host, optionally with a port: "node3.dreamhosting.at:8007".
+    pub server: String,
+    /// Narrow the match to one datastore/bucket/share. Absent removes every
+    /// reference to the host.
+    #[serde(default)]
+    pub datastore: String,
+}
+
+/// Reduce a field that might be a bare host, a `host:port`, a URL, or an
+/// NFS-style `host:/export` to just its host, lowercased.
+///
+/// Comparing raw strings would miss the obvious cases: the same server is
+/// written `node3.dreamhosting.at:8007` in one field and
+/// `https://node3.dreamhosting.at:8007/` in another, and an operator asked to
+/// name the server will type whichever they remember.
+fn host_of(field: &str) -> String {
+    let s = field.trim();
+    // Strip scheme.
+    let s = s.split("://").last().unwrap_or(s);
+    // Strip any path / export component.
+    let s = s.split('/').next().unwrap_or(s);
+    // Strip userinfo.
+    let s = s.rsplit('@').next().unwrap_or(s);
+    // Strip port. Guard IPv6 literals, which are bracketed and full of colons.
+    let s = if s.starts_with('[') {
+        s.split(']').next().unwrap_or(s).trim_start_matches('[')
+    } else {
+        s.split(':').next().unwrap_or(s)
+    };
+    s.trim().to_ascii_lowercase()
+}
+
+/// True when `storage` points at the server described by `target`.
+pub fn storage_references_server(storage: &BackupStorage, target: &BackupServerRef) -> bool {
+    let want = host_of(&target.server);
+    if want.is_empty() { return false; }
+    let hosts = [
+        host_of(&storage.pbs_server),
+        host_of(&storage.endpoint),
+        host_of(&storage.remote_url),
+        // NFS/SMB destinations carry the server in the path ("nas:/vol/backups",
+        // "//nas/backups").
+        host_of(storage.path.trim_start_matches('/')),
+    ];
+    if !hosts.iter().any(|h| !h.is_empty() && *h == want) {
+        return false;
+    }
+    if target.datastore.is_empty() {
+        return true;
+    }
+    // Narrowed to one datastore/bucket/share.
+    let ds = target.datastore.trim().to_ascii_lowercase();
+    [&storage.pbs_datastore, &storage.bucket]
+        .iter()
+        .any(|f| f.trim().to_ascii_lowercase() == ds)
+}
+
+/// What removing a server actually did on this node.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerRemovalReport {
+    /// Schedules still pointing at this server. Populated only when the removal
+    /// was REFUSED — the operator either repoints them or confirms.
+    #[serde(default)]
+    pub blocking_schedules: Vec<String>,
+    /// The primary PBS connection was this server and has been cleared.
+    #[serde(default)]
+    pub primary_config_cleared: bool,
+    /// Saved PBS destinations removed from targets.json.
+    #[serde(default)]
+    pub pbs_targets_removed: usize,
+    /// History entries whose embedded credentials were scrubbed.
+    #[serde(default)]
+    pub history_entries_scrubbed: usize,
+    /// Config snapshots rewritten with the credentials removed.
+    #[serde(default)]
+    pub snapshots_scrubbed: usize,
+    /// Schedules deleted (only ever with `force`).
+    #[serde(default)]
+    pub schedules_removed: usize,
+    /// Human-readable trail, one line per thing changed.
+    #[serde(default)]
+    pub details: Vec<String>,
+}
+
+impl ServerRemovalReport {
+    /// True when nothing on this node referenced the server. A second run
+    /// reports this, which is what makes the action safe to retry.
+    pub fn is_noop(&self) -> bool {
+        !self.primary_config_cleared
+            && self.pbs_targets_removed == 0
+            && self.history_entries_scrubbed == 0
+            && self.snapshots_scrubbed == 0
+            && self.schedules_removed == 0
+    }
+}
+
+/// Blank every credential-looking field of a storage block in place, leaving
+/// the non-secret parts (hostname, datastore) so history still says WHERE a
+/// backup went. Uses the same substring rule as the API redaction, so a storage
+/// field added later is scrubbed without anyone remembering to list it.
+fn scrub_storage_secrets(storage: &mut BackupStorage) -> bool {
+    let before = match serde_json::to_value(&*storage) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let mut after = before.clone();
+    if let serde_json::Value::Object(map) = &mut after {
+        for (key, val) in map.iter_mut() {
+            if crate::secrets::is_secret_field(key) {
+                if let serde_json::Value::String(s) = val {
+                    s.clear();
+                }
+            }
+        }
+    }
+    if after == before { return false; }
+    match serde_json::from_value::<BackupStorage>(after) {
+        Ok(cleaned) => { *storage = cleaned; true }
+        Err(_) => false,
+    }
+}
+
+/// Remove every trace of `target` from THIS node.
+///
+/// Refuses while a schedule still targets the server unless `force` — deleting
+/// the credentials out from under a live schedule would leave it failing every
+/// night with an auth error instead of telling the operator now. With `force`
+/// those schedules are deleted, which is the only coherent alternative: a
+/// schedule pointing at a server with no credentials is not a backup.
+pub fn remove_backup_server(target: &BackupServerRef, force: bool) -> Result<ServerRemovalReport, String> {
+    if host_of(&target.server).is_empty() {
+        return Err("A server hostname is required".to_string());
+    }
+    let mut report = ServerRemovalReport::default();
+
+    let mut config = load_config();
+
+    // (d) Refuse while schedules still point at it.
+    let blocking: Vec<String> = config.schedules.iter()
+        .filter(|s| storage_references_server(&s.storage, target))
+        .map(|s| s.name.clone())
+        .collect();
+    if !blocking.is_empty() && !force {
+        report.blocking_schedules = blocking;
+        return Ok(report);
+    }
+
+    let mut config_dirty = false;
+
+    // Delete the schedules that pointed at it (force path only — the refusal
+    // above is the non-force outcome).
+    if !blocking.is_empty() {
+        let before = config.schedules.len();
+        config.schedules.retain(|s| !storage_references_server(&s.storage, target));
+        let removed = before - config.schedules.len();
+        if removed > 0 {
+            report.schedules_removed = removed;
+            report.details.push(format!(
+                "removed {} schedule(s) targeting {}: {}",
+                removed, target.server, blocking.join(", "),
+            ));
+            config_dirty = true;
+        }
+    }
+
+    // (b) Scrub credentials out of history entries. The entries themselves stay
+    // — they are the record of what was backed up and when, and deleting that
+    // to remove a password would be destroying an audit trail to fix a leak.
+    for entry in config.entries.iter_mut() {
+        if storage_references_server(&entry.storage, target)
+            && scrub_storage_secrets(&mut entry.storage)
+        {
+            report.history_entries_scrubbed += 1;
+            config_dirty = true;
+        }
+    }
+    if report.history_entries_scrubbed > 0 {
+        report.details.push(format!(
+            "scrubbed credentials from {} backup history entr{}",
+            report.history_entries_scrubbed,
+            if report.history_entries_scrubbed == 1 { "y" } else { "ies" },
+        ));
+    }
+
+    if config_dirty {
+        save_config(&config)?;
+    }
+
+    // (a) The primary PBS connection.
+    let primary = load_pbs_config();
+    if storage_references_server(&primary, target) {
+        // Clear rather than delete the file: an absent config and a cleared one
+        // load identically (load_pbs_config defaults), but clearing leaves the
+        // file at its hardened permissions instead of recreating it later.
+        save_pbs_config(&BackupStorage {
+            storage_type: StorageType::Pbs,
+            ..BackupStorage::default()
+        })?;
+        report.primary_config_cleared = true;
+        report.details.push(format!("cleared primary PBS connection to {}", target.server));
+    }
+
+    // (a) Saved PBS destinations.
+    let targets = load_pbs_targets();
+    let kept: Vec<PbsTarget> = targets.iter()
+        .filter(|t| {
+            let as_storage = BackupStorage {
+                storage_type: StorageType::Pbs,
+                pbs_server: t.pbs_server.clone(),
+                pbs_datastore: t.pbs_datastore.clone(),
+                ..BackupStorage::default()
+            };
+            !storage_references_server(&as_storage, target)
+        })
+        .cloned()
+        .collect();
+    if kept.len() != targets.len() {
+        report.pbs_targets_removed = targets.len() - kept.len();
+        save_pbs_targets(&kept)?;
+        report.details.push(format!(
+            "removed {} saved PBS destination(s)", report.pbs_targets_removed,
+        ));
+    }
+
+    // (c) Config snapshots. They are plain JSON at 0600 and each embeds a whole
+    // copy of the config, so the credential survives in every daily snapshot
+    // long after the live config is clean.
+    report.snapshots_scrubbed = scrub_config_snapshots(target)?;
+    if report.snapshots_scrubbed > 0 {
+        report.details.push(format!(
+            "scrubbed credentials from {} config snapshot(s)", report.snapshots_scrubbed,
+        ));
+    }
+
+    Ok(report)
+}
+
+/// Walk every config snapshot and blank credential fields inside any object
+/// that references the removed server. Returns how many files were rewritten.
+///
+/// Objects are matched by looking for the host in the SAME object that carries
+/// the secret, so a snapshot mentioning two different backup servers only loses
+/// the credentials of the one being removed.
+fn scrub_config_snapshots(target: &BackupServerRef) -> Result<usize, String> {
+    let dir = "/etc/wolfstack/config-backups";
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        // No snapshots yet is not a failure — this runs on fresh nodes too.
+        Err(_) => return Ok(0),
+    };
+    let want = host_of(&target.server);
+    let mut rewritten = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) { Ok(c) => c, Err(_) => continue };
+        let mut value: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if scrub_value_for_host(&mut value, &want) {
+            let json = serde_json::to_string_pretty(&value)
+                .map_err(|e| format!("Failed to re-serialize snapshot: {}", e))?;
+            crate::paths::write_secure(&path.to_string_lossy(), json)
+                .map_err(|e| format!("Failed to rewrite snapshot {}: {}", path.display(), e))?;
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
+}
+
+#[cfg(test)]
+mod remove_backup_server_tests {
+    use super::*;
+
+    fn pbs(server: &str, datastore: &str, password: &str) -> BackupStorage {
+        BackupStorage {
+            storage_type: StorageType::Pbs,
+            pbs_server: server.into(),
+            pbs_datastore: datastore.into(),
+            pbs_password: password.into(),
+            pbs_user: "backup@pbs".into(),
+            ..BackupStorage::default()
+        }
+    }
+
+    /// The operator will type whichever form they remember. All of these name
+    /// the server that was left behind in production.
+    #[test]
+    fn a_server_is_matched_however_it_is_written() {
+        let stored = pbs("node3.dreamhosting.at:8007", "store1", "hunter2");
+        for typed in [
+            "node3.dreamhosting.at",
+            "node3.dreamhosting.at:8007",
+            "https://node3.dreamhosting.at:8007",
+            "https://node3.dreamhosting.at:8007/",
+            "NODE3.DreamHosting.AT",
+            "root@node3.dreamhosting.at:8007",
+        ] {
+            let target = BackupServerRef { server: typed.into(), datastore: String::new() };
+            assert!(
+                storage_references_server(&stored, &target),
+                "{} should match the stored server", typed,
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_server_is_not_matched() {
+        let stored = pbs("node3.dreamhosting.at:8007", "store1", "hunter2");
+        let target = BackupServerRef { server: "pbs.newhost.example".into(), datastore: String::new() };
+        assert!(!storage_references_server(&stored, &target));
+        // An empty target must never match everything — that would wipe the lot.
+        let empty = BackupServerRef { server: "  ".into(), datastore: String::new() };
+        assert!(!storage_references_server(&stored, &empty));
+    }
+
+    #[test]
+    fn a_datastore_narrows_the_match() {
+        let a = pbs("nas.example", "store1", "p");
+        let b = pbs("nas.example", "store2", "p");
+        let target = BackupServerRef { server: "nas.example".into(), datastore: "store1".into() };
+        assert!(storage_references_server(&a, &target));
+        assert!(!storage_references_server(&b, &target), "other datastores on the same host survive");
+    }
+
+    #[test]
+    fn nfs_and_smb_servers_are_matched_through_the_path() {
+        let mut nfs = BackupStorage { storage_type: StorageType::Nfs, ..BackupStorage::default() };
+        nfs.path = "nas.example:/volume1/backups".into();
+        let mut smb = BackupStorage { storage_type: StorageType::Smb, ..BackupStorage::default() };
+        smb.path = "//nas.example/backups".into();
+        let target = BackupServerRef { server: "nas.example".into(), datastore: String::new() };
+        assert!(storage_references_server(&nfs, &target));
+        assert!(storage_references_server(&smb, &target));
+    }
+
+    /// Scrubbing keeps the record of WHERE a backup went and drops only the
+    /// credential — deleting history to fix a leak destroys an audit trail.
+    #[test]
+    fn scrubbing_a_storage_block_keeps_location_and_drops_secrets() {
+        let mut s = pbs("node3.dreamhosting.at:8007", "store1", "hunter2");
+        s.pbs_token_secret = "tok".into();
+        s.secret_key = "sk".into();
+        assert!(scrub_storage_secrets(&mut s));
+        assert_eq!(s.pbs_password, "");
+        assert_eq!(s.pbs_token_secret, "");
+        assert_eq!(s.secret_key, "");
+        assert_eq!(s.pbs_server, "node3.dreamhosting.at:8007", "history still says where it went");
+        assert_eq!(s.pbs_datastore, "store1");
+        assert_eq!(s.pbs_user, "backup@pbs", "the user is not a credential");
+        // Idempotent: a second scrub changes nothing and reports so.
+        assert!(!scrub_storage_secrets(&mut s));
+    }
+
+    #[test]
+    fn snapshot_scrubbing_only_touches_the_removed_server() {
+        let mut snapshot = serde_json::json!({
+            "backups": {
+                "schedules": [
+                    { "name": "old", "storage": {
+                        "pbs_server": "node3.dreamhosting.at:8007",
+                        "pbs_password": "hunter2", "pbs_datastore": "store1" } },
+                    { "name": "new", "storage": {
+                        "pbs_server": "pbs.newhost.example",
+                        "pbs_password": "keepme", "pbs_datastore": "store1" } }
+                ]
+            }
+        });
+        let changed = scrub_value_for_host(&mut snapshot, &host_of("node3.dreamhosting.at:8007"));
+        assert!(changed);
+        let scheds = &snapshot["backups"]["schedules"];
+        assert_eq!(scheds[0]["storage"]["pbs_password"], "", "removed server's password gone");
+        assert_eq!(scheds[0]["storage"]["pbs_server"], "node3.dreamhosting.at:8007");
+        assert_eq!(scheds[1]["storage"]["pbs_password"], "keepme",
+            "the server we still use keeps its credentials");
+    }
+
+    #[test]
+    fn snapshot_scrubbing_is_idempotent() {
+        let mut snapshot = serde_json::json!({
+            "storage": { "pbs_server": "nas.example", "pbs_password": "p" }
+        });
+        let host = host_of("nas.example");
+        assert!(scrub_value_for_host(&mut snapshot, &host), "first pass changes it");
+        assert!(!scrub_value_for_host(&mut snapshot, &host), "second pass is a no-op");
+    }
+
+    #[test]
+    fn a_report_with_nothing_to_do_is_a_noop() {
+        assert!(ServerRemovalReport::default().is_noop());
+        let mut r = ServerRemovalReport::default();
+        r.history_entries_scrubbed = 1;
+        assert!(!r.is_noop());
+    }
+
+    #[test]
+    fn removing_without_a_server_name_is_rejected() {
+        let target = BackupServerRef { server: "   ".into(), datastore: String::new() };
+        assert!(remove_backup_server(&target, false).is_err());
+    }
+}
+
+/// Blank credential fields in any object that also names `host`. Returns true
+/// if anything changed.
+fn scrub_value_for_host(value: &mut serde_json::Value, host: &str) -> bool {
+    let mut changed = false;
+    match value {
+        serde_json::Value::Object(map) => {
+            // Does THIS object reference the host? Check the fields a server
+            // name can live in, plus a bare `path` for NFS/SMB.
+            let references = ["pbs_server", "endpoint", "remote_url", "path", "server"]
+                .iter()
+                .any(|k| map.get(*k)
+                    .and_then(|v| v.as_str())
+                    .map(|s| host_of(s.trim_start_matches('/')) == host)
+                    .unwrap_or(false));
+            if references {
+                for (key, val) in map.iter_mut() {
+                    if crate::secrets::is_secret_field(key) {
+                        if let serde_json::Value::String(s) = val {
+                            if !s.is_empty() {
+                                s.clear();
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            for (_k, val) in map.iter_mut() {
+                if scrub_value_for_host(val, host) { changed = true; }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                if scrub_value_for_host(item, host) { changed = true; }
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
 /// Fill empty fields on `storage` from a saved destination.
 ///
 /// Pure and separated from disk access so the inheritance order —
@@ -8805,7 +9276,10 @@ pub fn save_pbs_config(storage: &BackupStorage) -> Result<(), String> {
         .map_err(|e| format!("Failed to create PBS config dir: {}", e))?;
     let json = serde_json::to_string_pretty(storage)
         .map_err(|e| format!("Failed to serialize PBS config: {}", e))?;
-    fs::write(path, json)
+    // 0600 — this file holds `pbs_token_secret` and `pbs_password`. A plain
+    // fs::write left it at the umask's mercy, the same way backups.json shipped
+    // world-readable. `save_pbs_targets` next door already does this.
+    crate::paths::write_secure(path, json)
         .map_err(|e| format!("Failed to write PBS config: {}", e))?;
     Ok(())
 }

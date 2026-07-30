@@ -520,6 +520,14 @@ pub fn harden_existing() {
             "/etc/wolfstack/oidc.json".to_string(),          // OIDC client secrets
             "/etc/wolfstack/ai-config.json".to_string(),     // LLM API keys + SMTP pass
             "/etc/wolfstack/pbs/config.json".to_string(),    // PBS tokens
+            // backups.json carries pbs_password / smb_password / secret_key /
+            // access_key / pbs_token_secret in cleartext and shipped 0644
+            // root:root until v25.6.8 — every install predating that fix is
+            // still world-readable until this runs (production report, 3-node
+            // "wolf" cluster, 2026-07-30).
+            locs.backup_config.clone(),
+            "/etc/wolfstack/backups.json".to_string(),       // default path, if remapped above
+            "/etc/wolfstack/pbs/targets.json".to_string(),   // additional PBS destinations + their tokens
             "/etc/wolfstack/paths.json".to_string(),         // path remap — if attacker-controlled, can redirect secret writers
             "/etc/ppp/chap-secrets".to_string(),             // PPPoE passwords (WAN)
             "/etc/ppp/pap-secrets".to_string(),
