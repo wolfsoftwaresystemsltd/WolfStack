@@ -318,6 +318,24 @@ pub struct SubnetRoute {
     pub enabled: bool,
     #[serde(default)]
     pub description: String,
+    /// The operator has saved this route by hand, so auto-apply must leave its
+    /// gateway alone.
+    ///
+    /// Auto-created routes (id prefixed `auto-wolfnet-`) track the gateway that
+    /// cluster gossip reports for the peer owning the subnet, so a peer whose
+    /// WolfNet IP changes gets a corrected route. That refresh must not fight
+    /// the operator: klasSponsor 2026-07-30 edited a gossip-created route's
+    /// gateway and auto-apply planted a duplicate for the same CIDR pointing at
+    /// the old gateway, which then won in the kernel (applied later) AND made
+    /// the route permanently un-editable, because the overlap guard in
+    /// `update_subnet_route` refuses two same-CIDR routes on one node. This flag
+    /// is the operator saying "mine now".
+    ///
+    /// Defaults to false so routes already in an on-disk config deserialize as
+    /// auto-managed — EXCEPT that the refresh only ever touches `auto-wolfnet-`
+    /// ids, so an operator-created route is never eligible regardless.
+    #[serde(default)]
+    pub operator_edited: bool,
 }
 
 /// Firewall rule action.
@@ -3192,8 +3210,55 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
     // stops retrying them and they clear from the failing list on upgraded
     // nodes (AstroMando 2026-06-26: 8 such routes trapped, retried every tick).
     let mut auto_disable_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Heal hosts that already carry a duplicate same-CIDR pair from the
+    // coverage bug (klasSponsor 2026-07-30): auto-apply keyed coverage on
+    // (cidr, gateway), so editing a gossip-created route's gateway planted a
+    // second route for the same CIDR pointing at the old one. Both applied,
+    // and the auto one won because it sorted later — then the overlap guard
+    // made the route un-editable. `routes_can_overlap` forbids that pair, so
+    // it can only exist as wreckage from the old behaviour.
+    //
+    // Disable the AUTO side and keep the operator's, matching the existing
+    // convention here: disable rather than delete, so it stays visible and
+    // auditable in the UI.
+    let mut duplicate_disable_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    // CIDR → the gateway the duplicate had installed in the kernel. The
+    // operator's route cannot simply overwrite it: `apply_subnet_route` refuses
+    // a destination held via a gateway it wasn't told to expect ("installed
+    // outside WolfStack"). Passing it as `previous_gateway` authorises the
+    // atomic `ip route replace`, exactly as an edit does — without this the
+    // cleanup would disable the duplicate and leave the kernel stuck on its
+    // gateway forever.
+    let mut superseded_gateway: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for route in cfg.subnet_routes.iter()
+        .filter(|r| r.enabled && r.id.starts_with("auto-wolfnet-"))
+    {
+        let shadowed_by_operator = cfg.subnet_routes.iter().any(|other| {
+            other.id != route.id
+                && other.enabled
+                && !other.id.starts_with("auto-wolfnet-")
+                && other.subnet_cidr == route.subnet_cidr
+                && (other.node_id.is_none() || route.node_id.is_none()
+                    || other.node_id == route.node_id)
+        });
+        if shadowed_by_operator {
+            tracing::info!(
+                "WolfRouter: disabling duplicate auto-created subnet route {} via {} \
+                 — an operator-owned route for the same subnet exists and takes \
+                 precedence (cleanup of the pre-v25.6.7 coverage bug)",
+                route.subnet_cidr, route.gateway,
+            );
+            duplicate_disable_ids.insert(route.id.clone());
+            superseded_gateway.insert(route.subnet_cidr.clone(), route.gateway.clone());
+        }
+    }
+
     for route in cfg.subnet_routes.iter()
         .filter(|r| r.enabled && node_handles_route(r, self_node_id))
+        .filter(|r| !duplicate_disable_ids.contains(&r.id))
     {
         // Orphan guard — skip routes whose gateway IP no longer matches
         // any wolfnet peer in the local config. We log a warning the
@@ -3236,7 +3301,10 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
             }
             continue;
         }
-        match apply_subnet_route(route, None) {
+        // Pass the gateway of any duplicate we just disabled for this CIDR, so
+        // the operator's route is allowed to take the kernel entry over.
+        let superseded = superseded_gateway.get(&route.subnet_cidr).map(|s| s.as_str());
+        match apply_subnet_route(route, superseded) {
             Ok(()) => clear_subnet_route_warn(&route.subnet_cidr), // recovery logged once
             Err(e) => {
                 warn_subnet_route_once(&route.subnet_cidr, format!(
@@ -3251,19 +3319,22 @@ pub fn reconcile_subnet_routes(state: &RouterState, self_node_id: &str) {
     // gossip-planted routes for CIDRs the local kernel owns — they never worked
     // and (with the auto-apply guards above) won't be re-created. Disabling
     // rather than deleting keeps them visible/auditable in the UI.
-    let routes_for_sync = if auto_disable_ids.is_empty() {
+    let routes_for_sync = if auto_disable_ids.is_empty() && duplicate_disable_ids.is_empty() {
         cfg.subnet_routes.clone()
     } else {
         let mut wcfg = state.config.write().unwrap();
         for r in wcfg.subnet_routes.iter_mut() {
-            if r.enabled && auto_disable_ids.contains(&r.id) {
+            let reason = if auto_disable_ids.contains(&r.id) {
+                Some("subnet owned by a local kernel route — never installable over WolfNet")
+            } else if duplicate_disable_ids.contains(&r.id) {
+                Some("duplicate of an operator-owned route for the same subnet, which takes precedence")
+            } else {
+                None
+            };
+            if let (true, Some(reason)) = (r.enabled, reason) {
                 r.enabled = false;
                 if !r.description.contains("auto-disabled") {
-                    r.description = format!(
-                        "{} (auto-disabled: subnet owned by a local kernel route — \
-                         never installable over WolfNet)",
-                        r.description
-                    );
+                    r.description = format!("{} (auto-disabled: {})", r.description, reason);
                 }
                 tracing::info!(
                     "WolfRouter: auto-disabled impossible subnet route {} via {} \
@@ -3523,11 +3594,25 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
     }
     if wanted.is_empty() { return; }
 
-    // Filter out any subnet/gateway already covered by an existing
-    // route — including DISABLED ones. Treating a disabled route as
-    // "covered" lets the operator opt out by toggling enabled=false
-    // in the UI; without that, auto-apply would re-create a fresh
-    // enabled entry on every tick.
+    // Refresh the gateway on auto-created routes the operator hasn't claimed,
+    // BEFORE deciding what's missing — a peer whose WolfNet IP changed needs
+    // its existing route corrected, not a second one planted next to it.
+    //
+    // This used to happen by accident: coverage was keyed on (cidr, gateway),
+    // so a route whose gateway no longer matched gossip looked absent and a
+    // duplicate got added. That "healed" an IP change and broke editing — see
+    // `SubnetRoute::operator_edited`. Correcting in place does the healing
+    // without ever creating the same-CIDR pair the API forbids.
+    let refreshed = refresh_managed_route_gateways(state, &wanted);
+
+    // Filter out any subnet already covered by an existing route — including
+    // DISABLED ones, and regardless of its gateway. Treating a disabled route
+    // as "covered" lets the operator opt out by toggling enabled=false in the
+    // UI; without that, auto-apply would re-create a fresh enabled entry on
+    // every tick. Ignoring the gateway is what keeps an operator's edited
+    // gateway from being read as "no route here" — `routes_can_overlap` (the
+    // uniqueness rule create/update enforce) keys on CIDR and node scope only,
+    // so a second same-CIDR route is a state the API would have rejected.
     let existing: Vec<(String, String)> = {
         let cfg = state.config.read().unwrap();
         cfg.subnet_routes.iter()
@@ -3535,9 +3620,15 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
             .collect()
     };
     let to_add: Vec<(String, String, String)> = wanted.into_iter()
-        .filter(|(cidr, gw, _)| !route_set_covers(cidr, gw, &existing))
+        .filter(|(cidr, _gw, _)| !route_set_covers_cidr(cidr, &existing))
         .collect();
-    if to_add.is_empty() { return; }
+    if to_add.is_empty() {
+        if refreshed > 0 {
+            let cfg_snapshot = state.config.read().unwrap().clone();
+            sync_subnet_routes_to_wolfnet(&cfg_snapshot.subnet_routes);
+        }
+        return;
+    }
 
     // Final live guard against the 30s-cache race (AstroMando 2026-06-26): drop
     // any candidate the local kernel already owns in an unmanageable form — a
@@ -3583,6 +3674,10 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
                      Detected via cluster gossip; safe to edit or disable manually.",
                     peer_name,
                 ),
+                // Auto-managed until the operator saves it: while this is false
+                // the gateway tracks whatever gossip reports for the peer, so a
+                // peer that rejoins on a new WolfNet IP gets corrected in place.
+                operator_edited: false,
             });
         }
     }
@@ -3614,24 +3709,100 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
     sync_subnet_routes_to_wolfnet(&cfg_snapshot.subnet_routes);
 }
 
+/// Point auto-created routes at the gateway cluster gossip currently reports
+/// for the peer that owns the subnet, when the two have drifted apart — a peer
+/// rejoined with a new WolfNet IP, typically.
+///
+/// Only `auto-wolfnet-` ids that the operator has not saved by hand are
+/// eligible, so this can never overwrite a deliberate choice. Returns how many
+/// routes were changed; the kernel entry is swapped for each so the correction
+/// takes effect without waiting for the next reconcile tick.
+///
+/// `wanted` is the gossip view: (subnet_cidr, gateway, peer_hostname).
+fn refresh_managed_route_gateways(
+    state: &RouterState,
+    wanted: &[(String, String, String)],
+) -> usize {
+    // Gossip can name the same CIDR via more than one peer; take the first,
+    // matching the order auto-apply itself would have added them in.
+    let mut desired: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (cidr, gw, _peer) in wanted {
+        desired.entry(cidr.as_str()).or_insert(gw.as_str());
+    }
+
+    // Work out the changes under the write lock, but apply kernel state after
+    // releasing it — apply_subnet_route shells out to `ip`.
+    let mut swaps: Vec<(SubnetRoute, String)> = Vec::new();
+    {
+        let mut cfg = state.config.write().unwrap();
+        for route in cfg.subnet_routes.iter_mut() {
+            if route.operator_edited { continue; }
+            if !route.id.starts_with("auto-wolfnet-") { continue; }
+            let want_gw = match desired.get(route.subnet_cidr.as_str()) {
+                Some(g) => *g,
+                None => continue,
+            };
+            if route.gateway == want_gw { continue; }
+            let old_gateway = std::mem::replace(&mut route.gateway, want_gw.to_string());
+            tracing::info!(
+                "WolfRouter auto-apply: subnet route {} gateway {} → {} \
+                 (peer WolfNet IP changed; route is auto-managed)",
+                route.subnet_cidr, old_gateway, want_gw,
+            );
+            swaps.push((route.clone(), old_gateway));
+        }
+    }
+    if swaps.is_empty() { return 0; }
+
+    let cfg_snapshot = state.config.read().unwrap().clone();
+    if let Err(e) = cfg_snapshot.save() {
+        tracing::warn!(
+            "WolfRouter auto-apply: refreshed {} route gateway(s) in memory but \
+             save failed: {} (next tick will retry)",
+            swaps.len(), e,
+        );
+    }
+
+    let self_id = crate::agent::self_node_id();
+    for (route, old_gateway) in &swaps {
+        if !route.enabled || !node_handles_route(route, &self_id) { continue; }
+        // `ip route replace` is atomic, and passing the old gateway authorises
+        // swapping OUR entry rather than someone else's.
+        if let Err(e) = apply_subnet_route(route, Some(old_gateway.as_str())) {
+            tracing::warn!(
+                "WolfRouter auto-apply: gateway refresh for {} failed to apply: {}",
+                route.subnet_cidr, e,
+            );
+        }
+    }
+    swaps.len()
+}
+
 /// Helper: parse an IPv4 octet-string to u32 (network byte order).
 fn ipv4_to_u32(s: &str) -> u32 {
     s.parse::<std::net::Ipv4Addr>().map(u32::from).unwrap_or(0)
 }
 
-/// True iff some `(cidr, gateway)` in `existing` covers `target_cidr` via
-/// `target_gw` — an exact match or a wider same-gateway prefix. Family
-/// aware: v4 uses u32 math, v6 uses u128; a candidate of the other family
-/// never covers the target. An unparseable target returns `true`
-/// ("pretend covered, don't auto-add"), matching the prior v4 behaviour.
-fn route_set_covers(target_cidr: &str, target_gw: &str, existing: &[(String, String)]) -> bool {
+/// True iff some entry in `existing` covers `target_cidr` — an exact match or a
+/// wider prefix — REGARDLESS of gateway. Family aware: v4 uses u32 math, v6 uses
+/// u128; a candidate of the other family never covers the target. An
+/// unparseable target returns `true` ("pretend covered, don't auto-add"),
+/// matching the prior v4 behaviour.
+///
+/// The gateway is deliberately not part of the test. It used to be, and that is
+/// what let an operator's edited gateway read as "no route for this subnet" and
+/// get a duplicate planted beside it — a state `routes_can_overlap` forbids, so
+/// the route could then never be edited again (klasSponsor 2026-07-30). A
+/// changed peer IP is handled by `refresh_managed_route_gateways` correcting the
+/// existing route instead. `existing` keeps its `(cidr, gateway)` shape because
+/// callers build it straight from the config and the gateway is useful in logs.
+fn route_set_covers_cidr(target_cidr: &str, existing: &[(String, String)]) -> bool {
     if is_ipv6_cidr(target_cidr) {
         let (tnet, tprefix) = match parse_cidr_v6(target_cidr) {
             Some(t) => t,
             None => return true,
         };
-        for (cidr, gw) in existing {
-            if gw != target_gw { continue; }
+        for (cidr, _gw) in existing {
             if !is_ipv6_cidr(cidr) { continue; }
             let (rnet, rprefix) = match parse_cidr_v6(cidr) { Some(p) => p, None => continue };
             if rprefix > tprefix { continue; }
@@ -3646,8 +3817,7 @@ fn route_set_covers(target_cidr: &str, target_gw: &str, existing: &[(String, Str
             None => return true,
         };
         let target_net = ipv4_to_u32(&tnet_str);
-        for (cidr, gw) in existing {
-            if gw != target_gw { continue; }
+        for (cidr, _gw) in existing {
             if is_ipv6_cidr(cidr) { continue; }
             let (rnet_str, rprefix) = match parse_cidr(cidr) { Some(p) => p, None => continue };
             let route_net = ipv4_to_u32(&rnet_str);
@@ -4536,28 +4706,67 @@ mod ipv6_subnet_route_tests {
     }
 
     #[test]
-    fn route_set_covers_v4_unchanged() {
-        // Regression: the family-aware coverage must reproduce the old
-        // v4-only `already_covered` closure exactly.
+    fn route_set_covers_v4_prefix_maths() {
         let existing = vec![("10.10.0.0/16".to_string(), "10.100.10.30".to_string())];
-        assert!(route_set_covers("10.10.0.0/16", "10.100.10.30", &existing)); // exact
-        assert!(route_set_covers("10.10.5.0/24", "10.100.10.30", &existing)); // wider covers narrower
-        assert!(!route_set_covers("10.10.5.0/24", "10.100.10.99", &existing)); // wrong gateway
+        assert!(route_set_covers_cidr("10.10.0.0/16", &existing)); // exact
+        assert!(route_set_covers_cidr("10.10.5.0/24", &existing)); // wider covers narrower
         let narrow = vec![("10.10.5.0/24".to_string(), "10.100.10.30".to_string())];
-        assert!(!route_set_covers("10.10.0.0/16", "10.100.10.30", &narrow)); // narrower can't cover wider
+        assert!(!route_set_covers_cidr("10.10.0.0/16", &narrow)); // narrower can't cover wider
+        assert!(!route_set_covers_cidr("192.168.0.0/16", &existing)); // unrelated
     }
 
     #[test]
     fn route_set_covers_v6_and_never_across_families() {
         let existing = vec![("fc00:abcd::/32".to_string(), "10.100.10.30".to_string())];
-        assert!(route_set_covers("fc00:abcd::/32", "10.100.10.30", &existing)); // exact
-        assert!(route_set_covers("fc00:abcd:1::/48", "10.100.10.30", &existing)); // wider covers narrower
-        assert!(!route_set_covers("fc00:abcd:1::/48", "10.100.10.99", &existing)); // wrong gateway
+        assert!(route_set_covers_cidr("fc00:abcd::/32", &existing)); // exact
+        assert!(route_set_covers_cidr("fc00:abcd:1::/48", &existing)); // wider covers narrower
         // Cross-family never covers — a v4 route can't cover a v6 target or vice versa.
         let v4 = vec![("10.0.0.0/8".to_string(), "10.100.10.30".to_string())];
-        assert!(!route_set_covers("fc00:abcd::/48", "10.100.10.30", &v4));
+        assert!(!route_set_covers_cidr("fc00:abcd::/48", &v4));
         let v6 = vec![("fc00::/16".to_string(), "10.100.10.30".to_string())];
-        assert!(!route_set_covers("10.10.0.0/16", "10.100.10.30", &v6));
+        assert!(!route_set_covers_cidr("10.10.0.0/16", &v6));
+    }
+
+    /// The klasSponsor 2026-07-30 bug, as a test.
+    ///
+    /// Coverage keyed on (cidr, gateway) meant that editing a gossip-created
+    /// route's gateway made auto-apply see the subnet as unrouted, so it planted
+    /// a SECOND route for the same CIDR with the old gateway. That pair then won
+    /// in the kernel (applied later) and made the route un-editable, because
+    /// `routes_can_overlap` refuses two same-CIDR routes on one node — the exact
+    /// state auto-apply had just created.
+    #[test]
+    fn an_edited_gateway_does_not_look_like_a_missing_route() {
+        let gossip_gateway = "10.100.10.30";
+        let operator_gateway = "10.100.10.77";
+        // What the config holds after the operator changed the gateway.
+        let existing = vec![("10.20.0.0/16".to_string(), operator_gateway.to_string())];
+        // Gossip still wants the subnet via the original peer IP. The subnet is
+        // already routed, so nothing may be added — whatever the gateway.
+        assert!(
+            route_set_covers_cidr("10.20.0.0/16", &existing),
+            "an edited gateway must not read as an absent route — that is what              planted the duplicate that broke editing"
+        );
+        assert_ne!(gossip_gateway, operator_gateway, "guard: the test needs them to differ");
+    }
+
+    /// A subnet nobody has a route for is still added — the coverage change must
+    /// not stop auto-apply doing its actual job.
+    #[test]
+    fn a_genuinely_missing_subnet_is_still_uncovered() {
+        let existing = vec![("10.20.0.0/16".to_string(), "10.100.10.30".to_string())];
+        assert!(!route_set_covers_cidr("10.99.0.0/16", &existing));
+        assert!(!route_set_covers_cidr("10.99.0.0/16", &[]));
+    }
+
+    #[test]
+    fn operator_edited_defaults_false_so_existing_configs_stay_auto_managed() {
+        // A route deserialized from a config written before the field existed.
+        let r: SubnetRoute = serde_json::from_str(
+            r#"{"id":"auto-wolfnet-peer-10_20_0_0_16-1","subnet_cidr":"10.20.0.0/16","gateway":"10.100.10.30"}"#
+        ).expect("must deserialize without the new field");
+        assert!(!r.operator_edited);
+        assert!(r.enabled, "enabled still defaults true");
     }
 
     #[test]

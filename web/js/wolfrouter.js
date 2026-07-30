@@ -8352,13 +8352,22 @@
             return;
         }
 
+        // Preserve the existing enabled state on edit. Hardcoding true meant
+        // opening a disabled route and pressing Save silently re-enabled it —
+        // including the ones WolfRouter auto-disables (locally-owned subnet,
+        // duplicate of an operator route), which would then start failing to
+        // apply every tick again. New routes still default to enabled.
+        const existing = routeId
+            ? (wrState.subnet_routes || []).find(r => r.id === routeId)
+            : null;
+
         const route = {
             id: routeId || '',
             subnet_cidr: cidr,
             gateway: gateway,
             description: desc,
             node_id: node || null,
-            enabled: true,
+            enabled: existing ? existing.enabled !== false : true,
         };
 
         try {

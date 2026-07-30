@@ -5065,6 +5065,10 @@ pub async fn create_subnet_route(req: HttpRequest, state: S, body: web::Json<Sub
     if route.id.is_empty() {
         route.id = gen_id("subnet-route");
     }
+    // Hand-created, so hand-owned: auto-apply never tracks gossip's gateway for
+    // it. (Belt and braces — the refresh also only considers `auto-wolfnet-`
+    // ids, and `gen_id` never produces one.)
+    route.operator_edited = true;
 
     // Basic validation
     if route.subnet_cidr.trim().is_empty() {
@@ -5196,7 +5200,12 @@ pub async fn update_subnet_route(
 ) -> HttpResponse {
     auth_or_return!(req, state);
     let id = path.into_inner();
-    let updated = body.into_inner();
+    let mut updated = body.into_inner();
+    // The operator has saved this route by hand — auto-apply must stop
+    // tracking gossip's gateway for it, or it will overwrite this edit on the
+    // next tick (klasSponsor 2026-07-30). Set server-side rather than trusting
+    // the client to send it.
+    updated.operator_edited = true;
 
     if updated.subnet_cidr.trim().is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({
