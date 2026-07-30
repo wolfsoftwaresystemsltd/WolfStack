@@ -55,7 +55,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Bound the wall-clock so a stuck network call doesn't hold a
     # runner for the full 6-hour GitHub default.
-    timeout-minutes: 30
+    #
+    # 60, not 30: a cross build of this crate takes 21-27 minutes
+    # depending on arch and runner luck (measured across v25.6.2-v25.6.4:
+    # aarch64 21 and 26, armv7 25 and 27, x86_64 25 and 26). A 30-minute
+    # cap left nothing in hand, and on v25.6.5 aarch64 crossed it — the
+    # job was cancelled mid-compile, `release` needs every matrix leg, so
+    # it was skipped and no release was cut at all despite two of three
+    # binaries building fine. 60 keeps the runaway guard the comment above
+    # asks for while leaving room for a slow runner.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
