@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.8.5: Unraid agent starts even when the array is stalled, installer self-recovers** _(2026-07-31 — [`bdd576ff`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bdd576ff00628a3376c055619418464e6969cf92))_
+- **v25.8.5: the Unraid agent starts even when the array is stalled, and the installer fixes itself** _(2026-07-31 — [`df52513e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/df52513edaa25ed7b630969f39b1e855b71b8382))_
 - **v25.8.4: Unraid installer stops declaring failure on nodes that are coming up fine** _(2026-07-31 — [`a7ff2652`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a7ff2652dc4c0c43e71c7eb71c7a5468af9a6d88))_
 - **v25.8.4: the Unraid installer stops declaring failure on nodes that are coming up fine** _(2026-07-31 — [`ba63a904`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ba63a904993e0f532bed726463cde26199a6cf19))_
 - **v25.8.3: expired session goes to the login page instead of a half-drawn dashboard** _(2026-07-31 — [`06817582`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/068175824b5d63fbedc62efa68767579656835f6))_
