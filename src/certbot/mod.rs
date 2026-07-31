@@ -17,13 +17,15 @@
 //! Renewal is handled by a daily tokio task (`certbot renew --quiet`)
 //! with a `--deploy-hook` that reloads WolfProxy on success.
 
+pub mod replication;
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CONFIG_PATH: &str = "/etc/wolfstack/certbot.json";
 const DEFAULT_WEBROOT: &str = "/var/lib/wolfstack/acme-webroot";
-const LE_LIVE_DIR: &str = "/etc/letsencrypt/live";
+pub(crate) const LE_LIVE_DIR: &str = "/etc/letsencrypt/live";
 
 /// Persisted certbot configuration. Separate file rather than shoved
 /// into an existing one — other modules don't need to know about ACME
@@ -524,7 +526,7 @@ fn probe_cert_via_target(
 /// to `openssl x509` rather than pulling in a rustls-pemfile/x509-parser
 /// dep tree — certbot already requires openssl on the host, so there's
 /// nothing to gain from adding a crate.
-fn probe_cert(pem: &Path) -> (Vec<String>, String, i64) {
+pub(crate) fn probe_cert(pem: &Path) -> (Vec<String>, String, i64) {
     let mut domains = Vec::new();
     let mut expires = String::new();
     let mut days: i64 = 0;
@@ -820,7 +822,7 @@ pub fn delete(name: &str) -> Result<String, String> {
 /// to nginx, and honours an explicit `reload_cmd` override. No-op on
 /// systems running neither — the admin presumably runs the webserver
 /// out-of-band and will reload it themselves.
-fn reload_proxy(cfg: &CertbotConfig) -> Result<(), String> {
+pub(crate) fn reload_proxy(cfg: &CertbotConfig) -> Result<(), String> {
     if !cfg.reload_cmd.is_empty() {
         let status = Command::new("sh").arg("-c").arg(&cfg.reload_cmd).status();
         return match status {

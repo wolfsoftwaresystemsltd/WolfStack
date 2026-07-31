@@ -447,6 +447,32 @@ fn get_session_token(req: &HttpRequest) -> Option<String> {
         .map(|c| c.value().to_string())
 }
 
+/// Cluster-secret-ONLY gate for peer-to-peer endpoints an operator never
+/// calls directly. Unlike `require_auth` there is no session or API-key
+/// fallback — these endpoints move key material between nodes, so the
+/// only acceptable caller is another node holding the cluster secret.
+///
+/// Delegates to `auth::validate_inter_node_secret` rather than comparing
+/// against `state.cluster_secret` inline, for the reason documented on
+/// `require_auth`: the inline form misses the on-disk secret and has
+/// already caused drift between endpoints once.
+pub fn require_cluster_secret(
+    req: &HttpRequest, state: &web::Data<AppState>,
+) -> Result<(), HttpResponse> {
+    let provided = req.headers()
+        .get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !provided.is_empty()
+        && crate::auth::validate_inter_node_secret(provided, &state.cluster_secret)
+    {
+        return Ok(());
+    }
+    Err(HttpResponse::Unauthorized().json(serde_json::json!({
+        "error": "X-WolfStack-Secret missing or invalid"
+    })))
+}
+
 /// Check if request is authenticated; returns username or error response
 pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
     // Accept internal requests from other WolfStack nodes if they provide the cluster secret.
@@ -8911,13 +8937,42 @@ pub async fn reverse_proxy_config_save(
 // ─── Certbot / SSL certificates ─────────────────────────────────────────
 
 /// GET /api/certs — list every Let's Encrypt cert on disk, with expiry.
-pub async fn certs_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
-    HttpResponse::Ok().json(serde_json::json!({
+/// Cert list decorated with replication state, shared by `/api/certs`
+/// and the local row of `/api/certs/cluster` so the two can't drift.
+///
+/// `replicated` = this node pushes it to peers. `replica_of` = it
+/// ARRIVED from that peer, which is what tells the UI to suppress Renew
+/// (a replica has no certbot renewal config, so renewing it is
+/// meaningless — the owner does that).
+fn certs_list_payload() -> serde_json::Value {
+    let cfg = crate::certbot::replication::ReplicationConfig::load();
+    let replicas = crate::certbot::replication::ReplicaStore::load();
+    let certs: Vec<serde_json::Value> = crate::certbot::list_certs()
+        .into_iter()
+        .map(|c| {
+            let replica_of = replicas.get(&c.name).map(|r| r.source_hostname.clone());
+            let mut v = serde_json::to_value(&c).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(o) = v.as_object_mut() {
+                o.insert("replicated".into(), serde_json::json!(cfg.is_replicated(&c.name)));
+                o.insert("replica_of".into(), serde_json::json!(replica_of));
+            }
+            v
+        })
+        .collect();
+    serde_json::json!({
         "installed": crate::certbot::is_installed(),
         "config": crate::certbot::CertbotConfig::load(),
-        "certs": crate::certbot::list_certs(),
-    }))
+        "certs": certs,
+    })
+}
+
+pub async fn certs_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    match web::block(certs_list_payload).await {
+        Ok(v) => HttpResponse::Ok().json(v),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": e.to_string() })),
+    }
 }
 
 /// GET /api/certs/cluster — aggregated cert list across every node in
@@ -8938,15 +8993,17 @@ pub async fn certs_cluster_list(req: HttpRequest, state: web::Data<AppState>) ->
 
     // Local first — direct call, no HTTP round-trip.
     if let Some(self_node) = nodes.iter().find(|n| n.is_self).cloned() {
-        rows.push(serde_json::json!({
-            "node_id": self_node.id,
-            "hostname": self_node.hostname,
-            "cluster_name": self_node.cluster_name,
-            "is_self": true,
-            "installed": crate::certbot::is_installed(),
-            "config": crate::certbot::CertbotConfig::load(),
-            "certs": crate::certbot::list_certs(),
-        }));
+        // Same payload builder as /api/certs, so the local row carries
+        // the replication fields exactly like the peer rows do.
+        let mut row = web::block(certs_list_payload).await
+            .unwrap_or_else(|_| serde_json::json!({ "certs": [] }));
+        if let Some(o) = row.as_object_mut() {
+            o.insert("node_id".into(), serde_json::json!(self_node.id));
+            o.insert("hostname".into(), serde_json::json!(self_node.hostname));
+            o.insert("cluster_name".into(), serde_json::json!(self_node.cluster_name));
+            o.insert("is_self".into(), serde_json::json!(true));
+        }
+        rows.push(row);
     }
 
     // Then every other online wolfstack node in parallel.
@@ -9008,6 +9065,324 @@ pub async fn certs_cluster_list(req: HttpRequest, state: web::Data<AppState>) ->
     HttpResponse::Ok().json(serde_json::json!({ "nodes": rows }))
 }
 
+// ───────────────── certificate replication ─────────────────
+//
+// Opt-in push of a cert (including its private key) from the node that
+// issues and renews it to the cluster peers that need to SERVE it. See
+// `certbot::replication` for why replicas are inert and how renewal
+// re-replication is detected.
+
+/// GET /api/certs/replication — this node's replicate list plus the
+/// replicas it currently holds from other nodes, so one screen can show
+/// both directions.
+pub async fn certs_replication_get(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (cfg, store) = web::block(|| {
+        (
+            crate::certbot::replication::ReplicationConfig::load(),
+            crate::certbot::replication::ReplicaStore::load(),
+        )
+    })
+    .await
+    .unwrap_or_default();
+    HttpResponse::Ok().json(serde_json::json!({
+        "certs": cfg.certs,
+        "replicas": store.replicas,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct CertReplicationSaveRequest {
+    /// Full desired list of cert names to replicate from this node.
+    /// Replace-semantics: what you send is what you get.
+    pub certs: Vec<String>,
+}
+
+/// POST /api/certs/replication — set which certs this node replicates.
+/// Kicks an immediate reconcile so enabling (or disabling) takes effect
+/// without waiting for the periodic pass.
+pub async fn certs_replication_save(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<CertReplicationSaveRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut certs = body.into_inner().certs;
+    certs.sort();
+    certs.dedup();
+
+    // Validate before saving: a name that can't be replicated should be
+    // rejected at the point the operator sets it, not silently skipped
+    // by the reconcile loop later.
+    for name in &certs {
+        if !crate::certbot::replication::is_safe_cert_name(name) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("invalid certificate name '{}'", name)
+            }));
+        }
+    }
+
+    let cfg = crate::certbot::replication::ReplicationConfig { certs: certs.clone() };
+    if let Err(e) = web::block(move || cfg.save()).await
+        .unwrap_or_else(|e| Err(e.to_string()))
+    {
+        return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+
+    let cluster = state.cluster.clone();
+    let secret = state.cluster_secret.clone();
+    tokio::spawn(async move { reconcile_cert_replication(cluster, secret).await; });
+
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true, "certs": certs }))
+}
+
+/// GET /api/certs/replication/state — peer-to-peer. Reports the digests
+/// of replicas held here (so the owner can diff without shipping keys)
+/// and the lineages this node owns (so the owner can report a conflict
+/// instead of retrying a push that will always be refused).
+pub async fn certs_replication_state(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_cluster_secret(&req, &state) { return resp; }
+    let st = web::block(crate::certbot::replication::local_state)
+        .await
+        .unwrap_or_default();
+    HttpResponse::Ok().json(st)
+}
+
+/// POST /api/certs/replication/push — peer-to-peer receiver. Writes an
+/// incoming lineage and reloads the proxy if anything actually changed.
+pub async fn certs_replication_push(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<crate::certbot::replication::CertBundle>,
+) -> HttpResponse {
+    if let Err(resp) = require_cluster_secret(&req, &state) { return resp; }
+    let bundle = body.into_inner();
+    let name = bundle.name.clone();
+    let applied = web::block(move || {
+        let r = crate::certbot::replication::apply_bundle(&bundle);
+        // Reload inside the blocking context so the systemctl call isn't
+        // sitting on the async runtime.
+        if matches!(&r, Ok(a) if a.changed) {
+            crate::certbot::replication::reload_after_replica();
+        }
+        r
+    })
+    .await;
+    match applied {
+        Ok(Ok(a)) => {
+            if a.changed {
+                tracing::info!("cert replication: applied '{}' from peer", name);
+            }
+            HttpResponse::Ok().json(serde_json::json!({ "ok": true, "changed": a.changed }))
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("cert replication: refused '{}': {}", name, e);
+            HttpResponse::BadRequest().json(serde_json::json!({ "error": e }))
+        }
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CertReplicationPruneRequest {
+    /// Node id of the owner doing the pruning.
+    pub source_node_id: String,
+    /// Names that owner still replicates. Anything else it previously
+    /// sent us is removed.
+    pub keep: Vec<String>,
+}
+
+/// POST /api/certs/replication/prune — peer-to-peer. Drops replicas the
+/// sending owner no longer replicates.
+pub async fn certs_replication_prune(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<CertReplicationPruneRequest>,
+) -> HttpResponse {
+    if let Err(resp) = require_cluster_secret(&req, &state) { return resp; }
+    let b = body.into_inner();
+    let removed = web::block(move || {
+        let r = crate::certbot::replication::prune(&b.source_node_id, &b.keep);
+        if matches!(&r, Ok(v) if !v.is_empty()) {
+            crate::certbot::replication::reload_after_replica();
+        }
+        r
+    })
+    .await;
+    match removed {
+        Ok(Ok(names)) => {
+            if !names.is_empty() {
+                tracing::info!("cert replication: pruned {:?}", names);
+            }
+            HttpResponse::Ok().json(serde_json::json!({ "ok": true, "removed": names }))
+        }
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// Owner-side reconcile. For every cert this node replicates, ask each
+/// online peer what it holds and push only what differs — then prune
+/// what the operator has turned off.
+///
+/// Diff-then-push (rather than blind push) is what makes this safe to
+/// run on a timer: a renewal changes the digest and is picked up on the
+/// next pass no matter WHICH mechanism performed the renewal, while a
+/// steady state costs one small GET per peer and moves no key material.
+///
+/// Runs unconditionally rather than short-circuiting on an empty list:
+/// the prune leg is what cleans up after the last cert is switched off,
+/// and it must still reach a peer that was offline at the time. The cost
+/// is one GET + one small POST per peer per pass, against a cluster that
+/// already polls every node every 10 seconds.
+pub async fn reconcile_cert_replication(
+    cluster: std::sync::Arc<crate::agent::ClusterState>,
+    cluster_secret: String,
+) {
+    let nodes = cluster.get_all_nodes();
+    let self_id = crate::agent::self_node_id();
+    let self_hostname = nodes
+        .iter()
+        .find(|n| n.is_self)
+        .map(|n| n.hostname.clone())
+        .unwrap_or_default();
+
+    let sid = self_id.clone();
+    let shost = self_hostname.clone();
+    let (keep, bundles) = match tokio::task::spawn_blocking(move || {
+        let cfg = crate::certbot::replication::ReplicationConfig::load();
+        let replicas = crate::certbot::replication::ReplicaStore::load();
+        let mut bundles = Vec::new();
+        // `keep` is the CONFIGURED list, deliberately not "the ones we
+        // managed to read". Deriving it from successful reads would mean
+        // a transient IO error dropped the name from `keep` and the prune
+        // leg then DELETED a perfectly good replica off every peer. Prune
+        // must express operator intent ("stop replicating this"), never a
+        // momentary local failure — so cert deletion removes the name
+        // from this config instead (see certs_delete).
+        let keep = cfg.certs.clone();
+        for name in &cfg.certs {
+            // A replica must never be re-replicated onward — the owner
+            // is the node holding the certbot renewal config. Without
+            // this, B could push A's cert back to C and muddy who owns
+            // what.
+            if replicas.is_replica(name) {
+                tracing::warn!(
+                    "cert replication: '{}' is itself a replica on this node — not re-replicating",
+                    name
+                );
+                continue;
+            }
+            match crate::certbot::replication::read_bundle(name, &sid, &shost) {
+                Ok(b) => bundles.push(b),
+                Err(e) => tracing::warn!("cert replication: skipping '{}': {}", name, e),
+            }
+        }
+        (keep, bundles)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => { tracing::warn!("cert replication: gather failed: {}", e); return; }
+    };
+
+    let client = &*API_HTTP_CLIENT;
+    for node in nodes {
+        if node.is_self || node.id == self_id { continue; }
+        if !node.online { continue; }
+        if node.node_type != "wolfstack" { continue; }
+
+        // What does this peer already have?
+        let mut peer_state: Option<crate::certbot::replication::ReplicaState> = None;
+        for url in build_node_urls(&node.address, node.port, "/api/certs/replication/state") {
+            match client.get(&url)
+                .header("X-WolfStack-Secret", &cluster_secret)
+                .timeout(std::time::Duration::from_secs(10))
+                .send().await
+            {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(v) = r.json::<crate::certbot::replication::ReplicaState>().await {
+                        peer_state = Some(v);
+                        break;
+                    }
+                }
+                Ok(r) => { let _ = r.bytes().await; }
+                Err(_) => {}
+            }
+        }
+        let Some(peer_state) = peer_state else {
+            tracing::warn!(
+                "cert replication: could not read state from {} ({}) — skipping this pass",
+                node.hostname, node.address
+            );
+            continue;
+        };
+
+        for bundle in &bundles {
+            // The peer issues this cert itself — pushing would be
+            // refused every pass, so say so once and move on.
+            if peer_state.owned.iter().any(|n| n == &bundle.name) {
+                tracing::warn!(
+                    "cert replication: {} owns '{}' itself — not replacing it with a replica",
+                    node.hostname, bundle.name
+                );
+                continue;
+            }
+            if peer_state.replicas.get(&bundle.name) == Some(&bundle.digest) {
+                continue; // already current
+            }
+            let body = match serde_json::to_string(bundle) {
+                Ok(b) => b,
+                Err(e) => { tracing::warn!("cert replication: serialise '{}': {}", bundle.name, e); continue; }
+            };
+            let mut pushed = false;
+            let mut last_err = String::new();
+            for url in build_node_urls(&node.address, node.port, "/api/certs/replication/push") {
+                match client.post(&url)
+                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .header("Content-Type", "application/json")
+                    .timeout(std::time::Duration::from_secs(20))
+                    .body(body.clone())
+                    .send().await
+                {
+                    Ok(r) if r.status().is_success() => { let _ = r.bytes().await; pushed = true; break; }
+                    Ok(r) => {
+                        let status = r.status();
+                        let detail = r.text().await.unwrap_or_default();
+                        last_err = format!("HTTP {} — {}", status, detail);
+                    }
+                    Err(e) => last_err = format!("{} ({})", e, url),
+                }
+            }
+            if pushed {
+                tracing::info!("cert replication: '{}' → {}", bundle.name, node.hostname);
+            } else {
+                tracing::warn!(
+                    "cert replication: '{}' → {} FAILED: {}",
+                    bundle.name, node.hostname, last_err
+                );
+            }
+        }
+
+        // Prune whatever this owner no longer replicates.
+        let prune_body = serde_json::json!({ "source_node_id": self_id, "keep": keep }).to_string();
+        for url in build_node_urls(&node.address, node.port, "/api/certs/replication/prune") {
+            match client.post(&url)
+                .header("X-WolfStack-Secret", &cluster_secret)
+                .header("Content-Type", "application/json")
+                .timeout(std::time::Duration::from_secs(10))
+                .body(prune_body.clone())
+                .send().await
+            {
+                Ok(r) if r.status().is_success() => { let _ = r.bytes().await; break; }
+                Ok(r) => { let _ = r.bytes().await; }
+                Err(_) => {}
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CertIssueRequest {
     pub domains: Vec<String>,
@@ -9060,6 +9435,14 @@ pub async fn certs_issue(
         };
         web::block(move || crate::certbot::issue(&domains, &email, &challenge, creds.as_deref(), dry_run)).await
     };
+    // A newly issued cert may already be on the replicate list (re-issue
+    // of an existing name), so propagate immediately rather than making
+    // the operator wait for the periodic pass.
+    if matches!(&result, Ok(Ok(_))) {
+        let cluster = state.cluster.clone();
+        let secret = state.cluster_secret.clone();
+        tokio::spawn(async move { reconcile_cert_replication(cluster, secret).await; });
+    }
     match result {
         Ok(Ok(out)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "log": out })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
@@ -9073,7 +9456,16 @@ pub async fn certs_renew(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
-    match web::block(move || crate::certbot::renew(&name)).await {
+    let result = web::block(move || crate::certbot::renew(&name)).await;
+    // Renewal rotates the private key, so every replica is now stale.
+    // The periodic reconcile would catch it within the interval anyway —
+    // this just makes the UI-driven path feel immediate.
+    if matches!(&result, Ok(Ok(_))) {
+        let cluster = state.cluster.clone();
+        let secret = state.cluster_secret.clone();
+        tokio::spawn(async move { reconcile_cert_replication(cluster, secret).await; });
+    }
+    match result {
         Ok(Ok(out)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "log": out })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
@@ -9086,7 +9478,37 @@ pub async fn certs_delete(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
-    match web::block(move || crate::certbot::delete(&name)).await {
+    let deleted_name = name.clone();
+    let result = web::block(move || crate::certbot::delete(&name)).await;
+
+    // Drop it from the replicate list too. The reconcile's prune leg is
+    // driven by that list (not by what's readable on disk), so leaving a
+    // deleted cert in it would strand the replica on every peer forever
+    // — and log a read failure every pass.
+    if matches!(&result, Ok(Ok(_))) {
+        let n = deleted_name.clone();
+        let dropped = web::block(move || {
+            let mut cfg = crate::certbot::replication::ReplicationConfig::load();
+            if !cfg.is_replicated(&n) { return Ok::<bool, String>(false); }
+            cfg.certs.retain(|c| c != &n);
+            cfg.save().map(|_| true)
+        }).await;
+        match dropped {
+            Ok(Ok(true)) => {
+                tracing::info!(
+                    "cert replication: '{}' deleted — removed from replicate list, peers will prune",
+                    deleted_name
+                );
+                let cluster = state.cluster.clone();
+                let secret = state.cluster_secret.clone();
+                tokio::spawn(async move { reconcile_cert_replication(cluster, secret).await; });
+            }
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => tracing::warn!("cert replication: config update after delete failed: {}", e),
+            Err(e) => tracing::warn!("cert replication: config update after delete failed: {}", e),
+        }
+    }
+    match result {
         Ok(Ok(out)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "log": out })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
@@ -42774,6 +43196,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/certs", web::get().to(certs_list))
         .route("/api/certs", web::post().to(certs_issue))
         .route("/api/certs/cluster", web::get().to(certs_cluster_list))
+        // Registered before the `/api/certs/{name}` routes so "replication"
+        // is never captured as a cert name.
+        .route("/api/certs/replication", web::get().to(certs_replication_get))
+        .route("/api/certs/replication", web::post().to(certs_replication_save))
+        .route("/api/certs/replication/state", web::get().to(certs_replication_state))
+        .route("/api/certs/replication/push", web::post().to(certs_replication_push))
+        .route("/api/certs/replication/prune", web::post().to(certs_replication_prune))
         .route("/api/certs/config", web::post().to(certs_config_save))
         .route("/api/certs/{name}/renew", web::post().to(certs_renew))
         .route("/api/certs/{name}", web::delete().to(certs_delete))
