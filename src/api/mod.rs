@@ -447,6 +447,47 @@ fn get_session_token(req: &HttpRequest) -> Option<String> {
         .map(|c| c.value().to_string())
 }
 
+/// Response header stamped on every 401 that means "this operator's browser
+/// session is gone" — no cookie, or a cookie past the 8-hour session lifetime,
+/// or a session cleared by a restart or force-logout.
+///
+/// The dashboard's global fetch interceptor keys on this header rather than on
+/// a bare 401, because plenty of endpoints answer 401 for reasons that must NOT
+/// throw the operator out to the login page: a mistyped admin password in the
+/// Add Node dialog, a peer presenting the wrong cluster secret, an invalid API
+/// key. Only the session paths below set it.
+pub const SESSION_EXPIRED_HEADER: &str = "X-WolfStack-Session";
+
+/// Build the 401 for a dead operator session. Single definition so the header
+/// can't be forgotten on a path that adds one later.
+pub fn session_expired_response(error: &str) -> HttpResponse {
+    HttpResponse::Unauthorized()
+        .insert_header((SESSION_EXPIRED_HEADER, "expired"))
+        .json(serde_json::json!({ "error": error }))
+}
+
+#[cfg(test)]
+mod session_expired_response_tests {
+    use super::{session_expired_response, SESSION_EXPIRED_HEADER};
+
+    #[actix_web::test]
+    async fn stamps_the_header_the_dashboard_bounces_on() {
+        let resp = session_expired_response("Session expired");
+        assert_eq!(resp.status().as_u16(), 401);
+        assert_eq!(
+            resp.headers()
+                .get(SESSION_EXPIRED_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("expired"),
+            "web/js/app.js bounces to the login page on this header alone — a 401 \
+             without it is deliberately treated as an ordinary endpoint error so a \
+             wrong password in the Add Node dialog can't log the operator out",
+        );
+        let body = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        assert_eq!(body, r#"{"error":"Session expired"}"#);
+    }
+}
+
 /// Cluster-secret-ONLY gate for peer-to-peer endpoints an operator never
 /// calls directly. Unlike `require_auth` there is no session or API-key
 /// fallback — these endpoints move key material between nodes, so the
@@ -542,14 +583,10 @@ pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
         Some(token) => {
             match state.sessions.validate(&token) {
                 Some(username) => Ok(username),
-                None => Err(HttpResponse::Unauthorized().json(serde_json::json!({
-                    "error": "Session expired"
-                }))),
+                None => Err(session_expired_response("Session expired")),
             }
         }
-        None => Err(HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "Not authenticated"
-        }))),
+        None => Err(session_expired_response("Not authenticated")),
     }
 }
 
@@ -35626,9 +35663,9 @@ async fn set_github_sponsor(
         .and_then(|c| state.sessions.validate(c.value()))
     {
         Some(u) => u,
-        None => return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "operator session required to change GitHub Sponsor state"
-        })),
+        None => return session_expired_response(
+            "operator session required to change GitHub Sponsor state",
+        ),
     };
     let body = body.into_inner();
     if let Err(e) = state.patreon.set_github_sponsor(body.enabled, body.login) {

@@ -198,10 +198,6 @@ struct Cli {
     rotate_cluster_secret: bool,
 }
 
-/// Serve the login page for unauthenticated requests to /
-/// Version string used as cache-buster for static assets.
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// Agent-mode root handler — returned for any path the SPA would normally
 /// serve. The node is functional (cluster API still bound) but this user
 /// hit the wrong door: they should manage it from the cluster's master
@@ -240,38 +236,94 @@ ol li { margin-bottom: 8px; }
     HttpResponse::Ok().content_type("text/html").body(html)
 }
 
-async fn index_handler(req: HttpRequest, state: web::Data<api::AppState>) -> HttpResponse {
-    // Check if authenticated
+/// Web-UI pages that are only meaningful with a live operator session. Each is
+/// served through `gated_page`, so a logged-out or expired browser gets the
+/// login screen instead of an app shell whose every API call 401s.
+///
+/// `/` and `/index.html` BOTH map to the dashboard because every login path
+/// lands the browser on one or the other: the password form and the OIDC
+/// callback redirect to `/index.html`, the passkey flow to `/`. Only `/` used
+/// to be gated — `/index.html` fell through to the `actix_files` service below
+/// and handed the full dashboard to a logged-out browser, which then painted a
+/// half-rendered page while its API calls came back 401. That is the "session
+/// timed out and I got a broken page instead of the login screen" report.
+///
+/// console.html and vnc.html are here too: both are opened from inside the
+/// authenticated dashboard (`window.open`/hidden iframe, same-origin, so the
+/// cookie always rides along) and neither handles a 401 — on a dead session
+/// they used to render a black terminal or an empty VNC canvas forever.
+///
+/// Anything not listed here is public and served straight off disk by the
+/// fallback service: login.html, /css, /js, /images, manifest.json, sw.js, and
+/// wolfnet-global.html — that last one is a landing page that deliberately
+/// works logged-out, showing its own "not authenticated, log in →" panel when
+/// its node lookup comes back 401.
+const GATED_PAGES: &[(&str, &str)] = &[
+    ("/",             "index.html"),
+    ("/index.html",   "index.html"),
+    ("/console.html", "console.html"),
+    ("/vnc.html",     "vnc.html"),
+];
+
+/// Serve `file` from the web directory to a request carrying a valid session
+/// cookie; serve login.html to everyone else.
+///
+/// The logged-out answer is a 200 carrying login.html's body under the URL that
+/// was requested, NOT a 302 to /login.html. That is deliberate: the service
+/// worker's `cache.addAll(SHELL_ASSETS)` covers `/` and `/index.html`, and
+/// `Cache.put` rejects redirected responses — a redirect here is what broke SW
+/// installs the last time this path 302'd (see the comment in web/sw.js). All
+/// of login.html's own asset URLs are root-relative, so it renders identically
+/// from `/`, `/index.html` or `/console.html`, and submitting the form lands on
+/// `/index.html` as usual.
+async fn gated_page(
+    req: HttpRequest,
+    state: web::Data<api::AppState>,
+    file: &'static str,
+) -> HttpResponse {
     let authenticated = req.cookie("wolfstack_session")
         .and_then(|c| state.sessions.validate(c.value()))
         .is_some();
 
-    let web_dir = find_web_dir();
-    if authenticated {
-        let path = format!("{}/index.html", web_dir);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                // Inject cache-busting version into asset URLs so browsers
-                // fetch fresh JS/CSS after an upgrade without Ctrl+Shift+R.
-                // this has become a bit of a problem on chrome browsers. PC
-                let content = content
-                    .replace("/css/style.css\"", &format!("/css/style.css?v={}\"", APP_VERSION))
-                    .replace("/js/app.js\"", &format!("/js/app.js?v={}\"", APP_VERSION));
-                HttpResponse::Ok()
-                    .content_type("text/html")
-                    .insert_header(("Cache-Control", "no-cache"))
-                    .body(content)
-            }
-            Err(_) => HttpResponse::InternalServerError().body("Web UI not found"),
-        }
-    } else {
-        // we're logged out switch to login
-        let path = format!("{}/login.html", web_dir);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => HttpResponse::Ok().content_type("text/html").body(content),
-            Err(_) => HttpResponse::InternalServerError().body("Login page not found"),
-        }
+    let name = if authenticated { file } else { "login.html" };
+    let path = format!("{}/{}", find_web_dir(), name);
+
+    // index.html is ~600 KB — read it off the worker thread. A synchronous
+    // read here parks an actix worker on disk I/O for every page load.
+    //
+    // No cache-busting rewrite happens here any more: the two `.replace()`
+    // calls this function used to run matched nothing (index.html carries
+    // `?v=…` on both the stylesheet and app.js already, so the literals
+    // `/css/style.css"` and `/js/app.js"` no longer appear in the file). The
+    // busting itself is still done, by index.html's own inline Date.now()
+    // query strings.
+    match web::block(move || std::fs::read_to_string(&path)).await {
+        Ok(Ok(content)) => HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            // This URL renders either the dashboard or the login page depending
+            // purely on a cookie, so no cache may hand one to the other.
+            .insert_header(("Cache-Control", "no-store"))
+            .insert_header(("Vary", "Cookie"))
+            .body(content),
+        _ => HttpResponse::InternalServerError()
+            .content_type("text/plain; charset=utf-8")
+            .body(format!("Web UI not found: {} is missing from the WolfStack web directory.", name)),
     }
+}
+
+/// Register the operator web UI: session-gated HTML pages first, then the
+/// public static tree. Shared by all three non-agent listeners so the gate
+/// cannot drift between the HTTPS, inter-node and plain-HTTP servers.
+fn configure_web_ui(cfg: &mut web::ServiceConfig, web_dir: &str) {
+    for &(route, file) in GATED_PAGES {
+        cfg.route(
+            route,
+            web::get().to(move |req: HttpRequest, state: web::Data<api::AppState>| {
+                gated_page(req, state, file)
+            }),
+        );
+    }
+    cfg.service(actix_files::Files::new("/", web_dir).index_file("login.html"));
 }
 
 #[actix_web::main]
@@ -4457,9 +4509,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                 if agent_mode {
                     app.default_service(web::to(agent_index_handler))
                 } else {
-                    app
-                        .route("/", web::get().to(index_handler))
-                        .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
+                    app.configure(|cfg| configure_web_ui(cfg, &web_dir))
                 }
             })
             // Tighten the lifecycle so peers churning connections (cluster
@@ -4505,9 +4555,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                         if agent_mode {
                             app.default_service(web::to(agent_index_handler))
                         } else {
-                            app
-                                .route("/", web::get().to(index_handler))
-                                .service(actix_files::Files::new("/", &web_dir2).index_file("login.html"))
+                            app.configure(|cfg| configure_web_ui(cfg, &web_dir2))
                         }
                     })
                     .keep_alive(std::time::Duration::from_secs(2))
@@ -4608,9 +4656,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                 if agent_mode {
                     app.default_service(web::to(agent_index_handler))
                 } else {
-                    app
-                        .route("/", web::get().to(index_handler))
-                        .service(actix_files::Files::new("/", &web_dir).index_file("login.html"))
+                    app.configure(|cfg| configure_web_ui(cfg, &web_dir))
                 }
             })
             // See matching block above on the TLS path for why these
