@@ -18943,20 +18943,92 @@ function renderCertList(data) {
             <td style="font-size:12px;">${(c.domains || []).map(escapeHtml).join('<br>')}</td>
             <td><span style="color:${colour};font-weight:600;">${status}</span><br>
                 <span style="font-size:11px;color:var(--text-muted);">${escapeHtml(c.expires)}</span></td>
-            <td style="text-align:right;">
-                <button class="btn btn-sm" onclick="certRenew('${escapeHtml(c.name)}')">Renew</button>
-                <button class="btn btn-sm btn-danger" onclick="certDelete('${escapeHtml(c.name)}')">Delete</button>
-            </td>
+            <td>${certReplicationCell(c, '')}</td>
+            <td style="text-align:right;">${certRowActions(c, '')}</td>
         </tr>`;
     }).join('');
     body.innerHTML = `
         <div style="margin-bottom:10px; font-size:12px; color:var(--text-muted);">
             Auto-renewal runs daily via certbot renew. Certs are reloaded into WolfProxy automatically.
+            Replicated certs are re-pushed automatically whenever they renew.
         </div>
         <table class="data-table" style="width:100%;">
-            <thead><tr><th>Name</th><th>Domains</th><th>Expiry</th><th style="text-align:right;">Actions</th></tr></thead>
+            <thead><tr><th>Name</th><th>Domains</th><th>Expiry</th><th>Replicate</th><th style="text-align:right;">Actions</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
+}
+
+// ─── certificate replication (opt-in, per cert) ───
+//
+// A cert is OWNED by the node that issues and renews it; peers hold
+// read-only replicas. These two helpers render that distinction in both
+// the local and cluster cert tables.
+
+/// The "Replicate" cell. Replicas are read-only — the owner renews and
+/// re-pushes them — so they get a label rather than a toggle.
+function certReplicationCell(c, nodeId) {
+    if (c.replica_of) {
+        return `<span style="font-size:11px;color:var(--text-muted);"
+                      title="Received from ${escapeAttr(c.replica_of)}, which renews it and re-pushes automatically">
+            ↳ replica of <strong>${escapeHtml(c.replica_of)}</strong></span>`;
+    }
+    const arg = nodeId ? `, '${escapeAttr(nodeId)}'` : '';
+    return `<label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+        <input type="checkbox" ${c.replicated ? 'checked' : ''}
+               onchange="certToggleReplication('${escapeAttr(c.name)}', this.checked${arg})">
+        <span style="color:${c.replicated ? 'var(--text-primary)' : 'var(--text-muted)'};">
+            ${c.replicated ? 'To cluster' : 'Off'}</span></label>`;
+}
+
+/// Row actions. Renew is meaningless on a replica — it has no certbot
+/// renewal config — and deleting one just invites the owner to push it
+/// back on the next reconcile, so both are replaced by a pointer to the
+/// node that actually controls it.
+function certRowActions(c, nodeId) {
+    const arg = nodeId ? `, '${escapeAttr(nodeId)}'` : '';
+    if (c.replica_of) {
+        return `<span style="font-size:11px;color:var(--text-muted);">
+            managed on ${escapeHtml(c.replica_of)}</span>`;
+    }
+    return `<button class="btn btn-sm" onclick="certRenew('${escapeAttr(c.name)}'${arg})">Renew</button>
+            <button class="btn btn-sm btn-danger" onclick="certDelete('${escapeAttr(c.name)}'${arg})">Delete</button>`;
+}
+
+/// Turn replication on/off for one cert on the node that owns it.
+///
+/// Re-reads the current list before writing rather than trusting the
+/// rendered state: the API takes the full list (replace-semantics), so
+/// posting a stale client-side copy would silently drop a toggle made
+/// in another tab or on another screen.
+async function certToggleReplication(name, enabled, nodeId) {
+    // node_proxy re-prepends /api/, so the proxied path omits it.
+    const base = nodeId
+        ? `/api/nodes/${encodeURIComponent(nodeId)}/proxy/certs/replication`
+        : '/api/certs/replication';
+    try {
+        const cur = await fetch(base);
+        if (!cur.ok) throw new Error('could not read current list (HTTP ' + cur.status + ')');
+        const data = await cur.json();
+        const have = data.certs || [];
+        const certs = enabled
+            ? (have.includes(name) ? have : have.concat([name]))
+            : have.filter(n => n !== name);
+        const resp = await fetch(base, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ certs }),
+        });
+        const out = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(out.error || 'HTTP ' + resp.status);
+        showToast(enabled
+            ? `${name} will be replicated to cluster peers, private key included`
+            : `${name} is no longer replicated — peer copies are being removed`, 'success');
+    } catch (e) {
+        showToast('Replication change failed: ' + e.message, 'error');
+    }
+    // Reload either way so the checkbox reflects server truth rather
+    // than an optimistic click that may not have landed.
+    loadCertManager();
 }
 
 // Cluster-scope view: flat table of every cert on every node, plus a
@@ -18990,20 +19062,18 @@ function renderCertClusterList(data) {
             const selfBadge = n.is_self
                 ? '<span style="color:var(--text-muted);font-size:10px;">(this)</span>'
                 : '';
-            // Pass node_id so certRenew/certDelete can route via the
-            // proxy. For "this" node, node_id is empty — the action
-            // hits the local endpoint directly (no proxy round-trip).
-            const targetArg = n.is_self ? '' : `, '${escapeAttr(n.node_id)}'`;
+            // Pass node_id so the row's actions and replication toggle
+            // route via the proxy. For "this" node it's empty — those
+            // calls hit the local endpoint directly, no proxy round-trip.
+            const repNode = n.is_self ? '' : (n.node_id || '');
             rows += `<tr>
                 <td><strong>${escapeHtml(n.hostname || '')}</strong> ${selfBadge}</td>
                 <td><code>${escapeHtml(c.name)}</code></td>
                 <td style="font-size:12px;">${(c.domains || []).map(escapeHtml).join('<br>')}</td>
                 <td><span style="color:${colour};font-weight:600;">${status}</span><br>
                     <span style="font-size:11px;color:var(--text-muted);">${escapeHtml(c.expires || '')}</span></td>
-                <td style="text-align:right;">
-                    <button class="btn btn-sm" onclick="certRenew('${escapeAttr(c.name)}'${targetArg})">Renew</button>
-                    <button class="btn btn-sm btn-danger" onclick="certDelete('${escapeAttr(c.name)}'${targetArg})">Delete</button>
-                </td>
+                <td>${certReplicationCell(c, repNode)}</td>
+                <td style="text-align:right;">${certRowActions(c, repNode)}</td>
             </tr>`;
         });
     });
@@ -19038,7 +19108,7 @@ function renderCertClusterList(data) {
             Auto-renewal runs daily on each node via <code>certbot renew</code>.
         </div>
         <table class="data-table" style="width:100%;">
-            <thead><tr><th>Node</th><th>Name</th><th>Domains</th><th>Expiry</th><th style="text-align:right;">Actions</th></tr></thead>
+            <thead><tr><th>Node</th><th>Name</th><th>Domains</th><th>Expiry</th><th>Replicate</th><th style="text-align:right;">Actions</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
 }
@@ -19079,13 +19149,19 @@ function certIssueDialog() {
                 <label>Challenge type
                     <select id="cert-challenge">
                         <option value="webroot" selected>Webroot (zero-downtime, recommended)</option>
-                        <option value="dns-cloudflare">DNS-01 — Cloudflare</option>
-                        <option value="dns-route53">DNS-01 — AWS Route 53</option>
-                        <option value="dns-digitalocean">DNS-01 — DigitalOcean</option>
-                        <option value="dns-gandi">DNS-01 — Gandi</option>
+                        <option value="dns-provider">DNS-01 — saved DNS provider (supports wildcards)</option>
+                        <option value="dns-manual">DNS-01 — manual credentials file</option>
                     </select></label>
+                <label id="cert-dns-provider-label" style="display:none;">DNS provider
+                    <select id="cert-issue-dns-provider" style="width:100%;"><option value="">Loading…</option></select>
+                    <span style="display:block;font-weight:400;font-size:11px;color:var(--text-muted);margin-top:4px;">
+                        Credentials stay on the server and never reach the browser. Add providers under Settings → DNS Providers.</span></label>
+                <label id="cert-dns-plugin-label" style="display:none;">Certbot DNS plugin
+                    <select id="cert-issue-dns-plugin" style="width:100%;"><option value="">Loading…</option></select></label>
                 <label id="cert-dns-creds-label" style="display:none;">DNS credentials file path
-                    <input id="cert-dns-creds" style="width:100%;font-family:var(--font-mono);" placeholder="/etc/wolfstack/dns-credentials.ini"></label>
+                    <input id="cert-dns-creds" style="width:100%;font-family:var(--font-mono);" placeholder="/etc/wolfstack/dns-credentials.ini">
+                    <span style="display:block;font-weight:400;font-size:11px;color:var(--text-muted);margin-top:4px;">
+                        Must already exist on the target node, mode 0600.</span></label>
                 <label style="display:flex;align-items:center;gap:6px;">
                     <input type="checkbox" id="cert-dry-run"> Dry run (test without actually requesting)
                 </label>
@@ -19097,19 +19173,96 @@ function certIssueDialog() {
         </div>`;
     document.body.appendChild(overlay);
     const sel = document.getElementById('cert-challenge');
-    const lbl = document.getElementById('cert-dns-creds-label');
-    const sync = () => { lbl.style.display = sel.value.startsWith('dns-') ? '' : 'none'; };
+    const provLbl = document.getElementById('cert-dns-provider-label');
+    const plugLbl = document.getElementById('cert-dns-plugin-label');
+    const credsLbl = document.getElementById('cert-dns-creds-label');
+    const sync = () => {
+        const mode = sel.value;
+        provLbl.style.display = mode === 'dns-provider' ? '' : 'none';
+        plugLbl.style.display = mode === 'dns-manual' ? '' : 'none';
+        credsLbl.style.display = mode === 'dns-manual' ? '' : 'none';
+    };
     sel.addEventListener('change', sync);
     sync();
+    certIssueLoadDnsOptions();
+}
+
+// Populate the issue modal's saved-provider and manual-plugin dropdowns
+// from GET /api/dns-providers (which returns both the redacted provider
+// list and the certbot plugin whitelist).
+//
+// Deliberately separate from loadDnsProviders(): that one only runs on
+// the Settings → DNS Providers screen, so relying on it left this modal
+// with no provider list unless the operator had visited that page first.
+//
+// The provider store is replicated to every cluster peer, so an id
+// listed here also resolves on whichever node the target-node picker
+// selects — that replication exists precisely because issuing from a
+// different node used to fail with "dns provider 'id' not found".
+async function certIssueLoadDnsOptions() {
+    const provSel = document.getElementById('cert-issue-dns-provider');
+    const plugSel = document.getElementById('cert-issue-dns-plugin');
+    if (!provSel || !plugSel) return;
+    try {
+        const resp = await fetch('/api/dns-providers');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        const providers = data.providers || [];
+        const plugins = data.known_plugins || [];
+        // Keep the shared caches warm so Settings → DNS Providers and the
+        // other cert form agree with what's shown here.
+        dnsProvidersCache = providers;
+        dnsKnownPlugins = plugins;
+        provSel.innerHTML = providers.length
+            ? ['<option value="">— pick a provider —</option>'].concat(providers.map(function (p) {
+                return '<option value="' + escapeAttr(p.id) + '">' +
+                    escapeHtml(p.name) + ' (' + escapeHtml(p.plugin) + ')</option>';
+            })).join('')
+            : '<option value="">— none configured — add one under Settings → DNS Providers —</option>';
+        plugSel.innerHTML = ['<option value="">— pick a plugin —</option>'].concat(plugins.map(function (p) {
+            return '<option value="' + escapeAttr(p) + '">' + escapeHtml(p) + '</option>';
+        })).join('');
+    } catch (e) {
+        provSel.innerHTML = '<option value="">— failed to load providers: ' + escapeHtml(e.message) + ' —</option>';
+        plugSel.innerHTML = '<option value="">— failed to load plugins —</option>';
+    }
 }
 
 async function certIssueSubmit() {
     const domains = (document.getElementById('cert-domains')?.value || '').split(/\s+/).filter(Boolean);
     if (domains.length === 0) { showToast('Enter at least one domain', 'error'); return; }
     const email = (document.getElementById('cert-email')?.value || '').trim();
-    const challenge = (document.getElementById('cert-challenge')?.value || 'webroot');
-    const dnsCreds = (document.getElementById('cert-dns-creds')?.value || '').trim();
+    const mode = (document.getElementById('cert-challenge')?.value || 'webroot');
     const dryRun = document.getElementById('cert-dry-run')?.checked || false;
+
+    // Build the challenge-specific half of the payload BEFORE tearing the
+    // modal down, so a validation failure leaves the operator's typed
+    // domains and email intact instead of discarding them.
+    const payload = { domains, email, dry_run: dryRun };
+    if (mode === 'dns-provider') {
+        const providerId = (document.getElementById('cert-issue-dns-provider')?.value || '').trim();
+        if (!providerId) {
+            showToast('Pick a DNS provider, or add one under Settings → DNS Providers.', 'error');
+            return;
+        }
+        // dns_provider_id takes priority over `challenge` server-side and
+        // pulls the credentials from the replicated store, so no secret
+        // and no filesystem path ever goes over the wire.
+        payload.dns_provider_id = providerId;
+    } else if (mode === 'dns-manual') {
+        const plugin = (document.getElementById('cert-issue-dns-plugin')?.value || '').trim();
+        if (!plugin) { showToast('Pick a certbot DNS plugin', 'error'); return; }
+        const dnsCreds = (document.getElementById('cert-dns-creds')?.value || '').trim();
+        if (!dnsCreds) {
+            showToast('Enter the credentials file path, or use a saved DNS provider instead', 'error');
+            return;
+        }
+        payload.challenge = 'dns-' + plugin;
+        payload.dns_credentials_path = dnsCreds;
+    } else {
+        payload.challenge = 'webroot';
+    }
+
     // Cluster-scope picker wins; otherwise the configurator's selected node.
     const targetNode = certNodeId((document.getElementById('cert-target-node')?.value || '').trim());
     document.getElementById('cert-issue-modal')?.remove();
@@ -19123,7 +19276,7 @@ async function certIssueSubmit() {
         const resp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ domains, email, challenge, dns_credentials_path: dnsCreds, dry_run: dryRun }),
+            body: JSON.stringify(payload),
         });
         const data = await resp.json();
         if (!resp.ok) {

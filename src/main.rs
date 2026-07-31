@@ -2096,13 +2096,41 @@ async fn main() -> std::io::Result<()> {
         // certbot isn't installed — both checked inside renew_due.
         // First run after 60s so we don't race the service into a
         // fresh LE hit at every restart.
+        let cluster_renew = app_state.cluster.clone();
+        let secret_renew = app_state.cluster_secret.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(60)).await;
             loop {
                 tokio::task::spawn_blocking(|| {
                     let _ = certbot::renew_due();
                 }).await.ok();
+                // certbot may have just rotated a key. Push the new
+                // material now instead of leaving every replica stale
+                // until the next periodic reconcile.
+                api::reconcile_cert_replication(cluster_renew.clone(), secret_renew.clone()).await;
                 tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+            }
+        });
+
+        // Periodic certificate-replication reconcile.
+        //
+        // This is the leg that catches renewals WolfStack did NOT perform
+        // itself — the distro's own certbot systemd timer, or an operator
+        // running certbot by hand — neither of which tells us anything.
+        // Comparing digests rather than listening for an event is what
+        // makes those paths safe, and it self-heals a rebuilt peer too.
+        //
+        // 15 minutes is far tighter than strictly needed (certs renew 30
+        // days before expiry, so staleness is never dangerous) and a
+        // steady-state pass is one small GET per peer that moves no key
+        // material. First run at 90s so cluster state is populated.
+        let cluster_certrep = app_state.cluster.clone();
+        let secret_certrep = app_state.cluster_secret.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(90)).await;
+            loop {
+                api::reconcile_cert_replication(cluster_certrep.clone(), secret_certrep.clone()).await;
+                tokio::time::sleep(Duration::from_secs(15 * 60)).await;
             }
         });
 
