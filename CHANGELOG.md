@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.8.4: Unraid installer stops declaring failure on nodes that are coming up fine** _(2026-07-31 — [`a7ff2652`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a7ff2652dc4c0c43e71c7eb71c7a5468af9a6d88))_
+- **v25.8.4: the Unraid installer stops declaring failure on nodes that are coming up fine** _(2026-07-31 — [`ba63a904`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ba63a904993e0f532bed726463cde26199a6cf19))_
 - **v25.8.3: expired session goes to the login page instead of a half-drawn dashboard** _(2026-07-31 — [`06817582`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/068175824b5d63fbedc62efa68767579656835f6))_
 - **v25.8.3: an expired session goes to the login page instead of a half-drawn dashboard** _(2026-07-31 — [`e9e97c4c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e9e97c4c89b050c10d35485d06ff5d50e9988418))_
 - **v25.8.2: a damaged storage.json now repairs itself, and a node whose config directory is not mounted yet waits instead of adopting the wrong identity** _(2026-07-31 — [`2725e76d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2725e76df04991a22626011c4f4bed771095ab2a))_
