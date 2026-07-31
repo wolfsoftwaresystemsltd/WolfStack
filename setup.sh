@@ -423,17 +423,51 @@ port_open() {
     [ $? -ne 7 ]
 }
 
-while true; do
-    # Refresh the RAM copy when the array holds a newer binary (installer
-    # download or self-update wrote it). Temp+mv keeps the running inode
-    # intact; on a wedged share the timeout skips the refresh and we run
-    # the existing RAM copy instead of hanging the loop.
-    if timeout 60 cp -f "$WS_APPDATA/wolfstack" "$RAM_BIN.next" 2>/dev/null; then
-        chmod +x "$RAM_BIN.next" 2>/dev/null
-        mv -f "$RAM_BIN.next" "$RAM_BIN" 2>/dev/null
-    else
-        # Don't leave a stale ~84MB partial copy sitting in tmpfs.
+# Refresh the RAM copy from the array (installer download or self-update
+# wrote a newer binary). Temp+mv keeps the running inode intact.
+#
+# This runs as a background child that WE time out, not `timeout cp`. A cp
+# wedged in D-state on a stalled shfs mount ignores every signal, so
+# `timeout` cannot clear it and the supervisor blocked here forever — as
+# the very first thing in its loop, before it had written a single log
+# line. klas 2026-07-31: two S-state processes holding the lock, zero log
+# entries for 36 hours, no agent, and an installer that could only report
+# "FAILED" with yesterday's log. Abandoning the child leaks a D-state cp
+# until the share recovers, but the node RUNS, which is the whole point:
+# the array must never get a vote on whether this agent starts.
+stage_binary() {
+    ( cp -f "$WS_APPDATA/wolfstack" "$RAM_BIN.next" 2>/dev/null \
+        && chmod +x "$RAM_BIN.next" 2>/dev/null \
+        && mv -f "$RAM_BIN.next" "$RAM_BIN" 2>/dev/null ) &
+    _cp=$!
+    _w=0
+    while [ "$_w" -lt 60 ] && kill -0 "$_cp" 2>/dev/null; do
+        sleep 1
+        _w=$((_w + 1))
+    done
+    if kill -0 "$_cp" 2>/dev/null; then
+        kill -9 "$_cp" 2>/dev/null
+        echo "$(date) staging copy from $WS_APPDATA stuck after ${_w}s — abandoning it (stalled array?) and using the existing RAM binary" >> "$LOG"
         rm -f "$RAM_BIN.next" 2>/dev/null
+        return 1
+    fi
+    wait "$_cp" 2>/dev/null
+    return 0
+}
+
+while true; do
+    # Heartbeat BEFORE touching the array. Without this the loop's first act
+    # was an unlogged FUSE read, so "stalled on the array" and "never even
+    # started" were indistinguishable — both showed up as an empty log.
+    echo "$(date) supervisor: staging agent binary from $WS_APPDATA" >> "$LOG"
+    if [ -x "$RAM_BIN" ]; then
+        # We already have something runnable. Staging is an optimisation, so
+        # a failure here is not fatal — run what we have.
+        stage_binary || true
+    elif ! stage_binary; then
+        echo "$(date) no runnable agent binary at $RAM_BIN and the array copy did not complete — retrying in 30s" >> "$LOG"
+        sleep 30
+        continue
     fi
     if [ ! -x "$RAM_BIN" ]; then
         echo "$(date) no runnable agent binary at $RAM_BIN yet — retrying in 30s" >> "$LOG"
@@ -613,6 +647,11 @@ SUPERVISOR_EOF
         exit 1
     fi
     nohup /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &
+    # Remember which supervisor is OURS. The diagnostic below reports lock
+    # holders, and we have just created one — without this it accused the
+    # supervisor it had started moments earlier of being a wedged incumbent
+    # and told the operator to reboot (klas, 2026-07-31).
+    WS_SUP_PID=$!
 
     # The whole point of an update is a RUNNING agent — verify it, don't
     # assume it (PineappleGod, Unraid, 2026-07-03).
@@ -647,6 +686,46 @@ SUPERVISOR_EOF
             echo "  ⚠ Agent not running yet — waiting up to ${WS_WAIT_MAX}s for the supervisor..."
         fi
     done
+    # Self-recovery before we even think about reporting failure. The old
+    # behaviour was to print a diagnostic and hand the operator a list of
+    # kill commands to run by hand — but everything in that list is
+    # something this script can do itself, and on the one node where it
+    # fired the advice was wrong anyway (it told klas to reboot a pair of
+    # plainly killable S-state processes, 2026-07-31). Kill every lock
+    # holder that ISN'T in D state, clear stray agents, start a fresh
+    # supervisor, and wait again. Only a D-state holder is beyond us.
+    if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
+        WS_RECOVER_KILL=""
+        WS_STUCK_D=false
+        if command -v fuser >/dev/null 2>&1; then
+            for _p in $(timeout 5 fuser /var/run/wolfstack-agent-supervisor.lock 2>/dev/null | tr -s ' ' || true); do
+                _st=$(grep '^State:' "/proc/$_p/status" 2>/dev/null | tr -s ' \t' ' ' || true)
+                case "$_st" in
+                    (*" D"*) WS_STUCK_D=true ;;
+                    (*)      WS_RECOVER_KILL="$WS_RECOVER_KILL $_p" ;;
+                esac
+            done
+        fi
+        if [ "$WS_STUCK_D" = false ] && [ -n "$WS_RECOVER_KILL" ]; then
+            echo "  ⚠ Agent still not up — clearing the stalled supervisor and retrying..."
+            # shellcheck disable=SC2086
+            kill -9 $WS_RECOVER_KILL 2>/dev/null || true
+            pkill -9 -f "wolfstack --agent" 2>/dev/null || true
+            sleep 2
+            nohup /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &
+            WS_SUP_PID=$!
+            WS_WAIT=0
+            while [ "$WS_WAIT" -lt 60 ]; do
+                pgrep -f "wolfstack --agent" >/dev/null 2>&1 && break
+                sleep 1
+                WS_WAIT=$((WS_WAIT + 1))
+            done
+            if pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
+                echo "  ✓ Recovered — agent came up after clearing the stalled supervisor."
+            fi
+        fi
+    fi
+
     if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
         echo ""
         echo "  ✗ WolfStack agent FAILED to start."
@@ -679,15 +758,56 @@ SUPERVISOR_EOF
             echo "    ruled out. Reboot once if the steps below don't help."
         fi
         if [ -n "$WS_HOLDERS" ]; then
+            # Report the state we actually read instead of asserting one. This
+            # block used to say "it is wedged (classically D-state)" and "a
+            # wedged process cannot be killed — reboot this server" no matter
+            # what, and then print `State: S (sleeping)` between the two
+            # claims. S is interruptible: SIGKILL clears it and no reboot is
+            # needed. Sending an operator to an unnecessary reboot on the
+            # strength of a state we had already disproved is worse than
+            # saying nothing (klas, 2026-07-31).
+            WS_STUCK_D=false
+            WS_OTHER_HOLDER=false
             echo ""
-            echo "    A supervisor still holds $WS_LOCK but started no agent —"
-            echo "    it is wedged (classically D-state on a stalled /mnt/user share)."
+            echo "    Processes holding $WS_LOCK:"
             for _p in $WS_HOLDERS; do
                 _st=$(grep '^State:' "/proc/$_p/status" 2>/dev/null | tr -s ' \t' ' ' || true)
-                echo "      PID $_p ${_st:-state unknown}"
+                _cmd=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null || true)
+                _mine=""
+                if [ "$_p" = "${WS_SUP_PID:-}" ]; then
+                    _mine="  <- the supervisor this installer just started"
+                else
+                    WS_OTHER_HOLDER=true
+                fi
+                case "$_st" in (*" D"*) WS_STUCK_D=true ;; esac
+                echo "      PID $_p ${_st:-state unknown}  ${_cmd:-(no cmdline — likely a zombie)}$_mine"
             done
-            echo "    A wedged process cannot be killed. Reboot this server —"
-            echo "    a RAM-fresh boot starts clean and re-runs the agent."
+            if [ "$WS_STUCK_D" = true ]; then
+                echo ""
+                echo "    One of those is in D (uninterruptible) state — classically a"
+                echo "    stalled /mnt/user share. A D-state process cannot be killed,"
+                echo "    by any signal. Reboot this server; a RAM-fresh boot starts clean."
+            elif [ "$WS_OTHER_HOLDER" = true ]; then
+                echo ""
+                echo "    None of those is in D state, so they CAN be killed — no reboot"
+                echo "    needed. Clear them and start a fresh supervisor:"
+                echo "      kill -9 $WS_HOLDERS"
+                echo "      pkill -9 -f 'wolfstack --agent'"
+                echo "      /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &"
+            else
+                # Only our own supervisor holds it: it is alive and working,
+                # it just has not got an agent up inside our wait. Its own
+                # hang-recovery watchdog needs up to 5 minutes (5 x 60s port
+                # checks) to kill a non-serving agent and retry, which is
+                # longer than we are willing to block here. Not a failure yet.
+                echo ""
+                echo "    That is our own supervisor and it is alive — it simply has not"
+                echo "    got an agent up yet. Its hang-recovery watchdog can take up to"
+                echo "    5 minutes to retire a non-serving agent and retry, longer than"
+                echo "    this installer waits. Give it 5 minutes, then check:"
+                echo "      pgrep -af 'wolfstack --agent'"
+                echo "      tail -20 /var/log/wolfstack-agent.log"
+            fi
         fi
         if [ -s /var/log/wolfstack-agent.log ]; then
             echo ""
