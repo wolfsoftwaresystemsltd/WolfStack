@@ -270,26 +270,6 @@ REAL_HOME=$(eval echo "~$REAL_USER")
 # on-disk web/ assets, so the single binary is self-sufficient. This must run
 # BEFORE the package-manager check. See docs: "Installing WolfStack Agent on
 # Unraid".
-# Report the inter-node port this node ACTUALLY listens on, not the default.
-#
-# The daemon reserves that port at startup from 8554..=8599 and falls back
-# when the preferred one is taken — 8554 is RTSP for go2rtc/Frigate/MediaMTX,
-# which collides constantly on Unraid — then persists its choice to
-# ports.json. This installer used to print a hardcoded "port 8554" in the Add
-# Node instructions regardless, so an operator whose node had landed on 8555
-# was told to point the master at a port nothing was listening on, and the
-# node showed as unreachable on every protocol (klas, 2026-07-31: agent up and
-# serving on 8553, inter-node on 8555, installer still said 8554).
-#
-# /etc/wolfstack is the config dir on every platform (on Unraid it is a
-# symlink to the appdata copy), so this one reader works for both branches.
-# Falls back to the compiled-in default when ports.json has no entry, which is
-# the correct answer for a node that never had to move.
-ws_inter_node_port() {
-    _p=$(tr -d ' \t\n' < /etc/wolfstack/ports.json 2>/dev/null \
-        | grep -o '"inter_node":[0-9]*' | grep -o '[0-9]*$' | head -1)
-    case "$_p" in ("") echo 8554 ;; (*) echo "$_p" ;; esac
-}
 
 if [ -f /etc/unraid-version ]; then
     UNRAID_VER=$(tr -d '"' < /etc/unraid-version 2>/dev/null | sed -n 's/^version=//p')
@@ -871,15 +851,22 @@ SUPERVISOR_EOF
     echo "  Log:     $WS_APPDATA/wolfstack.log"
     echo "  Startup: $GO_FILE"
     echo ""
-    WS_INTER_PORT=$(ws_inter_node_port)
+    # 8553, the HTTPS management port — NOT the inter-node port.
+    #
+    # api::add_node defaults to `body.port.unwrap_or(8553)` and hands it to
+    # build_node_urls(), which tries `https://host:PORT` FIRST. So 8553 joins
+    # over TLS on the first attempt and never touches the plain-HTTP listener.
+    #
+    # This line said 8554 for years, which is wrong twice over: the handshake
+    # tries https://host:8554 and fails (that listener is plain HTTP), then
+    # falls back to unencrypted — and on any node where 8554 was already taken
+    # (go2rtc/Frigate RTSP, routine on Unraid) the daemon has moved to some
+    # other port in 8554..8599 and there is nothing on 8554 to reach at all.
+    # klas 2026-07-31: agent healthy and serving HTTPS on 8553, inter-node on
+    # 8555, installer still saying 8554, node "unreachable on all protocols".
     echo "  This node runs in AGENT mode — manage it from your master node's UI:"
-    echo "    master UI → + (bottom of the sidebar) → host $WS_IP, port $WS_INTER_PORT"
-    if [ "$WS_INTER_PORT" != 8554 ]; then
-        echo ""
-        echo "    NOTE: this node moved its inter-node listener to $WS_INTER_PORT because"
-        echo "    something else already holds 8554 (usually go2rtc/Frigate RTSP)."
-        echo "    Use $WS_INTER_PORT when adding it — 8554 will refuse the connection."
-    fi
+    echo "    master UI → + (bottom of the sidebar) → host $WS_IP, port 8553"
+    echo "    (8553 is the HTTPS port — the join handshake tries TLS first.)"
     if [ -s /etc/wolfstack/join-token ]; then
         echo "    join token: $(tr -d '\n\r' < /etc/wolfstack/join-token 2>/dev/null)"
     else
@@ -1093,7 +1080,9 @@ echo ""
 echo "  This will install / update on this host:"
 echo "    • The wolfstack binary at /usr/local/bin/wolfstack"
 echo "    • A systemd unit (wolfstack.service)"
-echo "    • Listeners bound: :8553 (management UI), :8554 (inter-node), :8550 (status pages)"
+echo "    • Listeners bound: :8553 (management UI / API, HTTPS — use this one to add"
+echo "      the node to a cluster), :8554 (inter-node, self-signed certs only),"
+echo "      :8550 (status pages). 8554 and 8550 move to the next free port if taken."
 echo "    • Build dependencies: git, curl, build tools, openssl headers"
 echo "    • Runtime dependencies: lxc, dnsmasq (binary), bridge-utils, qemu, socat, nfs-client, fuse3, s3fs"
 if [ "$AGENT_MODE" = true ]; then
