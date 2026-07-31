@@ -4,6 +4,87 @@
 
 // WolfStack Dashboard — app.js
 
+// ─── Session-expiry interceptor ──────────────────────────────────────────────
+//
+// Installed at the very top of this file so it wraps window.fetch before any
+// other statement here can call it.
+//
+// Only a handful of the several hundred fetch call sites below check for 401
+// themselves. The rest went straight to `resp.json()` and then indexed into
+// what is actually `{"error":"Session expired"}` — throwing a TypeError partway
+// through a render and leaving a half-drawn dashboard on screen. Combined with
+// /index.html being served to logged-out browsers (fixed server-side in
+// main.rs), that is the "session timed out and I got a broken page instead of
+// the login screen" report.
+//
+// The trigger is the X-WolfStack-Session: expired header, NOT a bare 401.
+// Several endpoints answer 401 for reasons that must not log the operator out —
+// a mistyped admin password in the Add Node dialog, a peer's bad cluster
+// secret, an invalid API key — and only require_auth()'s session paths stamp
+// the header.
+(function () {
+    var nativeFetch = window.fetch.bind(window);
+    var bouncing = false;
+
+    // Cover the dashboard the instant we know the session is dead.
+    //
+    // location.replace() does NOT stop execution — the navigation is queued
+    // while this document keeps running, so every loader that already had a
+    // 401 in flight still throws partway through its render during the round
+    // trip to /login.html. Without this cover that window is exactly the
+    // half-drawn dashboard being reported, just briefer.
+    //
+    // Colours come from the app's own theme variables, so the panel matches
+    // whichever of the 19 themes is active and keeps its contrast in both
+    // light and dark; the hardcoded fallbacks only apply if style.css never
+    // loaded, and pair 19:1 on their own.
+    function coverDashboard() {
+        // No body yet means nothing has painted, so there is nothing to hide.
+        if (!document.body) return;
+        var cover = document.createElement('div');
+        cover.id = 'ws-session-expired-cover';
+        cover.setAttribute('role', 'status');
+        cover.setAttribute('aria-live', 'polite');
+        cover.style.cssText =
+            'position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483646;'
+            + 'display:flex;flex-direction:column;align-items:center;justify-content:center;'
+            + 'gap:12px;padding:24px;text-align:center;'
+            + 'background:var(--bg-primary,#0a0a0a);color:var(--text-primary,#f0f0f0);'
+            + 'font-family:Inter,"Segoe UI",sans-serif;';
+        var title = document.createElement('div');
+        title.style.cssText = 'font-size:15px;font-weight:600;';
+        title.textContent = 'Your session has expired';
+        var detail = document.createElement('div');
+        detail.style.cssText = 'font-size:13px;opacity:0.75;';
+        detail.textContent = 'Returning you to the sign-in page…';
+        cover.appendChild(title);
+        cover.appendChild(detail);
+        document.body.appendChild(cover);
+    }
+
+    // Single definition of "the session is gone, go to the login page", shared
+    // with the explicit 401 checks further down this file so two of them can't
+    // race each other into different navigations.
+    window.wsSessionExpired = function () {
+        if (bouncing) return;
+        bouncing = true;
+        coverDashboard();
+        // replace(), not href: the dead page must not stay in history for the
+        // back button to resurrect after the operator logs in again.
+        window.location.replace('/login.html');
+    };
+
+    window.fetch = function (input, init) {
+        return nativeFetch(input, init).then(function (resp) {
+            if (resp.status === 401
+                && resp.headers.get('X-WolfStack-Session') === 'expired') {
+                window.wsSessionExpired();
+            }
+            return resp;
+        });
+    };
+})();
+
 // ─── User Preferences (synced to server) ───
 
 // Keys that should be persisted server-side per user
@@ -7251,9 +7332,13 @@ function setGauge(id, percent, valId, display) {
 }
 
 // ─── Auth redirect on 401 ───
+// The fetch interceptor at the top of this file has already started the bounce
+// by the time a caller gets here; wsSessionExpired() is idempotent, so calling
+// it again is a no-op. The return value still tells the caller to stop
+// rendering against a response body that carries an error, not data.
 function handleAuthError(resp) {
     if (resp.status === 401) {
-        window.location.href = '/login.html';
+        window.wsSessionExpired();
         return true;
     }
     return false;
@@ -7267,7 +7352,7 @@ async function checkSession() {
     try {
         const resp = await fetch('/api/nodes', { method: 'GET' });
         if (resp.status === 401) {
-            window.location.href = '/login.html';
+            window.wsSessionExpired();
             return;
         }
     } catch (e) {
@@ -7345,7 +7430,7 @@ async function connHeartbeat() {
         markConnectionDown();
         return;
     }
-    if (resp.status === 401) { window.location.href = '/login.html'; return; }
+    if (resp.status === 401) { window.wsSessionExpired(); return; }
     // Server responded → reachable. Clear any pending offline state.
     _connFails = 0;
     showConnRestored();
