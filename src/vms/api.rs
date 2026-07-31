@@ -1982,14 +1982,17 @@ async fn vm_import_external(
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
     // Auth: accept either cluster secret or transfer token
+    // validate_inter_node_secret, not `==`: the latter missed the
+    // on-disk secret (rejecting legitimate peers after a rotation) and
+    // compared in non-constant time.
     let has_secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v == state.cluster_secret.as_str())
+        .map(|v| crate::auth::validate_inter_node_secret(v, &state.cluster_secret))
         .unwrap_or(false);
 
     let has_token = req.headers().get("X-Transfer-Token")
         .and_then(|v| v.to_str().ok())
-        .map(|v| crate::api::validate_transfer_token(v))
+        .map(crate::api::validate_transfer_token)
         .unwrap_or(false);
 
     if !has_secret && !has_token {
