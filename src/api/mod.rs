@@ -9682,15 +9682,15 @@ pub async fn dns_providers_sync(
     body: web::Json<crate::dns_providers::DnsProviderStore>,
 ) -> HttpResponse {
     // Cluster-secret only — operators never call this.
-    let supplied = req.headers()
-        .get("X-WolfStack-Secret")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if supplied.is_empty() || supplied != state.cluster_secret {
-        return HttpResponse::Unauthorized().json(serde_json::json!({
-            "error": "X-WolfStack-Secret missing or invalid"
-        }));
-    }
+    //
+    // Was an inline `!= state.cluster_secret`, which had two problems.
+    // It only compared the IN-MEMORY secret, so a peer authenticating
+    // with the on-disk one was rejected and provider replication silently
+    // stopped — reproducing the very "dns provider 'id' not found" this
+    // endpoint exists to prevent. And `!=` on str is not constant time,
+    // reintroducing the timing leak `validate_cluster_secret` was written
+    // to close. The shared helper handles both.
+    if let Err(resp) = require_cluster_secret(&req, &state) { return resp; }
     let incoming = body.into_inner();
     if let Err(e) = incoming.save() {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
@@ -12455,14 +12455,17 @@ pub async fn lxc_import_external(
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
     // Accept cluster secret (same cluster), transfer token (cross-cluster), or session auth
+    // validate_inter_node_secret, not `==`: the latter missed the
+    // on-disk secret (rejecting legitimate peers after a rotation) and
+    // compared in non-constant time.
     let has_secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v == state.cluster_secret.as_str())
+        .map(|v| crate::auth::validate_inter_node_secret(v, &state.cluster_secret))
         .unwrap_or(false);
 
     let has_token = req.headers().get("X-Transfer-Token")
         .and_then(|v| v.to_str().ok())
-        .map(|v| validate_transfer_token(v))
+        .map(validate_transfer_token)
         .unwrap_or(false);
 
     if !has_secret && !has_token {
@@ -13478,7 +13481,7 @@ pub async fn docker_import(
 
     let has_token = req.headers().get("X-Transfer-Token")
         .and_then(|v| v.to_str().ok())
-        .map(|v| validate_transfer_token(v))
+        .map(validate_transfer_token)
         .unwrap_or(false);
 
     if !has_secret && !has_token {
@@ -29025,10 +29028,12 @@ pub struct K8sRunScriptRequest {
 
 pub async fn k8s_run_script(req: HttpRequest, state: web::Data<AppState>, body: web::Json<K8sRunScriptRequest>) -> HttpResponse {
     // Agent-style auth: cluster secret header
-    let secret = req.headers().get("X-WolfStack-Secret").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if secret != state.cluster_secret {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    // require_auth already accepts a valid X-WolfStack-Secret (via
+    // auth::validate_inter_node_secret, which also covers the on-disk
+    // secret and compares in constant time), so the previous inline
+    // `!= state.cluster_secret` pre-check was redundant AND leaked
+    // timing on the secret. Behaviour is unchanged; the leak is gone.
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
     let script_path = format!("/tmp/wolfstack-k8s-provision-{}.sh",
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
     if let Err(e) = std::fs::write(&script_path, &body.script) {
@@ -29050,10 +29055,12 @@ pub async fn k8s_run_script(req: HttpRequest, state: web::Data<AppState>, body: 
 /// GET /api/kubernetes/kubeconfig — return the local kubeconfig (cluster-secret auth)
 /// Tries k3s, microk8s, kubeadm in order of detection
 pub async fn k8s_kubeconfig(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    let secret = req.headers().get("X-WolfStack-Secret").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if secret != state.cluster_secret {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    // require_auth already accepts a valid X-WolfStack-Secret (via
+    // auth::validate_inter_node_secret, which also covers the on-disk
+    // secret and compares in constant time), so the previous inline
+    // `!= state.cluster_secret` pre-check was redundant AND leaked
+    // timing on the secret. Behaviour is unchanged; the leak is gone.
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
     // Try known kubeconfig paths in order
     let paths = [
         "/etc/rancher/k3s/k3s.yaml",
@@ -29073,10 +29080,12 @@ pub async fn k8s_kubeconfig(req: HttpRequest, state: web::Data<AppState>) -> Htt
 
 /// GET /api/kubernetes/join-token — return the join token/command for this node (cluster-secret auth)
 pub async fn k8s_join_token(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    let secret = req.headers().get("X-WolfStack-Secret").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if secret != state.cluster_secret {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    // require_auth already accepts a valid X-WolfStack-Secret (via
+    // auth::validate_inter_node_secret, which also covers the on-disk
+    // secret and compares in constant time), so the previous inline
+    // `!= state.cluster_secret` pre-check was redundant AND leaked
+    // timing on the secret. Behaviour is unchanged; the leak is gone.
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
     // Try k3s token
     if std::path::Path::new("/var/lib/rancher/k3s/server/node-token").exists() {
         match crate::kubernetes::get_k3s_token("/etc/rancher/k3s/k3s.yaml") {
@@ -29111,10 +29120,12 @@ pub struct K8sUninstallRequest {
 
 pub async fn k8s_uninstall(req: HttpRequest, state: web::Data<AppState>, body: web::Json<K8sUninstallRequest>) -> HttpResponse {
     // Accept either session auth or cluster-secret auth (for proxied calls)
-    let secret = req.headers().get("X-WolfStack-Secret").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if secret != state.cluster_secret {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    // require_auth already accepts a valid X-WolfStack-Secret (via
+    // auth::validate_inter_node_secret, which also covers the on-disk
+    // secret and compares in constant time), so the previous inline
+    // `!= state.cluster_secret` pre-check was redundant AND leaked
+    // timing on the secret. Behaviour is unchanged; the leak is gone.
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
 
     let script = match crate::kubernetes::uninstall_script(&body.cluster_type) {
         Ok(s) => s,
