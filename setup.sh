@@ -270,6 +270,27 @@ REAL_HOME=$(eval echo "~$REAL_USER")
 # on-disk web/ assets, so the single binary is self-sufficient. This must run
 # BEFORE the package-manager check. See docs: "Installing WolfStack Agent on
 # Unraid".
+# Report the inter-node port this node ACTUALLY listens on, not the default.
+#
+# The daemon reserves that port at startup from 8554..=8599 and falls back
+# when the preferred one is taken — 8554 is RTSP for go2rtc/Frigate/MediaMTX,
+# which collides constantly on Unraid — then persists its choice to
+# ports.json. This installer used to print a hardcoded "port 8554" in the Add
+# Node instructions regardless, so an operator whose node had landed on 8555
+# was told to point the master at a port nothing was listening on, and the
+# node showed as unreachable on every protocol (klas, 2026-07-31: agent up and
+# serving on 8553, inter-node on 8555, installer still said 8554).
+#
+# /etc/wolfstack is the config dir on every platform (on Unraid it is a
+# symlink to the appdata copy), so this one reader works for both branches.
+# Falls back to the compiled-in default when ports.json has no entry, which is
+# the correct answer for a node that never had to move.
+ws_inter_node_port() {
+    _p=$(tr -d ' \t\n' < /etc/wolfstack/ports.json 2>/dev/null \
+        | grep -o '"inter_node":[0-9]*' | grep -o '[0-9]*$' | head -1)
+    case "$_p" in ("") echo 8554 ;; (*) echo "$_p" ;; esac
+}
+
 if [ -f /etc/unraid-version ]; then
     UNRAID_VER=$(tr -d '"' < /etc/unraid-version 2>/dev/null | sed -n 's/^version=//p')
     echo "✓ Detected Unraid ${UNRAID_VER:-(unknown version)} — using the static-binary agent install"
@@ -850,8 +871,15 @@ SUPERVISOR_EOF
     echo "  Log:     $WS_APPDATA/wolfstack.log"
     echo "  Startup: $GO_FILE"
     echo ""
+    WS_INTER_PORT=$(ws_inter_node_port)
     echo "  This node runs in AGENT mode — manage it from your master node's UI:"
-    echo "    master UI → + (bottom of the sidebar) → host $WS_IP, port 8554"
+    echo "    master UI → + (bottom of the sidebar) → host $WS_IP, port $WS_INTER_PORT"
+    if [ "$WS_INTER_PORT" != 8554 ]; then
+        echo ""
+        echo "    NOTE: this node moved its inter-node listener to $WS_INTER_PORT because"
+        echo "    something else already holds 8554 (usually go2rtc/Frigate RTSP)."
+        echo "    Use $WS_INTER_PORT when adding it — 8554 will refuse the connection."
+    fi
     if [ -s /etc/wolfstack/join-token ]; then
         echo "    join token: $(tr -d '\n\r' < /etc/wolfstack/join-token 2>/dev/null)"
     else
@@ -959,7 +987,18 @@ for port in 8553 8554 8550; do
             8554) ROLE="inter-node cluster API" ;;
             8550) ROLE="public status pages" ;;
         esac
-        ws_warn "Port $port ($ROLE) is already bound by $HOLDER. WolfStack will fail to bind it until that service is stopped or the port is moved in /etc/wolfstack/config.toml."
+        # 8554 and 8550 auto-fall-back through a scan range and persist the
+        # choice to ports.json; only the API port is fatal when taken. Saying
+        # "WolfStack will fail to bind it" for all three was wrong, and it sent
+        # operators hunting for a conflict that the daemon had already routed
+        # around — while the REAL consequence (the node is now reachable on a
+        # different port than the docs quote) went unmentioned.
+        case "$port" in
+            8553)
+                ws_warn "Port $port ($ROLE) is already bound by $HOLDER. WolfStack cannot start until that service is stopped or the API port is moved in /etc/wolfstack/ports.json." ;;
+            *)
+                ws_warn "Port $port ($ROLE) is already bound by $HOLDER. WolfStack will start anyway on the next free port and record it in /etc/wolfstack/ports.json — use THAT port when adding this node, not $port." ;;
+        esac
     fi
 done
 
