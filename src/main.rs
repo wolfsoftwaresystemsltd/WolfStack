@@ -1154,8 +1154,13 @@ async fn main() -> std::io::Result<()> {
             let cluster_for_label = cluster.clone();
             tokio::spawn(async move {
                 let mut last_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                // Counts 60s iterations so the SMART self-test pass can run
+                // hourly off this same loop, reusing the readings it already
+                // took instead of running a second smartctl sweep.
+                let mut ticks: u64 = 0;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    ticks = ticks.wrapping_add(1);
                     // list_arrays() is fast (just /proc/mdstat) but
                     // doesn't populate per-disk SMART. We need SMART
                     // for the FAILED-disk alert path, so hydrate via
@@ -1172,6 +1177,16 @@ async fn main() -> std::io::Result<()> {
 
                     let mut current = std::collections::HashSet::new();
                     let mut new_alerts: Vec<(String, String, String)> = Vec::new();
+                    // `last_seen = current` at the end of each tick is what
+                    // de-duplicates alerts. The self-test pass only runs on the
+                    // hourly tick, so on the other 59 its keys would vanish
+                    // from the set and the same failure would re-alert every
+                    // hour. Carry them forward on the ticks that don't re-test.
+                    if !ticks.is_multiple_of(60) {
+                        for k in last_seen.iter().filter(|k| k.starts_with("selftest:")) {
+                            current.insert(k.clone());
+                        }
+                    }
                     for arr in &arrays {
                         if arr.state == "degraded" {
                             let key = format!("array_degraded:{}", arr.name);
@@ -1234,14 +1249,41 @@ async fn main() -> std::io::Result<()> {
                         if !crate::array::ensure_smartmontools() {
                             return Vec::new();
                         }
+                        // Standby policy lives in disk_smart_health_watchdog:
+                        // never wake a disk on this 60s cadence, but force one
+                        // guard-free read if it has gone a day without a
+                        // successful one. Before that, a permanently spun-down
+                        // HDD was dropped by filter_map on every poll and was
+                        // therefore never monitored at all (klas, 2026-07-31).
                         crate::array::list_physical_disks().into_iter()
-                            .filter_map(|dev| {
-                                let guard = crate::array::disk_is_rotational(&dev);
-                                crate::array::disk_smart_health(&dev, guard).map(|h| (dev, h))
+                            .map(|dev| {
+                                let check = crate::array::disk_smart_health_watchdog(&dev);
+                                (dev, check)
                             })
-                            .collect::<Vec<(String, crate::array::DiskSmart)>>()
+                            .collect::<Vec<(String, crate::array::SmartCheck)>>()
                     }).await.unwrap_or_default();
-                    for (dev, health) in &phys {
+                    for (dev, check) in &phys {
+                        // A disk we cannot read is NOT a healthy disk. Say so
+                        // once it has been unreadable long enough that the
+                        // silence is a fault rather than a spun-down moment.
+                        if check.smart.is_none()
+                            && check.stale_secs >= crate::array::SMART_UNREADABLE_ALERT_SECS
+                        {
+                            let key = format!("smart_unreadable:{}", dev);
+                            current.insert(key.clone());
+                            if !last_seen.contains(&key) {
+                                new_alerts.push((
+                                    "warning".into(),
+                                    format!("Disk {} health is unreadable", dev),
+                                    format!("{} — no successful SMART read in {} day(s), so this disk is NOT being monitored. Check cabling/enclosure, or inspect manually: smartctl -a {}",
+                                        dev, check.stale_secs / 86_400, dev),
+                                ));
+                            }
+                        }
+                        let health = match check.smart.as_ref() {
+                            Some(h) => h,
+                            None => continue,
+                        };
                         let reasons = health.failing_reasons();
                         if reasons.is_empty() { continue; }
                         let key = format!("smart:{}", dev);
@@ -1253,6 +1295,88 @@ async fn main() -> std::io::Result<()> {
                                 format!("{} — back up and plan replacement: {}",
                                     dev, reasons.join("; ")),
                             ));
+                        }
+                    }
+
+                    // ─── Scheduled SMART short self-tests (hourly) ───
+                    // Runs off the same loop, one pass an hour, reusing the
+                    // readings above. A disk we could read is a disk that is
+                    // already spinning, so testing it costs no extra spin-up;
+                    // sleeping disks are skipped entirely unless the operator
+                    // set allow_wake. First pass is an hour after start, which
+                    // keeps a reboot from kicking off a fleet-wide test storm.
+                    if ticks.is_multiple_of(60) {
+                        let candidates: Vec<(String, Option<crate::array::DiskSmart>)> = phys
+                            .iter()
+                            .map(|(d, c)| (d.clone(), c.smart.clone()))
+                            .collect();
+                        let tested = tokio::task::spawn_blocking(move || {
+                            let cfg = crate::array::ArrayConfig::load().smart_tests;
+                            let mut out: Vec<(String, crate::array::SelfTestStatus)> = Vec::new();
+                            for (dev, smart) in candidates {
+                                let smart = match smart {
+                                    Some(s) => s,
+                                    None => {
+                                        if !cfg.allow_wake { continue; }
+                                        match crate::array::disk_smart_health(&dev, false) {
+                                            Some(s) => s,
+                                            None => continue,
+                                        }
+                                    }
+                                };
+                                let status = match crate::array::self_test_status(&dev) {
+                                    Some(s) => s,
+                                    None => continue,
+                                };
+                                if crate::array::self_test_due(&dev, &smart, &status, &cfg) {
+                                    // A drive that refuses (no self-test support
+                                    // behind its enclosure) is logged, not
+                                    // alerted — it would otherwise raise the same
+                                    // alert every cycle forever. The manual
+                                    // "run now" API surfaces the error directly
+                                    // to whoever asked for it. Silence it for
+                                    // good by adding the device to `exclude`.
+                                    let kind = crate::array::next_self_test_kind(
+                                        &dev, smart.power_on_hours, &cfg);
+                                    if let Err(e) = crate::array::start_self_test(&dev, kind) {
+                                        tracing::warn!("SMART {kind} self-test on {dev} refused: {e}");
+                                    } else {
+                                        tracing::info!("SMART {kind} self-test started on {dev} (stage: {})",
+                                            crate::array::life_stage(smart.power_on_hours));
+                                    }
+                                }
+                                out.push((dev, status));
+                            }
+                            out
+                        }).await.unwrap_or_default();
+
+                        for (dev, status) in &tested {
+                            // Only an explicit failure alerts. An aborted or
+                            // interrupted test reports no verdict at all and
+                            // must never be shown as a failure.
+                            if status.passed != Some(false) { continue; }
+                            let key = format!("selftest:{}", dev);
+                            current.insert(key.clone());
+                            if !last_seen.contains(&key) {
+                                new_alerts.push((
+                                    "critical".into(),
+                                    format!("Disk {} failed its SMART self-test", dev),
+                                    format!("{} — {}. The drive itself reports a fault; back up and plan replacement.",
+                                        dev,
+                                        status.result.clone().unwrap_or_else(|| "self-test reported a failure".into())),
+                                ));
+                            }
+                        }
+                        // Disks we could not evaluate this pass — asleep, or
+                        // unreadable — keep whatever verdict they already had.
+                        // Without this they drop out of the dedup set and the
+                        // same failure re-alerts every time the disk happens
+                        // to be awake on an hourly tick.
+                        for k in last_seen.iter().filter(|k| k.starts_with("selftest:")) {
+                            let dev = &k["selftest:".len()..];
+                            if !tested.iter().any(|(d, _)| d == dev) {
+                                current.insert(k.clone());
+                            }
                         }
                     }
 

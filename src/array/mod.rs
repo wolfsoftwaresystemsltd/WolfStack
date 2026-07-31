@@ -204,6 +204,10 @@ pub struct ArrayConfig {
     /// Alert toggles per array. Default: all on.
     #[serde(default)]
     pub alert_overrides: Vec<AlertOverride>,
+    /// Scheduled SMART short self-tests. `#[serde(default)]` so an existing
+    /// arrays.json without the key loads and picks up the safe defaults.
+    #[serde(default)]
+    pub smart_tests: SmartTestConfig,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1376,6 +1380,415 @@ fn read_disk_smart(device: &str, respect_standby: bool, dev_type: Option<&str>) 
     Some(smart)
 }
 
+// ─── Standby-aware health polling ───
+
+/// A spun-down rotational disk cannot be read without waking it, so the Issues
+/// watcher passes `respect_standby` and `read_disk_smart` returns `None` for
+/// it. Correct per poll, wrong as a policy: on a host that spins disks down
+/// aggressively (Unraid's array default) a drive can sit un-evaluated for its
+/// whole life, accumulate reallocated/pending sectors and die with no alert
+/// ever raised — while the Storage page shows it healthy, because that surface
+/// reads with the guard OFF and wakes the disk (klas, 2026-07-31). So: never
+/// wake a disk on the normal cadence, but guarantee every disk is genuinely
+/// READ at least once a day.
+const SMART_FORCE_AFTER_SECS: u64 = 86_400;
+
+/// After this long with no successful read — including the forced one — the
+/// disk is genuinely unmonitored and the operator has to be told, because on
+/// every surface "no data" is indistinguishable from "healthy".
+pub const SMART_UNREADABLE_ALERT_SECS: u64 = 7 * 86_400;
+
+fn smart_state_path() -> PathBuf {
+    PathBuf::from(crate::paths::get().config_dir.clone()).join("smart-state.json")
+}
+
+/// Last wall-clock second at which each device yielded a usable SMART read.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct SmartReadState {
+    #[serde(default)]
+    last_ok: std::collections::HashMap<String, u64>,
+    /// device -> unix seconds at which we last *started* a self-test. A hard
+    /// wall-clock floor for the scheduler, so a drive that reports no usable
+    /// test timestamp still can't be re-tested on every tick.
+    #[serde(default)]
+    last_test_at: std::collections::HashMap<String, u64>,
+    /// device -> how many scheduled tests we have started. Drives the
+    /// every-Nth escalation to an extended test in the wear-out stage.
+    #[serde(default)]
+    test_count: std::collections::HashMap<String, u64>,
+}
+
+/// Persisted, not process-local: held only in memory, an agent restart would
+/// re-seed every device and a node that restarts more often than weekly could
+/// never reach the 24h forced-read or 7-day unreadable thresholds at all — the
+/// exact node that most needs them.
+fn smart_read_log() -> &'static std::sync::Mutex<SmartReadState> {
+    static LAST_OK: std::sync::OnceLock<std::sync::Mutex<SmartReadState>> =
+        std::sync::OnceLock::new();
+    LAST_OK.get_or_init(|| {
+        let loaded = std::fs::read_to_string(smart_state_path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<SmartReadState>(&s).ok())
+            .unwrap_or_default();
+        std::sync::Mutex::new(loaded)
+    })
+}
+
+/// Flush the read log, at most hourly. The thresholds it feeds are measured in
+/// days, so an hourly write is ample and keeps a healthy node from rewriting
+/// the file on every 60s poll.
+fn persist_read_log(state: &SmartReadState, now: u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_WRITE: AtomicU64 = AtomicU64::new(0);
+    let prev = LAST_WRITE.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) < 3_600 {
+        return;
+    }
+    if LAST_WRITE
+        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return; // another caller is writing this hour's copy
+    }
+    persist_read_log_now(state);
+}
+
+/// Unthrottled flush, for state we cannot afford to lose to the hourly window.
+fn persist_read_log_now(state: &SmartReadState) {
+    let Ok(json) = serde_json::to_string_pretty(state) else { return };
+    let path = smart_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = crate::paths::write_secure(&path.to_string_lossy(), json) {
+        tracing::warn!("could not persist SMART read state: {e}");
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Outcome of one watchdog poll of a device.
+pub struct SmartCheck {
+    /// The reading, when one could be taken on this poll.
+    pub smart: Option<DiskSmart>,
+    /// Seconds since this device last yielded a usable read (measured from
+    /// first sighting until one succeeds). Drives the "unmonitored" alert.
+    pub stale_secs: u64,
+}
+
+/// Poll one disk's health for the Issues watcher without breaking spin-down.
+///
+/// Solid-state devices have no spin state and are always read directly.
+/// Rotational disks are read behind the `-n standby` guard, so a sleeping
+/// drive is left alone — unless it has gone longer than
+/// `SMART_FORCE_AFTER_SECS` without a successful read, in which case exactly
+/// one guard-free read is taken. First sighting seeds the timer rather than
+/// forcing, so a reboot never spins the whole array up at once.
+pub fn disk_smart_health_watchdog(device: &str) -> SmartCheck {
+    let now = now_secs();
+    if !disk_is_rotational(device) {
+        let smart = disk_smart_health(device, false);
+        return finish_check(device, smart, now);
+    }
+    if let Some(smart) = disk_smart_health(device, true) {
+        return finish_check(device, Some(smart), now);
+    }
+    // Asleep or unreadable. Force a read only when this disk is overdue one.
+    let due = {
+        let log = smart_read_log().lock().unwrap_or_else(|e| e.into_inner());
+        log.last_ok
+            .get(device)
+            .map(|&last| now.saturating_sub(last) >= SMART_FORCE_AFTER_SECS)
+            .unwrap_or(false)
+    };
+    if !due {
+        return finish_check(device, None, now);
+    }
+    finish_check(device, disk_smart_health(device, false), now)
+}
+
+/// Record a successful read, or seed the timer on first sighting, and report
+/// how stale this device's health data now is.
+fn finish_check(device: &str, smart: Option<DiskSmart>, now: u64) -> SmartCheck {
+    let mut log = smart_read_log().lock().unwrap_or_else(|e| e.into_inner());
+    let last = if smart.is_some() {
+        log.last_ok.insert(device.to_string(), now);
+        now
+    } else {
+        *log.last_ok.entry(device.to_string()).or_insert(now)
+    };
+    persist_read_log(&log, now);
+    SmartCheck { smart, stale_secs: now.saturating_sub(last) }
+}
+
+// ─── SMART short self-tests ───
+
+/// Operator settings for scheduled SMART short self-tests.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SmartTestConfig {
+    /// Master switch. On by default, which is safe because `allow_wake` is
+    /// off: the scheduler then only tests disks that are already spinning, so
+    /// a spun-down array pays nothing for having this enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Fixed cadence in days. 0 (the default) derives it from drive age.
+    #[serde(default)]
+    pub interval_days: u32,
+    /// Devices never to test — e.g. drives behind enclosures that don't
+    /// implement self-test and would just log a refusal every cycle.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Permit spinning a sleeping disk up in order to test it. Off by
+    /// default: waking a whole array on a timer is precisely what operators
+    /// spin their disks down to avoid.
+    #[serde(default)]
+    pub allow_wake: bool,
+    /// Escalate to the *extended* self-test periodically once a drive reaches
+    /// the wear-out end of the curve. A short test only samples the drive; the
+    /// extended test scans the full surface, which is the deeper diagnostic
+    /// worth paying for exactly when failure probability is climbing again
+    /// (klas, 2026-07-31). Every 4th scheduled test becomes an extended one,
+    /// so on the wear-out cadence that lands roughly monthly.
+    #[serde(default = "default_true")]
+    pub deep_test_in_wear_out: bool,
+}
+
+fn default_true() -> bool { true }
+
+/// One in every N scheduled tests is the extended variant, for drives in the
+/// wear-out stage. Four keeps the deep scan roughly monthly against the 7-day
+/// wear-out cadence, without leaving an ageing drive scanning continuously.
+const DEEP_TEST_EVERY: u64 = 4;
+
+impl Default for SmartTestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_days: 0,
+            exclude: Vec::new(),
+            allow_wake: false,
+            deep_test_in_wear_out: true,
+        }
+    }
+}
+
+/// Test interval in hours, positioned on the drive-failure bathtub curve from
+/// the drive's own power-on hours. Failure rate is elevated during infant
+/// mortality and again during wear-out, and lowest across the flat middle, so
+/// the cadence tightens at both ends instead of being uniform (klas,
+/// 2026-07-31). Boundaries are 1 year (8760 h) and 4 years (35 040 h) of
+/// powered life.
+pub fn self_test_interval_hours(power_on_hours: Option<u64>, cfg: &SmartTestConfig) -> u64 {
+    if cfg.interval_days > 0 {
+        return cfg.interval_days as u64 * 24;
+    }
+    match power_on_hours {
+        Some(h) if h < 8_760 => 7 * 24,   // infant mortality — watch closely
+        Some(h) if h < 35_040 => 30 * 24, // constant-rate middle — relax
+        Some(_) => 7 * 24,                // wear-out — watch closely again
+        None => 14 * 24,                  // age unknown — split the difference
+    }
+}
+
+/// Which segment of the bathtub curve a drive currently sits in. Presentation
+/// only — the scheduler uses `self_test_interval_hours`.
+pub fn life_stage(power_on_hours: Option<u64>) -> &'static str {
+    match power_on_hours {
+        Some(h) if h < 8_760 => "early-life",
+        Some(h) if h < 35_040 => "steady-state",
+        Some(_) => "wear-out",
+        None => "unknown",
+    }
+}
+
+/// Newest self-test outcome for a device.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SelfTestStatus {
+    /// `Some(true)` passed, `Some(false)` failed, `None` when the newest entry
+    /// was aborted/interrupted — genuinely unknown — or no test has ever run.
+    pub passed: Option<bool>,
+    /// smartctl's own wording for the newest entry.
+    pub result: Option<String>,
+    /// Drive power-on hours at which the newest test ran. The drive's own
+    /// clock, so it survives reboots and agent restarts with no persistence.
+    pub last_test_hours: Option<u64>,
+    /// A self-test is running right now — never start a second one.
+    pub in_progress: bool,
+}
+
+/// Read the self-test log. Mirrors `disk_smart_health`'s auto-detect →
+/// `-d sat` fallback, since USB enclosures need the SAT transport here too.
+pub fn self_test_status(device: &str) -> Option<SelfTestStatus> {
+    read_self_test(device, None).or_else(|| read_self_test(device, Some("sat")))
+}
+
+fn read_self_test(device: &str, dev_type: Option<&str>) -> Option<SelfTestStatus> {
+    let mut args: Vec<&str> = vec!["15", "smartctl", "--json=c", "-l", "selftest"];
+    if let Some(t) = dev_type {
+        args.push("-d");
+        args.push(t);
+    }
+    args.push(device);
+    let out = Command::new("timeout").args(&args).output().ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+
+    // NVMe — nvme_self_test_log.table[]. self_test_result.value 0x0 is a clean
+    // pass; 0x5 (fatal/unknown error), 0x6 (unknown failed segment) and 0x7
+    // (failed segments) are real failures; every other code is an abort and
+    // must NOT be reported as failure. The table is written at the raw result
+    // index, so it can be sparse — take the first populated entry, which is
+    // the most recent per the NVMe log layout.
+    // Source: smartmontools nvmeprint.cpp print_self_test_log().
+    if let Some(log) = json.get("nvme_self_test_log") {
+        let in_progress = log
+            .pointer("/current_self_test_operation/value")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            != 0;
+        let newest = log
+            .get("table")
+            .and_then(|t| t.as_array())
+            .and_then(|t| t.iter().find(|e| e.get("self_test_result").is_some()));
+        let (passed, result, hours) = match newest {
+            Some(e) => (
+                match e.pointer("/self_test_result/value").and_then(|v| v.as_u64()) {
+                    Some(0x0) => Some(true),
+                    Some(0x5) | Some(0x6) | Some(0x7) => Some(false),
+                    _ => None,
+                },
+                e.pointer("/self_test_result/string").and_then(|v| v.as_str()).map(String::from),
+                e.get("power_on_hours").and_then(|v| v.as_u64()),
+            ),
+            None => (None, None, None),
+        };
+        return Some(SelfTestStatus { passed, result, last_test_hours: hours, in_progress });
+    }
+
+    // ATA — ata_smart_self_test_log.standard.table[], newest first (it is
+    // built in the same order smartctl prints, where "#1" is the most recent).
+    // `status.passed` is emitted for every completed test and deliberately
+    // OMITTED when the test was aborted or interrupted, so absence means
+    // unknown, never failure. `status.remaining_percent` present = still running.
+    // Source: smartmontools ataprint.cpp ataPrintSmartSelfTestEntry().
+    let newest = json
+        .pointer("/ata_smart_self_test_log/standard/table")
+        .and_then(|t| t.as_array())
+        .and_then(|t| t.iter().find(|e| e.get("status").is_some()));
+    match newest {
+        Some(e) => Some(SelfTestStatus {
+            passed: e.pointer("/status/passed").and_then(|v| v.as_bool()),
+            result: e.pointer("/status/string").and_then(|v| v.as_str()).map(String::from),
+            last_test_hours: e.get("lifetime_hours").and_then(|v| v.as_u64()),
+            in_progress: e.pointer("/status/remaining_percent").is_some(),
+        }),
+        // Log present but empty = "no self-tests have been logged", which is a
+        // valid status (and means one is due), not a read error.
+        None => json
+            .pointer("/ata_smart_self_test_log/standard")
+            .map(|_| SelfTestStatus::default()),
+    }
+}
+
+/// Which self-test to run next on this device: `"long"` when the drive has
+/// reached wear-out and this is its every-Nth scheduled test, `"short"`
+/// otherwise. A short test samples; the extended test scans the whole surface.
+pub fn next_self_test_kind(device: &str, power_on_hours: Option<u64>, cfg: &SmartTestConfig) -> &'static str {
+    if !cfg.deep_test_in_wear_out || life_stage(power_on_hours) != "wear-out" {
+        return "short";
+    }
+    let log = smart_read_log().lock().unwrap_or_else(|e| e.into_inner());
+    let count = log.test_count.get(device).copied().unwrap_or(0);
+    // Escalate on the Nth, N*2th, … so an ageing drive still gets short tests
+    // in between rather than back-to-back full-surface scans.
+    if count % DEEP_TEST_EVERY == DEEP_TEST_EVERY - 1 { "long" } else { "short" }
+}
+
+/// Start a SMART self-test (`kind` = `"short"` or `"long"`). Errors carry
+/// smartctl's own last message so the operator sees why a drive refused
+/// rather than a generic failure.
+pub fn start_self_test(device: &str, kind: &str) -> Result<(), String> {
+    // Only these two are accepted — never interpolate caller input into an
+    // argv slot smartctl will interpret.
+    let kind = match kind {
+        "long" => "long",
+        "short" => "short",
+        other => return Err(format!("unsupported self-test type '{other}'")),
+    };
+    let out = Command::new("timeout")
+        .args(["20", "smartctl", "-t", kind, device])
+        .output()
+        .map_err(|e| format!("could not run smartctl: {e}"))?;
+    if out.status.success() {
+        record_self_test_started(device);
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let text = if stderr.trim().is_empty() {
+        String::from_utf8_lossy(&out.stdout).to_string()
+    } else {
+        stderr
+    };
+    Err(text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .unwrap_or("smartctl refused the self-test")
+        .to_string())
+}
+
+/// Note that a test was started, for the scheduler's wall-clock floor and the
+/// every-Nth extended-test escalation.
+fn record_self_test_started(device: &str) {
+    let now = now_secs();
+    let mut log = smart_read_log().lock().unwrap_or_else(|e| e.into_inner());
+    log.last_test_at.insert(device.to_string(), now);
+    *log.test_count.entry(device.to_string()).or_insert(0) += 1;
+    // Force the flush: losing this would let the scheduler re-test on the very
+    // next tick, which for a drive reporting no test timestamp means hourly.
+    persist_read_log_now(&log);
+}
+
+/// Whether `device` is due a scheduled short self-test.
+///
+/// Two independent brakes, because either signal alone has a hole: the drive's
+/// own power-on-hours clock is authoritative when available, and a wall-clock
+/// floor covers drives that report no usable test timestamp — without it, such
+/// a drive would be re-tested on every scheduler tick.
+pub fn self_test_due(
+    device: &str,
+    smart: &DiskSmart,
+    status: &SelfTestStatus,
+    cfg: &SmartTestConfig,
+) -> bool {
+    if !cfg.enabled || status.in_progress {
+        return false;
+    }
+    if cfg.exclude.iter().any(|d| d == device) {
+        return false;
+    }
+    let interval_h = self_test_interval_hours(smart.power_on_hours, cfg);
+    {
+        let log = smart_read_log().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&started) = log.last_test_at.get(device) {
+            if now_secs().saturating_sub(started) < interval_h * 3_600 {
+                return false;
+            }
+        }
+    }
+    match (smart.power_on_hours, status.last_test_hours) {
+        (Some(current), Some(last)) => current.saturating_sub(last) >= interval_h,
+        // Never tested, or no usable timestamp — establish a baseline. The
+        // wall-clock floor above is what keeps this from firing repeatedly.
+        _ => true,
+    }
+}
+
 fn filesystem_used_bytes_for(device: &str) -> Option<u64> {
     // If the array's underlying device has a mounted filesystem,
     // report its `df` usage. Best-effort — not every array has one
@@ -2184,6 +2597,106 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
         // the SMART standby guard is kept (never wake an unknown disk on a
         // hunch). A real SSD/NVMe reads "0" from sysfs and is handled live.
         assert!(disk_is_rotational("/dev/definitely-not-a-real-disk-zzz"));
+    }
+
+    #[test]
+    fn self_test_cadence_follows_the_bathtub_curve() {
+        let cfg = SmartTestConfig::default();
+        // Infant mortality and wear-out are the high-failure ends of the
+        // curve, so both get the tight cadence; the flat middle relaxes.
+        assert_eq!(self_test_interval_hours(Some(100), &cfg), 7 * 24);
+        assert_eq!(self_test_interval_hours(Some(8_759), &cfg), 7 * 24);
+        assert_eq!(self_test_interval_hours(Some(8_760), &cfg), 30 * 24);
+        assert_eq!(self_test_interval_hours(Some(35_039), &cfg), 30 * 24);
+        assert_eq!(self_test_interval_hours(Some(35_040), &cfg), 7 * 24);
+        // Unknown age sits between the two rather than picking an extreme.
+        assert_eq!(self_test_interval_hours(None, &cfg), 14 * 24);
+        // An explicit interval overrides the curve entirely.
+        let fixed = SmartTestConfig { interval_days: 3, ..Default::default() };
+        assert_eq!(self_test_interval_hours(Some(100), &fixed), 72);
+    }
+
+    #[test]
+    fn life_stage_labels_match_the_cadence_boundaries() {
+        assert_eq!(life_stage(Some(0)), "early-life");
+        assert_eq!(life_stage(Some(8_760)), "steady-state");
+        assert_eq!(life_stage(Some(35_040)), "wear-out");
+        assert_eq!(life_stage(None), "unknown");
+    }
+
+    #[test]
+    fn self_test_is_not_due_when_disabled_excluded_or_already_running() {
+        let smart = DiskSmart { power_on_hours: Some(50_000), ..Default::default() };
+        let never_tested = SelfTestStatus::default();
+        let dev = "/dev/zzz-due-probe";
+
+        let off = SmartTestConfig { enabled: false, ..Default::default() };
+        assert!(!self_test_due(dev, &smart, &never_tested, &off));
+
+        let excluded = SmartTestConfig { exclude: vec![dev.to_string()], ..Default::default() };
+        assert!(!self_test_due(dev, &smart, &never_tested, &excluded));
+
+        // A test already running must never trigger a second one.
+        let running = SelfTestStatus { in_progress: true, ..Default::default() };
+        assert!(!self_test_due(dev, &smart, &running, &SmartTestConfig::default()));
+
+        // Enabled, never tested, nothing running → due, so a fresh disk gets
+        // a baseline rather than waiting a full interval for its first test.
+        assert!(self_test_due(dev, &smart, &never_tested, &SmartTestConfig::default()));
+    }
+
+    #[test]
+    fn self_test_due_respects_the_drive_own_hour_clock() {
+        let cfg = SmartTestConfig::default();
+        let dev = "/dev/zzz-clock-probe";
+        // Steady-state drive (30-day cadence = 720 h) tested 100 powered hours
+        // ago is not due; the same drive 800 hours on is.
+        let smart = DiskSmart { power_on_hours: Some(20_000), ..Default::default() };
+        let recent = SelfTestStatus { last_test_hours: Some(19_900), ..Default::default() };
+        assert!(!self_test_due(dev, &smart, &recent, &cfg));
+        let stale = SelfTestStatus { last_test_hours: Some(19_200), ..Default::default() };
+        assert!(self_test_due(dev, &smart, &stale, &cfg));
+    }
+
+    #[test]
+    fn deep_test_escalates_only_in_wear_out() {
+        let cfg = SmartTestConfig::default();
+        // Young and mid-life drives never escalate, whatever the count.
+        assert_eq!(next_self_test_kind("/dev/zzz-kind-a", Some(1_000), &cfg), "short");
+        assert_eq!(next_self_test_kind("/dev/zzz-kind-a", Some(20_000), &cfg), "short");
+        // A wear-out drive with no history starts on short (count 0).
+        assert_eq!(next_self_test_kind("/dev/zzz-kind-b", Some(40_000), &cfg), "short");
+        // ...and escalates on the Nth.
+        for _ in 0..(DEEP_TEST_EVERY - 1) {
+            record_self_test_started("/dev/zzz-kind-b");
+        }
+        assert_eq!(next_self_test_kind("/dev/zzz-kind-b", Some(40_000), &cfg), "long");
+        // Opting out keeps it on short even at wear-out.
+        let no_deep = SmartTestConfig { deep_test_in_wear_out: false, ..Default::default() };
+        assert_eq!(next_self_test_kind("/dev/zzz-kind-b", Some(40_000), &no_deep), "short");
+    }
+
+    #[test]
+    fn smart_check_seeds_on_first_sighting_then_tracks_staleness() {
+        // Unique device name: the read log is a process-global map shared by
+        // every test in this binary.
+        let dev = "/dev/zzz-staleness-probe";
+        // First sighting of an unreadable (spun-down) disk seeds the timer
+        // instead of counting as already-stale — that's what stops a reboot
+        // from force-waking every disk in the array at once.
+        let c = finish_check(dev, None, 1_000);
+        assert!(c.smart.is_none());
+        assert_eq!(c.stale_secs, 0);
+        // Still unreadable an hour on: staleness runs from the seed.
+        let c = finish_check(dev, None, 4_600);
+        assert_eq!(c.stale_secs, 3_600);
+        // A successful read clears it.
+        let c = finish_check(dev, Some(DiskSmart::default()), 5_000);
+        assert!(c.smart.is_some());
+        assert_eq!(c.stale_secs, 0);
+        // ...and staleness restarts from that read, not from first sighting.
+        let c = finish_check(dev, None, 5_600);
+        assert_eq!(c.stale_secs, 600);
     }
 
     #[test]
