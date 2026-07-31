@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.7.1: peer authentication stops rejecting the on-disk cluster secret, and no longer leaks it through comparison timing** _(2026-07-31 — [`1942c61e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1942c61e71645f991deb6f8534014bb19a501b01))_
 - **v25.7.0: a cert issued on one node can now be served by every node, and the issue dialog can finally pick a saved DNS provider** _(2026-07-31 — [`9abef0a6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9abef0a6217a30183330b42b4a4c7ba6e3a57a85))_
 - **v25.6.9: pin the "don't break existing configs" rule to a real pre-upgrade backups.json** _(2026-07-30 — [`8cdf5311`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8cdf53115b9f4af61ea5988f9859b1ab93086552))_
 - **v25.6.8: fleet backup config reaches every node, backup servers can be removed, and credentials stop being world-readable** _(2026-07-30 — [`99017976`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9901797601b7ff17f526ef45c67b03c6e67927d5))_
