@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.8.2: a damaged storage.json now repairs itself, and a node whose config directory is not mounted yet waits instead of adopting the wrong identity** _(2026-07-31 — [`2725e76d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2725e76df04991a22626011c4f4bed771095ab2a))_
+- **v25.8.1: a corrupt storage.json can no longer be overwritten with an empty one, and a node that silently falls back to the default cluster secret now says so** _(2026-07-31 — [`c02d9fce`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c02d9fce39c5de2a11de9709f9d05e4eb86d969e))_
 - **v25.8.0: spun-down disks are finally health-checked, SMART self-tests run on a drive-age schedule, and a wedged supervisor no longer strands an Unraid node** _(2026-07-31 — [`3d126a04`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3d126a044feb4d2484631597c2a8803989156cf1))_
 - **v25.7.1: peer authentication stops rejecting the on-disk cluster secret, and no longer leaks it through comparison timing** _(2026-07-31 — [`1942c61e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1942c61e71645f991deb6f8534014bb19a501b01))_
 - **v25.7.0: a cert issued on one node can now be served by every node, and the issue dialog can finally pick a saved DNS provider** _(2026-07-31 — [`9abef0a6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9abef0a6217a30183330b42b4a4c7ba6e3a57a85))_
