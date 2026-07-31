@@ -1380,6 +1380,44 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
 
+                    // ─── Node-level config faults ───
+                    // Both present to the operator as "the node is online but
+                    // nothing on it works", and neither was visible anywhere
+                    // in the UI — only as a log line nobody reads.
+                    if crate::auth::using_default_cluster_secret() {
+                        let peers = cluster.get_all_nodes().into_iter()
+                            .filter(|n| !n.is_self).count();
+                        if peers > 0 {
+                            let key = "cluster_secret_default".to_string();
+                            current.insert(key.clone());
+                            if !last_seen.contains(&key) {
+                                new_alerts.push((
+                                    "critical".into(),
+                                    "This node is using the built-in default cluster secret".into(),
+                                    format!("{} peer(s) are configured. Every proxied per-node request is signed with the public default secret and will be rejected with 401 by any peer using its own — this node keeps reporting online while none of its pages load. Copy /etc/wolfstack/custom-cluster-secret from a working node (chmod 600) and restart the agent.", peers),
+                                ));
+                            }
+                        }
+                    }
+                    // load_config() refreshes the unreadable flag; it is a
+                    // small file read, and running it here means the fault is
+                    // reported even on a node nobody has opened Storage on.
+                    let storage_bad = tokio::task::spawn_blocking(|| {
+                        let _ = crate::storage::load_config();
+                        crate::storage::config_is_unreadable()
+                    }).await.unwrap_or(false);
+                    if storage_bad {
+                        let key = "storage_config_unreadable".to_string();
+                        current.insert(key.clone());
+                        if !last_seen.contains(&key) {
+                            new_alerts.push((
+                                "critical".into(),
+                                "Storage configuration could not be read".into(),
+                                "WolfStack is holding an EMPTY storage config in memory and has blocked writes so the on-disk file cannot be overwritten. Mounts will not be applied until it is repaired, and saving from the Storage page is refused on purpose — writing now would destroy the mounts and credentials the file still contains. A copy has been preserved next to it.".into(),
+                            ));
+                        }
+                    }
+
                     if !new_alerts.is_empty() {
                         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
                         // 1. Write to the in-memory alert_log so the

@@ -527,6 +527,12 @@ pub fn harden_existing() {
             // "wolf" cluster, 2026-07-30).
             locs.backup_config.clone(),
             "/etc/wolfstack/backups.json".to_string(),       // default path, if remapped above
+            // storage.json carries SMB `password` and S3 `secret_access_key`
+            // in cleartext (see storage::SmbConfig / S3Config) and was written
+            // with a plain fs::write — so 0644 root:root on every install
+            // predating this entry, exactly the backups.json hole again.
+            locs.storage_config.clone(),
+            "/etc/wolfstack/storage.json".to_string(),       // default path, if remapped above
             "/etc/wolfstack/pbs/targets.json".to_string(),   // additional PBS destinations + their tokens
             "/etc/wolfstack/paths.json".to_string(),         // path remap — if attacker-controlled, can redirect secret writers
             "/etc/ppp/chap-secrets".to_string(),             // PPPoE passwords (WAN)
