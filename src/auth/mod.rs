@@ -45,13 +45,45 @@ fn custom_secret_path() -> String { crate::paths::get().cluster_secret }
 pub fn load_cluster_secret() -> String {
     let path_str = custom_secret_path();
     let path = std::path::Path::new(&path_str);
-    if let Ok(secret) = std::fs::read_to_string(path) {
-        let secret = secret.trim().to_string();
-        if !secret.is_empty() {
-            return secret;
+    // Falling back to the built-in default is silent-but-fatal in a cluster:
+    // the node comes up, polls, and reports ONLINE, while every proxied
+    // per-node call is signed with the wrong X-WolfStack-Secret and rejected.
+    // The operator sees "online, but none of the links work" and nothing in
+    // the log says why. On Unraid /etc/wolfstack is a symlink into appdata, so
+    // an array that is slow, unmounted or wedged when the agent starts makes
+    // this read fail and silently downgrades the node's identity
+    // (klas, 2026-07-31). Say so, loudly, every time it happens.
+    match std::fs::read_to_string(path) {
+        Ok(secret) => {
+            let secret = secret.trim().to_string();
+            if !secret.is_empty() {
+                return secret;
+            }
+            tracing::error!(
+                "cluster secret file {} is empty — falling back to the BUILT-IN DEFAULT secret. \
+                 If any peer uses a custom secret it will reject this node with 401 on every \
+                 proxied request.",
+                path_str
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not read cluster secret file {} ({}) — falling back to the BUILT-IN \
+                 DEFAULT secret. On a fresh single node this is normal; in a cluster it means \
+                 peers using a custom secret will reject this node with 401 on every proxied \
+                 request, while it still shows as online.",
+                path_str, e
+            );
         }
     }
     CLUSTER_SECRET.to_string()
+}
+
+/// True when this node is authenticating with the public built-in default
+/// cluster secret rather than one of its own. Harmless on a standalone node;
+/// in a cluster it is the "online but every link 401s" failure.
+pub fn using_default_cluster_secret() -> bool {
+    !has_custom_cluster_secret()
 }
 
 /// True if this node has its OWN custom cluster secret configured (the

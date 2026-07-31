@@ -121,28 +121,118 @@ impl Default for StorageConfig {
 
 // ─── Config Persistence ───
 
-pub fn load_config() -> StorageConfig {
-    match fs::read_to_string(&config_path()) {
-        Ok(content) => {
-            serde_json::from_str(&content).unwrap_or_else(|e| {
-                error!("Failed to parse storage config: {}", e);
-                StorageConfig::default()
-            })
+/// Set when the on-disk config exists but could not be read or parsed.
+///
+/// Every mutation path is `load_config()` → mutate → `save_config()`. A parse
+/// failure makes `load_config` hand back an EMPTY config, so without this guard
+/// the very next UI action would write that empty config straight over a
+/// corrupt-but-still-recoverable file and permanently destroy every mount
+/// definition — and the SMB/S3 credentials stored with them (klas, 2026-07-31,
+/// "trailing characters at line 49 column 2").
+static CONFIG_UNREADABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Where the unparseable config was copied to, quoted back to the operator.
+static PRESERVED_TO: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Copy the unreadable config aside, once per process, before anything can
+/// clobber it. Best-effort: failing to preserve must not stop us reporting.
+fn preserve_unreadable_config() {
+    let mut guard = PRESERVED_TO.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_some() {
+        return;
+    }
+    let path = config_path();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = format!("{}.corrupt-{}", path, stamp);
+    match fs::copy(&path, &dest) {
+        Ok(_) => {
+            // It still holds cleartext credentials — do not widen its exposure.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&dest, PermissionsExt::from_mode(0o600));
+            }
+            error!("preserved the unreadable storage config at {}", dest);
+            *guard = Some(dest);
         }
-        Err(_) => StorageConfig::default(),
+        Err(e) => error!("could not preserve the unreadable storage config: {}", e),
     }
 }
 
+pub fn load_config() -> StorageConfig {
+    use std::sync::atomic::Ordering;
+    match fs::read_to_string(config_path()) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(cfg) => {
+                CONFIG_UNREADABLE.store(false, Ordering::Relaxed);
+                cfg
+            }
+            Err(e) => {
+                error!("Failed to parse storage config: {}", e);
+                CONFIG_UNREADABLE.store(true, Ordering::Relaxed);
+                preserve_unreadable_config();
+                StorageConfig::default()
+            }
+        },
+        // Absent is the normal fresh-install state, not a fault.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            CONFIG_UNREADABLE.store(false, Ordering::Relaxed);
+            StorageConfig::default()
+        }
+        // Present but unreadable (permissions, I/O, a wedged share) is a fault:
+        // treat it exactly like a parse failure so we never overwrite it.
+        Err(e) => {
+            error!("Failed to read storage config: {}", e);
+            CONFIG_UNREADABLE.store(true, Ordering::Relaxed);
+            StorageConfig::default()
+        }
+    }
+}
+
+/// True when the on-disk storage config is unreadable and writes are blocked.
+pub fn config_is_unreadable() -> bool {
+    CONFIG_UNREADABLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn save_config(config: &StorageConfig) -> Result<(), String> {
-    // Ensure directory exists
+    if config_is_unreadable() {
+        let preserved = PRESERVED_TO.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let copy_note = preserved
+            .map(|p| format!(" A copy was preserved at {}.", p))
+            .unwrap_or_default();
+        return Err(format!(
+            "The storage config at {} could not be read, so WolfStack is holding an empty one in \
+             memory. Saving now would overwrite the file and permanently destroy the mounts and \
+             stored credentials it still contains, so the write was refused.{} Repair or move that \
+             file aside, then reload this page.",
+            config_path(), copy_note
+        ));
+    }
     let path = config_path();
-    let dir = Path::new(&path).parent().unwrap();
+    let dir = Path::new(&path).parent()
+        .ok_or_else(|| format!("storage config path has no parent directory: {}", path))?;
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
 
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    fs::write(&path, json)
+
+    // Write-then-rename, in the SAME directory so the rename is atomic on the
+    // target filesystem. A plain fs::write truncates first, so an interrupted
+    // write — or two agents racing, which a wedged supervisor can produce —
+    // leaves a half-file on disk. write_secure gives the temp file 0600, and
+    // rename preserves it: this config carries SMB passwords and S3
+    // secret_access_key in cleartext.
+    let tmp = format!("{}.tmp.{}", path, std::process::id());
+    crate::paths::write_secure(&tmp, &json)
         .map_err(|e| format!("Failed to write config: {}", e))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("Failed to replace config: {}", e)
+    })?;
     Ok(())
 }
 
@@ -3979,6 +4069,32 @@ access_key_id = AKIAEXAMPLEKEY123456
         assert_eq!(endpoint_url("https://s3.example.com"), "https://s3.example.com");
         assert_eq!(endpoint_url("http://minio.lan:9000"), "http://minio.lan:9000");
         assert_eq!(endpoint_url("  s3.example.com  "), "https://s3.example.com");
+    }
+}
+
+#[cfg(test)]
+mod config_guard_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// The guard runs before any filesystem access, so this exercises the real
+    /// save path without touching the host's actual storage.json.
+    #[test]
+    fn save_is_refused_while_the_on_disk_config_is_unreadable() {
+        let restore = CONFIG_UNREADABLE.load(Ordering::Relaxed);
+
+        CONFIG_UNREADABLE.store(true, Ordering::Relaxed);
+        let err = save_config(&StorageConfig::default())
+            .expect_err("saving over an unreadable config must be refused");
+        // The operator has to be told what was at stake, not just that it failed.
+        assert!(err.contains("destroy"), "unhelpful refusal: {err}");
+        assert!(err.contains("refused"), "unhelpful refusal: {err}");
+
+        // With the config readable the guard must not block ordinary saves.
+        CONFIG_UNREADABLE.store(false, Ordering::Relaxed);
+        assert!(!config_is_unreadable());
+
+        CONFIG_UNREADABLE.store(restore, Ordering::Relaxed);
     }
 }
 
