@@ -560,11 +560,21 @@ SUPERVISOR_EOF
     # /mnt/user (the FUSE-freeze bug, klas 2026-07-16). fuser -k kills the
     # old lock's holders — the old supervisor shell AND any old agent that
     # inherited its lock fd — so it can't respawn a FUSE-side agent under
-    # our new one. New-style supervisors are unaffected (RAM-side lock,
-    # agents don't inherit it). timeout: the lock file is on FUSE and
-    # fuser must stat it — best-effort guard against a wedged share.
+    # our new one. timeout: the lock file is on FUSE and fuser must stat it —
+    # best-effort guard against a wedged share.
+    #
+    # We ALSO retire any current-era supervisor holding the RAM-side lock.
+    # Previously only the appdata lock was cleared, so a wedged new-style
+    # supervisor kept /var/run/wolfstack-agent-supervisor.lock forever: the
+    # installer's fresh supervisor lost the flock, exited 0 in silence, no
+    # agent ever started, and re-running this installer could never recover
+    # the node (klas, 2026-07-31). Killing a HEALTHY incumbent is harmless —
+    # we start a replacement below and its loop refreshes the RAM binary the
+    # same way. Agents don't inherit the lock fd (9>&- at exec), so they
+    # survive this and are cleared by the pkill that follows.
     if command -v fuser >/dev/null 2>&1; then
         timeout 15 fuser -k "$WS_APPDATA/agent-supervisor.lock" >/dev/null 2>&1 || true
+        timeout 15 fuser -k /var/run/wolfstack-agent-supervisor.lock >/dev/null 2>&1 || true
         sleep 1
     else
         # No fuser on this build: we can still kill old AGENTS below, but
@@ -600,9 +610,53 @@ SUPERVISOR_EOF
     fi
     if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
         echo ""
-        echo "  ✗ WolfStack agent FAILED to start. Last log lines:"
-        tail -20 /var/log/wolfstack-agent.log 2>/dev/null | sed 's/^/    /'
-        echo "  Start it manually after fixing the above:"
+        echo "  ✗ WolfStack agent FAILED to start."
+        # A blind `tail -20` here used to print 20 lines of auth kernel-block
+        # spam from the PREVIOUS run and hide the actual cause — the reported
+        # symptom was stale WARNs from the day before, telling the operator
+        # nothing (klas, 2026-07-31). Report the three things that actually
+        # distinguish the failure modes: who holds the lock, what the
+        # supervisor itself logged, and the agent's own output minus the
+        # auth noise.
+        WS_LOCK=/var/run/wolfstack-agent-supervisor.lock
+        WS_HOLDERS=""
+        # Every probe below is `|| true`-guarded: this script runs under
+        # `set -euo pipefail`, and fuser/grep exit non-zero when they simply
+        # find nothing. Unguarded, an empty result would abort the installer
+        # part-way through its own diagnostic and swallow the recovery
+        # instructions at the end of this block.
+        if command -v fuser >/dev/null 2>&1; then
+            WS_HOLDERS=$(timeout 5 fuser "$WS_LOCK" 2>/dev/null | tr -s ' ' || true)
+        fi
+        if [ -n "$WS_HOLDERS" ]; then
+            echo ""
+            echo "    A supervisor still holds $WS_LOCK but started no agent —"
+            echo "    it is wedged (classically D-state on a stalled /mnt/user share)."
+            for _p in $WS_HOLDERS; do
+                _st=$(grep '^State:' "/proc/$_p/status" 2>/dev/null | tr -s ' \t' ' ' || true)
+                echo "      PID $_p ${_st:-state unknown}"
+            done
+            echo "    A wedged process cannot be killed. Reboot this server —"
+            echo "    a RAM-fresh boot starts clean and re-runs the agent."
+        fi
+        if [ -s /var/log/wolfstack-agent.log ]; then
+            echo ""
+            echo "    Supervisor lifecycle (last 10):"
+            { grep -E 'agent (exited|PID)|no runnable agent binary|truncated at' \
+                /var/log/wolfstack-agent.log 2>/dev/null || true; } | tail -10 | sed 's/^/      /'
+            echo "    Agent output, auth noise removed (last 15):"
+            { grep -vE 'wolfstack::auth' /var/log/wolfstack-agent.log 2>/dev/null || true; } \
+                | tail -15 | sed 's/^/      /'
+        else
+            echo ""
+            echo "    /var/log/wolfstack-agent.log is empty or absent — the"
+            echo "    supervisor never reached its run loop, so the agent was"
+            echo "    never launched. The lock check above is the likely cause."
+        fi
+        echo ""
+        echo "  See the real startup error by running it in the foreground:"
+        echo "    /usr/local/bin/wolfstack --agent"
+        echo "  Then restart the supervisor:"
         echo "    /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &"
         [ -t 0 ] || cat >/dev/null 2>&1 || true
         exit 1

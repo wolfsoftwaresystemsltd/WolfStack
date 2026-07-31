@@ -77436,6 +77436,9 @@ const _arrayState = {
     backend: 'mdadm',
     arrays: [],
     config: { schedules: [], alert_overrides: [] },
+    // { config: SmartTestConfig, disks: [...] } from /api/array/smart-tests,
+    // or null when that endpoint failed — the card is then simply omitted.
+    smartTests: null,
 };
 
 async function arrayLoad() {
@@ -77445,10 +77448,17 @@ async function arrayLoad() {
         // /api/array/cluster aggregates THIS cluster (every node)
         // AND every federated remote cluster — one round-trip
         // surfaces every array from every connected site.
-        const [r, cfgR] = await Promise.all([
+        // smart-tests is fetched alongside but tolerated separately: physical
+        // disks are worth showing even if the array surface fails, and vice versa.
+        const [r, cfgR, stR] = await Promise.all([
             fetch('/api/array/cluster'),
             fetch('/api/array/config'),
+            fetch('/api/array/smart-tests').catch(() => null),
         ]);
+        _arrayState.smartTests = null;
+        if (stR && stR.ok) {
+            try { _arrayState.smartTests = await stR.json(); } catch (_) { /* card hidden */ }
+        }
         if (r.ok) {
             const d = await r.json();
             _arrayState.arrays = d.arrays || [];
@@ -77559,7 +77569,7 @@ function arrayRender() {
                 <div style="color:var(--text-muted);font-size:12px;margin-top:6px;">Use this if you know NoNRAID / mdadm IS installed but it's not being picked up</div>
                 <div id="array-diagnose-out" style="margin-top:18px;text-align:left;"></div>
             </div></div>
-        `;
+        ` + smartTestsCardHtml();
         return;
     }
 
@@ -77578,7 +77588,161 @@ function arrayRender() {
         html += `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin:8px 4px -2px;">${escapeHtml(groupName)}</div>`;
         for (const a of arrs) html += arrayRowHtml(a);
     }
-    list.innerHTML = html;
+    list.innerHTML = html + smartTestsCardHtml();
+}
+
+// ─── Drive health & scheduled SMART self-tests ───
+//
+// Physical disks exist whether or not this node has an assembled array, so
+// this card renders in both the populated and the "no arrays detected" states.
+
+function smartLifeBadge(stage) {
+    const map = {
+        'early-life':   ['#f59e0b', 'Early life'],
+        'steady-state': ['#22c55e', 'Steady state'],
+        'wear-out':     ['#ef4444', 'Wear-out'],
+        'unknown':      ['#94a3b8', 'Age unknown'],
+    };
+    const entry = map[stage] || map['unknown'];
+    return '<span title="Position on the drive-failure bathtub curve" style="display:inline-block;padding:2px 8px;'
+        + 'border-radius:10px;font-size:11px;font-weight:600;color:' + entry[0]
+        + ';border:1px solid ' + entry[0] + ';">' + escapeHtml(entry[1]) + '</span>';
+}
+
+function smartTestAgeSuffix(d, st) {
+    if (typeof st.last_test_hours !== 'number' || typeof d.power_on_hours !== 'number') return '';
+    const ago = d.power_on_hours - st.last_test_hours;
+    if (ago < 0) return '';
+    const days = Math.round(ago / 24);
+    const text = days <= 1 ? 'within a day' : days + ' powered days ago';
+    return ' <span style="color:var(--text-muted);">(' + text + ')</span>';
+}
+
+function smartTestResultCell(d) {
+    if (d.asleep) return '<span style="color:var(--text-muted);">spun down — not woken</span>';
+    const st = d.self_test;
+    if (!st) return '<span style="color:var(--text-muted);">no self-test log</span>';
+    if (st.in_progress) return '<span style="color:var(--accent,#3b82f6);">running now…</span>';
+    if (st.passed === true) return '<span style="color:#22c55e;">passed</span>' + smartTestAgeSuffix(d, st);
+    if (st.passed === false) {
+        return '<span style="color:#ef4444;font-weight:600;">FAILED — '
+            + escapeHtml(st.result || 'see smartctl') + '</span>';
+    }
+    // No verdict: the newest entry was aborted or interrupted. Never show that
+    // as a pass OR a failure — it genuinely means "we don't know".
+    if (st.result) return '<span style="color:var(--text-muted);">' + escapeHtml(st.result) + '</span>';
+    return '<span style="color:var(--text-muted);">never tested</span>';
+}
+
+function smartTestsCardHtml() {
+    const s = _arrayState.smartTests;
+    if (!s || !Array.isArray(s.disks)) return '';
+    const cfg = s.config || {};
+    let html = '<div class="card" style="margin-top:14px;"><div class="card-body">';
+    html += '<h4 style="margin:0 0 4px;font-size:14px;">Drive health &amp; self-tests</h4>';
+    if (cfg.enabled) {
+        const cadence = cfg.interval_days > 0
+            ? 'every ' + cfg.interval_days + ' days'
+            : 'paced by drive age — tested more often during early life and wear-out';
+        html += '<div style="color:var(--text-muted);font-size:12px;margin-bottom:12px;">'
+            + 'Scheduled short self-tests are on, ' + escapeHtml(cadence) + '. '
+            + (cfg.allow_wake
+                ? 'Sleeping disks are woken to test.'
+                : 'Sleeping disks are never woken — only drives already spinning are tested.')
+            + '</div>';
+    } else {
+        html += '<div style="color:var(--text-muted);font-size:12px;margin-bottom:12px;">'
+            + 'Scheduled self-tests are off. Disks are still monitored via SMART attributes; '
+            + 'you can start a test by hand below.</div>';
+    }
+    if (s.disks.length === 0) {
+        html += '<div style="color:var(--text-muted);font-size:13px;">No physical disks reported by this node.</div>';
+        return html + '</div></div>';
+    }
+    const th = 'text-align:left;padding:6px 10px 6px 0;font-size:11px;text-transform:uppercase;'
+        + 'letter-spacing:0.4px;color:var(--text-muted);font-weight:700;white-space:nowrap;';
+    const td = 'padding:7px 10px 7px 0;font-size:13px;vertical-align:middle;';
+    html += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;min-width:640px;">';
+    html += '<thead><tr>'
+        + '<th style="' + th + '">Device</th>'
+        + '<th style="' + th + '">Powered on</th>'
+        + '<th style="' + th + '">Life stage</th>'
+        + '<th style="' + th + '">Last self-test</th>'
+        + '<th style="' + th + '">Next</th>'
+        + '<th style="' + th + '"></th>'
+        + '</tr></thead><tbody>';
+    for (const d of s.disks) {
+        const dev = escapeHtml(d.device || '');
+        const hours = typeof d.power_on_hours === 'number' ? d.power_on_hours : null;
+        const ageCell = hours === null
+            ? '<span style="color:var(--text-muted);">unknown</span>'
+            : hours.toLocaleString() + ' h <span style="color:var(--text-muted);">('
+              + (hours / 8760).toFixed(1) + ' yr)</span>';
+        const nextCell = d.excluded
+            ? '<span style="color:var(--text-muted);">excluded</span>'
+            : escapeHtml(d.next_kind === 'long' ? 'extended' : 'short')
+              + ' <span style="color:var(--text-muted);">/ '
+              + Math.round((d.interval_hours || 0) / 24) + ' d</span>';
+        html += '<tr style="border-top:1px solid var(--border-color,#2d2f3a);">'
+            + '<td style="' + td + '"><code>' + dev + '</code></td>'
+            + '<td style="' + td + '">' + ageCell + '</td>'
+            + '<td style="' + td + '">' + smartLifeBadge(d.life_stage) + '</td>'
+            + '<td style="' + td + '">' + smartTestResultCell(d) + '</td>'
+            + '<td style="' + td + '">' + nextCell + '</td>'
+            + '<td style="' + td + 'text-align:right;white-space:nowrap;">'
+            + '<button type="button" onclick="arraySelfTestRun(\'' + dev + '\',\'short\')" '
+            + 'style="background:var(--accent,#3b82f6);color:#fff;border:none;border-radius:5px;'
+            + 'padding:5px 11px;cursor:pointer;font-size:12px;">Short test</button> '
+            + '<button type="button" onclick="arraySelfTestRun(\'' + dev + '\',\'long\')" '
+            + 'style="background:transparent;color:var(--text-primary);border:1px solid var(--border-color,#2d2f3a);'
+            + 'border-radius:5px;padding:5px 11px;cursor:pointer;font-size:12px;">Extended</button>'
+            + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    html += '<div style="color:var(--text-muted);font-size:11px;margin-top:10px;">'
+        + 'A short test samples the drive in about two minutes. An extended test scans the whole '
+        + 'surface and can run for hours — it happens in the background and the drive stays usable.'
+        + '</div>';
+    return html + '</div></div>';
+}
+
+async function arraySmartTestsLoad() {
+    try {
+        const r = await fetch('/api/array/smart-tests');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        _arrayState.smartTests = await r.json();
+    } catch (e) {
+        // Non-fatal: the arrays list is still worth rendering without this card.
+        _arrayState.smartTests = null;
+    }
+    arrayRender();
+}
+
+async function arraySelfTestRun(device, kind) {
+    if (kind === 'long') {
+        const ok = await showConfirm(
+            'An extended self-test scans the entire surface of ' + device + ' and can take several '
+            + 'hours on a large drive. It runs in the background and the drive stays usable. Start it?',
+            'Start extended self-test');
+        if (!ok) return;
+    }
+    try {
+        const r = await fetch('/api/array/smart-tests/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device: device, kind: kind }),
+        });
+        let d = {};
+        try { d = await r.json(); } catch (_) { d = {}; }
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        showToast((kind === 'long' ? 'Extended' : 'Short') + ' self-test started on ' + device, 'success');
+        // Give the drive a moment to report the test as in-progress.
+        setTimeout(arraySmartTestsLoad, 2000);
+    } catch (e) {
+        // Errors persist (duration 0) so the operator can read and copy them.
+        showToast('Could not start the self-test on ' + device + ': '
+            + (e && e.message ? e.message : String(e)), 'error', 0);
+    }
 }
 
 function arrayStateBadge(s) {

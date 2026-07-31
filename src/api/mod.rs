@@ -39780,6 +39780,75 @@ pub async fn array_config_save(req: HttpRequest, state: web::Data<AppState>, bod
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
 
+#[derive(Deserialize)]
+pub struct SelfTestRunRequest {
+    pub device: String,
+    /// "short" (default) or "long". Validated in array::start_self_test.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// GET /api/array/smart-tests — per-disk self-test state, where each drive
+/// sits on the failure curve, and the cadence it is therefore on.
+pub async fn array_smart_tests_get(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let payload = tokio::task::spawn_blocking(|| {
+        let cfg = crate::array::ArrayConfig::load().smart_tests;
+        let disks = crate::array::list_physical_disks().into_iter().map(|dev| {
+            // Read behind the standby guard: opening a page must never spin an
+            // array up. A sleeping disk reports what we last knew, not a lie —
+            // `asleep` tells the UI why the detail is absent.
+            let smart = crate::array::disk_smart_health(&dev, crate::array::disk_is_rotational(&dev));
+            let hours = smart.as_ref().and_then(|s| s.power_on_hours);
+            // Only read the self-test log for disks already awake — that probe
+            // would wake a sleeping drive just as surely as the attribute read.
+            let status = smart.as_ref().and_then(|_| crate::array::self_test_status(&dev));
+            serde_json::json!({
+                "device": dev,
+                "asleep": smart.is_none(),
+                "power_on_hours": hours,
+                "life_stage": crate::array::life_stage(hours),
+                "interval_hours": crate::array::self_test_interval_hours(hours, &cfg),
+                "next_kind": crate::array::next_self_test_kind(&dev, hours, &cfg),
+                "excluded": cfg.exclude.iter().any(|d| d == &dev),
+                "self_test": status,
+            })
+        }).collect::<Vec<_>>();
+        serde_json::json!({ "config": cfg, "disks": disks })
+    }).await.unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+    HttpResponse::Ok().json(payload)
+}
+
+/// POST /api/array/smart-tests/run — start a self-test on one disk now.
+pub async fn array_smart_test_run(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SelfTestRunRequest>,
+) -> HttpResponse {
+    let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
+    let dev = body.device.clone();
+    let kind = body.kind.clone().unwrap_or_else(|| "short".to_string());
+    let outcome = tokio::task::spawn_blocking(move || {
+        // Never hand an unvalidated path to smartctl. The device has to be one
+        // the kernel itself reports as a whole disk on this host — an operator
+        // session is not a licence to point the tool at an arbitrary path.
+        if !crate::array::list_physical_disks().iter().any(|d| d == &dev) {
+            return Err(format!("unknown device: {dev}"));
+        }
+        crate::array::start_self_test(&dev, &kind).map(|()| (dev, kind))
+    }).await;
+    match outcome {
+        Ok(Ok((dev, kind))) => {
+            gateway_audit(&state, &actor, "info", "SMART self-test started",
+                &format!("{} test on {}", kind, dev));
+            HttpResponse::Ok().json(serde_json::json!({ "ok": true, "device": dev, "kind": kind }))
+        }
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
 // ─── Federation API ───
 //
 // Cross-cluster registry — each entry is "another WolfStack cluster
@@ -42738,6 +42807,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/array/diagnose",                             web::get().to(array_diagnose))
         .route("/api/array/config",                               web::get().to(array_config_get))
         .route("/api/array/config",                               web::post().to(array_config_save))
+        .route("/api/array/smart-tests",                          web::get().to(array_smart_tests_get))
+        .route("/api/array/smart-tests/run",                      web::post().to(array_smart_test_run))
         .route("/api/array/{name}",                               web::get().to(array_detail))
         .route("/api/array/{name}/start",                         web::post().to(array_start))
         .route("/api/array/{name}/stop",                          web::post().to(array_stop))
