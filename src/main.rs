@@ -579,6 +579,16 @@ async fn main() -> std::io::Result<()> {
     // using the built-in default that every WolfStack installation
     // shares. The helper refuses to act on anything that looks like
     // an existing install — see auth::auto_generate_for_fresh_install.
+    // MUST run before the fresh-install check below and before the secret is
+    // read. On Unraid the config dir is a symlink into appdata: if the array
+    // has not mounted yet, an EXISTING install looks empty, so
+    // auto_generate_for_fresh_install would mint a brand-new cluster secret
+    // and load_cluster_secret would fall back to the built-in default —
+    // either way the node comes up with the wrong identity, reports itself
+    // online, and has every proxied request rejected by its peers with 401
+    // (klas, 2026-07-31). Returns immediately on a healthy host.
+    paths::wait_for_config_dir(120).await;
+
     let _ = auth::auto_generate_for_fresh_install();
 
     // Load per-installation cluster secret for inter-node authentication
@@ -1406,6 +1416,17 @@ async fn main() -> std::io::Result<()> {
                         let _ = crate::storage::load_config();
                         crate::storage::config_is_unreadable()
                     }).await.unwrap_or(false);
+                    if crate::storage::config_was_repaired() {
+                        let key = "storage_config_repaired".to_string();
+                        current.insert(key.clone());
+                        if !last_seen.contains(&key) {
+                            new_alerts.push((
+                                "warning".into(),
+                                "Storage configuration was damaged and has been repaired".into(),
+                                "WolfStack found trailing data after the end of storage.json, recovered the mount definitions it still contained, and rewrote the file. The damaged original was kept alongside it as storage.json.corrupt-<timestamp>. Check the Storage page to confirm your mounts are all present.".into(),
+                            ));
+                        }
+                    }
                     if storage_bad {
                         let key = "storage_config_unreadable".to_string();
                         current.insert(key.clone());

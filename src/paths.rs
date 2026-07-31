@@ -479,6 +479,51 @@ pub fn write_secure(path: &str, contents: impl AsRef<[u8]>) -> std::io::Result<(
     }
 }
 
+/// Wait, briefly and only when it will help, for the config directory to
+/// become available before anything reads config from it.
+///
+/// On Unraid `/etc/wolfstack` is a symlink into appdata, which does not exist
+/// until the array mounts. An agent that starts first reads NO config and
+/// silently adopts defaults — most damagingly the built-in cluster secret,
+/// which leaves the node polling and reporting online while every proxied
+/// request is rejected by peers with 401 and none of its pages load
+/// (klas, 2026-07-31).
+///
+/// Only a *dangling symlink* triggers the wait: that is the signal that the
+/// target is expected but not mounted yet. A plainly absent directory is a
+/// fresh install creating it for the first time and must never delay startup,
+/// and a healthy host returns immediately. Bounded, so boot cannot hang.
+pub async fn wait_for_config_dir(max_secs: u64) {
+    let dir = get().config_dir.clone();
+    let path = std::path::PathBuf::from(&dir);
+    let dangling = |p: &std::path::Path| {
+        std::fs::symlink_metadata(p).is_ok() && std::fs::metadata(p).is_err()
+    };
+    if !dangling(&path) {
+        return;
+    }
+    tracing::warn!(
+        "config directory {} is a symlink whose target is not available yet (array not mounted?) \
+         — waiting up to {}s rather than starting on defaults",
+        dir, max_secs
+    );
+    let mut waited = 0;
+    while waited < max_secs {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        waited += 2;
+        if !dangling(&path) {
+            tracing::info!("config directory {} became available after {}s", dir, waited);
+            return;
+        }
+    }
+    tracing::error!(
+        "config directory {} is still unavailable after {}s — starting with DEFAULTS. On a \
+         clustered node that means the built-in cluster secret, and peers will reject every \
+         proxied request with 401 while this node still reports itself online.",
+        dir, max_secs
+    );
+}
+
 /// One-shot: tighten permissions on `/etc/wolfstack` and any known
 /// sensitive file that might already exist with 0644 from a pre-v18.7.27
 /// install. Called once from main at startup. Silent on failure
