@@ -163,6 +163,58 @@ fn preserve_unreadable_config() {
     }
 }
 
+/// Set once when a damaged config was successfully auto-repaired, so the
+/// operator is told it happened instead of it being a silent rewrite.
+static CONFIG_REPAIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True when this process auto-repaired the storage config on disk.
+pub fn config_was_repaired() -> bool {
+    CONFIG_REPAIRED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Recover a config from content holding a complete JSON document followed by
+/// trailing bytes — precisely the damage a truncating rewrite leaves behind
+/// (klas, 2026-07-31: "trailing characters at line 49 column 2"). serde_json's
+/// streaming deserializer stops at the end of the first value and reports the
+/// byte offset it reached, so the leading document is recovered EXACTLY rather
+/// than guessed at by trimming to a brace.
+///
+/// Returns None when the leading bytes are not themselves a whole document —
+/// a truncated write — which is the genuinely unrecoverable case, and None
+/// when there was no trailing junk at all, since that content would have
+/// parsed strictly a moment earlier and something else is wrong.
+fn recover_leading_document(content: &str) -> Option<StorageConfig> {
+    let mut stream = serde_json::Deserializer::from_str(content).into_iter::<StorageConfig>();
+    let recovered = stream.next()?.ok()?;
+    let trailing = content.get(stream.byte_offset()..)?;
+    if trailing.trim().is_empty() {
+        return None;
+    }
+    Some(recovered)
+}
+
+/// Back up the damaged file and write the recovered config in its place.
+/// Returns the backup path so it can be quoted to the operator.
+fn repair_config_on_disk(recovered: &StorageConfig) -> Result<String, String> {
+    let path = config_path();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = format!("{}.corrupt-{}", path, stamp);
+    // Keep the damaged original before touching anything — if the rewrite goes
+    // wrong the operator still has every byte that was there.
+    fs::copy(&path, &backup).map_err(|e| format!("could not back up {}: {}", path, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&backup, PermissionsExt::from_mode(0o600));
+    }
+    write_config_atomic(recovered)?;
+    Ok(backup)
+}
+
 pub fn load_config() -> StorageConfig {
     use std::sync::atomic::Ordering;
     match fs::read_to_string(config_path()) {
@@ -173,6 +225,27 @@ pub fn load_config() -> StorageConfig {
             }
             Err(e) => {
                 error!("Failed to parse storage config: {}", e);
+                // Auto-repair before giving up: the common corruption keeps the
+                // whole config intact and merely appends stale bytes after it,
+                // so the mounts (and their credentials) are fully recoverable
+                // without the operator touching anything.
+                if let Some(recovered) = recover_leading_document(&content) {
+                    match repair_config_on_disk(&recovered) {
+                        Ok(backup) => {
+                            CONFIG_UNREADABLE.store(false, Ordering::Relaxed);
+                            CONFIG_REPAIRED.store(true, Ordering::Relaxed);
+                            error!(
+                                "storage config auto-repaired: recovered {} mount(s) from a \
+                                 damaged file; the original was kept at {}",
+                                recovered.mounts.len(), backup
+                            );
+                            return recovered;
+                        }
+                        Err(err) => {
+                            error!("could not write the repaired storage config: {}", err);
+                        }
+                    }
+                }
                 CONFIG_UNREADABLE.store(true, Ordering::Relaxed);
                 preserve_unreadable_config();
                 StorageConfig::default()
@@ -212,6 +285,13 @@ pub fn save_config(config: &StorageConfig) -> Result<(), String> {
             config_path(), copy_note
         ));
     }
+    write_config_atomic(config)
+}
+
+/// The actual write, without the unreadable-config guard, so the auto-repair
+/// path can replace a damaged file (which is exactly what the guard exists to
+/// prevent everyone ELSE from doing).
+fn write_config_atomic(config: &StorageConfig) -> Result<(), String> {
     let path = config_path();
     let dir = Path::new(&path).parent()
         .ok_or_else(|| format!("storage config path has no parent directory: {}", path))?;
@@ -4077,6 +4157,59 @@ mod config_guard_tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    /// A two-mount config whose tail was left behind when a shorter one-mount
+    /// version was written over it without truncating — the exact shape of the
+    /// damage klas hit ("trailing characters at line 49 column 2").
+    const TRUNCATION_DAMAGE: &str = r#"{
+  "mounts": [
+    {
+      "id": "media-1a2b3c4d",
+      "name": "media",
+      "type": "nfs",
+      "source": "nas:/export/media",
+      "mount_point": "/mnt/wolfstack/media",
+      "created_at": "2026-07-01T10:00:00Z"
+    }
+  ]
+}
+      "mount_point": "/mnt/wolfstack/backups",
+      "created_at": "2026-06-02T09:30:00Z"
+    }
+  ]
+}"#;
+
+    #[test]
+    fn trailing_data_after_the_document_is_recovered_not_discarded() {
+        // Precondition: this really is unparseable, so the recovery path is
+        // what is under test rather than a config that was fine all along.
+        assert!(serde_json::from_str::<StorageConfig>(TRUNCATION_DAMAGE).is_err());
+
+        let recovered = recover_leading_document(TRUNCATION_DAMAGE)
+            .expect("a complete document followed by junk must be recoverable");
+        // The surviving mount is recovered intact — not defaulted away.
+        assert_eq!(recovered.mounts.len(), 1);
+        assert_eq!(recovered.mounts[0].id, "media-1a2b3c4d");
+        assert_eq!(recovered.mounts[0].source, "nas:/export/media");
+        assert_eq!(recovered.mounts[0].mount_type, MountType::Nfs);
+    }
+
+    #[test]
+    fn a_clean_config_is_not_treated_as_damaged() {
+        // No trailing bytes means nothing to repair; returning Some here would
+        // make load_config rewrite a perfectly good file on every start.
+        let clean = r#"{"mounts":[]}"#;
+        assert!(serde_json::from_str::<StorageConfig>(clean).is_ok());
+        assert!(recover_leading_document(clean).is_none());
+    }
+
+    #[test]
+    fn a_truncated_config_is_not_silently_half_recovered() {
+        // Cut mid-document: there is no complete leading value, so this must
+        // NOT be "repaired" into a config missing half the operator's mounts.
+        let truncated = r#"{"mounts":[{"id":"media-1a2b3c4d","name":"med"#;
+        assert!(recover_leading_document(truncated).is_none());
+    }
+
     /// The guard runs before any filesystem access, so this exercises the real
     /// save path without touching the host's actual storage.json.
     #[test]
@@ -4168,3 +4301,4 @@ mod s3fs_log_tests {
         assert!(err.ends_with('…'));
     }
 }
+
