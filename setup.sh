@@ -376,12 +376,29 @@ RAM_BIN="/usr/local/bin/wolfstack"
 # Single supervisor per host. RAM-side lock: taking it can never stall on
 # FUSE, and RAM-fresh boots start clean. The installer fuser-kills any
 # pre-RAM-era supervisor holding the OLD appdata lock before starting us.
-# (No 2>/dev/null on the exec: a trailing redirect can't suppress a
-# failed-open of an earlier one anyway; callers null our stderr.)
-exec 9>"/var/run/wolfstack-agent-supervisor.lock" || exit 0
-flock -n 9 || exit 0
+#
+# All three bail-outs below LOG before exiting. They used to be bare
+# `|| exit 0`, and callers start us with `>/dev/null 2>&1`, so bash's own
+# stderr message went to the bit bucket and a supervisor that died here
+# left no evidence anywhere on the box — the operator got "agent FAILED to
+# start" printed over a log whose newest line was from the previous day
+# (klas, 2026-07-31). $LOG is RAM-backed and is exactly what the
+# installer's diagnostic reads back, so a line here is the one thing that
+# turns a silent death into a self-diagnosing one.
+if ! exec 9>"/var/run/wolfstack-agent-supervisor.lock"; then
+    echo "$(date) supervisor exiting: cannot open /var/run/wolfstack-agent-supervisor.lock — is /var/run writable and does the root fs have space?" >> "$LOG"
+    exit 0
+fi
+if ! flock -n 9; then
+    _holder=$(fuser /var/run/wolfstack-agent-supervisor.lock 2>/dev/null | tr -s ' ')
+    echo "$(date) supervisor exiting: another supervisor already holds the lock (PID(s):${_holder:- unknown}) — that one owns the agent" >> "$LOG"
+    exit 0
+fi
 trap '' HUP    # survive the installer's curl|bash session ending
-cd / || exit 0
+if ! cd /; then
+    echo "$(date) supervisor exiting: cd / failed" >> "$LOG"
+    exit 0
+fi
 
 api_port() {
     # The operator may have moved the API port (ports.json). timeout:
@@ -596,18 +613,40 @@ SUPERVISOR_EOF
         exit 1
     fi
     nohup /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &
-    sleep 3
 
     # The whole point of an update is a RUNNING agent — verify it, don't
-    # assume it. The supervisor restarts a dying agent on a 3s cadence, so
-    # one more 5s wait covers the "old process still releasing the port"
-    # race; if the agent still isn't up, say so loudly and point at the log
-    # instead of printing the success banner over a dead node
-    # (PineappleGod, Unraid, 2026-07-03).
-    if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
-        echo "  ⚠ Agent not running yet — giving the supervisor 5s more..."
-        sleep 5
-    fi
+    # assume it (PineappleGod, Unraid, 2026-07-03).
+    #
+    # Wait as long as the supervisor is actually allowed to take. Its FIRST
+    # action is `timeout 60 cp` of the ~86 MB binary off /mnt/user, and that
+    # 60s budget exists precisely because the copy is slow when the array is
+    # spun down, mover is running, or a parity check is in flight. This check
+    # used to give it 3s + 5s, so any node where that copy took longer than
+    # eight seconds was told "agent FAILED to start" while it was quietly
+    # coming up fine moments later — and because we aborted that early, the
+    # diagnostic below had nothing from this run to show and printed
+    # YESTERDAY's log lines instead (klas, 2026-07-31, whose whole diagnostic
+    # was dated a day before the run that printed it).
+    #
+    # Poll once a second instead of sleeping blind, so a healthy node still
+    # finishes in about a second, and narrate the staging copy so a slow array
+    # doesn't look like a hang.
+    WS_WAIT=0
+    WS_WAIT_MAX=90          # 60s copy budget + agent startup + a little slack
+    WS_SAID_STAGING=false
+    while [ "$WS_WAIT" -lt "$WS_WAIT_MAX" ]; do
+        pgrep -f "wolfstack --agent" >/dev/null 2>&1 && break
+        # .next only exists while the supervisor's staging copy is in flight.
+        if [ -e /usr/local/bin/wolfstack.next ] && [ "$WS_SAID_STAGING" = false ]; then
+            echo "  … staging the agent binary from the array (slow if the array is spun down)"
+            WS_SAID_STAGING=true
+        fi
+        sleep 1
+        WS_WAIT=$((WS_WAIT + 1))
+        if [ "$WS_WAIT" = 10 ]; then
+            echo "  ⚠ Agent not running yet — waiting up to ${WS_WAIT_MAX}s for the supervisor..."
+        fi
+    done
     if ! pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
         echo ""
         echo "  ✗ WolfStack agent FAILED to start."
@@ -625,8 +664,19 @@ SUPERVISOR_EOF
         # find nothing. Unguarded, an empty result would abort the installer
         # part-way through its own diagnostic and swallow the recovery
         # instructions at the end of this block.
+        WS_CAN_CHECK_LOCK=false
         if command -v fuser >/dev/null 2>&1; then
+            WS_CAN_CHECK_LOCK=true
             WS_HOLDERS=$(timeout 5 fuser "$WS_LOCK" 2>/dev/null | tr -s ' ' || true)
+        fi
+        if [ "$WS_CAN_CHECK_LOCK" = false ]; then
+            # Silence here used to read as "nothing holds the lock", which is
+            # the single most useful fact in this diagnostic. Say we couldn't
+            # look rather than letting an absent tool imply an all-clear.
+            echo ""
+            echo "    Could not check who holds $WS_LOCK — 'fuser' is not"
+            echo "    installed on this box, so a wedged supervisor cannot be"
+            echo "    ruled out. Reboot once if the steps below don't help."
         fi
         if [ -n "$WS_HOLDERS" ]; then
             echo ""
@@ -656,7 +706,12 @@ SUPERVISOR_EOF
         echo ""
         echo "  See the real startup error by running it in the foreground:"
         echo "    /usr/local/bin/wolfstack --agent"
-        echo "  Then restart the supervisor:"
+        echo ""
+        echo "  Then press Ctrl-C to STOP that foreground agent before the next"
+        echo "  step — it holds the API port, and a supervised agent started"
+        echo "  alongside it cannot bind and will exit immediately."
+        echo ""
+        echo "  Now restart the supervisor:"
         echo "    /usr/local/bin/wolfstack-agent-supervisor >/dev/null 2>&1 &"
         [ -t 0 ] || cat >/dev/null 2>&1 || true
         exit 1
