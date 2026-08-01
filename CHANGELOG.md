@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.9.3: SECURITY hardening — a cluster secret alone no longer opens a shell, and the default-secret warning can no longer be dismissed** _(2026-08-01 — [`5e513ee0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5e513ee09393d29f1482dd1e93d67a534c3b4f5b))_
+- **v25.9.2: SECURITY — the built-in cluster secret no longer authenticates anyone who is not already a recorded peer** _(2026-08-01 — [`37675403`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3767540356e16130717abe4d7846bd5a20eae71b))_
 - **v25.9.1: the installer says which release it is pulling and what the downloaded binary reports** _(2026-08-01 — [`83bb8b78`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/83bb8b78a390a4b58b395b1de30ed5cdf95e046f))_
 - **v25.9.0: System Check catches dead security controls, /boot alerts while there is still room to act, and the installer resolves podman conflicts** _(2026-08-01 — [`89968e25`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/89968e253345e553a8d7854fdfa72340f3b1e7a3))_
 - **v25.8.7: installer tells you to add a node on 8553 (HTTPS), not 8554** _(2026-07-31 — [`45e020fa`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/45e020fa18ad94a8df7199d0a685eda35462f1b8))_
