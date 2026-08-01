@@ -326,6 +326,12 @@ if [ -f /etc/unraid-version ]; then
 
     if pgrep -f "wolfstack --agent" >/dev/null 2>&1; then
         echo "  Stopping running WolfStack agent for upgrade..."
+        # Breadcrumb FIRST: the incumbent supervisor will log the resulting
+        # "agent exited (code 0)" line, and without context that reads as an
+        # unexplained flap (klas spent a morning on exactly that, 2026-08-01).
+        # SIGTERM → actix graceful shutdown → exit 0, so the very next
+        # lifecycle line after this one is this installer's doing.
+        echo "$(date) installer: stopping agent for upgrade (pkill SIGTERM) — the next 'agent exited (code 0)' line is expected" >> /var/log/wolfstack-agent.log 2>/dev/null || true
         pkill -f "wolfstack --agent" 2>/dev/null || true
         sleep 2
     fi
@@ -635,6 +641,12 @@ SUPERVISOR_EOF
         echo "  ⚠ 'fuser' not found — if the node flaps after this update, reboot once"
         echo "    to clear any pre-update supervisor loop (RAM-fresh boot starts clean)."
     fi
+    # Same breadcrumb as the upgrade-path pkill above: label this stop in
+    # the lifecycle log so it never reads as an unexplained agent exit.
+    # (Usually the old supervisor is already dead here — fuser -k above —
+    # so no exit line follows; the breadcrumb then simply marks the
+    # install boundary in the log.)
+    echo "$(date) installer: clearing any old agent before supervisor handover (pkill SIGTERM)" >> /var/log/wolfstack-agent.log 2>/dev/null || true
     pkill -f "wolfstack --agent" 2>/dev/null || true
     sleep 1
     # Run the shared supervisor from RAM. If a NEW-style supervisor is
@@ -1841,6 +1853,70 @@ for f in /etc/wolfstack/custom-cluster-secret \
         chmod 600 "$f" 2>/dev/null || true
     fi
 done
+
+# ─── Podman conflict check ──────────────────────────────────────────────────
+# Docker CE cannot be installed while podman is present: the docker-ce
+# packages conflict with podman/podman-docker on every major distro, so
+# get.docker.com and the manual repo paths below both fail mid-way.
+# Worse, podman-docker ships a /usr/bin/docker shim that makes podman
+# masquerade as Docker — the `command -v docker` gate below would then
+# skip the install and WolfStack would silently drive the wrong engine.
+# Ask before removing. NEVER remove unattended, even under --yes: podman
+# may be running someone's workloads, and destroying a container runtime
+# is not a decision an unattended installer gets to make.
+WS_DOCKER_IS_PODMAN_SHIM=false
+if command -v docker >/dev/null 2>&1 && docker --version 2>/dev/null | grep -qi podman; then
+    WS_DOCKER_IS_PODMAN_SHIM=true
+fi
+if [ "$WANT_DOCKER" = true ] && command -v podman >/dev/null 2>&1 \
+    && { ! command -v docker >/dev/null 2>&1 || [ "$WS_DOCKER_IS_PODMAN_SHIM" = true ]; }; then
+    echo ""
+    echo "⚠ podman is installed on this host."
+    if [ "$WS_DOCKER_IS_PODMAN_SHIM" = true ]; then
+        echo "  Its podman-docker shim is currently masquerading as /usr/bin/docker."
+    fi
+    echo "  Docker CE cannot be installed alongside podman — the packages conflict."
+    WS_PODMAN_CAN_PROMPT=false
+    if [ -t 0 ] || { [ -e /dev/tty ] && : < /dev/tty 2>/dev/null; }; then WS_PODMAN_CAN_PROMPT=true; fi
+    WS_PODMAN_REMOVE=false
+    if [ "$WS_PODMAN_CAN_PROMPT" = true ]; then
+        printf "  Remove podman now so Docker CE can be installed? [y/N] " > /dev/tty
+        read -r _pd_reply < /dev/tty 2>/dev/null || _pd_reply=""
+        case "$_pd_reply" in y|Y|yes|YES) WS_PODMAN_REMOVE=true ;; esac
+    else
+        echo "  Unattended run — NOT removing podman automatically (it may be running"
+        echo "  workloads). Skipping Docker install. Either remove podman yourself and"
+        echo "  re-run this installer, or re-run it from an interactive terminal."
+    fi
+    if [ "$WS_PODMAN_REMOVE" = true ]; then
+        echo "  Removing podman..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get remove -y podman podman-docker 2>/dev/null || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf remove -y podman podman-docker 2>/dev/null || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum remove -y podman podman-docker 2>/dev/null || true
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -R --noconfirm podman podman-docker 2>/dev/null || \
+                pacman -R --noconfirm podman 2>/dev/null || true
+        elif command -v zypper >/dev/null 2>&1; then
+            zypper --non-interactive remove podman podman-docker 2>/dev/null || true
+        fi
+        if command -v podman >/dev/null 2>&1; then
+            echo "  ✗ podman is still present after the removal attempt — skipping the"
+            echo "    Docker install rather than leaving a half-broken engine. Remove"
+            echo "    podman manually, then re-run this installer."
+            WANT_DOCKER=false
+        else
+            echo "  ✓ podman removed."
+        fi
+    else
+        # Operator declined (or no terminal): leave podman alone and skip
+        # the Docker install — a failed docker-ce install on top of podman
+        # leaves broken repos/packages behind.
+        WANT_DOCKER=false
+    fi
+fi
 
 # ─── Install Docker if missing ──────────────────────────────────────────────
 # WANT_DOCKER gates this for --minimal installs. A plain install keeps

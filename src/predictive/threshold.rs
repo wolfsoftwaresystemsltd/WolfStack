@@ -291,10 +291,19 @@ fn check_memory(
 }
 
 fn should_skip_disk(d: &crate::monitoring::DiskMetrics) -> bool {
-    // Match the historical `collect_issues` skip rule — /boot and
-    // /etc/pve are managed by the OS / Proxmox, only flag at >99 %.
-    (d.mount_point.starts_with("/boot") || d.mount_point == "/etc/pve")
-        && d.usage_percent <= 99.0
+    // /boot is owned by the dedicated `boot_partition` analyzer,
+    // which sizes its free-space floor from the kernels actually on
+    // the partition (2× the largest kernel set) instead of a flat
+    // >99 % rule. The old rule alerted only once /boot was already
+    // effectively full — wolf1 (2026-08-01) reached 100 % with nine
+    // kernels and dpkg failed mid-unpack before any warning fired.
+    // The generic GB thresholds below would misfire the other way: a
+    // healthy 975 MB /boot always has <2 GB free and would page
+    // Critical forever. So the generic check skips /boot entirely.
+    if d.mount_point.starts_with("/boot") { return true; }
+    // /etc/pve is pmxcfs (a tiny FUSE config fs managed by Proxmox):
+    // only flag it at >99 %.
+    d.mount_point == "/etc/pve" && d.usage_percent <= 99.0
 }
 
 fn check_disks(
@@ -613,7 +622,30 @@ mod tests {
             usage_percent: 90.0,
         });
         let p = analyze(&ctx(), &m, &[], &AckStore::default(), &ProposalStore::default());
-        // /boot at 90% should NOT fire — it's intentionally tight.
+        // /boot never fires from the GENERIC check — the dedicated
+        // boot_partition analyzer owns it.
+        assert!(p.iter().all(|x|
+            x.scope.resource_id.as_deref() != Some("/boot")
+        ));
+    }
+
+    /// Even a 100 %-full /boot stays out of the generic GB check —
+    /// its <2 GB free would otherwise page Critical with the WRONG
+    /// message (generic "free GB" advice, no kernel-purge safety
+    /// warning). boot_partition::analyze carries the correct finding.
+    #[test]
+    fn disk_skips_boot_even_at_100_pct() {
+        let mut m = metrics(10.0, 10.0, 100.0, 200.0);
+        m.disks.push(DiskMetrics {
+            name: "boot".into(),
+            mount_point: "/boot".into(),
+            fs_type: "ext4".into(),
+            total_bytes: 1_000_000_000,
+            used_bytes:  1_000_000_000,
+            available_bytes: 0,
+            usage_percent: 100.0,
+        });
+        let p = analyze(&ctx(), &m, &[], &AckStore::default(), &ProposalStore::default());
         assert!(p.iter().all(|x|
             x.scope.resource_id.as_deref() != Some("/boot")
         ));

@@ -77521,8 +77521,15 @@ const _arrayState = {
     backend: 'mdadm',
     arrays: [],
     config: { schedules: [], alert_overrides: [] },
-    // { config: SmartTestConfig, disks: [...] } from /api/array/smart-tests,
-    // or null when that endpoint failed — the card is then simply omitted.
+    // Outcome of the last /api/array/smart-tests fetch, as a discriminated
+    // result rather than a bare payload-or-null:
+    //   { ok: true,  payload: { config, disks } }
+    //   { ok: false, reason: 'unsupported' | 'auth' | 'error', detail? }
+    // null ONLY before the first attempt. A failed fetch used to collapse to
+    // null and erase the entire card with no message, which is indistinguishable
+    // from "this feature does not exist" — an expired session, a transient
+    // network failure, and a node predating the endpoint all read as missing
+    // work (Paul 2026-08-01).
     smartTests: null,
 };
 
@@ -77540,10 +77547,8 @@ async function arrayLoad() {
             fetch('/api/array/config'),
             fetch('/api/array/smart-tests').catch(() => null),
         ]);
-        _arrayState.smartTests = null;
-        if (stR && stR.ok) {
-            try { _arrayState.smartTests = await stR.json(); } catch (_) { /* card hidden */ }
-        }
+        // stR is null when that fetch itself rejected (the .catch above).
+        _arrayState.smartTests = await smartTestsResult(stR);
         if (r.ok) {
             const d = await r.json();
             _arrayState.arrays = d.arrays || [];
@@ -77719,12 +77724,67 @@ function smartTestResultCell(d) {
     return '<span style="color:var(--text-muted);">never tested</span>';
 }
 
+// Classify one /api/array/smart-tests response into the outcome shape held in
+// _arrayState.smartTests. `r` is a Response, or null when the fetch itself
+// rejected. Shared by the page load and the refresh so the two can never
+// disagree about what a given failure means.
+async function smartTestsResult(r) {
+    if (!r) return { ok: false, reason: 'error', detail: 'the request could not be sent' };
+    if (r.status === 404) return { ok: false, reason: 'unsupported' };
+    if (r.status === 401 || r.status === 403) return { ok: false, reason: 'auth' };
+    if (!r.ok) {
+        return { ok: false, reason: 'error',
+                 detail: 'HTTP ' + r.status + (r.statusText ? ' ' + r.statusText : '') };
+    }
+    let payload;
+    try { payload = await r.json(); }
+    catch (_) { return { ok: false, reason: 'error', detail: 'the node sent a malformed response' }; }
+    // A node without this route can still answer 200: the agent build serves
+    // its shell from default_service rather than 404ing unknown /api paths.
+    // No disks array means the surface genuinely is not there.
+    if (!payload || !Array.isArray(payload.disks)) return { ok: false, reason: 'unsupported' };
+    return { ok: true, payload };
+}
+
+// Card body for every non-ok outcome. Always states what happened and what to
+// do about it — never an empty card, never silence.
+function smartTestsUnavailableHtml(res) {
+    let msg, hint;
+    if (res.reason === 'unsupported') {
+        msg = 'Drive health and scheduled self-tests need WolfStack v25.8.0 or newer on this node.';
+        hint = 'This node runs an older build, which has no drive-health endpoint. Upgrade it and '
+             + 'this card fills in on the next refresh.';
+    } else if (res.reason === 'auth') {
+        msg = 'This session is not authorised to read drive health on this node.';
+        hint = 'Sign in again, then retry.';
+    } else {
+        msg = 'Drive health could not be read from this node.';
+        hint = res.detail ? 'The node reported: ' + res.detail + '.' : '';
+    }
+    return '<div role="status" style="border:1px solid var(--border-color,#2d2f3a);'
+        + 'border-left:3px solid #f59e0b;border-radius:6px;padding:12px 14px;margin-top:8px;">'
+        + '<div style="color:var(--text-primary);font-size:13px;">' + escapeHtml(msg) + '</div>'
+        + (hint
+            ? '<div style="color:var(--text-primary);opacity:0.85;font-size:12px;margin-top:5px;">'
+              + escapeHtml(hint) + '</div>'
+            : '')
+        + '<button type="button" onclick="arraySmartTestsLoad()" '
+        + 'style="margin-top:10px;background:transparent;color:var(--text-primary);'
+        + 'border:1px solid var(--border-color,#2d2f3a);border-radius:5px;padding:5px 11px;'
+        + 'cursor:pointer;font-size:12px;">Retry</button>'
+        + '</div>';
+}
+
 function smartTestsCardHtml() {
-    const s = _arrayState.smartTests;
-    if (!s || !Array.isArray(s.disks)) return '';
-    const cfg = s.config || {};
+    const res = _arrayState.smartTests;
+    // null = not attempted yet, so there is nothing honest to report. Every
+    // attempted outcome renders the card, successful or not.
+    if (!res) return '';
     let html = '<div class="card" style="margin-top:14px;"><div class="card-body">';
     html += '<h4 style="margin:0 0 4px;font-size:14px;">Drive health &amp; self-tests</h4>';
+    if (!res.ok) return html + smartTestsUnavailableHtml(res) + '</div></div>';
+    const s = res.payload;
+    const cfg = s.config || {};
     if (cfg.enabled) {
         const cadence = cfg.interval_days > 0
             ? 'every ' + cfg.interval_days + ' days'
@@ -77792,14 +77852,8 @@ function smartTestsCardHtml() {
 }
 
 async function arraySmartTestsLoad() {
-    try {
-        const r = await fetch('/api/array/smart-tests');
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        _arrayState.smartTests = await r.json();
-    } catch (e) {
-        // Non-fatal: the arrays list is still worth rendering without this card.
-        _arrayState.smartTests = null;
-    }
+    const r = await fetch('/api/array/smart-tests').catch(() => null);
+    _arrayState.smartTests = await smartTestsResult(r);
     arrayRender();
 }
 

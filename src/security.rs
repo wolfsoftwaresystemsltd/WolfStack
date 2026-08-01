@@ -156,6 +156,7 @@ pub fn run_security_checks() -> Vec<DependencyCheck> {
     scan_committed_default_secrets(&mut out);
     scan_sshd_config(&mut out);
     scan_fail2ban(&mut out);
+    scan_broken_security_controls(&mut out);
     scan_ssh_bruteforce(&mut out);
     scan_crypto_miners(&mut out);
     scan_tmp_binaries(&mut out);
@@ -455,6 +456,399 @@ fn scan_fail2ban(out: &mut Vec<DependencyCheck>) {
     ));
 }
 
+// ─── Broken security controls ───────────────────────────────────
+//
+// A security tool that is installed but cannot do its job is worse
+// than one that's absent — the operator believes the control exists.
+// wolf1 (2026-08-01): chkrootkit's nightly run exited 127 for weeks
+// (config set MAILTO="root", the Debian wrapper mails via `mail`,
+// and no mail/mailx binary was installed — only /usr/sbin/sendmail),
+// AND it had no /var/log/chkrootkit/log.expected baseline, so every
+// successful run would have mailed its entire output regardless of
+// change. A rootkit scanner simultaneously crying wolf nightly and
+// incapable of telling anyone — while WolfStack reported the node
+// healthy. Three failure modes, each checked independently:
+//
+//   1. Unit in failed state (the scanner itself is dead)
+//   2. Alert delivery impossible (runs fine, findings go nowhere —
+//      checked even when the unit is green; this is the mode that
+//      hid for weeks)
+//   3. Baseline never initialised (runs, alerts, but the output is
+//      all noise or the tool skips its core comparison)
+//
+// Everything here is Posture, not Compromise — per the AlertCategory
+// doc (alerting.rs), Compromise means "actively on fire", and a
+// misconfigured scanner is a recommendation-grade finding. The
+// critical()-severity findings alert through the background security
+// scan's default (non-prefixed) mapping, which is Posture.
+//
+// Deliberately NOT done here: parsing or relaying chkrootkit's own
+// findings. All three of its wolf1 hits were false positives (a
+// "BPFDoor" that was package-owned /usr/sbin/chronyd, a corosync
+// libqb blackbox data file in /dev/shm, fail2ban's test fixtures).
+// Reproducing a noisy scanner's output would reproduce its noise;
+// we report on the scanner's health, never its verdicts.
+
+/// systemd units (matched by substring) whose failure means a
+/// security control is dead. "aide" also matches Debian's
+/// dailyaidecheck.service; "clam" covers clamav-freshclam,
+/// clamav-daemon and clamd variants.
+const SECURITY_UNIT_FAMILIES: &[&str] = &[
+    "chkrootkit", "rkhunter", "aide", "clam", "auditd", "fail2ban", "sshguard",
+];
+
+fn security_relevant_unit(unit: &str) -> bool {
+    let lower = unit.to_lowercase();
+    SECURITY_UNIT_FAMILIES.iter().any(|f| lower.contains(f))
+}
+
+/// First column of `systemctl list-units --plain --no-legend` lines.
+/// Format verified live: "UNIT LOAD ACTIVE SUB DESCRIPTION",
+/// whitespace-separated, no header, no bullet glyph with --plain.
+fn parse_failed_unit_names(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Parse `systemctl show -p Result,ExecMainStatus <unit>` output
+/// ("Result=exit-code\nExecMainStatus=127", verified live).
+fn parse_unit_show(text: &str) -> (Option<String>, Option<i32>) {
+    let mut result = None;
+    let mut status = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("Result=") {
+            if !v.is_empty() { result = Some(v.to_string()); }
+        } else if let Some(v) = line.strip_prefix("ExecMainStatus=") {
+            status = v.trim().parse::<i32>().ok();
+        }
+    }
+    (result, status)
+}
+
+/// Extract the last assignment of `key` from shell-syntax config
+/// text (`KEY="value"`, `KEY='value'`, `KEY=value`). Comment lines
+/// are skipped. Returns the raw value — callers must treat values
+/// containing `$` or backticks as indeterminate (we do not evaluate
+/// shell) rather than acting on them.
+fn parse_shell_assignment(text: &str, key: &str) -> Option<String> {
+    let mut found = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') { continue; }
+        if let Some(rest) = trimmed.strip_prefix(key)
+            && let Some(value) = rest.strip_prefix('=')
+        {
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                .unwrap_or(value);
+            found = Some(value.to_string());
+        }
+    }
+    found
+}
+
+/// A shell value we can safely act on: non-empty and free of shell
+/// expansion we'd have to evaluate to understand.
+fn actionable_value(v: &Option<String>) -> Option<&str> {
+    match v {
+        Some(s) if !s.is_empty() && !s.contains('$') && !s.contains('`') => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Look for a binary in the directories cron and systemd actually
+/// use. `command -v` semantics without inheriting WolfStack's own
+/// PATH (which may be richer than the nightly job's).
+fn binary_on_path(name: &str) -> bool {
+    ["/usr/bin", "/usr/sbin", "/bin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
+        .iter()
+        .any(|d| Path::new(d).join(name).exists())
+}
+
+fn scan_broken_security_controls(out: &mut Vec<DependencyCheck>) {
+    scan_failed_security_units(out);
+    scan_control_mail_delivery(out);
+    scan_control_baselines(out);
+}
+
+/// Mode 1: the unit itself is dead. `systemctl --state=failed` only
+/// lists units systemd has given up on, so anything here matching a
+/// security family is a control that is not running at all.
+fn scan_failed_security_units(out: &mut Vec<DependencyCheck>) {
+    let text = match Command::new("systemctl")
+        .args(["list-units", "--type=service,timer", "--state=failed",
+               "--plain", "--no-legend", "--no-pager"])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return,  // non-systemd host (Unraid/Slackware): nothing to scan
+    };
+    for unit in parse_failed_unit_names(&text) {
+        if !security_relevant_unit(&unit) { continue; }
+        // Enrich with the real failure data — Result= and the main
+        // process exit status — so the finding names the cause
+        // instead of just "failed".
+        let (result, exec_status) = match Command::new("systemctl")
+            .args(["show", "-p", "Result,ExecMainStatus", &unit]).output()
+        {
+            Ok(o) if o.status.success() =>
+                parse_unit_show(&String::from_utf8_lossy(&o.stdout)),
+            _ => (None, None),
+        };
+        let mut cause = match (&result, exec_status) {
+            (Some(r), Some(s)) => format!("Result={}, last exit status {}", r, s),
+            (Some(r), None) => format!("Result={}", r),
+            _ => "see `systemctl status` for the failure record".to_string(),
+        };
+        if exec_status == Some(127) {
+            // Source: POSIX shell — 127 is "command not found". This
+            // is the wolf1 signature: the unit's script calls a
+            // binary (usually `mail`) that isn't installed.
+            cause.push_str(
+                " — exit 127 means 'command not found': the unit's script \
+                 invokes a binary that is not installed (a missing `mail` \
+                 command is the classic cause for scanner wrappers)");
+        }
+        out.push(critical(
+            &format!("Security control failed: {}", unit),
+            &format!(
+                "{} is in systemd 'failed' state — this security control is not \
+                 running, and has not been since the failure. A dead scanner \
+                 provides zero protection while the host still appears covered. \
+                 Cause: {}.",
+                unit, cause),
+            Some(format!(
+                "Diagnose and restart it:\n  systemctl status {u}\n  journalctl -u {u} -n 50 --no-pager\n  # after fixing the cause:\n  sudo systemctl restart {u}",
+                u = unit)),
+        ));
+    }
+}
+
+/// Mode 2: the control runs but its alerts cannot be delivered.
+/// Checked INDEPENDENTLY of unit state — a green unit whose mail
+/// pipe is broken is precisely the failure that hides longest.
+///
+/// Per-tool transport, each verified against the actual Debian
+/// packaging (sources.debian.org):
+///   chkrootkit — chkrootkit-daily sources /etc/chkrootkit/chkrootkit.conf
+///     (then legacy /etc/chkrootkit.conf, which overrides), and mails
+///     via `mail -s "$SUBJECT" "$MAILTO"`. Needs `mail`.
+///   rkhunter — cron.daily sources /etc/default/rkhunter, gates on
+///     CRON_DAILY_RUN, mails via /usr/sbin/sendmail "$REPORT_EMAIL".
+///     Needs sendmail. Separately, /etc/rkhunter.conf MAIL-ON-WARNING
+///     uses MAIL_CMD (upstream default: `mail -s ...`).
+///   aide — dailyaidecheck sources /etc/default/aide, defaults
+///     MAILTO to root, sends via s-nail if present else `mail`.
+fn scan_control_mail_delivery(out: &mut Vec<DependencyCheck>) {
+    // ── chkrootkit ──
+    if binary_on_path("chkrootkit") {
+        let mut conf = std::fs::read_to_string("/etc/chkrootkit/chkrootkit.conf")
+            .unwrap_or_default();
+        if let Ok(legacy) = std::fs::read_to_string("/etc/chkrootkit.conf") {
+            // Sourced second by chkrootkit-daily → later assignments win.
+            conf.push('\n');
+            conf.push_str(&legacy);
+        }
+        let run_daily = parse_shell_assignment(&conf, "RUN_DAILY");
+        let daily_disabled = matches!(run_daily.as_deref(), Some("false"));
+        let mailto = parse_shell_assignment(&conf, "MAILTO");
+        if !daily_disabled {
+            if let Some(addr) = actionable_value(&mailto) {
+                if !binary_on_path("mail") && !binary_on_path("mailx") {
+                    out.push(critical(
+                        "Security alerts undeliverable: chkrootkit has no mail command",
+                        &format!(
+                            "chkrootkit's daily job is configured to mail its report to \
+                             '{}' (MAILTO in /etc/chkrootkit/chkrootkit.conf), but the \
+                             `mail` command it invokes is not installed. Every nightly \
+                             run dies with exit 127 — the scanner produces findings \
+                             nobody will ever see, and has been failing this way since \
+                             the mail command went missing. An MTA at /usr/sbin/sendmail \
+                             alone is NOT enough: the wrapper calls `mail`, not sendmail.",
+                            addr),
+                        Some(
+                            "Install a mail(1) provider that hands off to your MTA:\n  \
+                             Debian/Proxmox:  sudo apt install bsd-mailx   (or mailutils)\n\
+                             Then prove delivery end-to-end:\n  \
+                             echo test | mail -s \"chkrootkit mail path test\" root".into()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── rkhunter ──
+    if binary_on_path("rkhunter") {
+        if let Ok(defaults) = std::fs::read_to_string("/etc/default/rkhunter") {
+            // Source: Debian rkhunter cron.daily — runs only when
+            // CRON_DAILY_RUN matches [YyTt]*.
+            let cron_on = actionable_value(&parse_shell_assignment(&defaults, "CRON_DAILY_RUN"))
+                .map(|v| v.starts_with(['y', 'Y', 't', 'T']))
+                .unwrap_or(false);
+            let report = parse_shell_assignment(&defaults, "REPORT_EMAIL");
+            if cron_on {
+                if let Some(addr) = actionable_value(&report) {
+                    if !Path::new("/usr/sbin/sendmail").exists() && !binary_on_path("sendmail") {
+                        out.push(critical(
+                            "Security alerts undeliverable: rkhunter has no sendmail",
+                            &format!(
+                                "rkhunter's daily cron job is configured to mail warnings to \
+                                 '{}' (REPORT_EMAIL in /etc/default/rkhunter) via \
+                                 /usr/sbin/sendmail, which is not installed. Scan warnings \
+                                 are silently lost.", addr),
+                            Some("Install an MTA that provides /usr/sbin/sendmail (e.g. \
+                                  `sudo apt install postfix` — 'local only' is fine) and send \
+                                  a test message.".into()),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Ok(conf) = std::fs::read_to_string("/etc/rkhunter.conf") {
+            let warn_addr = parse_shell_assignment(&conf, "MAIL-ON-WARNING");
+            if let Some(addr) = actionable_value(&warn_addr) {
+                // Upstream default MAIL_CMD invokes `mail`; a custom
+                // MAIL_CMD's first token is the binary to check.
+                let mail_cmd = parse_shell_assignment(&conf, "MAIL_CMD");
+                let mail_bin = actionable_value(&mail_cmd)
+                    .and_then(|c| c.split_whitespace().next())
+                    .unwrap_or("mail")
+                    .to_string();
+                let bin_name = mail_bin.rsplit('/').next().unwrap_or(&mail_bin);
+                let present = if mail_bin.starts_with('/') {
+                    Path::new(&mail_bin).exists()
+                } else {
+                    binary_on_path(bin_name)
+                };
+                if !present {
+                    out.push(critical(
+                        "Security alerts undeliverable: rkhunter MAIL-ON-WARNING is broken",
+                        &format!(
+                            "/etc/rkhunter.conf sets MAIL-ON-WARNING='{}' but the configured \
+                             mail command ('{}') is not installed — warnings found during \
+                             checks are silently lost.", addr, mail_bin),
+                        Some("Install the mail command (Debian: `sudo apt install bsd-mailx`) \
+                              or point MAIL_CMD at a binary that exists, then run \
+                              `rkhunter --check --sk` to confirm.".into()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── aide ──
+    let aide_daily = Path::new("/usr/share/aide/bin/dailyaidecheck").exists();
+    if aide_daily || binary_on_path("aide") {
+        // Source: Debian dailyaidecheck — MAILTO="${MAILTO:-root}"
+        // after sourcing /etc/default/aide, so mail is intended even
+        // with no defaults file. Delivery is s-nail, falling back to
+        // `mail`.
+        let mailto = std::fs::read_to_string("/etc/default/aide")
+            .ok()
+            .and_then(|t| parse_shell_assignment(&t, "MAILTO"))
+            .unwrap_or_else(|| "root".to_string());
+        let mailto_opt = Some(mailto);
+        if let Some(addr) = actionable_value(&mailto_opt) {
+            if !binary_on_path("s-nail") && !binary_on_path("mail") {
+                out.push(critical(
+                    "Security alerts undeliverable: AIDE has no mail command",
+                    &format!(
+                        "AIDE's daily integrity check mails its report to '{}' via \
+                         s-nail or mail(1), and neither is installed. Integrity \
+                         violations would be detected and then silently discarded.",
+                        addr),
+                    Some("Install one: `sudo apt install s-nail` (or bsd-mailx), \
+                          then run the check once by hand to confirm delivery: \
+                          `systemctl start dailyaidecheck.service`.".into()),
+                ));
+            }
+        }
+    }
+}
+
+/// Mode 3: the tool runs but its baseline was never created, so its
+/// core comparison never happens.
+fn scan_control_baselines(out: &mut Vec<DependencyCheck>) {
+    // chkrootkit diff baseline. Source: chkrootkit-daily —
+    // EXPECTED_OUTPUT="$LOG_DIR/log.expected", LOG_DIR=/var/log/chkrootkit,
+    // DIFF_MODE default "true". Without the baseline, every nightly
+    // mail contains the FULL output instead of a diff — permanent
+    // alert fatigue that trains the operator to ignore the control.
+    if binary_on_path("chkrootkit") {
+        let mut conf = std::fs::read_to_string("/etc/chkrootkit/chkrootkit.conf")
+            .unwrap_or_default();
+        if let Ok(legacy) = std::fs::read_to_string("/etc/chkrootkit.conf") {
+            conf.push('\n');
+            conf.push_str(&legacy);
+        }
+        let daily_off = matches!(
+            parse_shell_assignment(&conf, "RUN_DAILY").as_deref(), Some("false"));
+        let diff_off = matches!(
+            parse_shell_assignment(&conf, "DIFF_MODE").as_deref(), Some("false"));
+        if !daily_off && !diff_off
+            && !Path::new("/var/log/chkrootkit/log.expected").exists()
+        {
+            out.push(warn(
+                "chkrootkit has no baseline — full output mailed every night",
+                "DIFF_MODE is on (the default) but /var/log/chkrootkit/log.expected \
+                 does not exist, so the daily job mails its ENTIRE output every \
+                 night regardless of change. chkrootkit's raw output includes \
+                 known false positives (package-owned daemons flagged as \
+                 'suspicious', corosync's /dev/shm blackbox files, fail2ban test \
+                 fixtures) — nightly identical noise guarantees real changes get \
+                 ignored.",
+                Some("Review the current output, then accept it as the baseline:\n  \
+                      less /var/log/chkrootkit/log.today\n  \
+                      sudo cp -a /var/log/chkrootkit/log.today /var/log/chkrootkit/log.expected\n\
+                      From then on you're only mailed the DIFF when something changes.".into()),
+            ));
+        }
+    }
+
+    // AIDE database. Source: Debian aide.conf
+    // (database_in=file:/var/lib/aide/aide.db) and dailyaidecheck,
+    // which exits fatally when the database is absent — an AIDE
+    // install with no database does literally nothing.
+    if (Path::new("/usr/share/aide/bin/dailyaidecheck").exists() || binary_on_path("aide"))
+        && !Path::new("/var/lib/aide/aide.db").exists()
+    {
+        out.push(critical(
+            "AIDE is installed but has no database — integrity checking is inert",
+            "/var/lib/aide/aide.db does not exist. AIDE's daily check exits with \
+             a fatal error before comparing anything, so file-integrity \
+             monitoring is not happening at all despite the tool being installed.",
+            Some("Initialise it (takes a while on big filesystems):\n  \
+                  sudo aideinit\n  # then verify the timer runs clean:\n  \
+                  sudo systemctl start dailyaidecheck.service && systemctl status dailyaidecheck.service".into()),
+        ));
+    }
+
+    // rkhunter file-properties database. Source: rkhunter.conf —
+    // DBDIR=/var/lib/rkhunter/db; `rkhunter --propupd` creates
+    // rkhunter.dat there. Without it the file-properties comparison
+    // is blind (other checks still run, hence warn not critical).
+    if binary_on_path("rkhunter")
+        && !Path::new("/var/lib/rkhunter/db/rkhunter.dat").exists()
+    {
+        out.push(warn(
+            "rkhunter has no file-properties baseline",
+            "/var/lib/rkhunter/db/rkhunter.dat does not exist — `rkhunter \
+             --propupd` has never been run, so file-properties checks (the \
+             ones that catch replaced binaries) have no baseline to compare \
+             against.",
+            Some("Create it while the system is in a known-good state:\n  \
+                  sudo rkhunter --propupd\nRe-run after every legitimate \
+                  package upgrade (Debian's APT hook does this automatically \
+                  when APT_AUTOGEN is enabled in /etc/default/rkhunter).".into()),
+        ));
+    }
+}
+
 // ─── Active attack: SSH brute force ─────────────────────────────
 
 /// Count recent "Failed password" / "Invalid user" entries grouped by
@@ -602,6 +996,84 @@ fn scan_crypto_miners(out: &mut Vec<DependencyCheck>) {
 /// Malware drops its stage-2 in /tmp or /dev/shm because those are
 /// world-writable. Flag any executable file in those dirs newer than
 /// 24 hours old (excluding known-benign patterns like pip unpack dirs).
+///
+/// The executable-bit gate is load-bearing and must stay: plain DATA
+/// files in these dirs are normal (corosync's libqb writes its
+/// qb-*-blackbox ring buffers into /dev/shm mode 0600 — chkrootkit
+/// flags those; we must not). Only something both fresh AND
+/// executable is staging-shaped.
+///
+/// Per-file decision is pure (`tmp_file_flaggable`) so every branch
+/// is unit-tested; the ownership suppression below it is the second
+/// gate.
+fn tmp_file_flaggable(name: &str, mode: u32, age_secs: i64) -> bool {
+    if mode & 0o111 == 0 { return false; }
+    // Files older than 24h aren't worth flagging (and negative age =
+    // clock skew — don't trust it).
+    if !(0..=86400).contains(&age_secs) { return false; }
+    // Common benign droppers.
+    !(name.starts_with("systemd-") || name.starts_with("tmp.")
+        || name.starts_with(".systemd-") || name.starts_with("tmux-")
+        || name.starts_with("pip-") || name.ends_with(".tmp"))
+}
+
+/// True when `path` is owned by an installed package AND the package
+/// manager's digest check confirms the file is unmodified. Used to
+/// suppress false positives the chkrootkit way of working produces
+/// (wolf1: chronyd flagged as "BPFDoor" — dpkg -S owned, dpkg -V
+/// clean; an hour wasted disproving it).
+///
+/// dpkg: `dpkg-query -S` resolves the owner (format "pkg1, pkg2:
+/// path", dpkg-query(1)); `dpkg -V pkg` (rpm-format output) prints a
+/// line ONLY for paths that fail a check, with '5' in the third
+/// column for a digest mismatch (dpkg(1) --verify). No line for our
+/// path = content verified. rpm: `rpm -qf` + `rpm -V` with the same
+/// third-column '5' semantics.
+fn file_package_verified_clean(path: &str) -> bool {
+    if binary_on_path("dpkg-query") && binary_on_path("dpkg") {
+        let owners = match Command::new("dpkg-query").args(["-S", path]).output() {
+            Ok(o) if o.status.success() =>
+                crate::predictive::boot_partition::parse_dpkg_search_owners(
+                    &String::from_utf8_lossy(&o.stdout), path),
+            _ => return false,
+        };
+        if owners.is_empty() { return false; }
+        for pkg in owners {
+            if let Ok(v) = Command::new("dpkg").args(["-V", &pkg]).output() {
+                let text = String::from_utf8_lossy(&v.stdout).to_string();
+                if verify_output_digest_ok(&text, path) { return true; }
+            }
+        }
+        return false;
+    }
+    if binary_on_path("rpm") {
+        let owned = matches!(
+            Command::new("rpm").args(["-qf", path]).output(),
+            Ok(o) if o.status.success());
+        if !owned { return false; }
+        if let Ok(v) = Command::new("rpm").args(["-Vf", path]).output() {
+            let text = String::from_utf8_lossy(&v.stdout).to_string();
+            return verify_output_digest_ok(&text, path);
+        }
+        return false;
+    }
+    false
+}
+
+/// Scan dpkg/rpm verify output (rpm format: 9-char flag string, then
+/// optional attribute marker, then path; lines exist only for FAILED
+/// paths). Returns true when no line reports a digest mismatch ('5'
+/// in the third column, per dpkg(1) and rpm(8)) for `path`.
+fn verify_output_digest_ok(verify_stdout: &str, path: &str) -> bool {
+    for line in verify_stdout.lines() {
+        if !line.ends_with(path) { continue; }
+        if line.starts_with("missing") { return false; }
+        let flags: Vec<char> = line.chars().take(9).collect();
+        if flags.get(2) == Some(&'5') { return false; }
+    }
+    true
+}
+
 fn scan_tmp_binaries(out: &mut Vec<DependencyCheck>) {
     let mut suspicious = Vec::new();
     for dir in &["/tmp", "/dev/shm"] {
@@ -611,19 +1083,17 @@ fn scan_tmp_binaries(out: &mut Vec<DependencyCheck>) {
             let meta = match entry.metadata() { Ok(m) => m, Err(_) => continue };
             if !meta.is_file() { continue; }
             let mode = meta.permissions().mode();
-            let executable = mode & 0o111 != 0;
-            if !executable { continue; }
-            // Age check — files older than 24h aren't worth flagging.
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
             let age = now - meta.mtime();
-            if age > 86400 || age < 0 { continue; }
-            // Skip common benign patterns.
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with("systemd-") || name.starts_with("tmp.")
-                || name.starts_with(".systemd-") || name.starts_with("tmux-")
-                || name.starts_with("pip-") || name.ends_with(".tmp") {
-                continue;
-            }
+            if !tmp_file_flaggable(name, mode, age) { continue; }
+            // Second gate: provably package-owned and digest-clean
+            // files are never reported. dpkg doesn't ship files into
+            // /tmp or /dev/shm, so this fires ~never — it exists so a
+            // chronyd-class "package binary misread as malware" false
+            // positive is structurally impossible here.
+            let path_str = path.display().to_string();
+            if file_package_verified_clean(&path_str) { continue; }
             suspicious.push(format!("  {} ({:o}, {} mins old)", path.display(), mode & 0o777, age / 60));
         }
     }
@@ -875,6 +1345,155 @@ pub fn rotate_local_root() -> Result<String, String> {
         .args(["-KILL", "-f", "sshd: root@"])
         .output();
     Ok(pw)
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    // ── failed-unit list parsing (format verified live) ──
+
+    #[test]
+    fn parses_failed_unit_names() {
+        let text = "chkrootkit.service      loaded failed failed Nightly rootkit scan\n\
+                    dailyaidecheck.service  loaded failed failed daily AIDE check\n";
+        assert_eq!(parse_failed_unit_names(text),
+            vec!["chkrootkit.service".to_string(), "dailyaidecheck.service".to_string()]);
+        assert!(parse_failed_unit_names("").is_empty());
+    }
+
+    #[test]
+    fn security_unit_matching() {
+        assert!(security_relevant_unit("chkrootkit.service"));
+        assert!(security_relevant_unit("chkrootkit.timer"));
+        // Debian's AIDE unit is named dailyaidecheck — matched via
+        // the "aide" substring (daily-AIDE-check).
+        assert!(security_relevant_unit("dailyaidecheck.service"));
+        assert!(security_relevant_unit("clamav-freshclam.service"));
+        assert!(security_relevant_unit("auditd.service"));
+        assert!(security_relevant_unit("fail2ban.service"));
+        assert!(security_relevant_unit("rkhunter.timer"));
+        assert!(!security_relevant_unit("nginx.service"));
+        assert!(!security_relevant_unit("wolfstack.service"));
+    }
+
+    #[test]
+    fn parses_unit_show_output() {
+        // Format verified live: `systemctl show -p Result,ExecMainStatus`.
+        let (r, s) = parse_unit_show("Result=exit-code\nExecMainStatus=127\n");
+        assert_eq!(r.as_deref(), Some("exit-code"));
+        assert_eq!(s, Some(127));
+        let (r, s) = parse_unit_show("Result=success\nExecMainStatus=0\n");
+        assert_eq!(r.as_deref(), Some("success"));
+        assert_eq!(s, Some(0));
+        let (r, s) = parse_unit_show("");
+        assert!(r.is_none() && s.is_none());
+    }
+
+    // ── shell config parsing ──
+
+    #[test]
+    fn parses_debian_chkrootkit_conf_values() {
+        // Verbatim lines from Debian's shipped chkrootkit.conf
+        // (sources.debian.org, chkrootkit 0.59-1).
+        let conf = r#"
+## Whether the daily cron job should run chkrootkit at all
+# true/false, default: true
+RUN_DAILY="true"
+RUN_DAILY_OPTS=""
+DIFF_MODE="true"
+MAILTO="root"
+"#;
+        assert_eq!(parse_shell_assignment(conf, "RUN_DAILY").as_deref(), Some("true"));
+        assert_eq!(parse_shell_assignment(conf, "DIFF_MODE").as_deref(), Some("true"));
+        assert_eq!(parse_shell_assignment(conf, "MAILTO").as_deref(), Some("root"));
+        // Empty value parses as empty (→ "no mail intended").
+        assert_eq!(parse_shell_assignment(conf, "RUN_DAILY_OPTS").as_deref(), Some(""));
+        // Absent key is None, not empty.
+        assert!(parse_shell_assignment(conf, "NOT_THERE").is_none());
+    }
+
+    #[test]
+    fn shell_parse_last_assignment_wins_and_comments_skipped() {
+        let conf = "MAILTO=\"root\"\n# MAILTO=\"commented@out\"\nMAILTO='admin@example.com'\n";
+        assert_eq!(parse_shell_assignment(conf, "MAILTO").as_deref(),
+            Some("admin@example.com"));
+        // Unquoted form.
+        assert_eq!(parse_shell_assignment("CRON_DAILY_RUN=yes\n", "CRON_DAILY_RUN").as_deref(),
+            Some("yes"));
+    }
+
+    #[test]
+    fn dynamic_shell_values_are_not_actionable() {
+        // We do not evaluate shell — a $-expansion must be treated as
+        // indeterminate rather than reported on.
+        let v = Some("$ADMIN_EMAIL".to_string());
+        assert!(actionable_value(&v).is_none());
+        let v = Some("`cat /etc/mailto`".to_string());
+        assert!(actionable_value(&v).is_none());
+        let v = Some("root".to_string());
+        assert_eq!(actionable_value(&v), Some("root"));
+        let v = Some(String::new());
+        assert!(actionable_value(&v).is_none());
+        assert!(actionable_value(&None).is_none());
+    }
+
+    // ── /tmp + /dev/shm flagging ──
+
+    #[test]
+    fn fresh_executable_is_flaggable() {
+        assert!(tmp_file_flaggable("dropper", 0o100755, 300));
+    }
+
+    /// The corosync case from wolf1: libqb blackbox ring buffers are
+    /// DATA files (mode 0600) in /dev/shm. chkrootkit flags them; we
+    /// must not — the alarm keys on the executable bit and that gate
+    /// is load-bearing.
+    #[test]
+    fn corosync_blackbox_data_file_never_flagged() {
+        assert!(!tmp_file_flaggable(
+            "qb-3110230-3110234-32-1aB7dX/qb-blackbox-data", 0o100600, 60));
+        assert!(!tmp_file_flaggable("qb-blackbox-data", 0o100600, 60));
+        // Even a brand-new plain-data file: not executable → never flagged.
+        assert!(!tmp_file_flaggable("anything.bin", 0o100644, 1));
+    }
+
+    #[test]
+    fn old_or_benign_executables_not_flagged() {
+        assert!(!tmp_file_flaggable("dropper", 0o100755, 90_000));   // >24h
+        assert!(!tmp_file_flaggable("dropper", 0o100755, -5));       // clock skew
+        assert!(!tmp_file_flaggable("pip-build-tool", 0o100755, 60));
+        assert!(!tmp_file_flaggable("systemd-private-x", 0o100755, 60));
+        assert!(!tmp_file_flaggable("build.tmp", 0o100755, 60));
+    }
+
+    // ── package verify parsing ──
+
+    /// The chronyd case from wolf1: dpkg owns the file and `dpkg -V`
+    /// prints nothing for it (only FAILED paths get lines, dpkg(1))
+    /// — the file must be treated as clean and suppressed.
+    #[test]
+    fn package_owned_clean_file_is_suppressed() {
+        // Empty verify output = every check passed for every path.
+        assert!(verify_output_digest_ok("", "/usr/sbin/chronyd"));
+        // A failure for a DIFFERENT path in the same package doesn't
+        // taint ours.
+        assert!(verify_output_digest_ok(
+            "??5?????? c /etc/chrony/chrony.conf\n", "/usr/sbin/chronyd"));
+    }
+
+    #[test]
+    fn digest_mismatch_is_not_clean() {
+        // Third column '5' = content changed (dpkg(1) --verify).
+        assert!(!verify_output_digest_ok(
+            "??5??????   /usr/sbin/chronyd\n", "/usr/sbin/chronyd"));
+        // A missing file is not clean either.
+        assert!(!verify_output_digest_ok(
+            "missing   /usr/sbin/chronyd\n", "/usr/sbin/chronyd"));
+        // Conffile marker variant.
+        assert!(!verify_output_digest_ok(
+            "??5?????? c /usr/sbin/chronyd\n", "/usr/sbin/chronyd"));
+    }
 }
 
 #[cfg(test)]

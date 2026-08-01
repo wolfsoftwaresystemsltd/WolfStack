@@ -54,6 +54,7 @@ pub mod container_restart;
 pub mod container_boot;
 pub mod container_memory;
 pub mod threshold;
+pub mod boot_partition;
 pub mod cert_expiry;
 pub mod backup_freshness;
 pub mod vm_disk;
