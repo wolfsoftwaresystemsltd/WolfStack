@@ -505,13 +505,27 @@ pub fn require_cluster_secret(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !provided.is_empty()
-        && crate::auth::validate_inter_node_secret(provided, &state.cluster_secret)
+        && crate::auth::validate_inter_node_secret_from(
+            provided, &state.cluster_secret, peer_ip(req))
     {
         return Ok(());
     }
     Err(HttpResponse::Unauthorized().json(serde_json::json!({
         "error": "X-WolfStack-Secret missing or invalid"
     })))
+}
+
+/// Transport-level source address of a request, for the cluster-secret
+/// peer gate.
+///
+/// SECURITY: this deliberately uses `peer_addr()` — the real TCP peer —
+/// and NEVER `connection_info().realip_remote_addr()`, which honours
+/// `X-Forwarded-For`. That header is attacker-supplied; trusting it here
+/// would let anyone claim to be a recorded cluster peer and hand back the
+/// exact authentication bypass this gate exists to close. See
+/// `auth::default_secret_accepted_from`.
+pub fn peer_ip(req: &HttpRequest) -> Option<std::net::IpAddr> {
+    req.peer_addr().map(|a| a.ip())
 }
 
 /// Check if request is authenticated; returns username or error response
@@ -525,7 +539,9 @@ pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
     // unconditionally even when Stage 5 was tightened.
     if let Some(val) = req.headers().get("X-WolfStack-Secret") {
         let provided = val.to_str().unwrap_or("");
-        if crate::auth::validate_inter_node_secret(provided, &state.cluster_secret) {
+        if crate::auth::validate_inter_node_secret_from(
+            provided, &state.cluster_secret, peer_ip(req))
+        {
             return Ok("cluster-node".to_string());
         }
         // Invalid secret — do NOT fall through to session auth
@@ -600,7 +616,9 @@ pub fn require_cluster_auth(req: &HttpRequest, state: &web::Data<AppState>) -> R
             // of this helper accepted the hardcoded default unconditionally,
             // bypassing the Stage 5 env-flag gate that was applied to require_auth.
             // 13+ endpoints use this helper and inherited that gap; fixed here.
-            if crate::auth::validate_inter_node_secret(provided, &state.cluster_secret) {
+            if crate::auth::validate_inter_node_secret_from(
+                provided, &state.cluster_secret, peer_ip(req))
+            {
                 Ok(())
             } else {
                 Err(HttpResponse::Forbidden().json(serde_json::json!({
@@ -12497,7 +12515,7 @@ pub async fn lxc_import_external(
     // compared in non-constant time.
     let has_secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
-        .map(|v| crate::auth::validate_inter_node_secret(v, &state.cluster_secret))
+        .map(|v| crate::auth::validate_inter_node_secret_from(v, &state.cluster_secret, peer_ip(&req)))
         .unwrap_or(false);
 
     let has_token = req.headers().get("X-Transfer-Token")
@@ -14523,7 +14541,7 @@ pub async fn ai_action_exec(
     let secret_header = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_inter_node_secret(secret_header, &state.cluster_secret) {
+    if !crate::auth::validate_inter_node_secret_from(secret_header, &state.cluster_secret, peer_ip(&req)) {
         return HttpResponse::Forbidden().json(serde_json::json!({"error": "Cluster auth required"}));
     }
 
@@ -16918,7 +16936,7 @@ pub async fn security_cluster_secret_receive(
     let presented = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_inter_node_secret(presented, &state.cluster_secret) {
+    if !crate::auth::validate_inter_node_secret_from(presented, &state.cluster_secret, peer_ip(&req)) {
         return HttpResponse::Unauthorized().json(serde_json::json!({
             "error": "invalid cluster secret",
         }));
@@ -34051,7 +34069,7 @@ pub async fn wolfrun_sync(req: HttpRequest, state: web::Data<AppState>, body: we
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // Stage 5 — gate default-secret acceptance via the shared helper.
-    if !crate::auth::validate_inter_node_secret(secret, &state.cluster_secret) {
+    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req)) {
         // Also try cookie auth (in case admin calls it manually)
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
@@ -34087,7 +34105,7 @@ pub async fn statuspage_config_get(req: HttpRequest, state: web::Data<AppState>)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // Stage 5 — gate default-secret acceptance via the shared helper.
-    if !crate::auth::validate_inter_node_secret(secret, &state.cluster_secret) {
+    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req)) {
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
     let config = state.statuspage.config.read().unwrap().clone();
@@ -34379,7 +34397,7 @@ pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body:
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // Stage 5 — gate default-secret acceptance via the shared helper.
-    if !crate::auth::validate_inter_node_secret(secret, &state.cluster_secret) {
+    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req)) {
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
 
@@ -40017,7 +40035,7 @@ pub async fn gateways_sync(req: HttpRequest, state: web::Data<AppState>, body: w
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // Stage 5 — gate default-secret acceptance via the shared helper.
-    if !crate::auth::validate_inter_node_secret(provided, &state.cluster_secret)
+    if !crate::auth::validate_inter_node_secret_from(provided, &state.cluster_secret, peer_ip(&req))
     {
         return HttpResponse::Unauthorized().finish();
     }
@@ -42208,7 +42226,7 @@ async fn logs_ingest(
         .get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::auth::validate_inter_node_secret(provided, &state.cluster_secret) {
+    if !crate::auth::validate_inter_node_secret_from(provided, &state.cluster_secret, peer_ip(&req)) {
         return HttpResponse::Forbidden().json(serde_json::json!({"error": "invalid cluster secret"}));
     }
     // Only the designated hub stores logs. A non-hub node must never write
@@ -42442,7 +42460,7 @@ async fn logs_config_put(
         .headers()
         .get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
-        .map(|s| crate::auth::validate_inter_node_secret(s, &state.cluster_secret))
+        .map(|s| crate::auth::validate_inter_node_secret_from(s, &state.cluster_secret, peer_ip(&req)))
         .unwrap_or(false);
     if !is_internal {
         if let Err(resp) = require_auth(&req, &state) {

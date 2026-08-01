@@ -16,7 +16,9 @@ fn require_tui_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
     // lives in `auth::validate_inter_node_secret` — see Stage 5 docs.
     if let Some(val) = req.headers().get("X-WolfStack-Secret") {
         let provided = val.to_str().unwrap_or("");
-        if crate::auth::validate_inter_node_secret(provided, &state.cluster_secret) {
+        if crate::auth::validate_inter_node_secret_from(
+            provided, &state.cluster_secret, crate::api::peer_ip(req))
+        {
             return Ok("cluster-node".to_string());
         }
     }

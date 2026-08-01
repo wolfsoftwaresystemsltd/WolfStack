@@ -1987,7 +1987,8 @@ async fn vm_import_external(
     // compared in non-constant time.
     let has_secret = req.headers().get("X-WolfStack-Secret")
         .and_then(|v| v.to_str().ok())
-        .map(|v| crate::auth::validate_inter_node_secret(v, &state.cluster_secret))
+        .map(|v| crate::auth::validate_inter_node_secret_from(
+            v, &state.cluster_secret, crate::api::peer_ip(&req)))
         .unwrap_or(false);
 
     let has_token = req.headers().get("X-Transfer-Token")

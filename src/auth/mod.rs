@@ -428,6 +428,43 @@ fn realign_wolfusb_env(new_secret: &str) -> Result<(), std::io::Error> {
 /// support can recover a broken upgrade by setting the variable
 /// without an emergency hotfix release.
 pub fn default_secret_accepted() -> bool {
+    // No peer address supplied → fail CLOSED. See
+    // `default_secret_accepted_from` for why the peer is required.
+    default_secret_accepted_from(None)
+}
+
+/// Peer-scoped form of [`default_secret_accepted`].
+///
+/// # Security (CVE pending — reported by Dostxodjayev Abdullox, 2026-08-01)
+///
+/// Before this, the built-in default was accepted from ANY source
+/// address on a node that had not yet rotated. Since the constant is
+/// published in this very file, that made every un-migrated,
+/// network-reachable node a full authentication bypass: one HTTP
+/// request with the public constant reached `require_auth`-gated
+/// endpoints including `POST /api/containers/{runtime}/{id}/exec`,
+/// i.e. unauthenticated root RCE inside any managed container.
+///
+/// The default is now honoured ONLY when the request arrives from an
+/// address already recorded as a peer in `nodes.json`. Rationale:
+///   * A single-node install has no peers, so nothing legitimate can
+///     present the default — it is rejected outright.
+///   * An existing multi-node cluster keeps working, because its
+///     members are exactly the recorded peers. No upgrade breakage,
+///     which is why this is safe to ship without a coordinated
+///     rotation.
+///   * An attacker on the internet is not a recorded peer.
+///
+/// `peer` MUST be the transport-level source address (actix
+/// `HttpRequest::peer_addr`). NEVER pass a value derived from
+/// `X-Forwarded-For` / `realip_remote_addr`: those are attacker-
+/// controlled and would hand the bypass straight back.
+///
+/// Known, deliberate narrowing: a node still on the default whose
+/// peers are recorded as hostnames is accepted only while those
+/// hostnames resolve (60 s cache). Rotating the secret — which the
+/// dashboard banner now demands — removes the dependency entirely.
+pub fn default_secret_accepted_from(peer: Option<std::net::IpAddr>) -> bool {
     // Explicit reject takes priority — operators who set this WANT
     // the default rejected even if a future release flips the
     // overall default to "reject".
@@ -439,7 +476,7 @@ pub fn default_secret_accepted() -> bool {
     }
     // Permanent escape hatch: an operator recovering a half-migrated
     // cluster can force-accept the default without an emergency release.
-    // Takes priority over the auto-lock below.
+    // Takes priority over every check below, including the peer gate.
     if std::env::var("WOLFSTACK_ACCEPT_DEFAULT_SECRET")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -450,13 +487,87 @@ pub fn default_secret_accepted() -> bool {
     // has migrated and never needs the public built-in default (which is a
     // constant published in the source repo). Reject the default for it —
     // this closes the "public default secret accepted everywhere" hole for
-    // every cluster that has rotated, with zero operator action. Un-migrated
-    // installs (still on the default) keep accepting it so a binary upgrade
-    // can't sever their inter-node auth. See [[feedback_no_breaking_existing_installs]].
+    // every cluster that has rotated, with zero operator action.
     if has_custom_cluster_secret() {
         return false;
     }
-    true
+    // Un-migrated node: the default is still the working cluster
+    // credential, but only between RECORDED PEERS.
+    match peer {
+        Some(ip) => peer_is_recorded(ip),
+        None => false,
+    }
+}
+
+/// Normalise an address for comparison: IPv4-mapped IPv6
+/// (`::ffff:192.0.2.1`) is folded to its IPv4 form so a peer recorded
+/// as `192.0.2.1` still matches a connection accepted on a
+/// dual-stack listener.
+fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(v6),
+        },
+        v4 => v4,
+    }
+}
+
+/// Addresses recorded in `nodes.json`, resolved to IPs, cached for
+/// 60 s. Only consulted on the built-in-default path (a migrated node
+/// short-circuits above), so this never touches the hot auth path for
+/// a healthy cluster.
+fn peer_is_recorded(peer: std::net::IpAddr) -> bool {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    use std::net::ToSocketAddrs;
+
+    static CACHE: Mutex<Option<(Instant, HashSet<std::net::IpAddr>)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(60);
+
+    let peer = canonical_ip(peer);
+    // Poisoned lock must not become an auth bypass OR a cluster
+    // outage — recompute locally instead of trusting/So poisoning.
+    let mut guard = match CACHE.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if let Some((at, set)) = guard.as_ref()
+        && at.elapsed() < TTL
+    {
+        return set.contains(&peer);
+    }
+
+    let mut ips: HashSet<std::net::IpAddr> = HashSet::new();
+    let path = crate::paths::get().nodes_config;
+    if let Ok(raw) = std::fs::read_to_string(&path)
+        && let Ok(nodes) = serde_json::from_str::<Vec<serde_json::Value>>(&raw)
+    {
+        for n in nodes {
+            // `address` is the peer's configured address; `public_ip`
+            // is what it reported about itself. A peer can legitimately
+            // reach us from either, so both are allowed.
+            for key in ["address", "public_ip"] {
+                let Some(a) = n.get(key).and_then(|v| v.as_str()) else { continue };
+                let a = a.trim();
+                if a.is_empty() { continue; }
+                // Strip a [v6]:port / host:port wrapper if present.
+                let host = a.trim_start_matches('[').split(']').next().unwrap_or(a);
+                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                    ips.insert(canonical_ip(ip));
+                    continue;
+                }
+                // Hostname → resolve. Port 0 is fine; we only want IPs.
+                if let Ok(addrs) = (host, 0u16).to_socket_addrs() {
+                    for sa in addrs { ips.insert(canonical_ip(sa.ip())); }
+                }
+            }
+        }
+    }
+    let hit = ips.contains(&peer);
+    *guard = Some((Instant::now(), ips));
+    hit
 }
 
 /// Authenticate a presented `X-WolfStack-Secret` header value against
@@ -477,14 +588,36 @@ pub fn default_secret_accepted() -> bool {
 /// fine: an attacker learns nothing useful from "which of the three
 /// values matched" because the three valid values are equally
 /// authoritative.
-pub fn validate_inter_node_secret(provided: &str, in_memory: &str) -> bool {
+/// Use this from every HTTP handler, passing
+/// `req.peer_addr().map(|a| a.ip())`. See
+/// [`default_secret_accepted_from`] for the security rationale and
+/// for why a forwarded header must never be substituted here.
+pub fn validate_inter_node_secret_from(
+    provided: &str,
+    in_memory: &str,
+    peer: Option<std::net::IpAddr>,
+) -> bool {
+    // CRITICAL ORDERING — do not "optimise" this by checking the
+    // in-memory/on-disk slots first.
+    //
+    // On an un-migrated node BOTH of those slots literally CONTAIN the
+    // built-in default: `load_cluster_secret()` falls back to
+    // `CLUSTER_SECRET` whenever the custom-secret file is absent,
+    // empty or unreadable, and `state.cluster_secret` was populated
+    // from that same call at startup. So a "check our own slots first"
+    // arrangement matches the published constant on the ordinary
+    // comparison path and never consults the peer gate at all — which
+    // is precisely the bypass being fixed here, and precisely the
+    // reporter's PoC (an install whose /etc/wolfstack was unwritable).
+    //
+    // Therefore: if the presented value IS the published constant, the
+    // peer gate is the ONLY thing that can accept it, no matter which
+    // of our slots happens to hold the same bytes.
+    if validate_cluster_secret(provided, default_cluster_secret()) {
+        return default_secret_accepted_from(peer);
+    }
     if validate_cluster_secret(provided, in_memory) { return true; }
     if validate_cluster_secret(provided, &load_cluster_secret()) { return true; }
-    if default_secret_accepted()
-        && validate_cluster_secret(provided, default_cluster_secret())
-    {
-        return true;
-    }
     false
 }
 
@@ -2696,7 +2829,8 @@ mod secret_tests {
     /// in-memory match.
     #[test]
     fn inter_node_accepts_in_memory_unconditionally() {
-        assert!(validate_inter_node_secret("wsk_in_mem_value_for_test", "wsk_in_mem_value_for_test"));
+        assert!(validate_inter_node_secret_from(
+            "wsk_in_mem_value_for_test", "wsk_in_mem_value_for_test", None));
     }
 
     /// Stage 5 regression test: the OR-chain in
@@ -2705,20 +2839,80 @@ mod secret_tests {
     /// degenerate to "always true".
     #[test]
     fn inter_node_rejects_obviously_wrong_value() {
-        assert!(!validate_inter_node_secret("not_a_real_secret_at_all_xyz",
-                                            "wsk_in_mem_value_for_test"));
+        assert!(!validate_inter_node_secret_from("not_a_real_secret_at_all_xyz",
+                                                 "wsk_in_mem_value_for_test", None));
     }
 
-    /// Stage 5 regression test: default_secret_accepted() must default
-    /// to TRUE so shipping the binary doesn't break any existing install.
-    /// If the env var is set in the test runner this assertion is
-    /// skipped — we trust CI to not set WolfStack vars accidentally.
+    /// Security regression (CVE pending, reported 2026-08-01 by
+    /// Dostxodjayev Abdullox): the built-in default must NEVER be
+    /// accepted without a transport peer address. This assertion
+    /// replaces the old `default_secret_acceptance_defaults_to_true`,
+    /// which encoded exactly the posture that made every un-migrated,
+    /// network-reachable node an unauthenticated-RCE bypass.
+    ///
+    /// Skipped when the operator escape hatch is set in the runner's
+    /// environment — that flag legitimately forces acceptance.
     #[test]
-    fn default_secret_acceptance_defaults_to_true() {
-        if std::env::var("WOLFSTACK_REJECT_DEFAULT_SECRET").is_ok() { return; }
-        assert!(default_secret_accepted(),
-                "default-secret acceptance must default to true — \
-                 Stage 5 must not change behaviour for any install on upgrade");
+    fn default_secret_rejected_without_peer_address() {
+        if std::env::var("WOLFSTACK_ACCEPT_DEFAULT_SECRET").is_ok() { return; }
+        assert!(!default_secret_accepted(),
+                "the built-in default must be rejected when no peer address \
+                 is available — fail closed");
+        assert!(!default_secret_accepted_from(None),
+                "explicit None peer must also be rejected");
+    }
+
+    /// An address that is not a recorded peer must never authenticate
+    /// with the published constant. 203.0.113.0/24 is TEST-NET-3
+    /// (RFC 5737) and cannot be a real peer.
+    #[test]
+    fn default_secret_rejected_from_unrecorded_peer() {
+        if std::env::var("WOLFSTACK_ACCEPT_DEFAULT_SECRET").is_ok() { return; }
+        let stranger: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(!default_secret_accepted_from(Some(stranger)),
+                "an unrecorded source address must not be able to present \
+                 the built-in default secret");
+    }
+
+    /// The end-to-end shape of the reported vulnerability: the exact
+    /// published constant, presented by a stranger, against a node
+    /// whose in-memory secret is something else, must NOT authenticate.
+    #[test]
+    fn published_constant_does_not_authenticate_a_stranger() {
+        if std::env::var("WOLFSTACK_ACCEPT_DEFAULT_SECRET").is_ok() { return; }
+        let stranger: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(!validate_inter_node_secret_from(
+                    default_cluster_secret(), "wsk_some_other_in_memory_secret",
+                    Some(stranger)),
+                "PoC regression: the constant from src/auth/mod.rs must not \
+                 grant inter-node auth from an unrecorded address");
+        // Explicit "no peer information" must fail closed too.
+        assert!(!validate_inter_node_secret_from(
+                    default_cluster_secret(), "wsk_some_other_in_memory_secret", None),
+                "a request with no resolvable peer must fail closed on the default");
+    }
+
+    /// The real credential still works — the fix must not break a
+    /// legitimate peer presenting the node's actual secret.
+    #[test]
+    fn genuine_secret_still_authenticates_regardless_of_peer() {
+        let real = "wsk_a_genuine_per_install_secret_value_for_test";
+        assert!(validate_inter_node_secret_from(real, real, None));
+        let stranger: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(validate_inter_node_secret_from(real, real, Some(stranger)));
+    }
+
+    /// A peer arriving over a dual-stack listener shows up as an
+    /// IPv4-mapped IPv6 address; it must compare equal to the IPv4
+    /// form recorded in nodes.json.
+    #[test]
+    fn ipv4_mapped_ipv6_is_canonicalised() {
+        let mapped: std::net::IpAddr = "::ffff:192.0.2.10".parse().unwrap();
+        let plain: std::net::IpAddr = "192.0.2.10".parse().unwrap();
+        assert_eq!(canonical_ip(mapped), plain);
+        // A genuine v6 address is left alone.
+        let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(canonical_ip(v6), v6);
     }
 
     #[test]
