@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.9.0: System Check catches dead security controls, /boot alerts while there is still room to act, and the installer resolves podman conflicts** _(2026-08-01 — [`89968e25`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/89968e253345e553a8d7854fdfa72340f3b1e7a3))_
 - **v25.8.7: installer tells you to add a node on 8553 (HTTPS), not 8554** _(2026-07-31 — [`45e020fa`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/45e020fa18ad94a8df7199d0a685eda35462f1b8))_
 - **v25.8.7: the installer tells you to add a node on 8553 (HTTPS), not 8554** _(2026-07-31 — [`0f2cb718`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0f2cb718915c094e815f8af22184cf144057dc49))_
 - **v25.8.6: installer reports the inter-node port the node actually listens on** _(2026-07-31 — [`3fd38857`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3fd388574cc8d321e8c36bca29937da521b73312))_
