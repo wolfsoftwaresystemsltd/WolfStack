@@ -22,7 +22,7 @@ pub async fn console_ws(
     state: web::Data<crate::api::AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     // Require session authentication for WebSocket console access
-    if let Err(resp) = crate::api::require_auth(&req, &state) {
+    if let Err(resp) = crate::api::require_operator_auth(&req, &state) {
         return Ok(resp);
     }
 
@@ -734,10 +734,14 @@ pub async fn remote_console_ws(
     body: web::Payload,
     state: web::Data<crate::api::AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    // Require session authentication
-    if let Err(resp) = crate::api::require_auth(&req, &state) {
-        return Ok(resp);
-    }
+    // Require an operator identity — this opens an interactive root
+    // shell on the far node. The username is forwarded to that node so
+    // its own require_operator_auth can attribute the session; a peer's
+    // bare cluster secret is not sufficient there.
+    let actor = match crate::api::require_operator_auth(&req, &state) {
+        Ok(u) => u,
+        Err(resp) => return Ok(resp),
+    };
 
     let (node_id, ctype, name) = path.into_inner();
 
@@ -775,20 +779,33 @@ pub async fn remote_console_ws(
 
     let secret = state.cluster_secret.clone();
     let (response, session, msg_stream) = actix_ws::handle(&req, body)?;
-    actix_rt::spawn(remote_console_bridge(session, msg_stream, node.address, node.port, ctype, name, secret));
+    actix_rt::spawn(remote_console_bridge(session, msg_stream, RemoteConsoleTarget {
+        host: node.address, port: node.port, ctype, name, cluster_secret: secret, actor,
+    }));
     Ok(response)
+}
+
+/// Where a proxied console session is going, and on whose authority.
+struct RemoteConsoleTarget {
+    host: String,
+    port: u16,
+    ctype: String,
+    name: String,
+    cluster_secret: String,
+    /// Operator this console session is opened on behalf of. Sent to the
+    /// remote node as `X-WolfStack-Actor` so its `require_operator_auth`
+    /// accepts the forwarded shell. Never `"cluster-node"` — the caller
+    /// was authenticated as a real operator before this was built.
+    actor: String,
 }
 
 /// Bridge browser WS ↔ remote node's console WS
 async fn remote_console_bridge(
     mut session: actix_ws::Session,
     mut msg_stream: actix_ws::MessageStream,
-    remote_host: String,
-    remote_port: u16,
-    ctype: String,
-    name: String,
-    cluster_secret: String,
+    target: RemoteConsoleTarget,
 ) {
+    let RemoteConsoleTarget { host: remote_host, port: remote_port, ctype, name, cluster_secret, actor } = target;
     // Simple percent-encode for URL path
     let encoded_name: String = name.bytes().map(|b| {
         if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
@@ -848,9 +865,18 @@ async fn remote_console_bridge(
             Ok(req) => req,
             Err(_) => continue,
         };
-        // Authenticate with remote node via cluster secret
+        // Authenticate with remote node via cluster secret, plus the
+        // operator attribution its require_operator_auth demands for a
+        // shell. Skip the stamp if our caller was somehow a peer.
         if let Ok(val) = tungstenite::http::HeaderValue::from_str(&cluster_secret) {
             ws_request.headers_mut().insert("X-WolfStack-Secret", val);
+        }
+        if actor != "cluster-node"
+            && let Ok(val) = tungstenite::http::HeaderValue::from_str(&actor)
+        {
+            ws_request.headers_mut().insert("X-WolfStack-Proxied",
+                tungstenite::http::HeaderValue::from_static("1"));
+            ws_request.headers_mut().insert("X-WolfStack-Actor", val);
         }
 
         match tokio::time::timeout(

@@ -24961,8 +24961,16 @@ async function secretAuditRender() {
     // hidden if clean. Per-session dismissal stored in sessionStorage
     // so a fresh login surfaces it again.
     if (banner) {
+        // The built-in-default finding is NOT dismissible. Until v25.9.2 this
+        // banner could be waved away per session and only linked to Settings,
+        // which is how a node could run for months on the published constant
+        // (reported 2026-08-01 by @squeeze440 — the constant granted
+        // unauthenticated container RCE). A finding that means "anyone who
+        // read our source can authenticate here" gets a prompt that stays put
+        // and carries the fix, not a Dismiss button.
+        const defaultSecret = findings.some(f => f.id === 'cluster-secret-default');
         const dismissedKey = 'secret-audit-banner-dismissed-' + (data.finding_count || 0);
-        const dismissed = sessionStorage.getItem(dismissedKey) === '1';
+        const dismissed = !defaultSecret && sessionStorage.getItem(dismissedKey) === '1';
         if (findings.length === 0 || dismissed) {
             banner.style.display = 'none';
             banner.className = '';   // don't leave a stale severity skin on the hidden element
@@ -24976,14 +24984,21 @@ async function secretAuditRender() {
             const title = isCompromise
                 ? `Cluster secret is the built-in default — ${findings.length} finding${findings.length > 1 ? 's' : ''}`
                 : `${findings.length} credential audit finding${findings.length > 1 ? 's' : ''}`;
+            // Rotate-now for the default-secret case; Dismiss otherwise.
+            const actionBtn = defaultSecret
+                ? `<button onclick="selectView('settings'); switchSettingsTab('security'); setTimeout(function(){ document.getElementById('secret-audit-card')?.scrollIntoView({behavior:'smooth'}); secretAuditCoordinatedRotate(); }, 300); return false;" class="btn btn-sm" style="background:var(--danger,#ef4444); color:#fff; border:none; padding:6px 12px; border-radius:6px; cursor:pointer; white-space:nowrap; font-weight:600;">Rotate now</button>`
+                : `<button onclick="sessionStorage.setItem('${vlanEsc(dismissedKey)}','1'); document.getElementById('secret-audit-banner').style.display='none';" class="btn btn-sm" style="background:transparent; color:var(--text-secondary); border:1px solid var(--border); padding:6px 12px; border-radius:6px; cursor:pointer; white-space:nowrap;">Dismiss</button>`;
+            const body = defaultSecret
+                ? `This node authenticates with the cluster secret published in WolfStack's source. Rotating to a per-install secret takes one click and is coordinated across every peer — the cluster keeps working during the rolling restart.`
+                : `Open <a href="#" onclick="selectView('settings'); switchSettingsTab('security'); document.getElementById('secret-audit-card')?.scrollIntoView({behavior:'smooth'}); return false;" style="color:var(--text-primary); text-decoration:underline;">Settings → Security → Credential audit</a> to review and rotate.`;
             banner.innerHTML = `
                 <div style="display:flex; align-items:flex-start; gap:12px;">
                     <div style="font-size:20px; line-height:1;"><span class="ws-icon-clean-wrap" data-icon="warning"></span></div>
                     <div style="flex:1; font-size:13px; line-height:1.5;">
                         <div style="font-weight:600; margin-bottom:4px;">${vlanEsc(title)}</div>
-                        <div style="color:var(--text-secondary);">Open <a href="#" onclick="selectView('settings'); switchSettingsTab('security'); document.getElementById('secret-audit-card')?.scrollIntoView({behavior:'smooth'}); return false;" style="color:var(--text-primary); text-decoration:underline;">Settings → Security → Credential audit</a> to review and rotate.</div>
+                        <div style="color:var(--text-secondary);">${body}</div>
                     </div>
-                    <button onclick="sessionStorage.setItem('${vlanEsc(dismissedKey)}','1'); document.getElementById('secret-audit-banner').style.display='none';" class="btn btn-sm" style="background:transparent; color:var(--text-secondary); border:1px solid var(--border); padding:6px 12px; border-radius:6px; cursor:pointer; white-space:nowrap;">Dismiss</button>
+                    ${actionBtn}
                 </div>`;
             banner.style.display = 'block';
         }

@@ -606,6 +606,80 @@ pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
     }
 }
 
+/// Auth gate for endpoints that run caller-supplied commands or open an
+/// interactive shell.
+///
+/// # Why this exists
+///
+/// Third recommendation of the 2026-08-01 report by Dostxodjayev
+/// Abdullox (@squeeze440): *"a peer node legitimately proxying
+/// dashboard/API calls does not need blanket authority to run arbitrary
+/// shell commands inside every container; a narrower peer-scoped
+/// capability would shrink the blast radius of this credential class
+/// even after the default-secret issue above is fixed."*
+///
+/// The cluster secret is a single symmetric credential shared by every
+/// node, so it cannot cryptographically stop a secret-holder from doing
+/// what a peer can do. What it CAN do is stop the credential class from
+/// being a one-header path to a root shell:
+///
+/// **Accepts**
+///   * a real operator — session cookie or API key (the normal path)
+///   * a peer forwarding an operator's action: a cluster secret that is
+///     NOT the built-in default, together with `X-WolfStack-Proxied: 1`
+///     and `X-WolfStack-Actor` naming the operator upstream. Only
+///     `node_proxy` / `remote_console_bridge` stamp those, and only
+///     when their own caller was a real operator rather than another
+///     peer — so the attribution cannot be chained by a secret-holder.
+///
+/// **Rejects**
+///   * the built-in default secret, unconditionally — even from a
+///     recorded peer, and even when `WOLFSTACK_ACCEPT_DEFAULT_SECRET=1`.
+///     The published constant never reaches a shell, full stop. This is
+///     defence in depth layered on top of the peer gate in
+///     `auth::default_secret_accepted_from`.
+///   * a bare cluster secret with no operator attribution — node-to-node
+///     state sync has no business opening a shell.
+pub fn require_operator_auth(
+    req: &HttpRequest, state: &web::Data<AppState>,
+) -> Result<String, HttpResponse> {
+    if let Some(val) = req.headers().get("X-WolfStack-Secret") {
+        let provided = val.to_str().unwrap_or("");
+        // The published constant NEVER authorises command execution.
+        if crate::auth::validate_cluster_secret(provided, crate::auth::default_cluster_secret()) {
+            return Err(HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "The built-in default cluster secret cannot authorise command \
+                          execution. Rotate to a per-install secret: Settings → Security \
+                          → Rotate cluster secret."
+            })));
+        }
+        if !crate::auth::validate_inter_node_secret_from(
+            provided, &state.cluster_secret, peer_ip(req))
+        {
+            return Err(HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "Invalid cluster secret"
+            })));
+        }
+        let proxied = req.headers().get("X-WolfStack-Proxied")
+            .and_then(|v| v.to_str().ok()) == Some("1");
+        let actor = req.headers().get("X-WolfStack-Actor")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && *s != "cluster-node");
+        return match (proxied, actor) {
+            (true, Some(a)) => Ok(format!("{} (via peer)", a)),
+            _ => Err(HttpResponse::Forbidden().json(serde_json::json!({
+                "error": "This endpoint executes commands and requires an operator \
+                          identity. A cluster-secret-only request is not sufficient; \
+                          use a session or API key, or reach it through \
+                          /api/nodes/{id}/proxy as a logged-in operator."
+            }))),
+        };
+    }
+    // No cluster-secret header — fall through to session / API-key auth.
+    require_auth(req, state)
+}
+
 /// Require cluster secret authentication for inter-node endpoints
 pub fn require_cluster_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<(), HttpResponse> {
     match req.headers().get("X-WolfStack-Secret") {
@@ -7123,7 +7197,9 @@ pub async fn container_updates_check(req: HttpRequest, state: web::Data<AppState
 
 /// POST /api/containers/{runtime}/{id}/updates/apply — apply updates inside a container
 pub async fn container_updates_apply(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Runs a package-manager upgrade as root inside the container —
+    // command execution, so the same operator gate as container_exec.
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
     let (runtime, container) = path.into_inner();
     let pkg_manager = detect_container_pkg_manager(&runtime, &container);
 
@@ -7161,7 +7237,9 @@ pub async fn container_updates_apply(req: HttpRequest, state: web::Data<AppState
 
 /// POST /api/containers/{runtime}/{id}/exec — run a command inside a container
 pub async fn container_exec(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Command execution: operator identity required, and the built-in
+    // default secret is refused outright. See require_operator_auth.
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
     let (runtime, container) = path.into_inner();
     let cmd = body["command"].as_str().unwrap_or("");
     if cmd.is_empty() {
@@ -7914,7 +7992,13 @@ pub async fn node_proxy(
     path: web::Path<(String, String)>,
     body: web::Bytes,
 ) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // Capture WHO is proxying. Endpoints that execute commands
+    // (require_operator_auth) accept a peer's cluster secret only when
+    // it carries this attribution, so a bare node-to-node call cannot
+    // reach a shell. Deliberately NOT stamped when our own caller was
+    // itself a peer ("cluster-node"): otherwise a secret-holder could
+    // chain through any node's proxy to manufacture operator identity.
+    let actor = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
 
     let (node_id, api_path) = path.into_inner();
 
@@ -7965,6 +8049,12 @@ pub async fn node_proxy(
         // "a peer synced state to me" (e.g. image_watcher_config_save) key off
         // this stamp. Handlers that don't care simply ignore it.
         builder = builder.header("X-WolfStack-Proxied", "1");
+        // Operator attribution for command-execution endpoints on the
+        // far side. Omitted when the caller was another peer, which
+        // makes those endpoints refuse the forwarded call.
+        if actor != "cluster-node" {
+            builder = builder.header("X-WolfStack-Actor", actor.clone());
+        }
         if !body_vec.is_empty() {
             builder = builder.body(body_vec.clone());
         }
@@ -45496,5 +45586,61 @@ mod autofix_command_tests {
         assert!(!AUTOFIX_FINDING_TYPES.contains(&"tamper_detection"));
         assert!(!AUTOFIX_FINDING_TYPES.contains(&"disk_fill_eta"));
         assert_eq!(AUTOFIX_FINDING_TYPES.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod operator_auth_tests {
+    //! Tests for the shell-sink auth gate added for recommendation #3 of
+    //! the 2026-08-01 report by Dostxodjayev Abdullox (@squeeze440).
+    //!
+    //! `require_operator_auth` needs a full `AppState` to exercise
+    //! end-to-end, which these unit tests cannot cheaply build. What IS
+    //! unit-testable — and what actually carries the security property —
+    //! is the attribution rule: which `X-WolfStack-Actor` values count as
+    //! a real operator. That logic is mirrored here exactly as written in
+    //! the handler, so a change to one without the other fails the build
+    //! of intent, and the integration behaviour is documented alongside.
+
+    /// Mirror of the actor-acceptance predicate in `require_operator_auth`.
+    fn actor_is_operator(proxied: bool, actor: Option<&str>) -> bool {
+        let actor = actor
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && *s != "cluster-node");
+        matches!((proxied, actor), (true, Some(_)))
+    }
+
+    #[test]
+    fn bare_cluster_secret_cannot_reach_a_shell() {
+        // A peer presenting only the cluster secret — node-to-node state
+        // sync — has no operator attribution and must be refused.
+        assert!(!actor_is_operator(false, None));
+        assert!(!actor_is_operator(true, None));
+        assert!(!actor_is_operator(false, Some("paul")));
+    }
+
+    #[test]
+    fn operator_attribution_cannot_be_chained_by_a_peer() {
+        // require_auth returns the literal "cluster-node" for a
+        // cluster-secret caller. If that were forwarded as an actor, a
+        // secret-holder could bounce through any node's proxy to
+        // manufacture operator identity. node_proxy refuses to stamp it;
+        // this is the receiving end refusing it too (defence in depth).
+        assert!(!actor_is_operator(true, Some("cluster-node")));
+        assert!(!actor_is_operator(true, Some("  cluster-node  ")));
+    }
+
+    #[test]
+    fn blank_actor_is_not_an_operator() {
+        assert!(!actor_is_operator(true, Some("")));
+        assert!(!actor_is_operator(true, Some("   ")));
+    }
+
+    #[test]
+    fn genuine_proxied_operator_is_accepted() {
+        // The legitimate path: an operator clicked exec in the dashboard,
+        // their node proxied it, stamping both headers.
+        assert!(actor_is_operator(true, Some("paul")));
+        assert!(actor_is_operator(true, Some("admin@example.com")));
     }
 }

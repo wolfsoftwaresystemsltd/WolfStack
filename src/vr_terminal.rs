@@ -30,7 +30,7 @@ pub async fn vr_term_create(
     state: web::Data<crate::api::AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    if let Err(resp) = crate::api::require_operator_auth(&req, &state) { return resp; }
 
     let ctype = body.get("type").and_then(|v| v.as_str()).unwrap_or("host");
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("shell");
@@ -143,7 +143,7 @@ pub async fn vr_term_output(
     state: web::Data<crate::api::AppState>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    if let Err(resp) = crate::api::require_operator_auth(&req, &state) { return resp; }
     let id = path.into_inner();
 
     let mut sessions = VR_SESSIONS.lock().unwrap();
@@ -173,7 +173,7 @@ pub async fn vr_term_input(
     path: web::Path<String>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    if let Err(resp) = crate::api::require_operator_auth(&req, &state) { return resp; }
     let id = path.into_inner();
 
     let data = body.get("data").and_then(|v| v.as_str()).unwrap_or("");
@@ -202,7 +202,7 @@ pub async fn vr_term_close(
     state: web::Data<crate::api::AppState>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
+    if let Err(resp) = crate::api::require_operator_auth(&req, &state) { return resp; }
     let id = path.into_inner();
 
     let mut sessions = VR_SESSIONS.lock().unwrap();
