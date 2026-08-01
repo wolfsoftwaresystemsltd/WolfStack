@@ -4918,8 +4918,12 @@ async fn mtls_gate(
             .get("X-WolfStack-Secret")
             .and_then(|v| v.to_str().ok())
             .map(|s| {
+                // ServiceRequest exposes the same transport peer as
+                // HttpRequest::peer_addr — never a forwarded header.
+                let peer = req.peer_addr().map(|a| a.ip());
                 req.app_data::<actix_web::web::Data<crate::api::AppState>>()
-                    .map(|st| crate::auth::validate_inter_node_secret(s, &st.cluster_secret))
+                    .map(|st| crate::auth::validate_inter_node_secret_from(
+                        s, &st.cluster_secret, peer))
                     .unwrap_or(false)
             })
             .unwrap_or(false);
