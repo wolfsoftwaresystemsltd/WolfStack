@@ -2246,49 +2246,34 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                     &local_ips,
                                 );
                                 if is_self {
-                                    // Accept cluster_name updates from gossip (admin may have changed it on another node).
+                                    // A node is AUTHORITATIVE about its own cluster membership.
+                                    // We NEVER adopt our own cluster_name from a peer's gossip.
                                     //
-                                    // GATED ON is_self_strong. A weak IP match must never
-                                    // adopt: a peer gossips back ITS view of us, addressed by
-                                    // whatever IP it reaches us on (e.g. our WireGuard endpoint
-                                    // 10.203.0.1), tagged with THAT peer's cluster. The IP is
-                                    // ours, so the weak check said "self" and we adopted the
-                                    // remote cluster's name as our own — repeatedly, because
-                                    // every gossip round re-applied it.
-                                    // Observed 2026-07-28: adding the Wolf-Grid-Regions region
-                                    // servers silently moved wolfstack-1 out of intelligentwolf
-                                    // and into Wolf-Grid-Regions, and it kept coming back after
-                                    // being corrected. cluster_name is a display grouping, so
-                                    // this quietly reorganises an operator's whole fleet view.
+                                    // History: this block used to adopt a gossiped cluster on a
+                                    // strong self-id match, as a "safety net" for an admin rename
+                                    // made on another node. But a gossiped record is a MIRROR —
+                                    // every peer syncs its copy of us from other peers — and it
+                                    // carries no intent or timestamp, so there is no way to tell a
+                                    // fresh admin change from a STALE mirror re-asserting an old
+                                    // value. On 2026-07-28 adding the Wolf-Grid-Regions region
+                                    // servers left them holding wolfstack-1's record labelled
+                                    // "Wolf-Grid-Regions"; because that mirror carried wolfstack-1's
+                                    // real global id, the strong-match gate passed and wolfstack-1
+                                    // re-adopted the stale label within one gossip round of every
+                                    // correction — a permanent flap that silently reorganised the
+                                    // operator's whole fleet view. It recurred on v25.9.3
+                                    // (Paul 2026-08-01), because the stale mirrors were still out
+                                    // there and this adoption path kept honouring them.
+                                    //
+                                    // A legitimate reassignment travels via the delivery-confirmed
+                                    // identity-intent queue + the /api/agent/cluster-name push
+                                    // receiver (which retries until the target actually applies it
+                                    // and re-delivers to a node that was offline). Passive gossip
+                                    // adoption was only ever a redundant crutch on top of that, and
+                                    // it is the crutch that caused the flap — so it is gone. Our
+                                    // own self_cluster.json is the single source of truth for our
+                                    // membership; peers learn it FROM us, never the reverse.
                                     if is_self_strong {
-                                        if let Some(ref gossiped_cluster) = known.cluster_name {
-                                            let current_cluster = {
-                                                let nodes_r = cluster.nodes.read().unwrap();
-                                                nodes_r.get(&cluster.self_id).and_then(|n| n.cluster_name.clone())
-                                            };
-                                            // Case-insensitive: a peer gossiping a different-CASE
-                                            // spelling of our own cluster must NOT flip us — only a
-                                            // genuinely different name (a real rename) is adopted.
-                                            if !cluster_eq(current_cluster.as_deref(), Some(gossiped_cluster.as_str())) {
-
-                                                let mut nodes_w = cluster.nodes.write().unwrap();
-                                                if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
-                                                    n.cluster_name = Some(gossiped_cluster.clone());
-                                                }
-                                                drop(nodes_w);
-                                                ClusterState::save_self_cluster_name(gossiped_cluster);
-                                                // Our cluster changed (a rename/move learned via
-                                                // gossip before the direct push landed) — bring this
-                                                // node's local cluster-tagged stores along, same as
-                                                // the /api/agent/cluster-name receiver does. Without
-                                                // this, a member that converges via gossip first
-                                                // would satisfy the admin's intent sweep and the
-                                                // push (which carries the migration) never fires.
-                                                let old_label = current_cluster
-                                                    .unwrap_or_else(|| "WolfStack".to_string());
-                                                migrate_local_cluster_tags(&old_label, gossiped_cluster);
-                                            }
-                                        }
                                         // Same gossip-adoption safety net for the display name an
                                         // admin set on another node. Only adopt a Some value —
                                         // an older peer that doesn't know the field gossips None,

@@ -8074,6 +8074,13 @@ dns_cloudflare_api_token = your_token_here"
                 </div>
             </div>
 
+            <!-- Drive health & scheduled SMART self-tests. Physical-disk health
+                 belongs on the per-node Storage page (this), next to the disk
+                 layout — NOT on the cluster-wide Storage Array page where it
+                 lived until v25.9.4 (Paul 2026-08-01: "it makes no sense on
+                 storage array"). Populated by loadDriveHealthCard(). -->
+            <div id="drive-health-card"></div>
+
             <!-- Network & cluster filesystems (GlusterFS/NFS/CIFS/SSHFS/WolfDisk) —
                  not block devices, so they never appear in the disk layout above.
                  Hidden unless the node actually has such mounts. -->
