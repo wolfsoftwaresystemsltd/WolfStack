@@ -2487,7 +2487,7 @@ function selectServerView(nodeId, view) {
         }
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadZfsStatus(), loadDiskInfo(), loadGlusterStatus()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadZfsStatus(), loadDiskInfo(), loadGlusterStatus(), loadDriveHealthCard()]).finally(() => hidePageLoadingOverlay(el));
     if (view === 'shares') { _gwClusterMode = null; gwLoad().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'syslogs') { loadSystemLogs(); hidePageLoadingOverlay(el); }
     if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
@@ -77674,7 +77674,10 @@ function arrayRender() {
                 <div style="color:var(--text-muted);font-size:12px;margin-top:6px;">Use this if you know NoNRAID / mdadm IS installed but it's not being picked up</div>
                 <div id="array-diagnose-out" style="margin-top:18px;text-align:left;"></div>
             </div></div>
-        ` + smartTestsCardHtml();
+        `;
+        // Drive health moved to the per-node Storage page in v25.9.4 — see
+        // loadDriveHealthCard(). It never belonged on this cluster-wide array
+        // view (it only ever showed the local node's physical disks).
         return;
     }
 
@@ -77693,7 +77696,7 @@ function arrayRender() {
         html += `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin:8px 4px -2px;">${escapeHtml(groupName)}</div>`;
         for (const a of arrs) html += arrayRowHtml(a);
     }
-    list.innerHTML = html + smartTestsCardHtml();
+    list.innerHTML = html;
 }
 
 // ─── Drive health & scheduled SMART self-tests ───
@@ -77827,6 +77830,7 @@ function smartTestsCardHtml() {
         + '<th style="' + th + '">Device</th>'
         + '<th style="' + th + '">Powered on</th>'
         + '<th style="' + th + '">Life stage</th>'
+        + '<th style="' + th + '">Lifespan</th>'
         + '<th style="' + th + '">Last self-test</th>'
         + '<th style="' + th + '">Next</th>'
         + '<th style="' + th + '"></th>'
@@ -77847,6 +77851,7 @@ function smartTestsCardHtml() {
             + '<td style="' + td + '"><code>' + dev + '</code></td>'
             + '<td style="' + td + '">' + ageCell + '</td>'
             + '<td style="' + td + '">' + smartLifeBadge(d.life_stage) + '</td>'
+            + '<td style="' + td + '">' + smartLifeBar(hours, d.life_stage) + '</td>'
             + '<td style="' + td + '">' + smartTestResultCell(d) + '</td>'
             + '<td style="' + td + '">' + nextCell + '</td>'
             + '<td style="' + td + 'text-align:right;white-space:nowrap;">'
@@ -77859,6 +77864,16 @@ function smartTestsCardHtml() {
             + '</td></tr>';
     }
     html += '</tbody></table></div>';
+    // Legend for the Lifespan bar — the colour zones must never be read by
+    // colour alone (accessibility), so each is named here and the per-row
+    // badge already states the stage in words.
+    html += '<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:12px;font-size:11px;color:var(--text-muted);">'
+        + '<span style="font-weight:600;color:var(--text-primary,#fff);">Bathtub curve:</span>'
+        + smartLifeLegendKey('#f59e0b', 'Early life (&lt; 1 yr)')
+        + smartLifeLegendKey('#22c55e', 'Steady state (1–4 yr)')
+        + smartLifeLegendKey('#ef4444', 'Wear-out (&gt; 4 yr)')
+        + '<span>— drives are self-tested more often in the first and last stages, where failures cluster.</span>'
+        + '</div>';
     html += '<div style="color:var(--text-muted);font-size:11px;margin-top:10px;">'
         + 'A short test samples the drive in about two minutes. An extended test scans the whole '
         + 'surface and can run for hours — it happens in the background and the drive stays usable.'
@@ -77866,8 +77881,70 @@ function smartTestsCardHtml() {
     return html + '</div></div>';
 }
 
+// One key entry for the lifespan legend: a colour chip + a text label, so the
+// zones are never identified by colour alone.
+function smartLifeLegendKey(color, label) {
+    return '<span style="display:inline-flex;align-items:center;gap:5px;">'
+        + '<span style="width:11px;height:11px;border-radius:3px;background:' + color + ';opacity:0.85;"></span>'
+        + label + '</span>';
+}
+
+// Lifespan bar — one drive's position on the disk-failure "bathtub curve".
+// This is a positional plot of a single value on a fixed 3-zone axis, not a
+// chart of series, so it carries no categorical palette: the three zones use
+// the RESERVED status colours (amber/green/red), each named in the legend and
+// mirrored by the row's text badge. Scale runs 0 → 6 yr so the wear-out zone
+// has visible room; boundaries at 1 yr (8,760 h) and 4 yr (35,040 h) match
+// array::life_stage() on the backend.
+function smartLifeBar(hours, stage) {
+    if (typeof hours !== 'number') {
+        return '<span style="font-size:11px;color:var(--text-muted);">—</span>';
+    }
+    const MAX = 52560;               // 6 years in hours
+    const zoneColor = { 'early-life': '#f59e0b', 'steady-state': '#22c55e', 'wear-out': '#ef4444', 'unknown': '#94a3b8' };
+    const markCol = zoneColor[stage] || zoneColor.unknown;
+    const pct = Math.max(0, Math.min(100, (hours / MAX) * 100));
+    const yr = (hours / 8760).toFixed(1);
+    const stageWords = String(stage || 'unknown').replace(/-/g, ' ');
+    const tip = hours.toLocaleString() + ' h (' + yr + ' yr) — ' + stageWords
+        + '. Early life < 1 yr · Steady state 1–4 yr · Wear-out > 4 yr';
+    // Outer box positions the marker; inner flex row holds the three rounded,
+    // clipped zone tints. Marker sits above the clip so its 2px ring shows.
+    return '<div role="img" aria-label="' + escapeAttr(tip) + '" title="' + escapeAttr(tip) + '" '
+        + 'style="position:relative;width:170px;height:10px;">'
+        + '<div style="display:flex;width:100%;height:100%;border-radius:5px;overflow:hidden;background:var(--bg-tertiary,#2d2f3a);">'
+        + '<div style="width:16.67%;background:rgba(245,158,11,0.30);"></div>'
+        + '<div style="width:50%;background:rgba(34,197,94,0.26);"></div>'
+        + '<div style="width:33.33%;background:rgba(239,68,68,0.28);"></div>'
+        + '</div>'
+        + '<div style="position:absolute;top:-2px;bottom:-2px;left:' + pct.toFixed(1) + '%;'
+        + 'width:2px;background:' + markCol + ';transform:translateX(-1px);'
+        + 'box-shadow:0 0 0 1.5px var(--bg-secondary,#16181f);border-radius:1px;"></div>'
+        + '</div>';
+}
+
+// Storage-page host for the drive-health card. Fetches through apiUrl() so it
+// follows the currently-selected node (a proxied remote node works too), reuses
+// the same _arrayState.smartTests + smartTestsCardHtml() as the classifier does
+// everywhere else, and renders into #drive-health-card.
+async function loadDriveHealthCard() {
+    const card = document.getElementById('drive-health-card');
+    if (!card) return;
+    const r = await fetch(apiUrl('/api/array/smart-tests')).catch(() => null);
+    _arrayState.smartTests = await smartTestsResult(r);
+    card.innerHTML = smartTestsCardHtml();
+}
+
+// Refresh whichever drive-health surface is currently on screen. The self-test
+// buttons live in a card shared by the Storage page (#drive-health-card) and
+// the legacy Storage Array page (#array-list); refresh only the one present.
+async function refreshSmartTestSurfaces() {
+    if (document.getElementById('drive-health-card')) { await loadDriveHealthCard(); return; }
+    if (document.getElementById('array-list')) { await arraySmartTestsLoad(); }
+}
+
 async function arraySmartTestsLoad() {
-    const r = await fetch('/api/array/smart-tests').catch(() => null);
+    const r = await fetch(apiUrl('/api/array/smart-tests')).catch(() => null);
     _arrayState.smartTests = await smartTestsResult(r);
     arrayRender();
 }
@@ -77891,7 +77968,7 @@ async function arraySelfTestRun(device, kind) {
         if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
         showToast((kind === 'long' ? 'Extended' : 'Short') + ' self-test started on ' + device, 'success');
         // Give the drive a moment to report the test as in-progress.
-        setTimeout(arraySmartTestsLoad, 2000);
+        setTimeout(refreshSmartTestSurfaces, 2000);
     } catch (e) {
         // Errors persist (duration 0) so the operator can read and copy them.
         showToast('Could not start the self-test on ' + device + ': '
