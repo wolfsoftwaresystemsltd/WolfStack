@@ -148,7 +148,22 @@ download_prebuilt() {
         return 1
     fi
     local url="https://github.com/${repo}/releases/latest/download/${binary}-${BINARY_ARCH}"
-    echo "  Downloading prebuilt ${binary} for ${BINARY_ARCH}..."
+    # Say WHICH release "latest" resolves to before downloading — a
+    # troubleshooting aid (klas 2026-08-01): the operator sees immediately
+    # whether the expected version is being pulled instead of inferring it
+    # later from a feature that never arrived. The tag lives in the FIRST
+    # redirect hop's Location header (the final URL is an opaque signed
+    # CDN link, so curl's url_effective cannot provide it). Best-effort:
+    # any failure just falls back to the old tagless message.
+    local release_tag=""
+    release_tag=$(curl -sI --connect-timeout 10 --max-time 20 "$url" 2>/dev/null \
+        | tr -d '\r' | grep -i '^location:' | head -1 \
+        | sed -n 's#.*/releases/download/\([^/]*\)/.*#\1#p') || release_tag=""
+    if [ -n "$release_tag" ]; then
+        echo "  Downloading prebuilt ${binary} for ${BINARY_ARCH} (release ${release_tag})..."
+    else
+        echo "  Downloading prebuilt ${binary} for ${BINARY_ARCH}..."
+    fi
     local tmpfile="${dest}.download"
     # --max-time is a poor fit for an 80 MB binary: a slow-but-healthy link can
     # exceed it and be written off as "unavailable", which used to drop the
@@ -191,7 +206,21 @@ download_prebuilt() {
         fi
         mv "$tmpfile" "$dest"
         chmod +x "$dest"
-        echo "  ✓ Downloaded prebuilt ${binary} (${BINARY_ARCH})"
+        # Ground truth: what does the downloaded binary itself report?
+        # If this disagrees with the release tag printed above, the node
+        # pulled a stale artifact (proxy/CDN cache, wrong repo) — visible
+        # NOW instead of surfacing later as a missing feature. Best-effort:
+        # the timeout guards a dest on a stalled FUSE share (Unraid), and
+        # a binary without --version simply prints nothing extra. Running
+        # it here adds no risk — this binary is about to run as root
+        # anyway, and the checksum gate above already vetted it.
+        local self_version=""
+        self_version=$(timeout 10 "$dest" --version 2>/dev/null | head -1) || self_version=""
+        if [ -n "$self_version" ]; then
+            echo "  ✓ Downloaded prebuilt ${binary} (${BINARY_ARCH}) — binary reports: ${self_version}"
+        else
+            echo "  ✓ Downloaded prebuilt ${binary} (${BINARY_ARCH})"
+        fi
         return 0
     else
         echo "  ⚠ Prebuilt binary not available — will build from source"
