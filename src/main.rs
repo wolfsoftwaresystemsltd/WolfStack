@@ -3694,12 +3694,20 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                             let mem_pct = metrics.memory_percent;
                             let disk_pct = metrics.disks.iter()
                                 .filter(|d| {
-                                    // Skip /boot/ and /etc/pve mounts unless >99% — managed by the OS/Proxmox
-                                    if d.mount_point.starts_with("/boot") || d.mount_point == "/etc/pve" {
-                                        d.usage_percent > 99.0
-                                    } else {
-                                        true
-                                    }
+                                    // Skip /boot entirely — the predictive
+                                    // `boot_partition` analyzer owns it, with a
+                                    // free-space floor sized from the kernels on
+                                    // the partition (the old ">99% only" rule
+                                    // here alerted after /boot was already full
+                                    // and dpkg broken — wolf1 2026-08-01). Note
+                                    // this whole loop's alert dispatch is retired
+                                    // (`triggered` below is always empty); the
+                                    // filter is kept aligned so nobody reads a
+                                    // stale rule out of dead code.
+                                    if d.mount_point.starts_with("/boot") { return false; }
+                                    // /etc/pve (pmxcfs) only counts at >99%.
+                                    if d.mount_point == "/etc/pve" { return d.usage_percent > 99.0; }
+                                    true
                                 })
                                 .map(|d| d.usage_percent)
                                 .fold(0.0_f32, f32::max);
