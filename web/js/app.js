@@ -8514,9 +8514,33 @@ async function dismissProxmoxCleanupBanner() {
     if (banner) banner.style.display = 'none';
 }
 
+// True while a fetchNodes() is awaiting the network. The sidebar is polled
+// from three places (initial load, the 5s stuck-load watchdog, the 15/60s
+// poll); without this guard a HUNG /api/nodes lets each of those stack another
+// hung request behind the first, so nothing ever completes and the sidebar
+// sits on "Loading…" indefinitely (wolfstack-1, 2026-08-03: the node's
+// /api/nodes stalled for a few minutes while cluster state settled and the UI
+// never recovered until it happened to answer). One in-flight fetch at a time.
+let _fetchNodesInFlight = false;
+
 async function fetchNodes() {
+    if (_fetchNodesInFlight) return;
+    _fetchNodesInFlight = true;
     try {
-        const resp = await fetch('/api/nodes');
+        // Hard timeout so a stalled endpoint ABORTS instead of hanging forever
+        // — a bare `await fetch` neither resolves nor rejects on a server that
+        // accepts the connection but never replies, which is exactly the state
+        // that wedged the sidebar. On abort/failure the catch runs, the watchdog
+        // retries with a clean slate, and the user sees "Reconnecting…" rather
+        // than a frozen "Loading…".
+        const ctrl = new AbortController();
+        const killer = setTimeout(() => ctrl.abort(), 12000);
+        let resp;
+        try {
+            resp = await fetch('/api/nodes', { signal: ctrl.signal });
+        } finally {
+            clearTimeout(killer);
+        }
         if (handleAuthError(resp)) return;
         const data = await resp.json();
         // Support both new { version, nodes } format and legacy array format
@@ -8621,6 +8645,25 @@ async function fetchNodes() {
         // owned solely by connHeartbeat() (the /api/ping probe); just log and
         // let the next poll retry.
         console.error('Failed to fetch nodes:', e);
+        // If the sidebar has never painted (first loads all failed/timed out),
+        // swap the frozen "Loading…" placeholder for an honest, self-updating
+        // "Reconnecting…" so the user knows the UI is alive and retrying rather
+        // than hung. Once a fetch succeeds, buildServerTree() overwrites this.
+        // We only touch the placeholder before the first real paint — never
+        // stomp a rendered tree on a transient blip.
+        if (!_serverTreeRendered) {
+            const tree = document.getElementById('server-tree');
+            if (tree) {
+                const aborted = e && e.name === 'AbortError';
+                tree.innerHTML = '<div style="padding:8px 16px;color:var(--text-muted);font-size:12px;">'
+                    + '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;'
+                    + 'background:var(--warning,#f59e0b);margin-right:6px;vertical-align:middle;"></span>'
+                    + (aborted ? 'Node is slow to respond — reconnecting…' : 'Reconnecting to node…')
+                    + '</div>';
+            }
+        }
+    } finally {
+        _fetchNodesInFlight = false;
     }
 }
 
