@@ -130,6 +130,14 @@ pub const FINDING_TYPE: &str = "osv_vulnerability_detected";
 /// Auto-resolves on the next tick once the override takes effect.
 pub const FINDING_UNRECOGNIZED_DERIVATIVE: &str = "osv_unrecognized_derivative";
 
+/// Warn-tier finding when a kernel is running but its owning package could
+/// not be identified, so the running kernel was NOT scanned for CVEs. This
+/// is the honest signal that replaces the old silent fallback to a bogus
+/// `linux-image-<release>` package name (which produced a false all-clear
+/// for kernel CVEs on Proxmox nodes). Auto-resolves once the kernel package
+/// resolves (e.g. after an upgrade fixes the packaging).
+pub const FINDING_KERNEL_UNIDENTIFIED: &str = "osv_kernel_unidentified";
+
 /// Where the `distro-info-data` package (Debian / Ubuntu) drops its
 /// CSV files. Reading these at runtime means new Ubuntu / Debian
 /// release codenames flow into WolfStack the next time the operator
@@ -356,6 +364,12 @@ pub struct Inventory {
     /// from `uname -r`. Always queried separately because the
     /// installed-kernel-packages list contains stale versions.
     pub running_kernel: Option<RunningKernel>,
+    /// Set to the `uname -r` release when a kernel IS running but its
+    /// owning package could NOT be identified (e.g. an unrecognised
+    /// distro packaging layout). The sampler turns this into an
+    /// operator-visible warning — a scanner that can't identify what it
+    /// is scanning must say so, not silently skip the kernel.
+    pub kernel_unidentified: Option<String>,
 }
 
 impl Default for EcosystemResolution {
@@ -1142,12 +1156,17 @@ pub fn collect_host_inventory(
         }).collect(),
         _ => Vec::new(),
     };
-    let running_kernel = collect_running_kernel(pm);
+    let (running_kernel, kernel_unidentified) = match collect_running_kernel(pm) {
+        KernelProbe::Found(k) => (Some(k), None),
+        KernelProbe::Unidentified(release) => (None, Some(release)),
+        KernelProbe::NotApplicable => (None, None),
+    };
     Inventory {
         target: ScanTargetOwned::Host,
         entries,
         resolution,
         running_kernel,
+        kernel_unidentified,
     }
 }
 
@@ -1176,6 +1195,7 @@ pub fn collect_lxc_inventory(
                 entries: Vec::new(),
                 resolution,
                 running_kernel: None,
+                kernel_unidentified: None,
             };
         }
     };
@@ -1206,6 +1226,7 @@ pub fn collect_lxc_inventory(
         entries,
         resolution,
         running_kernel: None,
+        kernel_unidentified: None,
     }
 }
 
@@ -1302,49 +1323,159 @@ pub fn parse_apk_info(text: &str) -> Vec<(String, String)> {
 /// CVE risk — every other entry is dormant on disk. We supply the
 /// running version separately so the analyzer can dedup kernel CVE
 /// findings to the version actually loaded.
-fn collect_running_kernel(pm: PackageManager) -> Option<RunningKernel> {
-    let raw = run_capped("uname", &["-r"], Duration::from_secs(2))?;
+/// Outcome of probing the running kernel.
+enum KernelProbe {
+    /// Identified — query OSV with this.
+    Found(RunningKernel),
+    /// A kernel IS running (Debian/Proxmox) but its owning package could
+    /// not be identified. Carries the `uname -r` release for the operator
+    /// warning. Crucially we do NOT query OSV with a guessed package name
+    /// that cannot match anything — that produced a silent false all-clear
+    /// on the Proxmox nodes (wolf1, 2026-08-04).
+    Unidentified(String),
+    /// No kernel scanning applies (Arch / unknown PM, or `uname` failed).
+    NotApplicable,
+}
+
+fn collect_running_kernel(pm: PackageManager) -> KernelProbe {
+    let raw = match run_capped("uname", &["-r"], Duration::from_secs(2)) {
+        Some(r) => r,
+        None => return KernelProbe::NotApplicable,
+    };
     let release = raw.trim();
-    if release.is_empty() { return None; }
+    if release.is_empty() { return KernelProbe::NotApplicable; }
     match pm {
-        PackageManager::Apt => Some(RunningKernel {
-            // dpkg names the package `linux-image-<release>`.
-            package: format!("linux-image-{}", release),
-            version: kernel_version_from_dpkg(release).unwrap_or_else(|| release.to_string()),
-        }),
+        PackageManager::Apt => {
+            // Resolve the REAL owning package. Debian ships
+            // `linux-image-<release>`; Proxmox ships
+            // `proxmox-kernel-<release>-signed`, so the old hardcoded
+            // `linux-image-` guess resolved to nothing on every Proxmox
+            // node and the scan fell back to a name OSV can never match.
+            // dpkg -S on the boot image resolves correctly on both.
+            let owner = kernel_package_from_dpkg(release);
+            // Only probe the linux-image guess when there is no dpkg owner —
+            // on the common Debian path the owner already IS
+            // linux-image-<release>, so this avoids a redundant lookup.
+            let guess_exists = owner.is_none()
+                && kernel_version_for_package(&format!("linux-image-{}", release)).is_some();
+            match choose_kernel_package(release, owner, guess_exists) {
+                Some(pkg) => {
+                    // Prefer a live-patching agent's effective version — see
+                    // live_patched_kernel_version for why the on-disk version
+                    // over-reports CVEs on a KernelCare/TuxCare host.
+                    let version = effective_kernel_version(
+                        live_patched_kernel_version(),
+                        kernel_version_for_package(&pkg),
+                        release,
+                    );
+                    KernelProbe::Found(RunningKernel { package: pkg, version })
+                }
+                None => KernelProbe::Unidentified(release.to_string()),
+            }
+        }
         PackageManager::Dnf | PackageManager::Yum | PackageManager::Zypper => {
-            // RHEL family: package is "kernel" or "kernel-default";
-            // version is the uname -r without the architecture
-            // suffix. `release` already drops .arch.
-            Some(RunningKernel {
+            // RHEL family: package is "kernel"; version is the uname -r.
+            // Same live-patching blind spot as Debian — prefer the agent's
+            // effective version when a healthy agent is present.
+            //
+            // UNTESTED on RHEL: no host in this fleet runs RHEL, let alone
+            // RHEL + a live-patch agent, so the exact `kcarectl --uname`
+            // string format on RHEL is unverified. The no-agent path (the
+            // only one that fires in this fleet) is unchanged from before.
+            let version = effective_kernel_version(
+                live_patched_kernel_version(), None, release);
+            KernelProbe::Found(RunningKernel {
                 package: "kernel".to_string(),
-                version: release.to_string(),
+                version,
             })
         }
-        PackageManager::Apk => Some(RunningKernel {
+        PackageManager::Apk => KernelProbe::Found(RunningKernel {
             // Alpine ships `linux-virt` / `linux-lts` etc. The exact
             // package depends on the boot kernel; the version we
             // care about is `release` itself.
             package: "linux-lts".to_string(),
             version: release.to_string(),
         }),
-        PackageManager::Pacman | PackageManager::None => None,
+        PackageManager::Pacman | PackageManager::None => KernelProbe::NotApplicable,
     }
 }
 
-/// On Debian/Ubuntu, `uname -r` returns something like "6.8.0-39-generic"
-/// but the dpkg version is something like "6.8.0-39.39". Look up the
-/// installed package version from dpkg directly so OSV's range
-/// matcher gets the right form.
-fn kernel_version_from_dpkg(release: &str) -> Option<String> {
-    let pkg = format!("linux-image-{}", release);
+/// Effective running-kernel version reported by a live-patching agent, or
+/// None when no healthy agent is present.
+///
+/// KernelCare/TuxCare patches the kernel IN MEMORY, changing neither
+/// `uname -r` nor the dpkg package version, so the on-disk version
+/// over-reports every CVE fixed since the base package — and because live
+/// patching means the host never reboots, that gap only widens. Measured on
+/// wolfstack-1 (2026-08-04): dpkg says `6.12.90-2`, but `kcarectl --uname`
+/// reports the actually-running `6.12.96-1`.
+///
+/// `run_capped` returns Some only on a clean exit 0, so a missing agent
+/// (spawn fails) or an errored one yields None and the caller keeps the
+/// on-disk version — the correct no-agent behaviour, which must not regress.
+///
+/// Oracle Ksplice (`uptrack-uname -r`) and Ubuntu Livepatch are deliberately
+/// NOT wired here: no host in this fleet runs them, and a half-wired branch
+/// that silently does nothing is worse than an honest omission. Add them
+/// properly when a host needs them.
+fn live_patched_kernel_version() -> Option<String> {
+    let out = run_capped("kcarectl", &["--uname"], Duration::from_secs(3))?;
+    parse_kcarectl_uname(&out)
+}
+
+/// Pure parser for `kcarectl --uname` stdout: the effective version, printed
+/// on a line of its own, or None when empty.
+fn parse_kcarectl_uname(stdout: &str) -> Option<String> {
+    let v = stdout.trim();
+    if v.is_empty() { None } else { Some(v.to_string()) }
+}
+
+/// The package that actually owns the running kernel image, via
+/// `dpkg-query -S /boot/vmlinuz-<release>` — works on both Debian
+/// (`linux-image-*`) and Proxmox (`proxmox-kernel-*-signed`), unlike a
+/// hardcoded name guess. Returns the owning package name.
+fn kernel_package_from_dpkg(release: &str) -> Option<String> {
+    let path = format!("/boot/vmlinuz-{}", release);
+    let out = run_capped("dpkg-query", &["-S", &path], Duration::from_secs(3))?;
+    crate::predictive::boot_partition::parse_dpkg_search_owners(&out, &path)
+        .into_iter()
+        .next()
+}
+
+/// The dpkg `${Version}` of a specific, already-resolved package. On
+/// Debian/Ubuntu `uname -r` ("6.8.0-39-generic") differs from the dpkg
+/// version ("6.8.0-39.39"), so OSV's range matcher needs this form.
+fn kernel_version_for_package(pkg: &str) -> Option<String> {
     let text = run_capped(
         "dpkg-query",
-        &["-W", "-f=${Version}", &pkg],
+        &["-W", "-f=${Version}", pkg],
         Duration::from_secs(3),
     )?;
     let trimmed = text.trim();
     if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// Choose the kernel package name: the dpkg owner (authoritative) if known,
+/// else the historical `linux-image-<release>` guess but ONLY when that
+/// guess resolves to an installed package. None means "could not identify",
+/// which the caller surfaces as a scanner warning rather than querying OSV
+/// with a name that cannot match anything.
+fn choose_kernel_package(release: &str, dpkg_owner: Option<String>, guess_exists: bool) -> Option<String> {
+    if let Some(owner) = dpkg_owner {
+        return Some(owner);
+    }
+    if guess_exists {
+        return Some(format!("linux-image-{}", release));
+    }
+    None
+}
+
+/// Version to hand OSV: the live-patched effective version when a healthy
+/// agent reports one, else the on-disk dpkg version, else the raw release.
+fn effective_kernel_version(live_patched: Option<String>, dpkg_version: Option<String>, release: &str) -> String {
+    live_patched
+        .or(dpkg_version)
+        .unwrap_or_else(|| release.to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -1807,6 +1938,11 @@ pub struct OsvFacts {
     /// nudging the operator toward `distro-info-data` or a manual
     /// override.
     pub unrecognized_derivatives: Vec<UnrecognizedDerivativeBreadcrumb>,
+    /// Targets where a kernel is running but its owning package could not
+    /// be identified — the running kernel was skipped, and the analyzer
+    /// emits one Warn finding per entry so the operator knows kernel CVEs
+    /// were NOT covered rather than seeing a false clean.
+    pub kernel_unidentified: Vec<KernelUnidentified>,
     pub config: OsvConfig,
     pub kev_cve_count: usize,
     /// Findings hidden by `OsvConfig.suppress_no_fix`. Reported on the
@@ -1824,6 +1960,15 @@ pub struct UnrecognizedDerivativeBreadcrumb {
     pub parent: ParentDistro,
     pub codename_hint: Option<String>,
     pub distro_info_present: bool,
+}
+
+/// A target whose running kernel package could not be identified — see
+/// `FINDING_KERNEL_UNIDENTIFIED`.
+#[derive(Debug, Clone)]
+pub struct KernelUnidentified {
+    pub target: ScanTargetOwned,
+    /// `uname -r` of the running kernel we could not resolve to a package.
+    pub release: String,
 }
 
 /// Cross-process / cross-call latch on the rate limit. Held only for
@@ -1861,6 +2006,7 @@ pub fn sample_now() -> OsvFacts {
         findings: Vec::new(),
         covered_targets: Vec::new(),
         unrecognized_derivatives: Vec::new(),
+        kernel_unidentified: Vec::new(),
         config: config.clone(),
         kev_cve_count: 0,
         suppressed_no_fix_by_target: HashMap::new(),
@@ -1891,6 +2037,12 @@ pub fn sample_now() -> OsvFacts {
                 parent: *parent,
                 codename_hint: codename_hint.clone(),
                 distro_info_present,
+            });
+        }
+        if let Some(release) = &inv.kernel_unidentified {
+            facts.kernel_unidentified.push(KernelUnidentified {
+                target: inv.target.clone(),
+                release: release.clone(),
             });
         }
     }
@@ -2848,7 +3000,58 @@ pub fn analyze(
             out.push(build_breadcrumb(b, &scope));
         }
     }
+    // Kernel-unidentified warnings. Not a CVE — a coverage GAP: the running
+    // kernel was NOT scanned. Emitted even in kev_only mode; "we didn't scan
+    // your kernel" is not noise-floor material.
+    for k in &facts.kernel_unidentified {
+        let scope = ProposalScope {
+            node_id: ctx.node_id.clone(),
+            resource_id: Some(format!("{}:kernel-unidentified",
+                k.target.as_target().resource_id())),
+        };
+        if acks.suppresses(FINDING_KERNEL_UNIDENTIFIED, &scope) { continue; }
+        if proposals.is_suppressed(FINDING_KERNEL_UNIDENTIFIED, &scope) { continue; }
+        out.push(build_kernel_unidentified(k, &scope));
+    }
     out
+}
+
+fn build_kernel_unidentified(k: &KernelUnidentified, scope: &ProposalScope) -> Proposal {
+    let target_label = k.target.as_target().label();
+    Proposal::new(
+        FINDING_KERNEL_UNIDENTIFIED, ProposalSource::Rule, Severity::Warn,
+        format!("OSV scanner could not identify the running kernel package on {}", target_label),
+        format!(
+            "The running kernel `{}` on {} could not be resolved to an owning \
+             package, so it was NOT scanned for CVEs. This is a coverage gap, \
+             not a clean result — kernel vulnerabilities on this host are \
+             currently invisible to the scanner. The usual cause is an \
+             unrecognised packaging layout where `dpkg -S /boot/vmlinuz-{}` \
+             returns no owner.",
+            k.release, target_label, k.release,
+        ),
+        vec![Evidence {
+            label: "Running kernel".into(),
+            value: k.release.clone(),
+            detail: Some("no owning dpkg package found".into()),
+            links: Vec::new(),
+        }],
+        RemediationPlan::Manual {
+            instructions:
+                "Confirm what owns the running kernel and make sure the package \
+                 database agrees. If dpkg genuinely has no record of it, the \
+                 kernel was likely installed outside the package manager or the \
+                 package was removed while booted — reinstall the matching \
+                 kernel package so future CVE scans and updates can track it."
+                .into(),
+            commands: vec![
+                "uname -r".into(),
+                "dpkg -S /boot/vmlinuz-$(uname -r)".into(),
+                "dpkg-query -W -f='${Version}\\n' \"$(dpkg -S /boot/vmlinuz-$(uname -r) | cut -d: -f1)\"".into(),
+            ],
+        },
+        scope.clone(),
+    )
 }
 
 fn build_breadcrumb(b: &UnrecognizedDerivativeBreadcrumb, scope: &ProposalScope) -> Proposal {
@@ -3011,6 +3214,21 @@ pub fn covered_scopes(
             },
         ));
     }
+    // Kernel-unidentified scopes — covered for every target we inventoried
+    // this tick (not just the unidentified ones), so the warning
+    // auto-resolves the moment the kernel becomes identifiable again
+    // (covered, but no finding re-emitted). Only the host ever carries a
+    // kernel finding; LXC targets share the host kernel.
+    for tgt in &facts.covered_targets {
+        out.push((
+            FINDING_KERNEL_UNIDENTIFIED.to_string(),
+            ProposalScope {
+                node_id: ctx.node_id.clone(),
+                resource_id: Some(format!("{}:kernel-unidentified",
+                    tgt.as_target().resource_id())),
+            },
+        ));
+    }
     out
 }
 
@@ -3059,6 +3277,73 @@ pub fn extra_covered_from_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Running-kernel probe (defects fixed 2026-08-04) ──
+
+    /// Case 1: live-patch agent PRESENT. `kcarectl --uname` reports the
+    /// effective version (measured on wolfstack-1); it must win over the
+    /// stale on-disk dpkg version so already-patched CVEs stop reporting.
+    #[test]
+    fn live_patch_version_overrides_dpkg_when_agent_present() {
+        assert_eq!(parse_kcarectl_uname("6.12.96-1\n").as_deref(), Some("6.12.96-1"));
+        assert_eq!(
+            effective_kernel_version(Some("6.12.96-1".into()), Some("6.12.90-2".into()), "6.12.90+deb13.1-amd64"),
+            "6.12.96-1",
+        );
+    }
+
+    /// Case 2: agent ABSENT. run_capped returns None (non-zero exit / no
+    /// binary) → parse sees nothing → the on-disk dpkg version is used
+    /// unchanged. This is the common case and must never regress.
+    #[test]
+    fn no_agent_keeps_on_disk_version() {
+        assert_eq!(parse_kcarectl_uname(""), None);
+        assert_eq!(parse_kcarectl_uname("  \n "), None);
+        assert_eq!(
+            effective_kernel_version(None, Some("6.12.90-2".into()), "6.12.90+deb13.1-amd64"),
+            "6.12.90-2",
+        );
+        // And with neither agent nor dpkg version, fall back to the raw release.
+        assert_eq!(effective_kernel_version(None, None, "6.14.11-2-pve"), "6.14.11-2-pve");
+    }
+
+    /// Case 3: Proxmox-style package name. `linux-image-<release>` finds
+    /// nothing on Proxmox; the real owner is `proxmox-kernel-*-signed`,
+    /// resolved via `dpkg -S /boot/vmlinuz-<release>` (measured on wolf1).
+    /// The dpkg-owner must be chosen over the guess.
+    #[test]
+    fn proxmox_kernel_package_resolved_from_dpkg_owner() {
+        // parse_dpkg_search_owners lives in boot_partition; confirm the
+        // real Proxmox `dpkg -S` line parses to the signed package.
+        let out = "proxmox-kernel-6.14.11-2-pve-signed: /boot/vmlinuz-6.14.11-2-pve\n";
+        let owner = crate::predictive::boot_partition::parse_dpkg_search_owners(
+            out, "/boot/vmlinuz-6.14.11-2-pve").into_iter().next();
+        assert_eq!(owner.as_deref(), Some("proxmox-kernel-6.14.11-2-pve-signed"));
+        // choose_kernel_package prefers the dpkg owner over the linux-image guess.
+        assert_eq!(
+            choose_kernel_package("6.14.11-2-pve", owner, /* guess_exists */ false).as_deref(),
+            Some("proxmox-kernel-6.14.11-2-pve-signed"),
+        );
+    }
+
+    /// The Debian happy path still uses the linux-image guess when it
+    /// genuinely resolves (no owner lookup available but the guess exists).
+    #[test]
+    fn debian_kernel_uses_linux_image_guess_when_it_exists() {
+        assert_eq!(
+            choose_kernel_package("6.8.0-39-generic", None, /* guess_exists */ true).as_deref(),
+            Some("linux-image-6.8.0-39-generic"),
+        );
+    }
+
+    /// Case 4: kernel package UNIDENTIFIABLE — no dpkg owner AND the
+    /// linux-image guess doesn't resolve. Must return None so the caller
+    /// surfaces a warning instead of querying OSV with a bogus name (the
+    /// old silent false all-clear).
+    #[test]
+    fn unidentifiable_kernel_returns_none_not_a_bogus_guess() {
+        assert_eq!(choose_kernel_package("6.14.11-2-pve", None, /* guess_exists */ false), None);
+    }
 
     #[test]
     fn ecosystem_ubuntu_lts_includes_lts_suffix() {
@@ -3937,6 +4222,7 @@ mod tests {
             findings: Vec::new(),
             covered_targets: vec![ScanTargetOwned::Host],
             unrecognized_derivatives: Vec::new(),
+            kernel_unidentified: Vec::new(),
             config: OsvConfig::default(),
             kev_cve_count: 0,
             suppressed_no_fix_by_target: suppressed,
@@ -4126,6 +4412,7 @@ mod tests {
             findings: Vec::new(),
             covered_targets: vec![ScanTargetOwned::Host],
             unrecognized_derivatives: Vec::new(),
+            kernel_unidentified: Vec::new(),
             config: OsvConfig::default(),
             kev_cve_count: 0,
             suppressed_no_fix_by_target: HashMap::new(),
@@ -4212,6 +4499,7 @@ mod tests {
                 codename_hint: Some("robust".to_string()),
                 distro_info_present: false,
             }],
+            kernel_unidentified: Vec::new(),
             config: OsvConfig::default(),
             kev_cve_count: 0,
             suppressed_no_fix_by_target: HashMap::new(),
@@ -4243,6 +4531,7 @@ mod tests {
                 codename_hint: None,
                 distro_info_present: true,
             }],
+            kernel_unidentified: Vec::new(),
             config,
             kev_cve_count: 0,
             suppressed_no_fix_by_target: HashMap::new(),
@@ -4266,6 +4555,7 @@ mod tests {
                 codename_hint: Some("robust".into()),
                 distro_info_present: false,
             }],
+            kernel_unidentified: Vec::new(),
             config: OsvConfig::default(),
             kev_cve_count: 0,
             suppressed_no_fix_by_target: HashMap::new(),
@@ -4296,6 +4586,7 @@ mod tests {
             findings: Vec::new(),
             covered_targets: vec![ScanTargetOwned::Host],
             unrecognized_derivatives: Vec::new(),
+            kernel_unidentified: Vec::new(),
             config: OsvConfig::default(),
             kev_cve_count: 0,
             suppressed_no_fix_by_target: HashMap::new(),
@@ -4328,6 +4619,7 @@ mod tests {
             findings: Vec::new(),
             covered_targets: vec![ScanTargetOwned::Host],
             unrecognized_derivatives: Vec::new(),
+            kernel_unidentified: Vec::new(),
             config: OsvConfig::default(),
             kev_cve_count: 0,
             suppressed_no_fix_by_target: HashMap::new(),
@@ -4362,6 +4654,7 @@ mod tests {
             findings: Vec::new(),
             covered_targets: vec![ScanTargetOwned::Host],
             unrecognized_derivatives: Vec::new(),
+            kernel_unidentified: Vec::new(),
             config: OsvConfig::default(),
             kev_cve_count: 0,
             suppressed_no_fix_by_target: HashMap::new(),
