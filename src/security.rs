@@ -226,6 +226,7 @@ const RISKY_PORTS: &[(u16, &str, &str, bool)] = &[
     (5432, "postgres",           "PostgreSQL exposed. Verify pg_hba.conf doesn't trust the network.", false),
     (11211,"memcached",          "memcached has no auth; UDP listener is a classic amplification vector.", false),
     (5601, "kibana",              "Kibana UI. If its Elasticsearch is open, attackers get a search interface too.", false),
+    (111,  "rpcbind-portmap",    "rpcbind/portmapper answering off-loopback. On UDP this is a DDoS amplification vector (~7-28x, CERT TA14-017A): an attacker spoofs a victim's source address and your host floods them with the reply. On a host with no NFS server and no NFSv3 client, rpcbind registers nothing but itself and can simply be switched off — check with `rpcinfo -p 127.0.0.1` first.", false),
 ];
 
 fn scan_listening_services(out: &mut Vec<DependencyCheck>) {
@@ -261,9 +262,18 @@ fn scan_listening_services(out: &mut Vec<DependencyCheck>) {
             if *rp != port { continue; }
             let name = format!("{}/{} exposed — {}", proto, port, service);
             let detail = format!("{} Listening on {}.", reason, local);
-            let fix = Some(format!(
-                "Bind the service to 127.0.0.1 in its config, OR block externally:\n  iptables -A INPUT -p {} --dport {} ! -s 127.0.0.1 -j DROP",
-                proto, port));
+            // rpcbind has no bind-address option, so the generic advice
+            // would be a dead end. On a host with no NFS it is not needed
+            // at all — mask BOTH units, because the socket unit is what
+            // actually holds port 111.
+            let fix = Some(if port == 111 {
+                "Check nothing uses RPC first:\n  rpcinfo -p 127.0.0.1\n  mount | grep 'type nfs'\nIf only 'portmapper' is registered and there are no NFS mounts, switch it off:\n  systemctl stop rpcbind.socket rpcbind.service\n  systemctl mask rpcbind.socket rpcbind.service\nIf you DO serve NFS, firewall 111 to your storage network instead."
+                    .to_string()
+            } else {
+                format!(
+                    "Bind the service to 127.0.0.1 in its config, OR block externally:\n  iptables -A INPUT -p {} --dport {} ! -s 127.0.0.1 -j DROP",
+                    proto, port)
+            });
             out.push(if *is_critical { critical(&name, &detail, fix) } else { warn(&name, &detail, fix) });
             break;
         }

@@ -51,20 +51,67 @@ pub const FINDING_SSHD_PASSWORD_AUTH: &str = "sshd_password_auth_enabled";
 pub const FINDING_SSHD_ROOT_LOGIN: &str = "sshd_root_login_enabled";
 pub const FINDING_SCAN_DETECTOR_DISABLED: &str = "scan_detector_disabled";
 
+/// Which transport a risky-port rule applies to.
+///
+/// Most entries are `Any`: an exposed Redis is an exposed Redis whether
+/// you reached it over TCP or UDP. Reflection rules are the exception —
+/// amplification is a UDP property, and firing them on a TCP listener
+/// would be a false positive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortProto { Any, Tcp, Udp }
+
+impl PortProto {
+    fn matches(self, p: crate::predictive::SocketProtocol) -> bool {
+        use crate::predictive::SocketProtocol as S;
+        matches!(
+            (self, p),
+            (PortProto::Any, _) | (PortProto::Tcp, S::Tcp) | (PortProto::Udp, S::Udp)
+        )
+    }
+}
+
+/// What KIND of problem an exposed port is.
+///
+/// `Exposure` — someone reaches your data or your host.
+/// `Reflection` — they never touch your data; they spoof your victim's
+/// address, and your host does the attacking. The distinction matters
+/// because the operator-facing message is completely different, and
+/// because reflection is what gets a provider abuse notice raised
+/// against you by a national CERT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RiskClass { Exposure, Reflection }
+
 /// Well-known services that should generally not be reachable from
 /// outside loopback. The bool flags "extreme blast radius" — Docker
 /// API plain on the public internet is *catastrophic*; an exposed
 /// PostgreSQL is bad but not as instantly-game-over.
-const RISKY_PORTS: &[(u16, &str, bool)] = &[
-    (2375, "docker-api-plain", true),  // root via container escape, no auth
-    (2376, "docker-api-tls",   false),
-    (6379, "redis",            false),
-    (27017,"mongodb",          false),
-    (9200, "elasticsearch",    false),
-    (3306, "mysql",            false),
-    (5432, "postgres",         false),
-    (11211,"memcached",        false),
-    (5601, "kibana",           false),
+///
+/// rpcbind/portmap is the first `Reflection` entry. It is worth being
+/// explicit about why it is here: it is almost never *needed*. On a
+/// host with no NFS server and no NFSv3 client it registers nothing but
+/// itself, yet ships enabled on most distros and answers the internet
+/// on 111/udp with a 7-28x bandwidth amplification factor (CERT
+/// TA14-017A). That combination — useless by default, loudly abusable,
+/// and reported by CERTs to the hosting provider rather than to the
+/// operator — is why an exposed portmapper is usually discovered via an
+/// abuse ticket instead of by the person running the box.
+const RISKY_PORTS: &[(u16, PortProto, RiskClass, &str, bool)] = &[
+    (2375, PortProto::Any, RiskClass::Exposure,   "docker-api-plain", true),  // root via container escape, no auth
+    (2376, PortProto::Any, RiskClass::Exposure,   "docker-api-tls",   false),
+    (6379, PortProto::Any, RiskClass::Exposure,   "redis",            false),
+    (27017,PortProto::Any, RiskClass::Exposure,   "mongodb",          false),
+    (9200, PortProto::Any, RiskClass::Exposure,   "elasticsearch",    false),
+    (3306, PortProto::Any, RiskClass::Exposure,   "mysql",            false),
+    (5432, PortProto::Any, RiskClass::Exposure,   "postgres",         false),
+    (11211,PortProto::Any, RiskClass::Exposure,   "memcached",        false),
+    (5601, PortProto::Any, RiskClass::Exposure,   "kibana",           false),
+    // UDP is the amplification vector — critical class, so a public
+    // bind lands on Severity::Critical via the matrix below.
+    (111,  PortProto::Udp, RiskClass::Reflection, "rpcbind-portmap",  true),
+    // TCP/111 cannot be used for reflection (the handshake defeats
+    // source spoofing), but it still enumerates RPC services and NFS
+    // exports to anyone who asks. Real, lesser, non-critical.
+    (111,  PortProto::Tcp, RiskClass::Exposure,   "rpcbind-portmap",  false),
 ];
 
 /// Per-tick snapshot of sshd config state.
@@ -117,12 +164,15 @@ pub fn covered_scopes(
     let mut out = Vec::new();
     let snap = &ctx.network;
     for sock in &snap.listening_sockets {
-        if let Some((_, _, _)) = lookup_risky(sock.port) {
+        if let Some((_, proto_rule, _, _, _)) = lookup_risky(sock.port, sock.protocol) {
             out.push((
                 FINDING_SERVICE_PUBLIC.to_string(),
                 ProposalScope {
                     node_id: ctx.node_id.clone(),
-                    resource_id: Some(format!("{}:{}", sock.bind, sock.port)),
+                    // MUST match analyze_listening_services exactly, or a
+                    // fixed finding never auto-resolves. Shared helper so
+                    // the two cannot drift apart.
+                    resource_id: Some(risky_resource_id(sock, proto_rule)),
                 },
             ));
         }
@@ -148,8 +198,37 @@ pub fn covered_scopes(
     out
 }
 
-fn lookup_risky(port: u16) -> Option<(u16, &'static str, bool)> {
-    RISKY_PORTS.iter().find(|(p, _, _)| *p == port).copied()
+/// Resource id a risky-port finding is scoped to — what an ack silences
+/// and what auto-resolve matches on.
+///
+/// Protocol is appended ONLY for protocol-specific rules, so 111/udp and
+/// 111/tcp can be acked independently while every pre-existing `Any`
+/// entry keeps a byte-identical id and no operator's existing ack is
+/// invalidated.
+fn risky_resource_id(
+    sock: &crate::predictive::ListeningSocket,
+    proto_rule: PortProto,
+) -> String {
+    match proto_rule {
+        PortProto::Any => format!("{}:{}", sock.bind, sock.port),
+        PortProto::Tcp => format!("{}:{}/tcp", sock.bind, sock.port),
+        PortProto::Udp => format!("{}:{}/udp", sock.bind, sock.port),
+    }
+}
+
+/// Resolve a listening socket to its risky-port rule.
+///
+/// Matching is on (port, protocol), not port alone: 111/udp and 111/tcp
+/// are separate entries with different classes, so a TCP portmapper is
+/// never reported as an amplification risk.
+fn lookup_risky(
+    port: u16,
+    proto: crate::predictive::SocketProtocol,
+) -> Option<(u16, PortProto, RiskClass, &'static str, bool)> {
+    RISKY_PORTS
+        .iter()
+        .find(|(p, pp, _, _, _)| *p == port && pp.matches(proto))
+        .copied()
 }
 
 fn analyze_listening_services(
@@ -160,7 +239,8 @@ fn analyze_listening_services(
 ) -> Vec<Proposal> {
     let mut out = Vec::new();
     for sock in &snap.listening_sockets {
-        let Some((_, service, is_critical_class)) = lookup_risky(sock.port) else { continue; };
+        let Some((_, proto_rule, class, service, is_critical_class)) =
+            lookup_risky(sock.port, sock.protocol) else { continue; };
 
         let reach = classify_bind(sock.bind, snap);
         if matches!(reach, NetworkReachability::LoopbackOnly) {
@@ -179,7 +259,7 @@ fn analyze_listening_services(
             (NetworkReachability::LoopbackOnly, _)       => continue,
         };
 
-        let resource = format!("{}:{}", sock.bind, sock.port);
+        let resource = risky_resource_id(sock, proto_rule);
         let scope = ProposalScope {
             node_id: ctx.node_id.clone(),
             resource_id: Some(resource.clone()),
@@ -187,7 +267,7 @@ fn analyze_listening_services(
         if acks.suppresses(FINDING_SERVICE_PUBLIC, &scope) { continue; }
         if proposals.is_suppressed(FINDING_SERVICE_PUBLIC, &scope) { continue; }
 
-        out.push(build_listening_proposal(sock, service, &reach, severity, &scope));
+        out.push(build_listening_proposal(sock, service, class, &reach, severity, &scope));
     }
     out
 }
@@ -195,6 +275,7 @@ fn analyze_listening_services(
 fn build_listening_proposal(
     sock: &crate::predictive::ListeningSocket,
     service: &str,
+    class: RiskClass,
     reach: &NetworkReachability,
     severity: Severity,
     scope: &ProposalScope,
@@ -238,22 +319,54 @@ fn build_listening_proposal(
         NetworkReachability::LoopbackOnly => "loopback (this should not have fired)",
     };
 
-    let title = format!(
-        "{} ({}/{}) reachable from {}",
-        service, proto, sock.port, reach_label,
-    );
+    let title = match class {
+        RiskClass::Reflection => format!(
+            "{} ({}/{}) can be abused to attack others — reachable from {}",
+            service, proto, sock.port, reach_label,
+        ),
+        RiskClass::Exposure => format!(
+            "{} ({}/{}) reachable from {}",
+            service, proto, sock.port, reach_label,
+        ),
+    };
 
-    let why = format!(
-        "Service `{}` (port {}/{}) is bound to `{}`, which makes it \
-         reachable from {}. The bind address resolves to that \
-         reachability class via the unified `NetworkReachability` \
-         classifier — see the resource_id `{}:{}` for filtering. \
-         If the exposure is intentional (e.g. an opt-in public \
-         endpoint with its own auth in front), acknowledge as \
-         intentional to silence permanently.",
-        service, sock.port, proto, sock.bind, reach_label,
-        sock.bind, sock.port,
-    );
+    // A reflection finding is not "someone can read your data" — it is
+    // "someone can point your host at a victim". Operators act on that
+    // differently, and it is what a national CERT reports to your hosting
+    // provider, so it is spelled out rather than folded into the generic
+    // exposure wording.
+    let why = match class {
+        RiskClass::Reflection => format!(
+            "Service `{}` is answering on {}/{} at `{}`, reachable from {}. \
+             This is a UDP amplification vector: an attacker sends a small \
+             query with your victim's address spoofed as the source, and \
+             THIS HOST sends the much larger reply to that victim. \
+             Portmapper amplifies roughly 7-28x (CERT TA14-017A), so your \
+             bandwidth is used to attack someone else. \
+             \n\nTwo things follow. First, you are unlikely to notice: the \
+             traffic leaves your host and the damage lands elsewhere. \
+             Second, this is what national CERTs scan for and report — the \
+             notice usually reaches your hosting provider's abuse desk \
+             before it reaches you. \
+             \n\nOn most hosts rpcbind is not needed at all: with no NFS \
+             server and no NFSv3 client it registers nothing but itself. \
+             Check with `rpcinfo -p 127.0.0.1` before assuming it is load-\
+             bearing. If this exposure is deliberate, acknowledge it to \
+             silence the finding.",
+            service, proto, sock.port, sock.bind, reach_label,
+        ),
+        RiskClass::Exposure => format!(
+            "Service `{}` (port {}/{}) is bound to `{}`, which makes it \
+             reachable from {}. The bind address resolves to that \
+             reachability class via the unified `NetworkReachability` \
+             classifier — see the resource_id `{}:{}` for filtering. \
+             If the exposure is intentional (e.g. an opt-in public \
+             endpoint with its own auth in front), acknowledge as \
+             intentional to silence permanently.",
+            service, sock.port, proto, sock.bind, reach_label,
+            sock.bind, sock.port,
+        ),
+    };
 
     let evidence = vec![
         Evidence {
@@ -270,18 +383,45 @@ fn build_listening_proposal(
         },
     ];
 
-    let remediation = RemediationPlan::Manual {
-        instructions: format!(
-            "Bind {} to 127.0.0.1 in its config OR firewall the port \
-             from external networks. If this is an intentional \
-             exposure, the cleanest path is to ack the finding so \
-             future scans don't re-flag it.",
-            service,
-        ),
-        commands: vec![
-            format!("ss -tlnp 'sport = :{}'", sock.port),
-            format!("sudo iptables -A INPUT -p {} --dport {} ! -s 127.0.0.1 -j DROP", proto, sock.port),
-        ],
+    // rpcbind gets its own remediation because "bind it to 127.0.0.1"
+    // is not actually achievable — rpcbind has no bind-address option on
+    // a modern distro. The real fix is to turn it off, and on a host with
+    // no NFS server and no NFSv3 client that costs nothing. Masking (not
+    // just disabling) is deliberate: the socket unit is what holds 111,
+    // and a masked unit cannot be pulled back up by a dependency or a
+    // package update.
+    let remediation = if sock.port == 111 {
+        RemediationPlan::Manual {
+            instructions:
+                "Check whether anything actually uses RPC on this host first: \
+                 `rpcinfo -p 127.0.0.1`. If the only program registered is \
+                 `portmapper` itself, and there are no NFS mounts, nothing \
+                 needs rpcbind and it can be switched off outright. Mask BOTH \
+                 units — the socket unit is what holds port 111, so stopping \
+                 only the service leaves the listener in place. If you do serve \
+                 NFS, firewall 111 to your storage network instead."
+                    .to_string(),
+            commands: vec![
+                "rpcinfo -p 127.0.0.1".to_string(),
+                "mount | grep 'type nfs'".to_string(),
+                "sudo systemctl stop rpcbind.socket rpcbind.service".to_string(),
+                "sudo systemctl mask rpcbind.socket rpcbind.service".to_string(),
+            ],
+        }
+    } else {
+        RemediationPlan::Manual {
+            instructions: format!(
+                "Bind {} to 127.0.0.1 in its config OR firewall the port \
+                 from external networks. If this is an intentional \
+                 exposure, the cleanest path is to ack the finding so \
+                 future scans don't re-flag it.",
+                service,
+            ),
+            commands: vec![
+                format!("ss -tlnp 'sport = :{}'", sock.port),
+                format!("sudo iptables -A INPUT -p {} --dport {} ! -s 127.0.0.1 -j DROP", proto, sock.port),
+            ],
+        }
     };
 
     Proposal::new(
@@ -534,6 +674,15 @@ mod tests {
         }
     }
 
+    fn udp_sock(addr: &str, port: u16) -> ListeningSocket {
+        ListeningSocket {
+            bind: addr.parse::<IpAddr>().unwrap(),
+            port,
+            protocol: SocketProtocol::Udp,
+            process: Some(format!("svc-{}", port)),
+        }
+    }
+
     fn ctx_with(interfaces: Vec<NetworkInterface>, sockets: Vec<ListeningSocket>) -> Context {
         Context {
             node_id: "node-a".into(),
@@ -577,6 +726,111 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].severity, Severity::Critical,
             "docker-api-plain on public internet must be Critical");
+    }
+
+    #[test]
+    fn rpcbind_udp_on_public_is_critical() {
+        let ctx = ctx_with(
+            vec![iface("eth0", "176.9.119.111", "inet")],
+            vec![udp_sock("0.0.0.0", 111)],
+        );
+        let p = analyze_listening_services(
+            &ctx, &ctx.network, &AckStore::default(), &ProposalStore::default(),
+        );
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].severity, Severity::Critical,
+            "rpcbind on udp/111 reachable from the internet is an amplification \
+             vector and must be Critical");
+        assert!(p[0].title.contains("attack others"),
+            "reflection findings must say the host attacks THIRD PARTIES, not \
+             that the host's own data is at risk: {}", p[0].title);
+    }
+
+    #[test]
+    fn rpcbind_tcp_on_public_is_not_critical() {
+        let ctx = ctx_with(
+            vec![iface("eth0", "176.9.119.111", "inet")],
+            vec![sock("0.0.0.0", 111)],   // TCP
+        );
+        let p = analyze_listening_services(
+            &ctx, &ctx.network, &AckStore::default(), &ProposalStore::default(),
+        );
+        assert_eq!(p.len(), 1);
+        assert_ne!(p[0].severity, Severity::Critical,
+            "tcp/111 cannot be spoofed for reflection — it is an information \
+             leak, not an amplifier, and must not share the UDP severity");
+        assert!(!p[0].title.contains("attack others"),
+            "tcp/111 must not claim to be a reflection vector: {}", p[0].title);
+    }
+
+    #[test]
+    fn rpcbind_udp_and_tcp_are_independently_ackable() {
+        // Both protocols exposed on the same address. They are distinct
+        // findings with different severities, so acking one must never
+        // silence the other.
+        let ctx = ctx_with(
+            vec![iface("eth0", "176.9.119.111", "inet")],
+            vec![udp_sock("0.0.0.0", 111), sock("0.0.0.0", 111)],
+        );
+        let p = analyze_listening_services(
+            &ctx, &ctx.network, &AckStore::default(), &ProposalStore::default(),
+        );
+        assert_eq!(p.len(), 2, "udp/111 and tcp/111 must be separate findings");
+        let ids: Vec<_> = p.iter()
+            .map(|x| x.scope.resource_id.clone().unwrap())
+            .collect();
+        assert_ne!(ids[0], ids[1],
+            "resource ids must differ or an ack on one silences the other: {:?}", ids);
+    }
+
+    #[test]
+    fn rpcbind_on_loopback_is_silent() {
+        // The correct posture. Must not nag.
+        let ctx = ctx_with(
+            vec![iface("lo", "127.0.0.1", "inet")],
+            vec![udp_sock("127.0.0.1", 111)],
+        );
+        let p = analyze_listening_services(
+            &ctx, &ctx.network, &AckStore::default(), &ProposalStore::default(),
+        );
+        assert!(p.is_empty(), "loopback-only rpcbind is correct, not a finding");
+    }
+
+    #[test]
+    fn existing_any_proto_rules_keep_their_resource_id() {
+        // Guards the ack-compatibility promise: entries that are not
+        // protocol-specific must keep the exact pre-change id, or every
+        // operator's existing acknowledgement silently stops matching.
+        let ctx = ctx_with(
+            vec![iface("eth0", "145.224.67.239", "inet")],
+            vec![sock("0.0.0.0", 3306)],
+        );
+        let p = analyze_listening_services(
+            &ctx, &ctx.network, &AckStore::default(), &ProposalStore::default(),
+        );
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].scope.resource_id.as_deref(), Some("0.0.0.0:3306"),
+            "non-protocol-specific rules must not gain a /tcp or /udp suffix");
+    }
+
+    #[test]
+    fn covered_scopes_match_finding_ids_for_rpcbind() {
+        // If these drift, a fixed rpcbind finding never auto-resolves.
+        let ctx = ctx_with(
+            vec![iface("eth0", "176.9.119.111", "inet")],
+            vec![udp_sock("0.0.0.0", 111)],
+        );
+        let findings = analyze_listening_services(
+            &ctx, &ctx.network, &AckStore::default(), &ProposalStore::default(),
+        );
+        let covered = covered_scopes(&ctx, &SshdConfig::default());
+        let finding_id = findings[0].scope.resource_id.clone().unwrap();
+        assert!(
+            covered.iter().any(|(f, s)| f == FINDING_SERVICE_PUBLIC
+                && s.resource_id.as_deref() == Some(finding_id.as_str())),
+            "covered_scopes must produce the same resource_id as the finding \
+             ({}), otherwise auto-resolve breaks", finding_id,
+        );
     }
 
     #[test]
