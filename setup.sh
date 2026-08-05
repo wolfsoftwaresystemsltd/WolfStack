@@ -37,6 +37,10 @@ AGENT_MODE=false
 SKIP_PBS_BUILD=false
 FORCE_PBS_BUILD=false
 MINIMAL=false
+# Did the operator state a Docker preference explicitly (--with-docker /
+# --no-docker, or the --minimal picker)? An explicit answer always wins over
+# the Proxmox default below — we only decline to guess, we never overrule.
+DOCKER_EXPLICIT=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --beta) BRANCH="beta" ;;
@@ -45,6 +49,11 @@ while [ $# -gt 0 ]; do
         --skip-pbs-build|--no-pbs-build) SKIP_PBS_BUILD=true ;;
         --build-pbs|--pbs-from-source) FORCE_PBS_BUILD=true ;;
         --minimal|--lite) MINIMAL=true ;;
+        # Explicit Docker choice. Needed on Proxmox VE, where Docker is NOT
+        # installed by default (see the PVE block after host detection) —
+        # an operator who wants it there has to say so.
+        --with-docker|--docker)  WANT_DOCKER=true;  DOCKER_EXPLICIT=true ;;
+        --no-docker|--without-docker) WANT_DOCKER=false; DOCKER_EXPLICIT=true ;;
         --install-dir|--install)
             if [ -n "$2" ]; then
                 shift
@@ -65,7 +74,11 @@ done
 # Pi print server, an edge node) gets a working monitoring UI without a
 # hypervisor and backup stack it will never use. The WolfStack binary detects
 # missing runtimes gracefully — skipped ones simply show as "not installed".
-WANT_DOCKER=true
+# NOTE: these defaults are applied AFTER argument parsing, so --with-docker /
+# --no-docker would be silently overwritten if this assignment were
+# unconditional. Only default WANT_DOCKER when the operator did not state a
+# preference on the command line.
+[ "$DOCKER_EXPLICIT" = true ] || WANT_DOCKER=true
 WANT_LXC=true
 WANT_KVM=true
 WANT_PBS=true
@@ -90,7 +103,10 @@ wolfstack_pick_components() {
         read -r reply < /dev/tty 2>/dev/null || reply=""
         case "$reply" in y|Y|yes|YES) eval "$2=true" ;; *) eval "$2=false" ;; esac
     }
+    # Answering the picker IS an explicit preference, either way — so on a
+    # Proxmox host it overrides the "don't install Docker" default below.
     _ws_pick "Docker (container management)?"          WANT_DOCKER
+    DOCKER_EXPLICIT=true
     _ws_pick "LXC system containers?"                  WANT_LXC
     _ws_pick "KVM / QEMU virtual machines?"            WANT_KVM
     _ws_pick "Proxmox Backup Client (PBS backups)?"    WANT_PBS
@@ -1203,6 +1219,30 @@ if command -v pveversion >/dev/null 2>&1 || [ -f /etc/pve/.version ] || dpkg -l 
     PVE_VER=$(pveversion 2>/dev/null || echo "unknown")
     echo "✓ Detected Proxmox VE host ($PVE_VER)"
     echo "  Skipping packages already provided by Proxmox (QEMU, LXC)"
+
+    # Docker is NOT installed by default on a PVE host. Proxmox's own FAQ
+    # says "It is not recommended to run docker directly on your Proxmox VE
+    # host", and we already treat PVE as a host to tread carefully on
+    # (see the apt branch below, which refuses to let Debian packages drag
+    # the proxmox-ve metapackage into a conflict). Installing Docker
+    # regardless was inconsistent with that care — reported by
+    # RutgerDiehard, who found both nodes of a fresh PVE cluster had had
+    # Docker added underneath them.
+    #
+    # This declines to GUESS; it never overrules. --with-docker, --no-docker
+    # and the --minimal picker all set DOCKER_EXPLICIT and win outright,
+    # because running Docker on PVE is a legitimate choice plenty of people
+    # make knowingly. An existing Docker install is untouched either way:
+    # the installer only ever adds Docker when it is absent.
+    if [ "$WANT_DOCKER" = true ] && [ "$DOCKER_EXPLICIT" != true ]; then
+        WANT_DOCKER=false
+        echo ""
+        echo "  ⓘ Not installing Docker on this Proxmox host."
+        echo "    Proxmox recommends against running Docker directly on a PVE host:"
+        echo "    https://pve.proxmox.com/pve-docs/chapter-pve-faq.html"
+        echo "    Run containers in an LXC or VM instead — WolfStack manages both."
+        echo "    Want it on the host anyway? Re-run with --with-docker."
+    fi
 fi
 
 # ─── Install manifest: snapshot package state BEFORE we install anything ───
