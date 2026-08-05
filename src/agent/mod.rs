@@ -2038,6 +2038,30 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             static POLL_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
                 crate::api::ipv4_only_client_builder()
                     .timeout(Duration::from_secs(10))
+                    // A connect timeout is NOT optional here, and its absence
+                    // took the production fleet down on 2026-08-05.
+                    //
+                    // `timeout()` bounds the whole request, but a SYN to a
+                    // black-holed address never reaches the point where that
+                    // clock does any good — the socket sits in SYN-SENT for the
+                    // kernel's full retry window (~130s with the default
+                    // tcp_syn_retries=6). This poller fires every 10 seconds at
+                    // every peer, and `build_node_urls` gives each peer THREE
+                    // targets (https :api, http :inter_node, http :api). So each
+                    // unreachable peer-URL stacked ~13 cycles of connections on
+                    // top of each other, for ever.
+                    //
+                    // Measured on wolfstack-1: 2,422 sockets in SYN-SENT (1,302
+                    // to :8553, 997 to :8554) plus 2,868 in CLOSE-WAIT — 6,349
+                    // sockets on one node, climbing ~700/min until the fd table
+                    // was exhausted and epoll cost put four actix workers at
+                    // ~80% each in kernel time.
+                    //
+                    // API_HTTP_CLIENT already carried connect_timeout(3s) for
+                    // exactly this reason (Bel's 5827 CLOSE_WAIT report). The
+                    // poller — the one client that dials EVERY peer on a timer,
+                    // reachable or not — was the one that never got it.
+                    .connect_timeout(Duration::from_secs(3))
                     .danger_accept_invalid_certs(true)
                     // Aggressive pool tuning so cluster polling doesn't
                     // leave orphaned idle sockets in CLOSE_WAIT when

@@ -36,6 +36,10 @@ use serde::{Deserialize, Serialize};
 static AGENT_LOOP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         crate::api::ipv4_only_client_builder()
+            // Never leave a connect hanging for the kernel's SYN retry
+            // window — see POLL_CLIENT (2026-08-05 fd exhaustion).
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     });

@@ -36,6 +36,11 @@ use super::AppState;
 static BROWSER_PROXY_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         crate::api::ipv4_only_client_builder()
+            // Bound the connect. Without it a proxied session to a node that
+            // has gone away parks a socket in SYN-SENT for the kernel's full
+            // ~130s retry window; enough of those exhaust the fd table (see
+            // POLL_CLIENT, 2026-08-05).
+            .connect_timeout(std::time::Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())

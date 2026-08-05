@@ -44,6 +44,10 @@ use super::{Agent, safety, tools::{self, AuthDecision, ToolId}};
 static DISPATCH_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         crate::api::ipv4_only_client_builder()
+            // Dials cluster peers for node queries — the same path that
+            // exhausted descriptors via POLL_CLIENT on 2026-08-05.
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(30))
             .danger_accept_invalid_certs(true)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
