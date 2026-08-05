@@ -372,6 +372,9 @@ static HEARTBEAT_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         crate::api::ipv4_only_client_builder()
             .timeout(std::time::Duration::from_secs(15))
+            // See POLL_CLIENT (2026-08-05): a total timeout does not stop a
+            // SYN to a black-holed address holding a descriptor for ~130s.
+            .connect_timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     });

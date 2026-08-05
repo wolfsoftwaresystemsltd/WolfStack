@@ -75,9 +75,34 @@ pub struct SystemMonitor {
     last_cpu_sample: Instant,
 }
 
-/// How often to do the expensive refresh (processes + disk list).
+/// How often to do the expensive refresh (disk list).
 /// At 2s polling interval, 15 ticks = every 30 seconds.
 const SLOW_REFRESH_TICKS: u32 = 15;
+
+/// Number of running processes, counted straight from /proc.
+///
+/// A `read_dir` and a digit check per entry — no per-process `open()`, so it
+/// costs nothing and, critically, leaves no descriptors behind. This replaces
+/// asking sysinfo, which only knows the count as a side effect of caching an
+/// open `/proc/<pid>/stat` handle for every process on the box.
+///
+/// Counts thread-group leaders (the numeric directories directly under /proc),
+/// which is what an operator means by "processes" — the previous number
+/// included every thread, so a node running a few hundred processes with heavy
+/// threading reported tens of thousands.
+fn count_processes() -> usize {
+    match std::fs::read_dir("/proc") {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                let bytes = name.as_encoded_bytes();
+                !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit())
+            })
+            .count(),
+        Err(_) => 0,
+    }
+}
 
 impl SystemMonitor {
     pub fn new() -> Self {
@@ -139,11 +164,31 @@ impl SystemMonitor {
         self.sys.refresh_memory();
         self.networks.refresh();
 
-        // Slow path (every ~30s): processes + disk list — these are expensive
+        // Slow path (every ~30s): disk list only.
+        //
+        // The full `refresh_processes(All, true)` that used to live here has
+        // been removed, and it was the single most expensive thing WolfStack
+        // did on a busy host. Two costs, both severe:
+        //
+        //   1. sysinfo walks and parses every entry under /proc. On a node
+        //      running ~190 OpenSim regions that is 50,766 threads, every 30
+        //      seconds, which alone put wolfstack at 390% CPU (production
+        //      fleet, 2026-08-05).
+        //   2. sysinfo's Linux backend keeps an open `/proc/<pid>/stat` handle
+        //      per process as a cache (`stat_file: Option<FileCounter>`), and
+        //      budgets itself HALF of RLIMIT_NOFILE to do it — it even raises
+        //      our soft limit to the hard limit first. With LimitNOFILE=65535
+        //      that is 32,767 descriptors held open for ever, which is what
+        //      exhausted the fd table and drove system CPU to 60-80%.
+        //
+        // Nothing in collect() needed it. The only consumer was the
+        // `processes` count below, and `top_processes()` — the one caller that
+        // actually wants the process LIST, behind GET /api/metrics/processes —
+        // already refreshes for itself on demand. So this was paying to scan
+        // every thread on the box every 30s to produce a single integer.
         self.tick += 1;
         if self.tick >= SLOW_REFRESH_TICKS {
             self.tick = 0;
-            self.sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
             self.disks.refresh_list();
         }
 
@@ -214,7 +259,7 @@ impl SystemMonitor {
                 five: load.five,
                 fifteen: load.fifteen,
             },
-            processes: self.sys.processes().len(),
+            processes: count_processes(),
             os_name: System::name(),
             os_version: System::os_version(),
             kernel_version: System::kernel_version(),
@@ -366,6 +411,42 @@ impl MetricsHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// The periodic collect() must NOT hold /proc file handles open. sysinfo
+    /// caches a `/proc/<pid>/stat` handle per process and grants itself half
+    /// of RLIMIT_NOFILE to do it; on the production fleet that was 32,767
+    /// descriptors per node and 60-80% system CPU. collect() no longer
+    /// refreshes processes at all, so repeated collects must not grow our fd
+    /// table.
+    #[test]
+    fn repeated_collect_does_not_accumulate_descriptors() {
+        fn open_fds() -> usize {
+            std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+        }
+        let mut mon = SystemMonitor::new();
+        let _ = mon.collect();
+        let baseline = open_fds();
+        // Enough iterations to cross SLOW_REFRESH_TICKS several times.
+        for _ in 0..(SLOW_REFRESH_TICKS * 3) {
+            let _ = mon.collect();
+        }
+        let after = open_fds();
+        assert!(
+            after <= baseline + 16,
+            "collect() leaked descriptors: {} -> {} over {} calls. sysinfo's \
+             per-process stat-handle cache is back in the hot path.",
+            baseline, after, SLOW_REFRESH_TICKS * 3,
+        );
+    }
+
+    /// The count must still be sane after dropping sysinfo's process refresh.
+    #[test]
+    fn process_count_is_plausible() {
+        let n = count_processes();
+        assert!(n > 0, "counted 0 processes — /proc parsing is broken");
+        assert!(n < 500_000, "counted {} processes, implausible", n);
+    }
 
     /// A one-shot `new()` + `collect()` must still produce a real CPU
     /// measurement.
