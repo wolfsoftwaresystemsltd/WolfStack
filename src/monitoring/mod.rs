@@ -106,8 +106,24 @@ fn count_processes() -> usize {
 
 impl SystemMonitor {
     pub fn new() -> Self {
-        let mut sys = System::new_all();
-        sys.refresh_all();
+        // Deliberately NOT `System::new_all()` / `refresh_all()`.
+        //
+        // Both mean `RefreshKind::everything()`, which includes a full process
+        // refresh — the exact thing collect() no longer does. sysinfo keeps an
+        // open `/proc/<pid>/stat` handle per process and grants itself HALF of
+        // RLIMIT_NOFILE for the cache, so a single construction claimed ~32,768
+        // descriptors on a busy host before a single metric was read. Removing
+        // the refresh from collect() alone was not enough: regions1-host still
+        // showed 33,178 fds twenty seconds after start (2026-08-05).
+        //
+        // Refresh only what SystemMetrics actually reads: CPU and memory.
+        // Disks and networks are separate objects handled below, and the
+        // process COUNT comes from `count_processes()` reading /proc directly.
+        // `top_processes()` still refreshes processes on demand for
+        // GET /api/metrics/processes — the one caller that wants the list.
+        let mut sys = System::new();
+        sys.refresh_cpu_all();
+        sys.refresh_memory();
         // Disks deliberately NOT refreshed at construction: sysinfo's disk
         // refresh statvfs()'s every mount, and a dead/starting FUSE mount
         // (/etc/pve while pve-cluster is still coming up, a stale sshfs, …)
@@ -412,6 +428,32 @@ impl MetricsHistory {
 mod tests {
     use super::*;
 
+
+
+    /// Construction must not claim sysinfo's descriptor budget either.
+    ///
+    /// `System::new_all()` means `RefreshKind::everything()`, which includes a
+    /// full process refresh — and sysinfo caches an open `/proc/<pid>/stat`
+    /// handle per process, budgeting itself HALF of RLIMIT_NOFILE. Fixing
+    /// collect() alone left this path claiming ~32,768 descriptors at startup
+    /// on a busy host.
+    #[test]
+    fn construction_does_not_claim_a_descriptor_per_process() {
+        fn open_fds() -> usize {
+            std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+        }
+        let before = open_fds();
+        let mon = SystemMonitor::new();
+        let after = open_fds();
+        drop(mon);
+        let procs = count_processes();
+        assert!(
+            after < before + procs.max(64),
+            "SystemMonitor::new() opened {} descriptors with {} processes on the \
+             box — it is refreshing processes and caching a stat handle each.",
+            after - before, procs,
+        );
+    }
 
     /// The periodic collect() must NOT hold /proc file handles open. sysinfo
     /// caches a `/proc/<pid>/stat` handle per process and grants itself half
