@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.1: service discovery no longer leaks a socket per probe and pegs the node** _(2026-08-05 — [`e9d8769a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e9d8769a65c9f02284a597f41b67506f3fdf0f13))_
 - **v25.10.0: an exposed rpcbind is now caught by WolfStack, not by your provider's abuse desk** _(2026-08-05 — [`df51826c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/df51826c50c25948e613781aeeae112b828841d8))_
 - **v25.9.6: OSV scanner identifies the running kernel correctly — no more false all-clear on Proxmox, no more already-patched CVEs on live-patched hosts** _(2026-08-04 — [`6ed550fb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6ed550fbb17e444cc04ab969fd822543cf4b5c15))_
 - **v25.9.5: the sidebar can no longer freeze on 'Loading…' when /api/nodes stalls** _(2026-08-03 — [`49302bb3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/49302bb3647c315a0cbf38b7a3135821ecf82c39))_
