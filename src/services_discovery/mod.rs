@@ -18,8 +18,65 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
+
+/// One HTTP client for every probe, for the lifetime of the process.
+///
+/// This was a fresh `reqwest::blocking::Client` per probe. A blocking
+/// client is not a thin handle — each one builds its own tokio runtime,
+/// thread and connection pool, so a sweep of N addresses x 24 ports
+/// created that many runtimes and leaked their descriptors. On a node
+/// whose peers are unroutable (RutgerDiehard 2026-08-05: a Docker bridge
+/// and a PVE address unreachable from the container) a single strace
+/// window caught 20,582 `socket()` and 20,580 `connect()` with 20,548
+/// failures against 26,020 `close()` — 17,810 descriptors still open, and
+/// `epoll_pwait` burning 40% of the process's syscall time because the
+/// descriptor set kept growing. Same failure `image_watcher.rs` already
+/// fixed for the async client.
+static PROBE_CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+    std::sync::LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            // Fail fast on an address nothing routes to, instead of holding
+            // the full read timeout. Unreachable peers are the common case
+            // on a mixed Docker/PVE estate and they dominate sweep time.
+            .connect_timeout(Duration::from_millis(800))
+            // Cluster web apps almost always have self-signed or PVE certs.
+            // Skip verification — we're just identifying, not transferring
+            // secrets.
+            .danger_accept_invalid_certs(true)
+            // Don't follow redirects — many apps redirect / to a long path
+            // we don't care about; we just need any non-error response.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    });
+
+/// Guards against overlapping sweeps.
+///
+/// `POST /api/cluster-services/sweep` is called by the page on load, and
+/// nothing stopped a second sweep starting while the first was still
+/// running. Each sweep walks every address x 24 ports at up to 2s per
+/// probe, so on an estate with unreachable peers one pass runs for
+/// minutes — long enough for every reload, reconnect or second browser
+/// tab to stack another full sweep on top. They pile up until the box is
+/// saturated. A caller that arrives mid-sweep now gets the cached list,
+/// which is what it would have rendered anyway.
+static SWEEP_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Clears `SWEEP_RUNNING` however `run_sweep` exits — early return, `?`, or
+/// a panic in a probe. A plain `store(false)` at the end of the function
+/// would strand the flag on any of those and silently kill discovery until
+/// the process restarts.
+struct SweepGuard;
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        SWEEP_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Auto-discovered services — shared across all WolfStack users on this
 /// node. Rewritten by every sweep.
@@ -270,17 +327,7 @@ fn identify(title: Option<&str>, server: Option<&str>) -> (String, &'static str,
 /// answer in under 100 ms; missing services timeout but don't pile up.
 fn probe(ip: &str, port: u16, scheme: &str) -> Option<DiscoveredService> {
     let url = format!("{}://{}:{}/", scheme, crate::netaddr::bracket_host(ip), port);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(2))
-        // Cluster web apps almost always have self-signed or PVE certs.
-        // Skip verification — we're just identifying, not transferring secrets.
-        .danger_accept_invalid_certs(true)
-        // Don't follow redirects — many apps redirect / to a long path
-        // we don't care about; we just need any non-error response.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .ok()?;
-    let resp = client.get(&url).send().ok()?;
+    let resp = PROBE_CLIENT.get(&url).send().ok()?;
     let status = resp.status().as_u16();
     // Treat 2xx, 3xx, 401, 403 as "service is here" — auth-protected
     // endpoints and redirects still mean something is listening that
@@ -313,6 +360,22 @@ fn probe(ip: &str, port: u16, scheme: &str) -> Option<DiscoveredService> {
 /// curated port list. Persists results to the shared discovered file
 /// (manual per-user entries live separately and aren't touched here).
 pub fn run_sweep() {
+    // Refuse to start a second sweep while one is in flight. compare_exchange
+    // so two callers racing here can never both win. The loser returns
+    // immediately and the endpoint serves the cached list — the same list it
+    // would have rendered had it waited, minus the pile-up.
+    if SWEEP_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        debug!("services_discovery: sweep already running, serving cached list");
+        return;
+    }
+    // Released on every exit path below, including the early return when no
+    // WolfNet IPs are known — a leaked `true` here would disable discovery for
+    // the lifetime of the process.
+    let _guard = SweepGuard;
+
     migrate_legacy_if_present();
 
     let ips = all_wolfnet_ips();
@@ -447,3 +510,44 @@ pub fn grouped_for(user: &str) -> Vec<(String, Vec<DiscoveredService>)> {
 
 #[allow(dead_code)]
 fn warn_unused() { warn!("unused"); }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The guard must clear the flag on EVERY exit path. If it ever strands
+    /// `SWEEP_RUNNING` at `true`, discovery is dead for the lifetime of the
+    /// process and the only symptom is an empty services page — silent, and
+    /// very hard to attribute.
+    #[test]
+    fn sweep_guard_clears_the_flag_even_on_panic() {
+        SWEEP_RUNNING.store(true, Ordering::SeqCst);
+        let r = std::panic::catch_unwind(|| {
+            let _guard = SweepGuard;
+            panic!("a probe blew up mid-sweep");
+        });
+        assert!(r.is_err(), "the panic should have propagated");
+        assert!(
+            !SWEEP_RUNNING.load(Ordering::SeqCst),
+            "SweepGuard must clear SWEEP_RUNNING when unwinding, or discovery \
+             never runs again on this node",
+        );
+    }
+
+    /// Two callers racing to start a sweep: exactly one wins. This is the
+    /// property that stops page loads stacking full sweeps on top of each
+    /// other until the node saturates.
+    #[test]
+    fn only_one_sweep_can_claim_the_flag() {
+        SWEEP_RUNNING.store(false, Ordering::SeqCst);
+        let first = SWEEP_RUNNING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        let second = SWEEP_RUNNING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        assert!(first, "the first caller must win the claim");
+        assert!(!second, "a second caller must be turned away while one runs");
+        SWEEP_RUNNING.store(false, Ordering::SeqCst);
+    }
+}

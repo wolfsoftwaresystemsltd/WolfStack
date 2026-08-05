@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use sysinfo::{System, Disks, Networks};
+use std::time::Instant;
+use sysinfo::{System, Disks, Networks, MINIMUM_CPU_UPDATE_INTERVAL};
 
 
 /// Snapshot of system metrics
@@ -68,6 +69,10 @@ pub struct SystemMonitor {
     networks: Networks,
     /// Counter for slow-path refreshes (processes, disks) — every Nth collect
     tick: u32,
+    /// When the CPU counters were last sampled. sysinfo derives CPU% from the
+    /// delta between two refreshes, so the gap between them IS the measurement
+    /// window — see the guard in `collect()`.
+    last_cpu_sample: Instant,
 }
 
 /// How often to do the expensive refresh (processes + disk list).
@@ -95,13 +100,42 @@ impl SystemMonitor {
             disks,
             networks,
             tick: SLOW_REFRESH_TICKS,
+            // refresh_all() above took the first CPU sample; collect() measures
+            // against this instant.
+            last_cpu_sample: Instant::now(),
         }
     }
 
     /// Collect current system metrics
     pub fn collect(&mut self) -> SystemMetrics {
+        // sysinfo computes CPU% from the delta between two refreshes, so the
+        // elapsed time between them IS the measurement window. Refresh again
+        // too soon and the busy-time delta is divided by a near-zero window,
+        // which pegs the result at ~100% no matter how idle the box is.
+        //
+        // The 2s polling loop is never anywhere near that limit, but every
+        // one-shot `SystemMonitor::new()` + `collect()` caller landed squarely
+        // inside it — the startup collection in main.rs, the MCP metrics tool
+        // and the WolfAgents node query. The startup one is the damaging case:
+        // its bogus reading is what the node publishes via `cluster.update_self`,
+        // so a freshly started or freshly restarted node advertised itself to
+        // the whole fleet at ~100% CPU while sitting idle (RutgerDiehard,
+        // 2026-08-05: six hosts all reporting 96-100% with `top` showing 76%
+        // idle). Restarting the service "fixed" it only until the next startup
+        // sample replaced it with another bogus 100%.
+        //
+        // Wait out the remainder of the interval so the window is real. Every
+        // one-shot caller is already on a dedicated thread or spawn_blocking,
+        // so this never parks an async worker, and the steady-state pollers
+        // never sleep at all.
+        let since_last = self.last_cpu_sample.elapsed();
+        if since_last < MINIMUM_CPU_UPDATE_INTERVAL {
+            std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL - since_last);
+        }
+
         // Fast path (every tick): CPU + memory + network only
         self.sys.refresh_cpu_all();
+        self.last_cpu_sample = Instant::now();
         self.sys.refresh_memory();
         self.networks.refresh();
 
@@ -326,5 +360,65 @@ impl MetricsHistory {
     /// Get all snapshots
     pub fn get_all(&self) -> Vec<MetricsSnapshot> {
         self.snapshots.iter().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-shot `new()` + `collect()` must still produce a real CPU
+    /// measurement.
+    ///
+    /// sysinfo derives CPU% from the gap between two refreshes. Before the
+    /// guard in `collect()`, the one-shot callers (startup metrics, the MCP
+    /// metrics tool, WolfAgents) refreshed microseconds after construction and
+    /// got ~100% on a completely idle machine — and the startup one is
+    /// published to the whole cluster via `update_self`, so every node
+    /// advertised itself as pegged right after boot.
+    ///
+    /// Asserting the elapsed window rather than the returned percentage keeps
+    /// this deterministic: a CI box under real load can legitimately report
+    /// any value, but the measurement window is ours to guarantee.
+    #[test]
+    fn one_shot_collect_waits_for_a_real_cpu_window() {
+        let start = Instant::now();
+        let mut mon = SystemMonitor::new();
+        let m = mon.collect();
+        println!(
+            "one-shot collect: cpu={:.1}% over {:?} ({} cores, load1={:.2})",
+            m.cpu_usage_percent, start.elapsed(), m.cpu_count, m.load_avg.one,
+        );
+        assert!(
+            (0.0..=100.0).contains(&m.cpu_usage_percent),
+            "cpu_usage_percent {:.1} is outside 0-100 — the averaging or the \
+             sampling window is wrong", m.cpu_usage_percent,
+        );
+        assert!(
+            start.elapsed() >= MINIMUM_CPU_UPDATE_INTERVAL,
+            "collect() returned after {:?}, which is less than sysinfo's \
+             MINIMUM_CPU_UPDATE_INTERVAL ({:?}) — the CPU delta was measured \
+             over a near-zero window and the percentage is meaningless",
+            start.elapsed(), MINIMUM_CPU_UPDATE_INTERVAL,
+        );
+    }
+
+    /// The steady-state poller must NOT pay the wait. Callers refreshing on a
+    /// 2s loop are already far past the minimum interval, and adding a sleep
+    /// to the hot path would slow every node's metrics tick.
+    #[test]
+    fn steady_state_collect_does_not_sleep() {
+        let mut mon = SystemMonitor::new();
+        let _ = mon.collect(); // first one may wait — that's the point above
+        std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+
+        let start = Instant::now();
+        let _ = mon.collect();
+        assert!(
+            start.elapsed() < MINIMUM_CPU_UPDATE_INTERVAL,
+            "collect() slept for {:?} despite the previous sample being older \
+             than the minimum interval — the guard should be a no-op here",
+            start.elapsed(),
+        );
     }
 }
