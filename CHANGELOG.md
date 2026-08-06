@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.12: WolfNotify — probes that tell you when a container falls over** _(2026-08-06 — [`c99322a7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c99322a7196815fdfd58c48ec23b19bb0fb1611a))_
+- **v25.10.11: docker migration stops losing the container it migrates** _(2026-08-06 — [`e71eb76f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e71eb76f0c0f4bcb1822cc67cd11eea42faa1770))_
 - **v25.10.10: --unblock reports what it actually removed** _(2026-08-06 — [`a2ce5834`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a2ce5834ec70a641499f53a67dd9c1fce9a8930c))_
 - **v25.10.9: a shell launch can't start a second daemon, and --unblock finally clears the login lockout** _(2026-08-06 — [`54702c1e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/54702c1e046de8062f0808d8e32b023dc42f6ddd))_
 - **v25.10.8: shrink the post-upgrade dark window, and stop the dashboard reload loop** _(2026-08-06 — [`2b7800b2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2b7800b246a1216af775845bcd9e91113b76f810))_
