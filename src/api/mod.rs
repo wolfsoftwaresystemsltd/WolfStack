@@ -13633,6 +13633,87 @@ pub async fn network_conflicts(
     HttpResponse::Ok().json(conflicts)
 }
 
+/// GET /api/notify/rules — the notification rule set for this node.
+pub async fn notify_rules_get(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    HttpResponse::Ok().json(crate::notify::NotifyRules::load())
+}
+
+/// PUT /api/notify/rules — replace the rule set.
+///
+/// Whole-set replacement rather than per-rule CRUD: the file is the unit that
+/// replicates (last-write-wins on `version`), so a partial update would race
+/// itself across nodes.
+pub async fn notify_rules_put(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<crate::notify::NotifyRules>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let rules = body.into_inner();
+    // Reject a rule that could never fire — a silently-dead rule is the worst
+    // outcome for a notification system.
+    for r in &rules.rules {
+        if r.id.trim().is_empty() || r.name.trim().is_empty() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "every rule needs an id and a name"
+            }));
+        }
+    }
+    match rules.save() {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "count": rules.rules.len() })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/notify/test — push a synthetic event through the live rule set.
+///
+/// The only honest way to answer "will this rule actually page me?" without
+/// waiting for a real outage.
+pub async fn notify_test(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let object = body.get("object").and_then(|v| v.as_str()).unwrap_or("test-container");
+    let kind: crate::notify::EventKind = body.get("kind")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(crate::notify::EventKind::ObjectFailed);
+    let node = body.get("node").and_then(|v| v.as_str()).unwrap_or("this-node");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let event = crate::notify::NotifyEvent {
+        kind,
+        node: node.to_string(),
+        backend: "docker".into(),
+        object: object.to_string(),
+        labels: Default::default(),
+        exit_code: Some(1),
+        restart_count: None,
+        timestamp: now,
+        message: "synthetic test event from the WolfNotify test button".into(),
+    };
+
+    // Report which rules matched BEFORE delivering, so a test that matches
+    // nothing is obvious rather than looking like a delivery failure.
+    let rules = crate::notify::NotifyRules::load();
+    let empty = std::collections::HashMap::new();
+    let matched: Vec<String> = crate::notify::evaluate(&event, &rules.rules, &empty)
+        .iter().map(|r| r.name.clone()).collect();
+
+    let mut cooldowns = std::collections::HashMap::new();
+    crate::notify::handle_event(event, &mut cooldowns).await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "matched_rules": matched,
+        "delivered": !matched.is_empty(),
+    }))
+}
+
 /// POST /api/containers/docker/import-spec — receive the runtime configuration
 /// of a container that is about to be migrated here.
 ///
@@ -43075,6 +43156,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/{id}/volumes", web::get().to(docker_volumes))
         .route("/api/containers/docker/import", web::post().to(docker_import))
         .route("/api/containers/docker/import-spec", web::post().to(docker_import_spec))
+        .route("/api/notify/rules", web::get().to(notify_rules_get))
+        .route("/api/notify/rules", web::put().to(notify_rules_put))
+        .route("/api/notify/test", web::post().to(notify_test))
         .route("/api/containers/docker/import-volume", web::post().to(docker_import_volume))
         .route("/api/containers/docker/{id}/config", web::post().to(docker_update_config))
         .route("/api/containers/docker/{id}/env", web::post().to(docker_update_env))

@@ -39,6 +39,7 @@ mod pools;
 mod mysql_editor;
 mod appstore;
 mod alerting;
+mod notify;
 mod predictive;
 mod wolfrun;
 mod statuspage;
@@ -815,6 +816,23 @@ async fn main() -> std::io::Result<()> {
     // arrives a second or two later is advertised on the very next cycle. Until
     // then the node advertises `None`, which is what it already did whenever
     // detection failed.
+    // WolfNotify — container/VM lifecycle events -> rules -> the existing
+    // alerting channels. Supervised internally: the docker event stream dies
+    // whenever the daemon restarts, and a source that has silently stopped is
+    // worse than none, so it reconnects with backoff and reports itself
+    // degraded when it can't. No rules configured = no work done.
+    {
+        let notify_node = std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        tokio::spawn(async move {
+            notify::run_docker_source(notify_node).await;
+        });
+    }
+
     let public_ip: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     {
         let slot = public_ip.clone();

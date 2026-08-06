@@ -917,6 +917,57 @@ pub async fn send_alert(config: &AlertConfig, category: AlertCategory, title: &s
 /// Slack, Telegram, ntfy). Pure dispatch — no enabled/verbosity/
 /// rate-limit gating; callers decide whether to send. `ntfy_priority`
 /// is the 1–5 ntfy scale.
+/// One delivery channel. Named so a notify rule can route to a subset —
+/// "compromise to my phone, container restarts to a Discord channel" — instead
+/// of every configured channel receiving everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    Discord,
+    Slack,
+    Telegram,
+    Ntfy,
+}
+
+impl Channel {
+    pub const ALL: [Channel; 4] = [Channel::Discord, Channel::Slack, Channel::Telegram, Channel::Ntfy];
+}
+
+/// Send to an explicit subset of channels. A channel with no credentials
+/// configured is skipped, exactly as in the send-to-everything path.
+pub async fn dispatch_to_selected(
+    config: &AlertConfig,
+    channels: &[Channel],
+    title: &str,
+    message: &str,
+    ntfy_priority: u8,
+) {
+    if channels.contains(&Channel::Discord)
+        && !config.discord_webhook.is_empty()
+        && let Err(e) = send_discord(&config.discord_webhook, title, message).await
+    {
+        warn!("Discord alert failed: {}", e);
+    }
+    if channels.contains(&Channel::Slack)
+        && !config.slack_webhook.is_empty()
+        && let Err(e) = send_slack(&config.slack_webhook, title, message).await
+    {
+        warn!("Slack alert failed: {}", e);
+    }
+    if channels.contains(&Channel::Telegram)
+        && !config.telegram_bot_token.is_empty() && !config.telegram_chat_id.is_empty()
+        && let Err(e) = send_telegram(&config.telegram_bot_token, &config.telegram_chat_id, title, message).await
+    {
+        warn!("Telegram alert failed: {}", e);
+    }
+    if channels.contains(&Channel::Ntfy)
+        && !config.ntfy_topic.is_empty()
+        && let Err(e) = send_ntfy(&config.ntfy_server, &config.ntfy_topic, &config.ntfy_token, title, message, ntfy_priority).await
+    {
+        warn!("ntfy alert failed: {}", e);
+    }
+}
+
 async fn dispatch_to_channels(config: &AlertConfig, title: &str, message: &str, ntfy_priority: u8) {
     if !config.discord_webhook.is_empty()
         && let Err(e) = send_discord(&config.discord_webhook, title, message).await
