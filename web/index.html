@@ -10843,11 +10843,145 @@ region = us-east-1"></textarea>
             </div>
         </div>
 
-        <script src="/js/vendor/lucide.min.js"></script>
-        <script>document.write('<script src="/js/icons-clean.js?v=' + Date.now() + '"><\/script>');</script>
-        <script>document.write('<script src="/js/app.js?v=' + Date.now() + '"><\/script>');</script>
-        <script>document.write('<script src="/js/wolfrouter.js?v=' + Date.now() + '"><\/script>');</script>
-        <script>document.write('<script src="/js/wolfhost.js?v=' + Date.now() + '"><\/script>');</script>
+        <!-- Survive an upgrade that lands mid-page-load.
+             An upgrade stops WolfStack, swaps the binary and restarts it, and
+             systemd reports "Started" BEFORE the HTTPS listener binds — measured
+             on wolfstack-1 during the v25.10.5 upgrade, 09:35:03.98 vs
+             09:35:11.52, a 7.5-second window where the port is simply closed.
+             A page load landing in that window loses one or more of the scripts
+             below, and a failed <script> is completely silent: no retry, no
+             error, no console clue. The page then sits on its static markup for
+             ever — sidebar frozen on "Loading…", icon buttons blank — and the
+             only cure is a refresh the operator has to think of themselves.
+             setup.sh even ends with "Please Refresh your browser if upgrading",
+             which is an admission that this is the user's problem to notice.
+             It shouldn't be. Notice it, say so, and recover automatically.
+
+             Scoped to the five scripts the dashboard cannot run without. The
+             deferred extras in <head> (three.js, xterm, terminal-console)
+             degrade a single panel rather than the page, so a failure there
+             must NOT raise a full-screen blocker. -->
+        <script>
+            (function () {
+                var probeTimer = null, shown = false;
+                var ATTEMPT_KEY = 'ws-asset-retry';
+
+                function overlay() {
+                    if (shown) return;
+                    shown = true;
+                    var box = document.createElement('div');
+                    // role=alert + assertive: this is a blocking failure, not a
+                    // status update — a screen reader must announce it at once.
+                    box.setAttribute('role', 'alert');
+                    box.setAttribute('aria-live', 'assertive');
+                    box.id = 'ws-asset-recovery';
+                    // Deliberately self-contained styling. styles.css may itself
+                    // be one of the things that failed to load, so this must not
+                    // depend on a CSS variable to stay readable. #f8fafc on
+                    // #111827 is ~17:1, well past WCAG AA either way.
+                    box.style.cssText = 'position:fixed;inset:0;z-index:2147483647;'
+                        + 'display:flex;align-items:center;justify-content:center;'
+                        + 'background:rgba(3,7,18,0.92);font-family:Inter,system-ui,sans-serif;';
+                    box.innerHTML =
+                        '<div style="max-width:420px;padding:28px 32px;border-radius:12px;'
+                        + 'background:#111827;border:1px solid #374151;color:#f8fafc;text-align:center;">'
+                        + '<div style="font-size:17px;font-weight:600;margin-bottom:10px;">'
+                        + 'WolfStack is restarting</div>'
+                        + '<div id="ws-asset-msg" style="font-size:14px;line-height:1.5;color:#cbd5e1;">'
+                        + 'The dashboard could not finish loading because the server went away '
+                        + 'mid-request — normally an upgrade. Reconnecting automatically…</div>'
+                        + '<button type="button" id="ws-asset-reload" style="margin-top:18px;'
+                        + 'padding:9px 20px;border-radius:8px;border:1px solid #4b5563;cursor:pointer;'
+                        + 'background:#1f2937;color:#f8fafc;font-size:14px;">Reload now</button>'
+                        + '</div>';
+                    (document.body || document.documentElement).appendChild(box);
+                    var btn = document.getElementById('ws-asset-reload');
+                    if (btn) btn.addEventListener('click', function () { location.reload(); });
+                }
+
+                // Probe the ASSET THAT FAILED, never a generic liveness URL.
+                //
+                // The first cut of this probed /login.html — "is the server
+                // up?" — and reloaded as soon as it answered. Measured against
+                // a server that was up but still missing the asset, that reloaded
+                // the whole 873 KB page every 2 seconds, for ever: 19 full page
+                // loads in 19 seconds. A client timer hammering a server that is
+                // already in trouble is the exact fault this release exists to
+                // remove, so it is not allowed in the recovery path either.
+                //
+                // Asking for the failed asset itself answers the only question
+                // that matters — can the page actually load now — and backing
+                // off means a genuinely broken asset costs one request every
+                // 15s rather than a page load every 2s.
+                // 2s,4s,8s,15s,15s… — 12 probes spans roughly 2.5 minutes, which
+                // comfortably covers a real upgrade (the listener bound 7.5s
+                // after systemd said "Started" on wolfstack-1, and a slow node
+                // with a cold cache takes longer) without polling for ever.
+                var BASE_DELAY = 2000, MAX_DELAY = 15000, MAX_ATTEMPTS = 5, MAX_PROBES = 12;
+                var probes = 0;
+
+                function attempts() {
+                    try { return parseInt(sessionStorage.getItem(ATTEMPT_KEY) || '0', 10) || 0; }
+                    catch (e) { return 0; }   // private mode / storage disabled
+                }
+                function recordAttempt(n) {
+                    try { sessionStorage.setItem(ATTEMPT_KEY, String(n)); } catch (e) { }
+                }
+
+                function probe(url) {
+                    fetch(url.split('#')[0] + (url.indexOf('?') === -1 ? '?' : '&') + 'ws-probe=' + Date.now(),
+                          { method: 'HEAD', cache: 'no-store' })
+                        .then(function (r) {
+                            if (!r.ok) return schedule(url);   // 404/5xx — not back yet
+                            recordAttempt(attempts() + 1);
+                            location.reload();
+                        })
+                        .catch(function () { schedule(url); });
+                }
+
+                function schedule(url) {
+                    if (attempts() >= MAX_ATTEMPTS) { exhausted(); return; }
+                    // Back off on the PROBE count, not the reload count. Reloads
+                    // only happen when the asset comes back, so keying the delay
+                    // off them left a still-404 asset polling flat-out at 2s for
+                    // ever — measured at 34 probes in 70s, an unbounded client
+                    // timer by another name. Probes are what actually repeat, so
+                    // they are what has to widen.
+                    var delay = Math.min(BASE_DELAY * Math.pow(2, probes), MAX_DELAY);
+                    probes++;
+                    if (probes > MAX_PROBES) { exhausted(); return; }
+                    probeTimer = setTimeout(function () { probe(url); }, delay);
+                }
+
+                function exhausted() {
+                    var msg = document.getElementById('ws-asset-msg');
+                    if (msg) {
+                        msg.textContent = 'The dashboard still cannot load its scripts after several '
+                            + 'attempts. The server may not have come back up. Check '
+                            + '"systemctl status wolfstack" on this host, then reload.';
+                    }
+                }
+
+                window.wsAssetFailed = function (src) {
+                    console.error('WolfStack: required asset failed to load:', src);
+                    overlay();
+                    if (probeTimer) return;             // one probe chain, whichever asset failed first
+                    if (attempts() >= MAX_ATTEMPTS) { exhausted(); return; }
+                    schedule(src);
+                };
+
+                // A clean load clears the counter, so the NEXT upgrade starts
+                // with a full retry budget instead of inheriting this one's.
+                window.addEventListener('load', function () {
+                    if (!shown) { try { sessionStorage.removeItem(ATTEMPT_KEY); } catch (e) { } }
+                });
+            })();
+        </script>
+        <script src="/js/vendor/lucide.min.js" onerror="wsAssetFailed(this.src)"></script>
+        <script>document.write('<script src="/js/icons-clean.js?v=' + Date.now() + '" onerror="wsAssetFailed(this.src)"><\/script>');</script>
+        <script>document.write('<script src="/js/app.js?v=' + Date.now() + '" onerror="wsAssetFailed(this.src)"><\/script>');</script>
+        <script>document.write('<script src="/js/wolfrouter.js?v=' + Date.now() + '" onerror="wsAssetFailed(this.src)"><\/script>');</script>
+        <script>document.write('<script src="/js/wolfhost.js?v=' + Date.now() + '" onerror="wsAssetFailed(this.src)"><\/script>');</script>
         <script>
             // Check auth on page load
             fetch('/api/auth/check')
