@@ -5237,3 +5237,124 @@ body.learn-drawer-open #task-log-footer { right: var(--learn-drawer-w) !importan
 .nm-iface.unused { --raccent: var(--text-muted); }
 .nm-down { color:var(--danger); font-size:10px; }
 .nm-stub { padding:18px; text-align:center; color:var(--text-muted); font-size:13px; background:var(--bg-tertiary); border-radius:var(--radius-sm); }
+
+/* ─── WolfNotify — probe launch bay ───────────────────────────────────────
+   Rules are rendered as probes: docked in the bay until launched, then
+   transmitting. The metaphor earns its keep — "is it deployed" and "is it
+   picking anything up" are exactly the two things an operator needs to read
+   at a glance, and they map to enabled + recently-fired.
+   Every animated state also has a non-animated cue (colour, label, ring
+   opacity) so nothing depends on motion. See prefers-reduced-motion below. */
+
+.probe-bay {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+    gap: 18px;
+    margin-top: 4px;
+}
+
+.probe {
+    position: relative;
+    background: linear-gradient(160deg, var(--bg-card) 0%, var(--bg-primary) 100%);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 16px 12px;
+    overflow: hidden;
+    transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease;
+}
+.probe:hover { transform: translateY(-2px); border-color: var(--border-light); }
+
+/* Starfield — pure CSS, no image request. Sits behind the probe art. */
+.probe::before {
+    content: "";
+    position: absolute; inset: 0;
+    /* Derived from the theme, not literal white: WolfStack ships nine themes
+       and hardcoded white dots are invisible on `light` and wrong on `amber`. */
+    background-image:
+        radial-gradient(1px 1px at 20% 30%, var(--text-muted) 50%, transparent 50%),
+        radial-gradient(1px 1px at 70% 20%, var(--text-muted) 50%, transparent 50%),
+        radial-gradient(1px 1px at 45% 70%, var(--text-muted) 50%, transparent 50%),
+        radial-gradient(1px 1px at 85% 60%, var(--text-muted) 50%, transparent 50%);
+    opacity: .45; pointer-events: none;
+}
+
+.probe-art { position: relative; height: 116px; display: grid; place-items: center; }
+.probe-art svg { position: relative; z-index: 1; overflow: visible; }
+
+/* Signal rings — only drawn when deployed. */
+.probe-ring { transform-origin: center; opacity: 0; }
+/* Always-on halo: the state cue that does not depend on catching the
+   animation mid-cycle. */
+.probe.is-deployed .probe-halo { opacity: .28; }
+.probe.is-deployed .probe-ring { animation: probe-ping 2.6s ease-out infinite; }
+.probe.is-deployed .probe-ring:nth-of-type(2) { animation-delay: .85s; }
+.probe.is-deployed .probe-ring:nth-of-type(3) { animation-delay: 1.7s; }
+@keyframes probe-ping {
+    0%   { transform: scale(.35); opacity: .55; }
+    100% { transform: scale(1.6);  opacity: 0;  }
+}
+
+/* Docked: clamped, dimmed, unmistakably not working. */
+.probe.is-docked .probe-body { opacity: .45; filter: grayscale(1); }
+.probe.is-docked { border-style: dashed; }
+
+/* Deployed: gentle drift so a live probe reads as alive. */
+.probe.is-deployed .probe-body { animation: probe-drift 6s ease-in-out infinite; }
+@keyframes probe-drift {
+    0%, 100% { transform: translateY(0)    rotate(0deg);   }
+    50%      { transform: translateY(-4px) rotate(-1.5deg); }
+}
+
+/* Signal received — the probe found something. Red, urgent, and labelled. */
+.probe.is-alerting { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-glow), 0 8px 26px -12px var(--accent); }
+.probe.is-alerting .probe-ring { stroke: var(--accent); }
+
+.probe-name { font-weight: 700; font-size: .96rem; margin: 6px 0 2px; color: var(--text-primary); }
+.probe-status { font-size: .74rem; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; }
+.probe-status.deployed { color: var(--success); }
+.probe-status.docked   { color: var(--text-muted); }
+.probe-status.alerting { color: var(--accent-light); }
+
+.probe-spec { list-style: none; margin: 10px 0 0; padding: 0; font-size: .78rem; color: var(--text-secondary); }
+.probe-spec li { display: flex; gap: 8px; padding: 3px 0; }
+.probe-spec .k { flex: 0 0 68px; color: var(--text-muted); }
+.probe-spec .v { color: var(--text-primary); word-break: break-word; }
+
+.probe-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 12px; }
+.probe-actions .btn { font-size: .76rem; padding: 6px 8px; width: 100%; }
+
+/* Empty launch tube — the affordance for adding a probe. */
+.probe-tube {
+    display: grid; place-items: center; gap: 8px;
+    min-height: 210px;
+    border: 1px dashed var(--border-light);
+    border-radius: 14px;
+    background: repeating-linear-gradient(45deg, transparent, transparent 9px, var(--accent-glow) 9px, var(--accent-glow) 10px);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: border-color .2s ease, color .2s ease;
+}
+.probe-tube:hover { border-color: var(--accent); color: var(--text-primary); }
+
+/* Bay status strip */
+.bay-strip { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+.bay-stat { display: flex; align-items: baseline; gap: 7px; }
+.bay-stat .n { font-size: 1.5rem; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.bay-stat .l { font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+
+/* Motion is decoration here, never information. */
+@media (prefers-reduced-motion: reduce) {
+    .probe.is-deployed .probe-ring,
+    .probe.is-deployed .probe-body { animation: none; }
+    .probe.is-deployed .probe-ring { opacity: .3; }   /* static ring still reads as transmitting */
+    .probe:hover { transform: none; }
+}
+
+/* Visually hidden, still announced. Used by the probe bay's live region so
+   launch/recall/test results reach a screen reader even when the user is not
+   looking at the card that changed. */
+.sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}

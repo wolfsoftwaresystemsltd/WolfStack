@@ -237,6 +237,10 @@
                     style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
                     <span class="icon" style="margin:0;font-size:20px;"><span class="ws-icon-clean-wrap" data-icon="warning"></span></span>
                 </a>
+                <a class="nav-item" data-page="probes" onclick="selectView('probes')" title="Probe Bay"
+                    style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;">
+                    <span class="icon" style="margin:0;font-size:20px;"><span class="ws-icon-clean-wrap" data-icon="satellite"></span></span>
+                </a>
                 <a class="nav-item" data-page="inbox" onclick="selectView('inbox')" title="Predictive Inbox"
                     style="display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:10px;position:relative;">
                     <span class="icon" style="margin:0;font-size:20px;"><span class="ws-icon-clean-wrap" data-icon="inbox"></span></span>
@@ -2461,6 +2465,17 @@
         </div>
 
         <!-- ═══ WolfFlow Page ═══ -->
+        <div id="page-probes" class="page-view" style="display:none;">
+            <p style="color:var(--text-secondary);font-size:.86rem;max-width:64ch;margin:0 0 14px;">
+                Probes watch your containers and report back. Configure one, launch it, and
+                it signals the channels you choose when something it is watching fails.
+            </p>
+            <div id="probe-bay-strip" class="bay-strip"></div>
+            <!-- Announcements for launch/recall/test, which are otherwise silent state
+                 changes on a card the user may not be looking at. -->
+            <div id="probe-live" role="status" aria-live="polite" class="sr-only"></div>
+            <div id="probe-bay" class="probe-bay"></div>
+        </div>
         <div id="page-wolfflow" class="page-view" style="display:none;">
 
             <!-- ═══ List View ═══ -->
