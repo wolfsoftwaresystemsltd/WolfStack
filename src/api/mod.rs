@@ -62,6 +62,18 @@ pub(crate) static API_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 pub(crate) fn ipv4_only_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
+        // SAFE DEFAULT for every client built through this factory.
+        //
+        // A total `.timeout()` does not bound a connection that never
+        // establishes: a SYN to an unroutable address holds a descriptor for
+        // the kernel's full retry window (~130s at tcp_syn_retries=6). Any
+        // caller on a timer then stacks those until the fd table is gone —
+        // the 2026-08-05 fleet outage (2,422 SYN-SENT, 2,868 CLOSE-WAIT,
+        // ~700 sockets/min across twelve nodes).
+        //
+        // Callers that need a tighter bound override it; a looser one is
+        // almost never right. Enforced by tests/resource_safety.rs.
+        .connect_timeout(std::time::Duration::from_secs(5))
 }
 
 /// Drain a response body before discarding so the socket returns to
@@ -16738,6 +16750,8 @@ async fn fetch_federation_lockouts(state: &web::Data<AppState>) -> Vec<Federatio
     for fed in federations {
         tasks.push(async move {
             let client = match reqwest::Client::builder()
+                // Bound the CONNECT — see tests/resource_safety.rs
+                .connect_timeout(std::time::Duration::from_secs(5))
                 .danger_accept_invalid_certs(fed.insecure_tls)
                 .timeout(std::time::Duration::from_secs(8))
                 .build()
@@ -31805,6 +31819,8 @@ async fn forward_proposal_action_to_peers(
 /// without exporting a new public function from federation/.
 fn build_federation_client(insecure_tls: bool) -> reqwest::Client {
     let mut b = reqwest::Client::builder()
+        // Bound the CONNECT — see tests/resource_safety.rs
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10));
     if insecure_tls { b = b.danger_accept_invalid_certs(true); }
     b.build().unwrap_or_else(|_| reqwest::Client::new())
@@ -41357,6 +41373,8 @@ pub struct FederationStatus {
 async fn probe_federation_status(url: &str, token: &str) -> Result<FederationStatus, String> {
     let url = format!("{}/api/federation/status", url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
+        // Bound the CONNECT — see tests/resource_safety.rs
+        .connect_timeout(std::time::Duration::from_secs(5))
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(15))
         .build()

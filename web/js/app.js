@@ -7533,8 +7533,11 @@ function updateDashboard(m) {
     const neoOs = document.getElementById('neo-os');
     if (neoOs) {
         neoOs.textContent = (m.os_name || 'Linux') + ' ' + (m.os_version || '');
-        const neoHost = document.getElementById('neo-host');
-        if (neoHost) neoHost.textContent = m.hostname;
+        // The card's heading IS the hostname — it used to read "WolfStack"
+        // with a hardcoded version under it, which was both meaningless and
+        // identical on every server in the fleet.
+        const neoHostname = document.getElementById('neo-hostname');
+        if (neoHostname) neoHostname.textContent = m.hostname || 'unknown';
         const neoKernel = document.getElementById('neo-kernel');
         if (neoKernel) neoKernel.textContent = m.kernel_version || 'unknown';
 

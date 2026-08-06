@@ -789,6 +789,11 @@ pub async fn api_coordinated_rotate(
     // Reuse the existing reqwest client builder pattern; short timeouts
     // so a hung peer doesn't stall the whole rotation.
     let client = match reqwest::Client::builder()
+        // Bound the CONNECT, not just the request: a SYN to an
+        // unroutable host holds a descriptor for the kernel's full
+        // retry window (~130s). Enforced by tests/resource_safety.rs
+        // after the 2026-08-05 fd-exhaustion outage.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(8))
         .build()

@@ -451,6 +451,11 @@ fn deliver(
 /// call does. Returns true only on a 2xx.
 fn post_to_hub(address: &str, port: u16, secret: &str, events: &[LogEvent]) -> bool {
     let client = match reqwest::blocking::Client::builder()
+        // Bound the CONNECT, not just the request: a SYN to an
+        // unroutable host holds a descriptor for the kernel's full
+        // retry window (~130s). Enforced by tests/resource_safety.rs
+        // after the 2026-08-05 fd-exhaustion outage.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(30))
         .build()

@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::time::Instant;
 use sysinfo::{System, Disks, Networks, MINIMUM_CPU_UPDATE_INTERVAL};
 
@@ -78,6 +79,20 @@ pub struct SystemMonitor {
 /// How often to do the expensive refresh (disk list).
 /// At 2s polling interval, 15 ticks = every 30 seconds.
 const SLOW_REFRESH_TICKS: u32 = 15;
+
+/// How long a top-processes scan stays good for.
+///
+/// The dashboard polls every 15s per viewer; without this the cost scaled
+/// with the number of open browser tabs. 30s keeps a top-10 table honest to
+/// anyone reading it while capping the scan rate no matter how many clients
+/// ask.
+const TOP_PROC_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Last top-processes scan: when it was taken, top-by-CPU, top-by-memory.
+/// Process-wide, so every viewer and every node-proxied request shares one
+/// scan rather than each triggering their own.
+static TOP_PROC_CACHE: Mutex<Option<(Instant, Vec<ProcessInfo>, Vec<ProcessInfo>)>> =
+    Mutex::new(None);
 
 /// Number of running processes, counted straight from /proc.
 ///
@@ -296,16 +311,71 @@ pub struct ProcessInfo {
 
 impl SystemMonitor {
     /// Get top processes by CPU and memory usage.
-    /// Refreshes process list if stale (> 5s since last refresh).
+    ///
+    /// Rate-limited to one real scan per `TOP_PROC_TTL` regardless of how many
+    /// clients ask, and scanned on a throwaway `System` so the descriptors it
+    /// needs are released immediately. Blocks for `MINIMUM_CPU_UPDATE_INTERVAL`
+    /// on a cache miss — callers must be on a blocking thread.
     pub fn top_processes(&mut self, count: usize) -> (Vec<ProcessInfo>, Vec<ProcessInfo>) {
-        // Ensure process data is reasonably fresh
-        if self.tick > 2 {
-            self.sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        // Serve from cache if a recent scan exists.
+        //
+        // "On demand" turned out to be a lie: the dashboard polls
+        // /api/metrics/processes every 15 SECONDS while the Top Processes
+        // panel is on screen (startProcessPolling in app.js). That is a
+        // faster timer than the 30s metrics loop this refresh was moved out
+        // of in v25.10.4, so anyone sitting on the dashboard reinstated the
+        // whole problem — full /proc walk plus sysinfo's descriptor claim,
+        // four times a minute (reported by JJ, 2026-08-06, nodes at 100%
+        // CPU on v25.10.4).
+        //
+        // The panel does not need second-by-second truth; a 30s cache is
+        // indistinguishable to a human reading a top-10 table, and it makes
+        // the cost independent of how hard any client polls.
+        {
+            let cache = TOP_PROC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((taken, cpu, mem)) = cache.as_ref() {
+                if taken.elapsed() < TOP_PROC_TTL {
+                    return (
+                        cpu.iter().take(count).cloned().collect(),
+                        mem.iter().take(count).cloned().collect(),
+                    );
+                }
+            }
         }
+
+        // Scan on a THROWAWAY System, never `self.sys`.
+        //
+        // sysinfo keeps an open /proc/<pid>/stat handle per process and
+        // budgets itself HALF of RLIMIT_NOFILE for that cache. Held on the
+        // long-lived monitor those descriptors are permanent — 32,767 on a
+        // busy host. Scoped to a temporary System they are released the
+        // moment it drops, so the claim is transient instead of forever, and
+        // `self.sys` (the one the 2s metrics loop uses) never holds any.
+        //
+        // The scan must be TWO refreshes with a gap. sysinfo derives process
+        // CPU from the delta between consecutive samples, and on a System that
+        // has never seen a process before it bails out and leaves the figure
+        // at zero (`compute_cpu_usage`, linux/process.rs:289 — "First time
+        // updating the values without reference, wait for a second cycle").
+        // A single refresh here would return a Top-CPU table of all-zeros in
+        // arbitrary order. The gap must be at least MINIMUM_CPU_UPDATE_INTERVAL
+        // or the CPU times behind the delta are not re-read either
+        // (`CpusWrapper::refresh`, linux/cpu.rs:56).
+        //
+        // 200ms of blocking is affordable because this runs at most once per
+        // TOP_PROC_TTL and the endpoint is already on `spawn_blocking`.
+        let mut scan = System::new();
+        scan.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+        scan.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        // Total RAM and core count come from `self.sys`, which the metrics
+        // loop keeps refreshed. The throwaway System has only ever been asked
+        // for processes, so its memory and CPU tables are still zeroed — using
+        // them would report every process as 0% of RAM.
         let total_mem = self.sys.total_memory();
         let cpu_count = self.sys.cpus().len().max(1) as f32;
 
-        let mut procs: Vec<ProcessInfo> = self.sys.processes().values()
+        let mut procs: Vec<ProcessInfo> = scan.processes().values()
             .filter(|p| p.cpu_usage() > 0.0 || p.memory() > 0)
             .map(|p| {
                 let mem = p.memory();
@@ -321,13 +391,31 @@ impl SystemMonitor {
             })
             .collect();
 
+        // Cache deeper than the caller asked for, so a later request for a
+        // longer list is still served from cache instead of forcing a fresh
+        // /proc walk. Ranked lists are built from the FULL set before any
+        // truncation — caching an already-trimmed list would silently pin the
+        // cache depth to whatever the first caller happened to ask for.
+        const CACHE_DEPTH: usize = 50;
+        let depth = count.max(CACHE_DEPTH);
+
         // Top CPU
         procs.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap_or(std::cmp::Ordering::Equal));
-        let top_cpu: Vec<ProcessInfo> = procs.iter().take(count).cloned().collect();
+        let cached_cpu: Vec<ProcessInfo> = procs.iter().take(depth).cloned().collect();
+        let top_cpu: Vec<ProcessInfo> = cached_cpu.iter().take(count).cloned().collect();
 
         // Top Memory
         procs.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes));
-        let top_mem: Vec<ProcessInfo> = procs.iter().take(count).cloned().collect();
+        let cached_mem: Vec<ProcessInfo> = procs.iter().take(depth).cloned().collect();
+        let top_mem: Vec<ProcessInfo> = cached_mem.iter().take(count).cloned().collect();
+
+        // Drop the scan explicitly so its /proc handles are released before
+        // we take the cache lock — makes the transient claim as short as
+        // possible rather than relying on end-of-scope.
+        drop(scan);
+
+        let mut cache = TOP_PROC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some((Instant::now(), cached_cpu, cached_mem));
 
         (top_cpu, top_mem)
     }
@@ -479,6 +567,70 @@ mod tests {
             "collect() leaked descriptors: {} -> {} over {} calls. sysinfo's \
              per-process stat-handle cache is back in the hot path.",
             baseline, after, SLOW_REFRESH_TICKS * 3,
+        );
+    }
+
+    /// The top-processes scan must be capped by the clock, not by how hard
+    /// clients poll — and it must still leave no descriptors behind.
+    ///
+    /// The dashboard polls /api/metrics/processes every 15s PER VIEWER
+    /// (`startProcessPolling`, web/js/app.js). v25.10.4 took the process
+    /// refresh off the metrics loop and left this endpoint to do it on demand,
+    /// which meant anyone parked on the dashboard reinstated the full /proc
+    /// walk four times a minute — faster than the loop that was removed.
+    ///
+    /// Two things are asserted here, both by observable behaviour rather than
+    /// by inspecting internals: a burst of calls costs one scan, and it costs
+    /// no descriptors.
+    #[test]
+    fn top_processes_scan_is_rate_limited_and_leaks_nothing() {
+        fn open_fds() -> usize {
+            std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+        }
+        let mut mon = SystemMonitor::new();
+
+        // First call pays for a scan; it must be a REAL one, so at least the
+        // two-sample CPU window.
+        let start = Instant::now();
+        let (cpu, mem) = mon.top_processes(10);
+        let first = start.elapsed();
+        assert!(!cpu.is_empty() && !mem.is_empty(), "scan returned no processes");
+        assert!(
+            first >= MINIMUM_CPU_UPDATE_INTERVAL,
+            "scan took {:?} — shorter than the CPU sampling window, so every \
+             process CPU figure is zero (sysinfo needs two samples)",
+            first,
+        );
+        assert!(
+            cpu.iter().any(|p| p.cpu_percent > 0.0),
+            "every process reported 0% CPU — the scan is sampling only once",
+        );
+        assert!(
+            mem.iter().any(|p| p.memory_percent > 0.0),
+            "every process reported 0% of RAM — total memory was read from a \
+             System that never refreshed memory",
+        );
+
+        // A burst must be served from cache: 20 calls in well under the cost
+        // of a second scan, and no growth in our fd table.
+        let baseline = open_fds();
+        let burst = Instant::now();
+        for _ in 0..20 {
+            let _ = mon.top_processes(10);
+        }
+        let burst = burst.elapsed();
+        assert!(
+            burst < MINIMUM_CPU_UPDATE_INTERVAL,
+            "20 polls took {:?} — at least one re-scanned, so the cache is not \
+             bounding the rate and every dashboard viewer costs a /proc walk",
+            burst,
+        );
+        let after = open_fds();
+        assert!(
+            after <= baseline + 16,
+            "top_processes leaked descriptors: {} -> {}. The scan must run on \
+             a throwaway System that drops its /proc handles.",
+            baseline, after,
         );
     }
 
