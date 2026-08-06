@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.10: --unblock reports what it actually removed** _(2026-08-06 — [`a2ce5834`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a2ce5834ec70a641499f53a67dd9c1fce9a8930c))_
+- **v25.10.9: a shell launch can't start a second daemon, and --unblock finally clears the login lockout** _(2026-08-06 — [`54702c1e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/54702c1e046de8062f0808d8e32b023dc42f6ddd))_
 - **v25.10.8: shrink the post-upgrade dark window, and stop the dashboard reload loop** _(2026-08-06 — [`2b7800b2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2b7800b246a1216af775845bcd9e91113b76f810))_
 - **v25.10.7: WebSocket bridges spun for ever on a stream error and never freed a socket** _(2026-08-06 — [`c6d9926c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c6d9926ca8b92038252eb47fc736504f2745b10e))_
 - **v25.10.6: an upgrade can no longer leave the dashboard permanently dead** _(2026-08-06 — [`aab55361`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aab55361e7de1e5bef2cd124067388824de349db))_
