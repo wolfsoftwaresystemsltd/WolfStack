@@ -239,6 +239,56 @@ a condition builder that nearly does.
   for a third. Decide early: the node that *owns* the object evaluates, peers do
   not.
 
+## 5b. Survey probes — documentation as a probe type (Paul, 2026-08-06)
+
+> "a documentation probe you can use to document things … with settings like
+> infrastructure etc and produce a PDF report"
+
+The probe metaphor extends past monitoring. A **survey probe** is launched at a
+target, collects, and returns a report rather than a stream of events.
+
+This is not speculative — the pipeline exists and was exercised on 2026-08-06:
+a read-only collector run over 12 hosts + 6 containers, rendered to HTML and
+printed to PDF with headless chromium (`chromium --headless --print-to-pdf`,
+already a dependency of the container-browser feature). That produced a 12-page
+estate document. The work is turning that from an ad-hoc script into a probe.
+
+**What differs from a monitoring probe** — and why it may want its own bay:
+
+| | Monitoring probe | Survey probe |
+|---|---|---|
+| Runs | Continuously | On demand, or on a schedule |
+| Emits | Events → notifications | An artefact (PDF/HTML/Markdown) |
+| Succeeds by | Staying quiet | Producing a document |
+| Failure mode | Missed alert | Stale or wrong document |
+
+They share the useful half: target selection (which nodes, which objects, which
+globs), scoping, and scheduling. That argues for one "probe" concept with a
+`kind` (`monitor` | `survey`), not two subsystems — the same argument that kept
+this out of a separate `wolfnotify` from the delivery channels.
+
+**Sketch:**
+
+```jsonc
+{
+  "kind": "survey",
+  "name": "Estate documentation",
+  "targets": { "nodes": ["*"] },
+  "sections": ["hosts", "networking", "storage", "containers", "databases"],
+  "format": "pdf",
+  "schedule": "0 6 * * 1",          // optional; on-demand if absent
+  "deliver": { "channels": ["email"], "path": "/var/lib/wolfstack/reports" }
+}
+```
+
+**Worth deciding early:** a survey probe reads far more of the estate than a
+monitoring probe, and its output is a single document containing topology,
+addressing and versions. That is genuinely useful and genuinely sensitive — it
+must never be written somewhere world-readable by default, and "email it to me"
+needs to be a deliberate choice rather than a default. Credentials must never be
+collected at all, which the 2026-08-06 collector already enforced by never
+reading secret files.
+
 ## 6. Open decisions
 
 1. Does a cluster-scoped rule notify once per cluster, or once per node that

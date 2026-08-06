@@ -2254,7 +2254,7 @@ function selectView(page) {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelector(`.nav-item[data-page="${page}"]`)?.classList.add('active');
 
-    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', wolfhost: 'WolfHost', exposure: 'Internet Exposure', 'ssh-keys': 'Authorised Keys' };
+    const titles = { datacenter: 'Datacenter', learn: 'Courses', settings: 'Settings', docs: 'Help & Documentation', appstore: 'App Store', issues: 'Issues', inbox: 'Predictive Inbox', 'global-wolfnet': 'Global View', kubernetes: 'WolfKube', topology: '3D Server Room', wolfflow: 'WolfFlow', wolfagents: 'WolfAgents', 'cluster-browser': 'Cluster Browser', databases: 'Databases', 'control-panel': 'Control Panel', array: 'Storage Array', xopools: 'XO Pools', tenants: 'Tenants', integrations: 'Integrations', 'fleet-security': 'Fleet Security', 'fleet-manage': 'Fleet', 'fleet-logs': 'Fleet Logs', 'dashboard-sync': 'Dashboard Sync', wolfhost: 'WolfHost', exposure: 'Internet Exposure', 'ssh-keys': 'Authorised Keys', probes: 'Probe Bay' };
     document.getElementById('page-title').textContent = titles[page] || page;
 
     if (page === 'datacenter') {
@@ -2330,6 +2330,8 @@ function selectView(page) {
         renderFleetManage();
     } else if (page === 'dashboard-sync') {
         dashboardSyncLoad();
+    } else if (page === 'probes') {
+        probeBayInit();
     } else if (page === 'fleet-logs') {
         fleetLogsInit();
     } else if (page === 'learn') {
@@ -80334,3 +80336,336 @@ function fleetMenuBtnKeydown(e, menu) {
 
 document.addEventListener('DOMContentLoaded', fleetMenuBarInit);
 window.fleetMenuBarInit = fleetMenuBarInit;
+
+// ═══════════════════════════════════════════════════════════════
+// WolfNotify — Probe Bay
+//
+// Notification rules rendered as probes: docked in the bay until launched,
+// then transmitting. The metaphor is doing real work — "is it deployed" and
+// "has it picked anything up" are the two things an operator needs at a
+// glance, and they map exactly onto enabled + recently-fired.
+//
+// State lives server-side in /api/notify/rules. The whole set is PUT on every
+// change because that file is the unit that replicates across the cluster;
+// per-rule PATCH would race itself between nodes.
+// ═══════════════════════════════════════════════════════════════
+
+let probeRules = { rules: [], version: 0 };
+
+const PROBE_EVENTS = [
+    ['object_failed',          'Exited with an error'],
+    ['object_oom_killed',      'Killed for using too much memory'],
+    ['object_health_failed',   'Healthcheck went unhealthy'],
+    ['object_restart_looping', 'Stuck in a restart loop'],
+    ['object_stopped',         'Stopped cleanly'],
+    ['object_started',         'Came back up'],
+    ['source_degraded',        'Monitoring itself stopped working'],
+];
+
+const PROBE_CHANNELS = [
+    ['discord', 'Discord'],
+    ['slack', 'Slack'],
+    ['telegram', 'Telegram'],
+    ['ntfy', 'ntfy'],
+];
+
+function probeAnnounce(msg) {
+    const el = document.getElementById('probe-live');
+    if (el) el.textContent = msg;
+}
+
+async function probeBayInit() {
+    const bay = document.getElementById('probe-bay');
+    if (!bay) return;
+    bay.innerHTML = renderBlockSkeleton ? renderBlockSkeleton({ lines: 4 }) : 'Loading…';
+    try {
+        const resp = await fetch(apiUrl('/api/notify/rules'));
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        probeRules = await resp.json();
+        if (!Array.isArray(probeRules.rules)) probeRules.rules = [];
+    } catch (e) {
+        // Never leave the bay looking empty-but-fine when it actually failed —
+        // an operator would read that as "no probes configured".
+        bay.innerHTML = `<div role="alert" style="grid-column:1/-1;background:var(--warning-bg,#332a1a);border:1px solid var(--warning,#f59e0b);border-radius:10px;padding:14px;color:var(--warning,#f59e0b);">
+            Could not reach the probe bay: ${escapeHtml(e.message)}
+        </div>`;
+        return;
+    }
+    renderProbeBay();
+}
+
+/** The probe itself: dish, body, and three signal rings. */
+function probeSvg() {
+    return `
+    <svg width="150" height="108" viewBox="0 0 112 80" aria-hidden="true" focusable="false">
+      <circle class="probe-halo" cx="56" cy="34" r="26" fill="none" stroke="currentColor" stroke-width="1" opacity="0"/>
+      <circle class="probe-ring" cx="56" cy="34" r="18" fill="none" stroke="var(--success)" stroke-width="1.5"/>
+      <circle class="probe-ring" cx="56" cy="34" r="18" fill="none" stroke="var(--success)" stroke-width="1.5"/>
+      <circle class="probe-ring" cx="56" cy="34" r="18" fill="none" stroke="var(--success)" stroke-width="1.5"/>
+      <g class="probe-body">
+        <!-- solar wings -->
+        <rect x="16" y="28" width="22" height="12" rx="2" fill="var(--bg-input)" stroke="var(--border-light)"/>
+        <rect x="74" y="28" width="22" height="12" rx="2" fill="var(--bg-input)" stroke="var(--border-light)"/>
+        <line x1="38" y1="34" x2="46" y2="34" stroke="var(--border-light)" stroke-width="2"/>
+        <line x1="66" y1="34" x2="74" y2="34" stroke="var(--border-light)" stroke-width="2"/>
+        <!-- hull -->
+        <rect x="46" y="24" width="20" height="26" rx="5" fill="var(--bg-card-hover)" stroke="var(--border-light)"/>
+        <!-- dish -->
+        <ellipse cx="56" cy="20" rx="11" ry="5" fill="var(--bg-secondary)" stroke="var(--accent)" stroke-width="1.5"/>
+        <line x1="56" y1="20" x2="56" y2="26" stroke="var(--accent)" stroke-width="1.5"/>
+        <!-- status lamp -->
+        <circle class="probe-lamp" cx="56" cy="44" r="2.6" fill="currentColor"/>
+      </g>
+    </svg>`;
+}
+
+function probeTargetSummary(r) {
+    const m = r.match || {};
+    const objects = (m.objects && m.objects.length) ? m.objects.join(', ') : 'everything';
+    const nodes = (m.nodes && m.nodes.length) ? m.nodes.join(', ') : 'this node';
+    return { objects, nodes };
+}
+
+function renderProbeBay() {
+    const bay = document.getElementById('probe-bay');
+    const strip = document.getElementById('probe-bay-strip');
+    if (!bay) return;
+
+    const rules = probeRules.rules || [];
+    const deployed = rules.filter(r => r.enabled !== false).length;
+    const docked = rules.length - deployed;
+
+    if (strip) {
+        strip.innerHTML = `
+            <div class="bay-stat"><span class="n">${deployed}</span><span class="l">deployed</span></div>
+            <div class="bay-stat"><span class="n">${docked}</span><span class="l">docked</span></div>
+            <div class="bay-stat"><span class="n">${rules.length}</span><span class="l">probes built</span></div>
+            <button class="btn btn-primary" style="margin-left:auto;" onclick="probeEdit(null)">Build a probe</button>`;
+    }
+
+    const cards = rules.map((r, i) => {
+        const on = r.enabled !== false;
+        const { objects, nodes } = probeTargetSummary(r);
+        const channels = (r.channels && r.channels.length)
+            ? r.channels.join(', ')
+            : 'every configured channel';
+        const events = (r.match?.events?.length)
+            ? r.match.events.map(e => (PROBE_EVENTS.find(p => p[0] === e)?.[1] || e)).join(', ')
+            : 'anything at all';
+        const stateClass = on ? 'is-deployed' : 'is-docked';
+        const stateLabel = on ? 'Deployed' : 'Docked';
+        const stateCls = on ? 'deployed' : 'docked';
+
+        return `
+        <article class="probe ${stateClass}" style="color:${on ? 'var(--success)' : 'var(--text-muted)'}">
+            <div class="probe-art">${probeSvg()}</div>
+            <div class="probe-name">${escapeHtml(r.name || r.id || 'Unnamed probe')}</div>
+            <div class="probe-status ${stateCls}">${stateLabel}${r.scope === 'cluster' ? ' · fleet-wide' : ''}</div>
+            <ul class="probe-spec">
+                <li><span class="k">Watches</span><span class="v">${escapeHtml(objects)}</span></li>
+                <li><span class="k">On</span><span class="v">${escapeHtml(nodes)}</span></li>
+                <li><span class="k">Reports</span><span class="v">${escapeHtml(events)}</span></li>
+                <li><span class="k">Signals</span><span class="v">${escapeHtml(channels)}</span></li>
+                <li><span class="k">Quiet for</span><span class="v">${Math.round((r.cooldown_secs ?? 900)/60)} min after firing</span></li>
+            </ul>
+            <div class="probe-actions">
+                <button class="btn" onclick="probeToggle(${i})">${on ? 'Recall' : 'Launch'}</button>
+                <button class="btn" onclick="probeEdit(${i})">Configure</button>
+                <button class="btn" onclick="probeTest(${i})" title="Send a synthetic event through this probe">Test signal</button>
+                <button class="btn" style="color:var(--accent);" onclick="probeScrap(${i})">Scrap</button>
+            </div>
+        </article>`;
+    }).join('');
+
+    const tube = `
+        <button class="probe-tube" onclick="probeEdit(null)" aria-label="Build a new probe">
+            <svg width="46" height="46" viewBox="0 0 46 46" aria-hidden="true">
+                <circle cx="23" cy="23" r="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 4"/>
+                <line x1="23" y1="14" x2="23" y2="32" stroke="currentColor" stroke-width="2"/>
+                <line x1="14" y1="23" x2="32" y2="23" stroke="currentColor" stroke-width="2"/>
+            </svg>
+            <span style="font-size:.84rem;font-weight:600;">Empty launch tube</span>
+            <span style="font-size:.74rem;">Build a probe</span>
+        </button>`;
+
+    bay.innerHTML = cards + tube;
+}
+
+/** Launch or recall — i.e. enable/disable. */
+async function probeToggle(i) {
+    const r = probeRules.rules[i];
+    if (!r) return;
+    r.enabled = !(r.enabled !== false);
+    if (await probeSave()) {
+        probeAnnounce(`${r.name} ${r.enabled ? 'launched' : 'recalled'}`);
+        showToast(`${r.name} ${r.enabled ? 'launched — now watching' : 'recalled to the bay'}`,
+                  r.enabled ? 'success' : 'info');
+        renderProbeBay();
+    }
+}
+
+async function probeScrap(i) {
+    const r = probeRules.rules[i];
+    if (!r) return;
+    if (!confirm(`Scrap the probe "${r.name}"? It will stop watching immediately.`)) return;
+    probeRules.rules.splice(i, 1);
+    if (await probeSave()) {
+        probeAnnounce(`${r.name} scrapped`);
+        showToast(`Probe "${r.name}" scrapped`, 'info');
+        renderProbeBay();
+    }
+}
+
+/** Fire a synthetic event through the live rule set. */
+async function probeTest(i) {
+    const r = probeRules.rules[i];
+    if (!r) return;
+    try {
+        const resp = await fetch(apiUrl('/api/notify/test'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ object: 'test-container', kind: 'object_failed' }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        if (data.matched_rules && data.matched_rules.length) {
+            showToast(`Signal sent — matched: ${data.matched_rules.join(', ')}`, 'success');
+            probeAnnounce(`Test signal matched ${data.matched_rules.length} probe(s)`);
+        } else {
+            // A test that matches nothing is the single most useful thing to
+            // surface: the probe looks deployed but would never fire.
+            showToast('No probe matched the test event — check what this probe watches', 'error');
+            probeAnnounce('Test signal matched no probes');
+        }
+    } catch (e) {
+        showToast(`Test failed: ${e.message}`, 'error');
+    }
+}
+
+async function probeSave() {
+    try {
+        const resp = await fetch(apiUrl('/api/notify/rules'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(probeRules),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        return true;
+    } catch (e) {
+        showToast(`Could not save probes: ${e.message}`, 'error');
+        return false;
+    }
+}
+
+function probeModalClose() {
+    if (window.__probeModalEl) { window.__probeModalEl.remove(); window.__probeModalEl = null; }
+}
+
+/** Build/configure a probe. `i` is null for a new one. */
+function probeEdit(i) {
+    const isNew = (i === null || i === undefined);
+    const r = isNew ? {
+        id: 'probe-' + Math.random().toString(36).slice(2, 10),
+        name: '', enabled: true, scope: 'node', mode: 'simple',
+        match: { events: [], backends: [], objects: [], labels: {}, nodes: [] },
+        channels: [], cooldown_secs: 900,
+    } : JSON.parse(JSON.stringify(probeRules.rules[i]));
+
+    const m = r.match || {};
+    const evChecks = PROBE_EVENTS.map(([val, label]) => `
+        <label style="display:block;font-size:.84rem;margin-bottom:5px;cursor:pointer;">
+            <input type="checkbox" class="probe-ev" value="${val}" ${(m.events||[]).includes(val) ? 'checked' : ''}>
+            ${escapeHtml(label)}
+        </label>`).join('');
+
+    const chChecks = PROBE_CHANNELS.map(([val, label]) => `
+        <label style="display:inline-block;font-size:.84rem;margin:0 14px 5px 0;cursor:pointer;">
+            <input type="checkbox" class="probe-ch" value="${val}" ${(r.channels||[]).includes(val) ? 'checked' : ''}>
+            ${escapeHtml(label)}
+        </label>`).join('');
+
+    const body = `
+      <div style="padding:4px 2px;white-space:normal;">
+        <label style="display:block;font-weight:600;margin-bottom:4px;">Probe name</label>
+        <input id="probe-name" type="text" value="${escapeHtml(r.name)}" placeholder="e.g. Production databases"
+               style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);margin-bottom:14px;">
+
+        <label style="display:block;font-weight:600;margin-bottom:4px;">Watch these containers</label>
+        <input id="probe-objects" type="text" value="${escapeHtml((m.objects||[]).join(', '))}" placeholder="* or  *-db, postgres"
+               style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);">
+        <div style="font-size:.75rem;color:var(--text-muted);margin:4px 0 14px;">Comma separated. <code>*</code> matches anything; <code>*-db</code> matches names ending in <code>-db</code>. Leave blank for everything.</div>
+
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Report when they…</legend>
+          ${evChecks}
+          <div style="font-size:.75rem;color:var(--text-muted);margin-top:4px;">Nothing ticked = report everything.</div>
+        </fieldset>
+
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Signal via</legend>
+          ${chChecks}
+          <div style="font-size:.75rem;color:var(--text-muted);margin-top:4px;">Nothing ticked = every channel configured in Alerting.</div>
+        </fieldset>
+
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;">
+          <div>
+            <label style="display:block;font-weight:600;margin-bottom:4px;font-size:.86rem;">Scope</label>
+            <label style="font-size:.84rem;margin-right:12px;cursor:pointer;"><input type="radio" name="probe-scope" value="node" ${r.scope !== 'cluster' ? 'checked' : ''}> This node</label>
+            <label style="font-size:.84rem;cursor:pointer;"><input type="radio" name="probe-scope" value="cluster" ${r.scope === 'cluster' ? 'checked' : ''}> Whole fleet</label>
+          </div>
+          <div>
+            <label style="display:block;font-weight:600;margin-bottom:4px;font-size:.86rem;">Stay quiet for</label>
+            <input id="probe-cooldown" type="number" min="0" step="1" value="${Math.round((r.cooldown_secs ?? 900)/60)}"
+                   style="width:90px;padding:7px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);"> minutes
+          </div>
+        </div>
+        <div style="font-size:.75rem;color:var(--text-muted);margin:-8px 0 14px;">Counted per container, so one noisy container never mutes the others. Recoveries are always reported.</div>
+
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:9px 12px;font-size:.78rem;color:var(--text-secondary);margin-bottom:14px;">
+          <b>Advanced conditions</b> — combining conditions, time windows and “3 failures in 10 minutes” — are designed but not built yet, so this probe runs in simple mode.
+        </div>
+
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary" onclick="probeEditSave(${isNew ? 'null' : i})">${isNew ? 'Build probe' : 'Save probe'}</button>
+          <button class="btn" onclick="probeModalClose()">Cancel</button>
+        </div>
+      </div>`;
+
+    // Stash the working copy where the save handler can reach it.
+    window.__probeDraft = r;
+    showModal(body, isNew ? 'Build a probe' : `Configure ${r.name || 'probe'}`, { noOk: true });
+    // closeModal() only strips an `active` class, which showModal's overlay
+    // never has — so hold the element and remove it ourselves.
+    const overlays = document.querySelectorAll('.modal-overlay');
+    window.__probeModalEl = overlays[overlays.length - 1] || null;
+}
+
+async function probeEditSave(i) {
+    const r = window.__probeDraft;
+    if (!r) return;
+    const name = document.getElementById('probe-name')?.value.trim() || '';
+    if (!name) {
+        showToast('Give the probe a name so you can recognise it later', 'error');
+        return;
+    }
+    r.name = name;
+    r.match = r.match || {};
+    r.match.objects = (document.getElementById('probe-objects')?.value || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+    r.match.events = Array.from(document.querySelectorAll('.probe-ev:checked')).map(el => el.value);
+    r.channels = Array.from(document.querySelectorAll('.probe-ch:checked')).map(el => el.value);
+    r.scope = document.querySelector('input[name="probe-scope"]:checked')?.value || 'node';
+    const mins = parseInt(document.getElementById('probe-cooldown')?.value, 10);
+    r.cooldown_secs = Number.isFinite(mins) && mins >= 0 ? mins * 60 : 900;
+
+    if (i === null || i === undefined) probeRules.rules.push(r);
+    else probeRules.rules[i] = r;
+
+    if (await probeSave()) {
+        probeModalClose();
+        showToast(`Probe "${r.name}" saved${r.enabled !== false ? ' and deployed' : ''}`, 'success');
+        probeAnnounce(`Probe ${r.name} saved`);
+        renderProbeBay();
+    }
+}
