@@ -1538,6 +1538,109 @@ fn lockouts_file() -> String {
     format!("{}/auth-active-lockouts.json", crate::paths::get().config_dir)
 }
 
+/// Drop every entry for `ip` from a persisted lockout snapshot.
+///
+/// Returns `None` when nothing matched, so the caller can skip the rewrite
+/// (and say nothing) rather than churn the file on every unblock.
+///
+/// Compares canonical forms: `kernel_block_ip` canonicalises before writing,
+/// but a snapshot written by an older build may hold the IPv4-mapped spelling
+/// (`::ffff:a.b.c.d`) that a dual-stack listener reports. Matching on the raw
+/// string would silently miss those and leave the entry to be restored.
+fn prune_lockout_snapshot(
+    snapshot: Vec<PersistedLockout>,
+    ip: &str,
+) -> Option<Vec<PersistedLockout>> {
+    let canon = |s: &str| {
+        s.parse::<std::net::IpAddr>()
+            .map(|a| a.to_canonical().to_string())
+            .unwrap_or_else(|_| s.to_string())
+    };
+    let target = canon(ip);
+    let before = snapshot.len();
+    let kept: Vec<PersistedLockout> =
+        snapshot.into_iter().filter(|e| canon(&e.ip) != target).collect();
+    if kept.len() == before { None } else { Some(kept) }
+}
+
+/// Remove `ip` from the on-disk lockout snapshot. Returns true if an entry
+/// was there and has been removed.
+///
+/// Without this an unblock is undone by the next restart:
+/// `restore_persisted_lockouts` re-applies every non-expired entry it finds —
+/// the kernel DROP *and* the in-memory record — so the operator's recovery
+/// survives only until someone bounces the service.
+pub fn cli_prune_persisted_lockout(ip: &str) -> bool {
+    let path = lockouts_file();
+    let json = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let snapshot: Vec<PersistedLockout> = match serde_json::from_str(&json) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let kept = match prune_lockout_snapshot(snapshot, ip) {
+        Some(k) => k,
+        None => return false,
+    };
+    match serde_json::to_string_pretty(&kept) {
+        Ok(out) => crate::paths::write_secure(&path, &out).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Ask the RUNNING daemon to drop its in-memory login lockout for `ip`.
+///
+/// `--unblock` is a separate, short-lived process. It can delete kernel rules
+/// and rewrite files, but the lockout that actually refuses a login lives in
+/// the daemon's memory (`LoginRateLimiter::attempts`, keyed on `Instant`, so it
+/// is not reconstructable from disk). Clearing only the kernel rule leaves the
+/// operator able to *reach* the login page and still be rejected on submit —
+/// the exact dead end reported 2026-08-06, where the only real escape was a
+/// `trusted_ips` entry.
+///
+/// So drive the same `/api/security/auth-unblock` endpoint the Security UI
+/// uses, authenticating with this node's cluster secret — readable because
+/// `--unblock` already requires root. HTTPS first (the default), then plain
+/// HTTP for `--no-tls` installs. Self-signed certs are the norm here and the
+/// peer is 127.0.0.1, so certificate validation buys nothing: anyone able to
+/// intercept this connection already owns the box.
+pub async fn cli_clear_daemon_lockout(ip: &str) -> Result<(), String> {
+    let port = crate::ports::PortConfig::load().api;
+    let secret = load_cluster_secret();
+    let client = reqwest::Client::builder()
+        // Bound CONNECT as well as the overall request — required by
+        // tests/resource_safety.rs after the 2026-08-05 fd exhaustion, and a
+        // wedged socket must never stall an operator's recovery command.
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+
+    // propagate: true matches the Security UI's default — "unblock my IP"
+    // is nearly always meant fleet-wide, and the threat-intel half of
+    // --unblock already allowlists across the cluster.
+    let body = serde_json::json!({ "ip": ip, "propagate": true });
+    let mut last_err = String::from("no endpoint tried");
+    for scheme in ["https", "http"] {
+        let url = format!("{}://127.0.0.1:{}/api/security/auth-unblock", scheme, port);
+        match client
+            .post(&url)
+            .header("X-WolfStack-Secret", &secret)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) => last_err = format!("{} returned HTTP {}", url, r.status()),
+            Err(e) => last_err = format!("{}: {}", url, e),
+        }
+    }
+    Err(last_err)
+}
+
 // ─── Cluster-node block protection ──────────────────────────────────────────
 // klasSponsor 2026-06-08: WolfStack nodes were kernel-blocking / fail2ban-
 // banning each OTHER's IPs (inter-node polling, a propagated block, or SSH
@@ -2987,6 +3090,49 @@ mod lockout_tests {
         let l = LoginRateLimiter::new();
         *l.config.write().unwrap() = cfg;
         l
+    }
+
+    fn locked(ip: &str) -> PersistedLockout {
+        PersistedLockout { ip: ip.into(), locked_at: 1_000, lockout_seconds: 48 * 3600 }
+    }
+
+    #[test]
+    fn prune_removes_the_named_ip() {
+        // The unblock case: the entry must go, or restore_persisted_lockouts
+        // re-applies both the kernel rule and the in-memory lockout on the
+        // next service start and undoes the operator's recovery.
+        let snap = vec![locked("192.168.68.50"), locked("203.0.113.9")];
+        let kept = prune_lockout_snapshot(snap, "192.168.68.50").expect("should change");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].ip, "203.0.113.9");
+    }
+
+    #[test]
+    fn prune_matches_an_ipv4_mapped_entry() {
+        // A dual-stack [::] listener reports v4 clients as ::ffff:a.b.c.d, and
+        // an older build could have persisted that spelling. Raw string
+        // matching would miss it and leave the block to be restored.
+        let snap = vec![locked("::ffff:192.168.68.50")];
+        let kept = prune_lockout_snapshot(snap, "192.168.68.50").expect("should change");
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn prune_reports_no_change_when_the_ip_is_absent() {
+        // Caller skips the rewrite and stays quiet — no file churn, and no
+        // "removed" line for something that was never there.
+        let snap = vec![locked("203.0.113.9")];
+        assert!(prune_lockout_snapshot(snap, "192.168.68.50").is_none());
+    }
+
+    #[test]
+    fn prune_leaves_an_unparseable_entry_alone() {
+        // Garbage in the snapshot must not be silently swallowed by the
+        // canonicalisation fallback, nor block pruning of valid neighbours.
+        let snap = vec![locked("not-an-ip"), locked("192.168.68.50")];
+        let kept = prune_lockout_snapshot(snap, "192.168.68.50").expect("should change");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].ip, "not-an-ip");
     }
 
     #[test]
