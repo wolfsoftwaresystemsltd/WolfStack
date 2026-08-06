@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.13: migration copies bind-mount data, not just named volumes** _(2026-08-06 — [`a2d08964`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a2d0896414dd42a167d5dc28bb677a4d8b9d152a))_
 - **v25.10.12: WolfNotify — probes that tell you when a container falls over** _(2026-08-06 — [`c99322a7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c99322a7196815fdfd58c48ec23b19bb0fb1611a))_
 - **v25.10.11: docker migration stops losing the container it migrates** _(2026-08-06 — [`e71eb76f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e71eb76f0c0f4bcb1822cc67cd11eea42faa1770))_
 - **v25.10.10: --unblock reports what it actually removed** _(2026-08-06 — [`a2ce5834`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a2ce5834ec70a641499f53a67dd9c1fce9a8930c))_
