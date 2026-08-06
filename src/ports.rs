@@ -15,7 +15,9 @@
 //! Per-node config lives in `/etc/wolfstack/ports.json` and is the persistent
 //! source of truth — the **Node Ports** settings panel writes it. A CLI
 //! `--port` flag overrides the API port for genuine one-off **manual** launches
-//! (`wolfstack --port N` from a shell). When WolfStack runs as its systemd
+//! (`wolfstack --port N --foreground` from a shell — a shell launch without
+//! `--foreground` prints help and starts nothing, see
+//! `main::should_refuse_shell_launch`). When WolfStack runs as its systemd
 //! service, a `--port` baked into the unit by an old `setup.sh` is reconciled
 //! into `ports.json` once (see [`reconcile_baked_port`]) and then ignored, so
 //! `ports.json` (and the UI) stay authoritative — a baked `--port` no longer
@@ -94,9 +96,10 @@ pub struct ResolvedApiPorts {
 
 /// Decide the api + inter-node ports for this launch.
 ///
-/// - **Manual shell launch** (`running_as_service == false`): a `--port` is a
-///   genuine one-off override and pulls `inter_node = port + 1` with it, the
-///   historical behaviour. `ports.json` fills in when no flag is given.
+/// - **Manual shell launch** (`running_as_service == false`, which now also
+///   means `--foreground` was passed): a `--port` is a genuine one-off override
+///   and pulls `inter_node = port + 1` with it, the historical behaviour.
+///   `ports.json` fills in when no flag is given.
 /// - **systemd service** (`running_as_service == true`, i.e. `INVOCATION_ID`
 ///   is set): `ports.json` is authoritative. A `--port` baked into the unit by
 ///   an old `setup.sh` is reconciled into `ports.json` once (see

@@ -106,7 +106,7 @@ mod cluster_join;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use std::time::Duration;
@@ -150,6 +150,15 @@ struct Cli {
     /// systemd ExecStart line written by setup.sh --agent.
     #[arg(long)]
     agent: bool,
+
+    /// Run the daemon in the foreground from a shell instead of under
+    /// systemd. Without this, a shell launch prints this help and exits
+    /// rather than starting a second daemon alongside the service. Use it
+    /// for debugging, or on a host with no systemd (a container) where you
+    /// supervise the process yourself. Stop `wolfstack.service` first —
+    /// otherwise the two instances fight over every port.
+    #[arg(long)]
+    foreground: bool,
 
     /// Print available WolfRouter recovery snapshots and exit. Use when
     /// the WolfRouter UI itself isn't reachable (or you want to confirm
@@ -197,6 +206,60 @@ struct Cli {
     /// effect without `--leave-cluster`.
     #[arg(long)]
     rotate_cluster_secret: bool,
+}
+
+/// Was this process started by systemd as a service?
+///
+/// `INVOCATION_ID` alone is not enough. systemd sets it for every unit it
+/// launches, and **it is inherited by everything that unit spawns** — including
+/// the terminal emulator of a desktop session (an `app-*.scope` under
+/// `user@N.service`) and any script run from a unit or timer. A shell in that
+/// position looks exactly like a service to a bare environment check, and would
+/// sail past the guard to start the second daemon it exists to prevent.
+///
+/// The cgroup path disambiguates cleanly: a real service lives under
+/// `system.slice`, every user session under `user.slice`. We use it in one
+/// direction only — to downgrade service→shell, never the reverse — because
+/// wrongly refusing a genuine service start is far worse than missing a manual
+/// launch. That asymmetry is safe here: wolfstack needs root (it reads
+/// /etc/shadow), so it can never legitimately run as a `systemctl --user` unit
+/// inside `user.slice`.
+///
+/// `cgroup` is the contents of `/proc/self/cgroup`, or `None` if unreadable —
+/// in which case we fall back to the environment variable alone rather than
+/// risk refusing to boot.
+fn systemd_service_context(invocation_id_present: bool, cgroup: Option<&str>) -> bool {
+    if !invocation_id_present {
+        return false;
+    }
+    match cgroup {
+        Some(c) => !c.contains("/user.slice"),
+        None => true,
+    }
+}
+
+/// [`systemd_service_context`] against the live process.
+fn detect_systemd_service_context() -> bool {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok();
+    systemd_service_context(
+        std::env::var_os("INVOCATION_ID").is_some(),
+        cgroup.as_deref(),
+    )
+}
+
+/// Should this invocation refuse to start the daemon and print help instead?
+///
+/// True for a shell launch that hasn't explicitly asked for a foreground run.
+/// A bare `wolfstack` typed at a prompt is nearly always someone checking
+/// whether the service is up, and answering that by starting a second daemon
+/// is actively harmful — it contends for every port with the real one, and the
+/// port-fallback scans drift the node's config on the way past.
+///
+/// Only reached after the one-shot modes (`--show-token`, `--unblock`,
+/// `--leave-cluster`, `--wolfrouter-*`) have already returned, so this never
+/// blocks an operator's break-glass commands.
+fn should_refuse_shell_launch(running_as_service: bool, foreground: bool) -> bool {
+    !running_as_service && !foreground
 }
 
 /// Agent-mode root handler — returned for any path the SPA would normally
@@ -420,6 +483,23 @@ async fn main() -> std::io::Result<()> {
                 println!("Unblocking {} from every WolfStack enforcement surface:", ip);
                 auth::kernel_unblock_ip(&ip);
                 println!("  ✓ login-lockout / NMAP-protection: kernel block removed (ipset + INPUT/FORWARD)");
+                // The kernel rule is only half of a login lockout. The half
+                // that refuses the password lives in the running daemon's
+                // memory and cannot be reached from this process — ask the
+                // daemon to clear it, then prune the on-disk snapshot so a
+                // restart can't restore what we just removed. ORDER MATTERS:
+                // the daemon re-persists the snapshot from memory when it
+                // unblocks, so pruning first would simply be overwritten.
+                match auth::cli_clear_daemon_lockout(&ip).await {
+                    Ok(()) => println!("  ✓ login-lockout: cleared in the running daemon — logins accepted now"),
+                    Err(e) => {
+                        println!("  • login-lockout: could not reach the local daemon ({})", e);
+                        println!("    Clearing on disk instead — it will be gone once the service starts.");
+                    }
+                }
+                if auth::cli_prune_persisted_lockout(&ip) {
+                    println!("  ✓ login-lockout: removed from auth-active-lockouts.json (a restart can't bring it back)");
+                }
                 predictive::threat_intel::cli_unblock_ip(&ip);
                 threat_intel::cli_unblock_ip(&ip);
                 println!("Done. Changes are live now; the allowlist entries stop the next feed sync from re-blocking it.");
@@ -516,6 +596,43 @@ async fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
+    // A daemon launch is expected to come from systemd. A bare `wolfstack`
+    // typed at a shell is nearly always someone checking whether the service
+    // is up — and silently starting a SECOND daemon is the worst possible
+    // answer to that question. It fights the real one for every port, and the
+    // status / inter-node fallback scans walk ports.json upward on the way
+    // past (see ports::should_persist_fallback). A test node reached
+    // inter_node 8555 / status 8551 exactly that way, which sent its operator
+    // hunting for a dashboard that had never moved off 8553.
+    //
+    // So: no systemd, no explicit --foreground, no daemon. Print help and get
+    // out of the way. Every one-shot mode (--show-token, --unblock,
+    // --leave-cluster, --wolfrouter-*) has already returned above and is
+    // unaffected — those are precisely the things an operator runs by hand.
+    //
+    // See systemd_service_context for how a unit launch is told apart from a
+    // shell one — INVOCATION_ID is necessary but NOT sufficient, because a
+    // desktop terminal or a unit-spawned script inherits it.
+    let running_as_systemd_service = detect_systemd_service_context();
+    if should_refuse_shell_launch(running_as_systemd_service, cli.foreground) {
+        eprintln!("wolfstack is a system service — it is not meant to be started by hand.");
+        eprintln!();
+        eprintln!("Refusing to launch a second daemon alongside the running service.");
+        eprintln!("To check on the real one:");
+        eprintln!();
+        eprintln!("    systemctl status wolfstack");
+        eprintln!("    journalctl -u wolfstack -f");
+        eprintln!();
+        eprintln!("The dashboard is HTTPS on the `api` port from /etc/wolfstack/ports.json");
+        eprintln!("(8553 by default) — not the status-page or inter-node port.");
+        eprintln!();
+        eprintln!("If you really do want it in the foreground — debugging, or a host with");
+        eprintln!("no systemd — pass --foreground, after stopping the service.");
+        eprintln!();
+        eprint!("{}", Cli::command().render_help());
+        std::process::exit(1);
+    }
+
     // ports.json is the persistent source of truth (the Node Ports UI writes
     // it). A CLI --port is a genuine one-off override ONLY for manual shell
     // launches. setup.sh historically baked --port into the systemd unit, which
@@ -528,11 +645,7 @@ async fn main() -> std::io::Result<()> {
     // inter_node here is just the *preferred* value — the actual bind (only on
     // self-signed installs in v23.12+) goes through ports::reserve_inter_node_port
     // and may shift if it's taken by Frigate/MediaMTX/etc.
-    // INVOCATION_ID is set by systemd for service processes only, so it tells
-    // a baked-unit launch apart from a manual `wolfstack --port N` shell run.
-    // (Caveat: `sudo -E` preserves the caller's environment — strip
-    // INVOCATION_ID before a manual test run if the shell inherited one.)
-    let running_as_systemd_service = std::env::var_os("INVOCATION_ID").is_some();
+    // `running_as_systemd_service` is bound above, at the shell-launch guard.
     let port_cfg = ports::PortConfig::load();
     let status_preferred = port_cfg.status; // captured before port_cfg is moved below
     let resolved = ports::resolve_api_ports(cli.port, running_as_systemd_service, port_cfg);
@@ -5000,4 +5113,77 @@ fn find_web_dir() -> String {
 
     // Fallback
     "web".to_string()
+}
+
+#[cfg(test)]
+mod service_context_tests {
+    use super::systemd_service_context;
+
+    // Real /proc/self/cgroup contents, captured from the machines described.
+    const SERVICE: &str = "0::/system.slice/wolfstack.service";
+    const SSH_SESSION: &str = "0::/user.slice/user-0.slice/session-3228.scope";
+    const DESKTOP_TERMINAL: &str = "0::/user.slice/user-1000.slice/user@1000.service\
+                                    /app.slice/app-org.kde.konsole-21731.scope/tab(1062235).scope";
+
+    #[test]
+    fn real_service_is_a_service() {
+        assert!(systemd_service_context(true, Some(SERVICE)));
+    }
+
+    #[test]
+    fn desktop_terminal_is_not_a_service_despite_inheriting_invocation_id() {
+        // The hole this function exists to close: a terminal emulator running
+        // as an app.scope under user@N.service inherits INVOCATION_ID, so the
+        // environment check alone would wave a manual launch straight through.
+        assert!(!systemd_service_context(true, Some(DESKTOP_TERMINAL)));
+    }
+
+    #[test]
+    fn ssh_session_is_not_a_service() {
+        // Belt and braces — an SSH login has no INVOCATION_ID to begin with,
+        // but the cgroup says user.slice too.
+        assert!(!systemd_service_context(false, Some(SSH_SESSION)));
+        assert!(!systemd_service_context(true, Some(SSH_SESSION)));
+    }
+
+    #[test]
+    fn no_invocation_id_is_never_a_service() {
+        assert!(!systemd_service_context(false, Some(SERVICE)));
+        assert!(!systemd_service_context(false, None));
+    }
+
+    #[test]
+    fn unreadable_cgroup_falls_back_to_the_env_var() {
+        // Fail toward starting. Refusing to boot a genuine service because
+        // /proc/self/cgroup was unreadable would be far worse than letting a
+        // manual launch through on an exotic host.
+        assert!(systemd_service_context(true, None));
+    }
+}
+
+#[cfg(test)]
+mod shell_launch_tests {
+    use super::should_refuse_shell_launch;
+
+    #[test]
+    fn bare_shell_launch_is_refused() {
+        // jdelrue's test node: `wolfstack` typed at a prompt while the service
+        // was already running. Starting a second daemon is never the answer.
+        assert!(should_refuse_shell_launch(false, false));
+    }
+
+    #[test]
+    fn systemd_service_always_starts() {
+        // The real launch path. --foreground is irrelevant here: the unit
+        // doesn't pass it, and it must start either way.
+        assert!(!should_refuse_shell_launch(true, false));
+        assert!(!should_refuse_shell_launch(true, true));
+    }
+
+    #[test]
+    fn explicit_foreground_is_honoured() {
+        // Debugging, or a host with no systemd (a container) where the
+        // operator supervises the process themselves.
+        assert!(!should_refuse_shell_launch(false, true));
+    }
 }
