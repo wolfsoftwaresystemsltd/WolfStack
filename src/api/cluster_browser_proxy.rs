@@ -338,12 +338,31 @@ async fn proxy_websocket(
         format!("ws://{}:{}/{}?{}", host, port, tail, query)
     };
 
-    let (upstream, _resp) = match tokio_tungstenite::connect_async(&upstream_url).await {
-        Ok(pair) => pair,
-        Err(e) => {
+    // Bound the upstream connect. `connect_async` has no timeout of its own, so
+    // a container that accepts the TCP connection but never finishes the
+    // WebSocket handshake parks this task — and its descriptor — indefinitely.
+    // That is the same defect class as the missing `connect_timeout` that took
+    // the fleet down on 2026-08-05, and it is not covered by the HTTP-client
+    // rule in tests/resource_safety.rs because tungstenite is not reqwest.
+    // Observed alongside the CLOSE-WAIT pile-up: 1,024 sockets in SYN-SENT.
+    const WS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let connect = tokio::time::timeout(
+        WS_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async(&upstream_url),
+    );
+    let (upstream, _resp) = match connect.await {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
             error!("cluster_browser proxy ws connect failed {}: {}", upstream_url, e);
             return Ok(HttpResponse::BadGateway()
                 .json(serde_json::json!({ "error": format!("ws connect failed: {}", e) })));
+        }
+        Err(_) => {
+            error!("cluster_browser proxy ws connect timed out after {:?}: {}",
+                   WS_CONNECT_TIMEOUT, upstream_url);
+            return Ok(HttpResponse::GatewayTimeout().json(serde_json::json!({
+                "error": format!("ws connect timed out after {:?}", WS_CONNECT_TIMEOUT)
+            })));
         }
     };
 
@@ -407,11 +426,36 @@ async fn ws_bridge(
                         let _ = browser.pong(&b).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    // An errored browser stream MUST end the bridge.
+                    //
+                    // actix-ws does not terminate its stream after an error:
+                    // `MessageStream::poll_next` returns the error WITHOUT
+                    // setting `closing` (actix-ws 0.3.1 stream.rs:176, and the
+                    // `?` on codec.decode at :189 does the same while the bad
+                    // bytes stay in the buffer). Every subsequent poll therefore
+                    // yields the same error, immediately ready, for ever.
+                    //
+                    // This arm used to be a catch-all `_ => {}`, so that error
+                    // fell through and the select loop re-polled with nothing to
+                    // await — a hot spin that ALSO never dropped either socket.
+                    // Measured on a user's node: seven actix workers pegged and
+                    // 29,344 sockets stranded in CLOSE-WAIT, one pair per selkies
+                    // reconnect, until the fd table hit its 65,535 ceiling and
+                    // accept() started failing (2026-08-06).
+                    Some(Err(e)) => {
+                        warn!("cluster_browser ws browser read: {} — closing bridge", e);
+                        break;
+                    }
+                    // Pong / Continuation / Nop — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
         }
     }
 
+    // Close BOTH ends. Dropping `up_tx` would release the descriptor, but the
+    // container keeps a selkies session alive until it sees a close, so an
+    // un-closed upstream leaks resources inside the container too.
+    let _ = up_tx.close().await;
     let _ = browser.close(None).await;
 }

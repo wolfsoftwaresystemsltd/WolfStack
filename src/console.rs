@@ -672,8 +672,25 @@ async fn console_session(
                 break;
             }
             // WebSocket input → PTY
-            Some(Ok(msg)) = msg_stream.recv() => {
+            //
+            // Matched as `recv_result` rather than `Some(Ok(msg))`. In
+            // `tokio::select!` a pattern that does not match merely DISABLES the
+            // branch — so a browser error or disconnect was silently dropped and
+            // this session simply stopped reading input while the PTY, its child
+            // process and its /dev/ptmx handle stayed open until the child
+            // happened to exit on its own. That is where the 42 leaked
+            // /dev/ptmx descriptors on a user's node came from (2026-08-06).
+            // Both terminal conditions must end the session explicitly.
+            recv_result = msg_stream.recv() => {
                 use actix_ws::Message;
+                let msg = match recv_result {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => {
+                        error!("console: browser websocket error: {} — closing session", e);
+                        break;
+                    }
+                    None => break,
+                };
                 match msg {
                     Message::Text(text) => {
                         // Check for resize command: {"type":"resize","cols":N,"rows":N}
@@ -932,7 +949,16 @@ async fn remote_console_bridge(
                             tungstenite::Message::Pong(data)).await;
                     }
                     Some(Ok(tungstenite::Message::Close(_))) | None => break,
-                    _ => {}
+                    // Break on an upstream error too. tungstenite is better
+                    // behaved than actix-ws here, but a bridge whose remote leg
+                    // has errored cannot do anything useful, and swallowing it
+                    // risks the same never-terminating loop as the browser side.
+                    Some(Err(e)) => {
+                        error!("console: upstream websocket error: {} — closing", e);
+                        break;
+                    }
+                    // Pong / Frame / Continuation — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
 
@@ -951,7 +977,28 @@ async fn remote_console_bridge(
                         let _ = session.pong(&bytes).await;
                     }
                     Some(Ok(actix_ws::Message::Close(_))) | None => break,
-                    _ => {}
+                    // An errored browser stream MUST end the bridge.
+                    //
+                    // actix-ws does NOT terminate its stream after an error:
+                    // `MessageStream::poll_next` returns it WITHOUT setting
+                    // `closing` (actix-ws 0.3.1 stream.rs:176; the `?` on
+                    // codec.decode at :189 does the same while the offending
+                    // bytes stay buffered). Every later poll therefore yields
+                    // the same error, immediately ready, for ever.
+                    //
+                    // A catch-all `_ => {}` let that fall through, so the select
+                    // loop re-polled with nothing to await — a hot spin that also
+                    // never dropped either side's socket. Measured on a user's
+                    // node 2026-08-06: seven actix workers pegged, 29,344 sockets
+                    // stranded in CLOSE-WAIT and 42 leaked /dev/ptmx handles,
+                    // until the fd table hit its 65,535 ceiling and accept()
+                    // began failing.
+                    Some(Err(e)) => {
+                        error!("console: browser websocket error: {} — closing", e);
+                        break;
+                    }
+                    // Pong / Continuation / Nop — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
         }
