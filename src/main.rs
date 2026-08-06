@@ -549,8 +549,15 @@ async fn main() -> std::io::Result<()> {
     let api_port: u16 = resolved.api;
     let inter_node_pref: u16 = resolved.inter_node_pref;
     // Status-port auto-fallback: try the configured port, scan upward if taken.
-    // Persists the chosen port back to ports.json so restarts are stable.
-    let status_port: u16 = ports::reserve_status_port(&cli.bind, status_preferred, 8550..=8599);
+    // The service persists the chosen port back to ports.json so restarts are
+    // stable; a manual shell launch (which normally finds the port busy because
+    // the service itself holds it) uses the fallback for that run only.
+    let status_port: u16 = ports::reserve_status_port(
+        &cli.bind,
+        status_preferred,
+        8550..=8599,
+        running_as_systemd_service,
+    );
 
     // Lock down /etc/wolfstack and known sensitive files. Pre-v18.7.27
     // installs left cluster-secret, nodes.json (containing PVE tokens),
@@ -4491,6 +4498,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     inter_node_pref,
                     8554..=8599,
                     &[api_port, status_port],
+                    running_as_systemd_service,
                 ))
             } else {
                 None

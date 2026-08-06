@@ -22,11 +22,13 @@
 //! silently overrides the configured ports or pins `inter_node` to `api + 1`.
 //! Both `inter_node` and `status` have auto-fallbacks (`reserve_inter_node_port`,
 //! `reserve_status_port`) so a colliding service (e.g. WolfDisk on 8550, Frigate
-//! on 8554) doesn't stop the daemon from starting.
+//! on 8554) doesn't stop the daemon from starting. A fallback is only written
+//! back to `ports.json` when we are the systemd service — see
+//! [`should_persist_fallback`] for why a manual shell launch must not.
 
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PortConfig {
@@ -168,12 +170,82 @@ impl PortConfig {
     }
 }
 
+/// Which listener a fallback scan settled on — selects the `ports.json` field
+/// [`persist_fallback_port`] updates, and the wording of its log lines.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FallbackPort {
+    Status,
+    InterNode,
+}
+
+impl FallbackPort {
+    fn label(self) -> &'static str {
+        match self {
+            FallbackPort::Status => "status",
+            FallbackPort::InterNode => "inter-node",
+        }
+    }
+}
+
+/// Should a fallback scan result be written back to `ports.json`?
+///
+/// Only when **both**:
+/// - we are the systemd service (`running_as_service`), and
+/// - the chosen port actually differs from what's already on disk, so we don't
+///   rewrite an identical file on every start.
+///
+/// The service condition is the important one. A manual `wolfstack` run from a
+/// shell nearly always finds the preferred port busy for the most boring reason
+/// there is — the real service is already bound to it. That is not a collision
+/// worth recording, but the old code recorded it anyway: the one-off process
+/// exited seconds later while its rewritten `ports.json` survived every reboot,
+/// and each subsequent manual launch walked the port up another step. Observed
+/// on a test node whose config had drifted to `inter_node` 8555 / `status` 8551
+/// purely from shell launches, leaving the operator hunting a dashboard that had
+/// never moved off 8553.
+fn should_persist_fallback(running_as_service: bool, current: u16, chosen: u16) -> bool {
+    running_as_service && current != chosen
+}
+
+/// Persist a fallback port choice to `ports.json`, subject to
+/// [`should_persist_fallback`].
+fn persist_fallback_port(which: FallbackPort, chosen: u16, running_as_service: bool) {
+    let mut cfg = PortConfig::load();
+    let current = match which {
+        FallbackPort::Status => cfg.status,
+        FallbackPort::InterNode => cfg.inter_node,
+    };
+    if !should_persist_fallback(running_as_service, current, chosen) {
+        if !running_as_service {
+            info!(
+                "{} port fell back to {} for this run only — manual launch, \
+                 ports.json left at {}",
+                which.label(), chosen, current
+            );
+        }
+        return;
+    }
+    match which {
+        FallbackPort::Status => cfg.status = chosen,
+        FallbackPort::InterNode => cfg.inter_node = chosen,
+    }
+    if let Err(e) = cfg.save() {
+        warn!("failed to persist new {} port to ports.json: {}", which.label(), e);
+    }
+}
+
 /// Try to reserve the preferred status port. If it's taken, scan upward through
-/// the range and pick the first free one — persists the choice back to ports.json
-/// so subsequent restarts use the same port. Returns the chosen port, or the
-/// preferred port unchanged if nothing else is free (caller will then surface
-/// the bind error like before).
-pub fn reserve_status_port(bind: &str, preferred: u16, range: std::ops::RangeInclusive<u16>) -> u16 {
+/// the range and pick the first free one. When running as the systemd service
+/// the choice is persisted back to ports.json so subsequent restarts are stable;
+/// a manual launch uses the fallback for that run only and leaves the config
+/// alone. Returns the chosen port, or the preferred port unchanged if nothing
+/// else is free (caller will then surface the bind error like before).
+pub fn reserve_status_port(
+    bind: &str,
+    preferred: u16,
+    range: std::ops::RangeInclusive<u16>,
+    running_as_service: bool,
+) -> u16 {
     if port_is_free(bind, preferred) {
         return preferred;
     }
@@ -181,13 +253,7 @@ pub fn reserve_status_port(bind: &str, preferred: u16, range: std::ops::RangeInc
         if p == preferred { continue; }
         if port_is_free(bind, p) {
             warn!("status port {} taken, falling back to {}", preferred, p);
-            let mut cfg = PortConfig::load();
-            if cfg.status != p {
-                cfg.status = p;
-                if let Err(e) = cfg.save() {
-                    warn!("failed to persist new status port to ports.json: {}", e);
-                }
-            }
+            persist_fallback_port(FallbackPort::Status, p, running_as_service);
             return p;
         }
     }
@@ -204,6 +270,7 @@ pub fn reserve_inter_node_port(
     preferred: u16,
     range: std::ops::RangeInclusive<u16>,
     avoid: &[u16],
+    running_as_service: bool,
 ) -> u16 {
     if !avoid.contains(&preferred) && port_is_free(bind, preferred) {
         return preferred;
@@ -213,13 +280,7 @@ pub fn reserve_inter_node_port(
         if avoid.contains(&p) { continue; }
         if port_is_free(bind, p) {
             warn!("inter-node port {} taken, falling back to {}", preferred, p);
-            let mut cfg = PortConfig::load();
-            if cfg.inter_node != p {
-                cfg.inter_node = p;
-                if let Err(e) = cfg.save() {
-                    warn!("failed to persist new inter-node port to ports.json: {}", e);
-                }
-            }
+            persist_fallback_port(FallbackPort::InterNode, p, running_as_service);
             return p;
         }
     }
@@ -324,6 +385,35 @@ mod tests {
         assert_eq!(r.api, 8553);
         assert_eq!(r.inter_node_pref, 8554);
         assert!(r.persist.is_none(), "a default install must not spuriously write ports.json");
+    }
+
+    #[test]
+    fn manual_launch_never_persists_a_port_fallback() {
+        // jdelrue's test node: `wolfstack` run from a shell while the service
+        // was already up. Every preferred port looks "taken" — by our own
+        // service — and the scan walks one step up. That must NOT be written
+        // back, or the drift outlives the process and survives reboots.
+        assert!(!should_persist_fallback(false, 8550, 8551));
+        assert!(!should_persist_fallback(false, 8554, 8555));
+    }
+
+    #[test]
+    fn service_persists_a_genuine_fallback() {
+        // A real collision (WolfDisk on 8550, Frigate on 8554) hit by the
+        // actual service does need recording, so restarts stay stable.
+        assert!(should_persist_fallback(true, 8550, 8551));
+    }
+
+    #[test]
+    fn service_does_not_rewrite_an_unchanged_port() {
+        // Already on the fallback port from a previous start — no churn-write.
+        assert!(!should_persist_fallback(true, 8551, 8551));
+    }
+
+    #[test]
+    fn fallback_port_labels_are_distinct() {
+        assert_eq!(FallbackPort::Status.label(), "status");
+        assert_eq!(FallbackPort::InterNode.label(), "inter-node");
     }
 
     #[test]
