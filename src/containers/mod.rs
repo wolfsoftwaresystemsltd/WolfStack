@@ -12209,13 +12209,393 @@ pub fn docker_clone(container: &str, new_name: &str) -> Result<String, String> {
     Ok(format!("Container cloned as '{}' ({})", new_name, &new_id[..12.min(new_id.len())]))
 }
 
+// ─── Docker migration: runtime configuration ───
+//
+// `docker commit` snapshots the filesystem and the image-level Config — Env,
+// Cmd, Entrypoint, WorkingDir, User, Labels all survive a commit/save/load
+// round trip. What it does NOT capture is HostConfig and the network
+// attachments: published ports, mounts, restart policy, resource limits,
+// devices. Those are properties of the *container*, not the image.
+//
+// So a migrated container came up on the default bridge with no port bindings
+// and no volumes — the destination was created with a bare
+// `docker create --name X <image>`. RutgerDiehard's speedtest-tracker went from
+// `speedtest_tracker_default` + 8543->443 + 8181->80 to `bridge` + nothing
+// (2026-08-06). This spec carries the missing half across.
+
+/// One mount to recreate on the destination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrateMount {
+    /// `"volume"` (named, docker-managed) or `"bind"` (a host path).
+    pub kind: String,
+    /// Volume name, or the host path for a bind mount.
+    pub source: String,
+    pub target: String,
+    pub read_only: bool,
+}
+
+/// The half of a container's configuration that `docker commit` loses.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DockerRuntimeSpec {
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
+    /// e.g. `unless-stopped`, or `on-failure:5`. Empty means unset.
+    #[serde(default)]
+    pub restart_policy: String,
+    #[serde(default)]
+    pub mounts: Vec<MigrateMount>,
+    /// Named networks the source is attached to, excluding the default bridge.
+    #[serde(default)]
+    pub networks: Vec<String>,
+    #[serde(default)]
+    pub memory_bytes: i64,
+    #[serde(default)]
+    pub nano_cpus: i64,
+    #[serde(default)]
+    pub privileged: bool,
+    #[serde(default)]
+    pub cap_add: Vec<String>,
+    /// `PathOnHost:PathInContainer:CgroupPermissions`
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// `hostname:ip`
+    #[serde(default)]
+    pub extra_hosts: Vec<String>,
+}
+
+impl DockerRuntimeSpec {
+    /// Named (docker-managed) volumes only — the ones whose data can be copied.
+    /// Bind mounts point at host paths that may or may not exist on the target;
+    /// we re-declare them but never invent their contents.
+    pub fn named_volumes(&self) -> Vec<String> {
+        self.mounts.iter()
+            .filter(|m| m.kind == "volume")
+            .map(|m| m.source.clone())
+            .collect()
+    }
+}
+
+/// Read the runtime configuration of `container` off the local daemon.
+pub fn capture_runtime_spec(container: &str) -> Result<DockerRuntimeSpec, String> {
+    let out = Command::new("docker")
+        .args(["inspect", container])
+        .output()
+        .map_err(|e| format!("docker inspect failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "docker inspect failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("docker inspect returned unparseable JSON: {}", e))?;
+    let c = parsed.get(0).ok_or_else(|| "docker inspect returned no container".to_string())?;
+    let host = &c["HostConfig"];
+
+    // Ports: HostConfig.PortBindings is {"80/tcp": [{"HostIp":"","HostPort":"8181"}]}.
+    // A container port can have several host bindings, so this is a flat_map.
+    let mut ports = Vec::new();
+    if let Some(map) = host["PortBindings"].as_object() {
+        for (key, bindings) in map {
+            let (cport, proto) = match key.split_once('/') {
+                Some((p, pr)) => (p, pr),
+                None => (key.as_str(), "tcp"),
+            };
+            let container_port: u16 = match cport.parse() { Ok(v) => v, Err(_) => continue };
+            for b in bindings.as_array().unwrap_or(&Vec::new()) {
+                let host_port: u16 = match b["HostPort"].as_str().unwrap_or("").parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,   // "" means "any free port" — not reproducible
+                };
+                ports.push(PortMapping {
+                    host_ip: b["HostIp"].as_str().unwrap_or("").to_string(),
+                    host_port,
+                    container_port,
+                    proto: proto.to_lowercase(),
+                    published: true,
+                });
+            }
+        }
+    }
+    // Stable order so the spec (and any diff of it) doesn't churn — docker
+    // hands back a JSON object, whose iteration order is not guaranteed.
+    ports.sort_by_key(|p| (p.container_port, p.host_port, p.proto.clone()));
+
+    let restart_policy = {
+        let name = host["RestartPolicy"]["Name"].as_str().unwrap_or("");
+        let max = host["RestartPolicy"]["MaximumRetryCount"].as_i64().unwrap_or(0);
+        match (name, max) {
+            ("", _) | ("no", _) => String::new(),
+            ("on-failure", n) if n > 0 => format!("on-failure:{}", n),
+            (n, _) => n.to_string(),
+        }
+    };
+
+    // .Mounts is the resolved view — typed, with the volume NAME for named
+    // volumes, which HostConfig.Binds strings don't reliably give us.
+    let mounts = c["Mounts"].as_array().map(|arr| {
+        arr.iter().filter_map(|m| {
+            let kind = m["Type"].as_str().unwrap_or("");
+            if kind != "volume" && kind != "bind" { return None; }   // tmpfs has no data to carry
+            let source = if kind == "volume" {
+                m["Name"].as_str().unwrap_or("").to_string()
+            } else {
+                m["Source"].as_str().unwrap_or("").to_string()
+            };
+            if source.is_empty() { return None; }
+            Some(MigrateMount {
+                kind: kind.to_string(),
+                source,
+                target: m["Destination"].as_str().unwrap_or("").to_string(),
+                read_only: !m["RW"].as_bool().unwrap_or(true),
+            })
+        }).collect::<Vec<_>>()
+    }).unwrap_or_default();
+
+    let networks = c["NetworkSettings"]["Networks"].as_object().map(|m| {
+        m.keys()
+            // `bridge` is the default and is attached anyway; `host`/`none` are
+            // network modes rather than attachable networks.
+            .filter(|n| !matches!(n.as_str(), "bridge" | "host" | "none"))
+            .cloned()
+            .collect::<Vec<_>>()
+    }).unwrap_or_default();
+
+    let str_list = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array().map(|a| {
+            a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()
+        }).unwrap_or_default()
+    };
+
+    let devices = host["Devices"].as_array().map(|a| {
+        a.iter().filter_map(|d| {
+            let on_host = d["PathOnHost"].as_str()?;
+            let in_ctr = d["PathInContainer"].as_str()?;
+            let perms = d["CgroupPermissions"].as_str().unwrap_or("rwm");
+            Some(format!("{}:{}:{}", on_host, in_ctr, perms))
+        }).collect()
+    }).unwrap_or_default();
+
+    Ok(DockerRuntimeSpec {
+        ports,
+        restart_policy,
+        mounts,
+        networks,
+        memory_bytes: host["Memory"].as_i64().unwrap_or(0),
+        nano_cpus: host["NanoCpus"].as_i64().unwrap_or(0),
+        privileged: host["Privileged"].as_bool().unwrap_or(false),
+        cap_add: str_list(&host["CapAdd"]),
+        devices,
+        extra_hosts: str_list(&host["ExtraHosts"]),
+    })
+}
+
+/// Build the `docker create` flags that reproduce `spec`.
+///
+/// `include_mounts` is the operator's choice from the migrate dialog: with it
+/// false the container is created with no volumes at all, so it cannot start
+/// against storage that isn't there yet.
+///
+/// Networks are deliberately NOT emitted here — only the first can be given to
+/// `docker create`, and the rest need `docker network connect` afterwards, so
+/// the caller handles all of them uniformly.
+pub fn spec_to_create_args(spec: &DockerRuntimeSpec, include_mounts: bool) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+
+    for p in &spec.ports {
+        let host_side = if p.host_ip.is_empty() || p.host_ip == "0.0.0.0" {
+            p.host_port.to_string()
+        } else {
+            format!("{}:{}", p.host_ip, p.host_port)
+        };
+        args.push("-p".into());
+        args.push(format!("{}:{}/{}", host_side, p.container_port, p.proto));
+    }
+
+    if !spec.restart_policy.is_empty() {
+        args.push("--restart".into());
+        args.push(spec.restart_policy.clone());
+    }
+
+    if include_mounts {
+        for m in &spec.mounts {
+            args.push("-v".into());
+            args.push(if m.read_only {
+                format!("{}:{}:ro", m.source, m.target)
+            } else {
+                format!("{}:{}", m.source, m.target)
+            });
+        }
+    }
+
+    if spec.memory_bytes > 0 {
+        args.push("--memory".into());
+        args.push(spec.memory_bytes.to_string());
+    }
+    if spec.nano_cpus > 0 {
+        args.push("--cpus".into());
+        // NanoCpus is CPUs × 1e9. Three decimals matches what `--cpus` accepts.
+        args.push(format!("{:.3}", spec.nano_cpus as f64 / 1_000_000_000.0));
+    }
+    if spec.privileged {
+        args.push("--privileged".into());
+    }
+    for c in &spec.cap_add {
+        args.push("--cap-add".into());
+        args.push(c.clone());
+    }
+    for d in &spec.devices {
+        args.push("--device".into());
+        args.push(d.clone());
+    }
+    for h in &spec.extra_hosts {
+        args.push("--add-host".into());
+        args.push(h.clone());
+    }
+    args
+}
+
+/// What to do with the source container's volumes. The operator chooses this in
+/// the migrate dialog — there is no safe default to assume. Copying multi-GB
+/// volume data is slow and often unwanted; re-declaring without copying leaves
+/// a database pointed at an empty directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeMode {
+    /// Recreate the mounts and copy the contents of every named volume.
+    Copy,
+    /// Recreate the mounts, leave the data behind for the operator to move.
+    Declare,
+    /// Create the container with no volumes at all.
+    Skip,
+}
+
+/// POST the runtime spec to the destination ahead of the image.
+fn send_runtime_spec(
+    target_url: &str,
+    container: &str,
+    spec: &DockerRuntimeSpec,
+    include_mounts: bool,
+    cluster_secret: &str,
+) -> Result<(), String> {
+    let payload = serde_json::json!({ "spec": spec, "include_mounts": include_mounts });
+    let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    let urls = crate::api::build_external_urls(
+        target_url,
+        &format!("/api/containers/docker/import-spec?name={}", container),
+    );
+    let mut last = String::from("no endpoint reachable");
+    for url in &urls {
+        let out = Command::new("curl")
+            .args([
+                "-s", "-f", "-k",
+                "--connect-timeout", "5",
+                "--max-time", "30",     // a few KB of JSON; a real ceiling is fine here
+                "-X", "POST",
+                "-H", "Content-Type: application/json",
+                "-H", &format!("X-WolfStack-Secret: {}", cluster_secret),
+                "--data-binary", &body,   // small and in memory already, not a file
+                url,
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => return Ok(()),
+            Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(last)
+}
+
+/// Tar a named volume's contents and stream them to the destination.
+///
+/// The volume's on-disk location comes from `docker volume inspect`, not a
+/// guessed path under /var/lib/docker — non-default drivers and a relocated
+/// data-root both make that guess wrong.
+fn send_volume_data(
+    target_url: &str,
+    container: &str,
+    volume: &str,
+    cluster_secret: &str,
+    staging: &str,
+) -> Result<(), String> {
+    if !crate::auth::is_safe_name(volume) {
+        return Err("unsafe volume name".into());
+    }
+    let out = Command::new("docker")
+        .args(["volume", "inspect", "-f", "{{.Mountpoint}}", volume])
+        .output()
+        .map_err(|e| format!("docker volume inspect: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "docker volume inspect: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let mountpoint = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if mountpoint.is_empty() {
+        return Err("volume has no local mountpoint (non-local driver?)".into());
+    }
+
+    let tar_path = format!("{}/wolfstack-vol-{}-{}.tar", staging, container, volume);
+    let tar = Command::new("tar")
+        .args(["-C", &mountpoint, "-cf", &tar_path, "."])
+        .output()
+        .map_err(|e| format!("tar: {}", e))?;
+    if !tar.status.success() {
+        let _ = std::fs::remove_file(&tar_path);
+        return Err(format!("tar: {}", String::from_utf8_lossy(&tar.stderr).trim()));
+    }
+
+    let urls = crate::api::build_external_urls(
+        target_url,
+        &format!("/api/containers/docker/import-volume?name={}&volume={}", container, volume),
+    );
+    let mut last = String::from("no endpoint reachable");
+    let mut ok = false;
+    for url in &urls {
+        let o = Command::new("curl")
+            .args([
+                "-s", "-f", "-k",
+                "--connect-timeout", "5",
+                "--speed-limit", "1024",
+                "--speed-time", "60",
+                "-X", "POST",
+                "-H", "Content-Type: application/octet-stream",
+                "-H", &format!("X-WolfStack-Secret: {}", cluster_secret),
+                "-T", &tar_path,      // stream — volumes are the big ones
+                url,
+            ])
+            .output();
+        match o {
+            Ok(r) if r.status.success() => { ok = true; break; }
+            Ok(r) => last = String::from_utf8_lossy(&r.stderr).trim().to_string(),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    let _ = std::fs::remove_file(&tar_path);
+    if ok { Ok(()) } else { Err(last) }
+}
+
 /// Migrate a Docker container to a remote WolfStack node
 /// Exports the container, sends it to the target, imports and optionally starts it
-pub fn docker_migrate(container: &str, target_url: &str, _remove_source: bool, cluster_secret: &str) -> Result<String, String> {
+pub fn docker_migrate(
+    container: &str,
+    target_url: &str,
+    _remove_source: bool,
+    cluster_secret: &str,
+    volume_mode: VolumeMode,
+) -> Result<String, String> {
     // Validate container name to prevent path traversal in export path and URL
     if !crate::auth::is_safe_name(container) {
         return Err("Invalid container name".to_string());
     }
+
+    // Capture the runtime configuration FIRST — before the commit, so a
+    // container whose config we can't read fails the migration outright rather
+    // than silently arriving stripped of its ports and volumes.
+    let spec = capture_runtime_spec(container)?;
+    let include_mounts = volume_mode != VolumeMode::Skip;
 
     // Step 1: Commit the running container to a temporary image (no stop needed)
     let temp_image = format!("wolfstack-migrate/{}", container);
@@ -12231,8 +12611,14 @@ pub fn docker_migrate(container: &str, target_url: &str, _remove_source: bool, c
         ));
     }
 
-    // Step 3: Export the image to a tar file
-    let export_path = format!("/tmp/wolfstack-migrate-{}.tar", container);
+    // Step 3: Export the image to a tar file.
+    //
+    // NOT /tmp: that is tmpfs on stock Debian 13 and most systemd distros, so
+    // the export would land in RAM and compete with the transfer that follows.
+    // transfer_staging_dir picks the operator's configured (disk-backed)
+    // staging path — the same fix backups got after the 2026-07-21 incident.
+    let staging = crate::paths::transfer_staging_dir();
+    let export_path = format!("{}/wolfstack-migrate-{}.tar", staging, container);
     let output = Command::new("docker")
         .args(["save", "-o", &export_path, &temp_image])
         .output()
@@ -12243,6 +12629,28 @@ pub fn docker_migrate(container: &str, target_url: &str, _remove_source: bool, c
             "Save failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
+    }
+
+    // Step 3b: Ship the runtime spec ahead of the image, so the destination
+    // knows how to create the container before it has one. Best-effort by
+    // design: an older peer has no such endpoint, and a migration that lands
+    // without its ports is still better than one that doesn't land at all —
+    // but say so in the result rather than letting it pass silently.
+    let mut warnings: Vec<String> = Vec::new();
+    if let Err(e) = send_runtime_spec(target_url, container, &spec, include_mounts, cluster_secret) {
+        warnings.push(format!(
+            "runtime config (ports, networks, mounts) could not be sent — the destination \
+             will be created with defaults: {}", e
+        ));
+    }
+
+    // Step 3c: Volume data, only if the operator asked for it.
+    if volume_mode == VolumeMode::Copy {
+        for volume in spec.named_volumes() {
+            if let Err(e) = send_volume_data(target_url, container, &volume, cluster_secret, &staging) {
+                warnings.push(format!("volume '{}' was not copied: {}", volume, e));
+            }
+        }
     }
 
     // Step 4: Send the tar to the remote node — try WolfStack (8553) and Proxmox (8006) ports
@@ -12258,11 +12666,20 @@ pub fn docker_migrate(container: &str, target_url: &str, _remove_source: bool, c
             .args([
                 "-s", "-f", "-k",    // --fail + accept self-signed certs
                 "--connect-timeout", "5",
-                "--max-time", "300", // 5 minute timeout for large images
+                // No --max-time: a hard ceiling fails an otherwise healthy
+                // multi-GB transfer purely for being big (300s only covers
+                // ~1GB on a slow link). Abort on a STALL instead — under
+                // 1 KB/s for 60s means the peer is gone, at any size.
+                "--speed-limit", "1024",
+                "--speed-time", "60",
                 "-X", "POST",
                 "-H", "Content-Type: application/octet-stream",
                 "-H", &secret_header,
-                "--data-binary", &format!("@{}", export_path),
+                // -T streams the file. `--data-binary @file` reads the WHOLE
+                // file into curl's memory first and dies with
+                // "option --data-binary: out of memory" on a large image, even
+                // with GBs free (RutgerDiehard, 2026-08-06).
+                "-T", &export_path,
                 import_url,
             ])
             .output();
@@ -12299,8 +12716,26 @@ pub fn docker_migrate(container: &str, target_url: &str, _remove_source: bool, c
         ));
     }
 
-    // Source stays running — destination is imported but not started
-    Ok(format!("Container transferred to {}. Destination is stopped — start it manually when ready. {}", target_url, last_response))
+    // Source stays running — destination is imported but not started.
+    // Anything that could not be carried across is reported here rather than
+    // discovered later by a container that won't serve traffic.
+    let mut msg = format!(
+        "Container transferred to {}. Destination is stopped — start it manually when ready. {}",
+        target_url, last_response
+    );
+    if volume_mode == VolumeMode::Declare && !spec.named_volumes().is_empty() {
+        msg.push_str(&format!(
+            " Volume data was NOT copied ({}) — move it before starting the destination.",
+            spec.named_volumes().join(", ")
+        ));
+    }
+    if volume_mode == VolumeMode::Skip && !spec.mounts.is_empty() {
+        msg.push_str(" Volumes were omitted entirely at your request.");
+    }
+    for w in &warnings {
+        msg.push_str(&format!(" WARNING: {}", w));
+    }
+    Ok(msg)
 }
 
 /// Import a Docker container image from a tar file
@@ -12329,9 +12764,51 @@ pub fn docker_import_image(tar_path: &str, container_name: &str) -> Result<Strin
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| format!("wolfstack-migrate/{}", container_name));
 
-    // Create a container from the loaded image
+    // Apply the sender's runtime spec if it arrived. Without it the container
+    // is created bare — which is exactly the bug that lost speedtest-tracker's
+    // ports and put it on the default bridge.
+    let staged_spec = take_staged_spec(container_name);
+    let mut notes: Vec<String> = Vec::new();
+
+    let mut create_args: Vec<String> =
+        vec!["create".into(), "--name".into(), container_name.into()];
+    let mut extra_networks: Vec<String> = Vec::new();
+
+    if let Some((spec, include_mounts)) = &staged_spec {
+        // Named networks must exist on this node before we can attach. A
+        // compose-created network like `speedtest_tracker_default` won't.
+        for net in &spec.networks {
+            if !crate::auth::is_safe_name(net) { continue; }
+            let exists = Command::new("docker")
+                .args(["network", "inspect", net])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !exists {
+                let made = Command::new("docker")
+                    .args(["network", "create", net])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !made {
+                    notes.push(format!("network '{}' could not be created", net));
+                    continue;
+                }
+            }
+            extra_networks.push(net.clone());
+        }
+        // `docker create` takes at most one --network; the rest are connected
+        // after creation.
+        if let Some(first) = extra_networks.first() {
+            create_args.push("--network".into());
+            create_args.push(first.clone());
+        }
+        create_args.extend(spec_to_create_args(spec, *include_mounts));
+    }
+    create_args.push(image_name.clone());
+
     let output = Command::new("docker")
-        .args(["create", "--name", container_name, &image_name])
+        .args(&create_args)
         .output()
         .map_err(|e| format!("Failed to create container: {}", e))?;
 
@@ -12342,11 +12819,83 @@ pub fn docker_import_image(tar_path: &str, container_name: &str) -> Result<Strin
         ));
     }
 
+    // Attach any remaining networks.
+    for net in extra_networks.iter().skip(1) {
+        let ok = Command::new("docker")
+            .args(["network", "connect", net, container_name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            notes.push(format!("could not attach network '{}'", net));
+        }
+    }
+
     // Clean up temp tar
     let _ = std::fs::remove_file(tar_path);
 
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(format!("Container '{}' imported ({})", container_name, &id[..12.min(id.len())]))
+    let mut msg = format!("Container '{}' imported ({})", container_name, &id[..12.min(id.len())]);
+    if staged_spec.is_none() {
+        msg.push_str(" — no runtime config was received, so ports, networks and volumes are NOT set");
+    }
+    for n in &notes {
+        msg.push_str(&format!(" WARNING: {}", n));
+    }
+    Ok(msg)
+}
+
+/// Path of the staged runtime spec for `container`, written by the
+/// import-spec endpoint just before the image arrives.
+pub fn staged_spec_path(container: &str) -> String {
+    format!("{}/wolfstack-spec-{}.json", crate::paths::transfer_staging_dir(), container)
+}
+
+/// Read and consume the staged spec. Consumed rather than left in place so a
+/// later manual import of the same name can't silently inherit a stale config.
+fn take_staged_spec(container: &str) -> Option<(DockerRuntimeSpec, bool)> {
+    let path = staged_spec_path(container);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let spec: DockerRuntimeSpec = serde_json::from_value(v.get("spec")?.clone()).ok()?;
+    let include_mounts = v.get("include_mounts").and_then(|b| b.as_bool()).unwrap_or(true);
+    Some((spec, include_mounts))
+}
+
+/// Restore a named volume's contents from a tar staged by the import-volume
+/// endpoint. Creates the volume if this node doesn't have it.
+pub fn docker_restore_volume(volume: &str, tar_path: &str) -> Result<String, String> {
+    if !crate::auth::is_safe_name(volume) {
+        return Err("Invalid volume name".into());
+    }
+    // Idempotent: `docker volume create` on an existing volume is a no-op.
+    let created = Command::new("docker")
+        .args(["volume", "create", volume])
+        .output()
+        .map_err(|e| format!("docker volume create: {}", e))?;
+    if !created.status.success() {
+        return Err(format!(
+            "docker volume create: {}",
+            String::from_utf8_lossy(&created.stderr).trim()
+        ));
+    }
+    let out = Command::new("docker")
+        .args(["volume", "inspect", "-f", "{{.Mountpoint}}", volume])
+        .output()
+        .map_err(|e| format!("docker volume inspect: {}", e))?;
+    let mountpoint = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || mountpoint.is_empty() {
+        return Err("volume has no local mountpoint".into());
+    }
+    let untar = Command::new("tar")
+        .args(["-C", &mountpoint, "-xf", tar_path])
+        .output()
+        .map_err(|e| format!("tar: {}", e))?;
+    if !untar.status.success() {
+        return Err(format!("tar: {}", String::from_utf8_lossy(&untar.stderr).trim()));
+    }
+    Ok(format!("Volume '{}' restored", volume))
 }
 /// Clone an LXC container (Proxmox-aware)
 #[allow(dead_code)]
@@ -14369,5 +14918,109 @@ mod compose_command_tests {
             }
             assert!(base_args.iter().all(|a| !a.starts_with('-')));
         }
+    }
+}
+
+#[cfg(test)]
+mod migrate_spec_tests {
+    use super::*;
+
+    fn port(host_ip: &str, host: u16, ctr: u16, proto: &str) -> PortMapping {
+        PortMapping {
+            host_ip: host_ip.into(),
+            host_port: host,
+            container_port: ctr,
+            proto: proto.into(),
+            published: true,
+        }
+    }
+
+    #[test]
+    fn ports_render_as_docker_flags() {
+        // RutgerDiehard's speedtest-tracker: 0.0.0.0:8543->443 and
+        // 0.0.0.0:8181->80 arrived as a container with no bindings at all.
+        let spec = DockerRuntimeSpec {
+            ports: vec![port("0.0.0.0", 8543, 443, "tcp"), port("0.0.0.0", 8181, 80, "tcp")],
+            ..Default::default()
+        };
+        let args = spec_to_create_args(&spec, true);
+        assert!(args.windows(2).any(|w| w[0] == "-p" && w[1] == "8543:443/tcp"), "{:?}", args);
+        assert!(args.windows(2).any(|w| w[0] == "-p" && w[1] == "8181:80/tcp"), "{:?}", args);
+    }
+
+    #[test]
+    fn a_specific_listen_ip_is_preserved() {
+        // 127.0.0.1:5432 must not silently become 0.0.0.0:5432 — that would
+        // publish a database to the network the operator had kept it off.
+        let spec = DockerRuntimeSpec {
+            ports: vec![port("127.0.0.1", 5432, 5432, "tcp")],
+            ..Default::default()
+        };
+        let args = spec_to_create_args(&spec, true);
+        assert!(args.contains(&"127.0.0.1:5432:5432/tcp".to_string()), "{:?}", args);
+    }
+
+    #[test]
+    fn mounts_are_omitted_when_the_operator_said_no_volumes() {
+        let spec = DockerRuntimeSpec {
+            mounts: vec![MigrateMount {
+                kind: "volume".into(),
+                source: "appdata".into(),
+                target: "/data".into(),
+                read_only: false,
+            }],
+            ..Default::default()
+        };
+        assert!(spec_to_create_args(&spec, true).contains(&"appdata:/data".to_string()));
+        assert!(!spec_to_create_args(&spec, false).iter().any(|a| a == "-v"));
+    }
+
+    #[test]
+    fn read_only_mounts_stay_read_only() {
+        let spec = DockerRuntimeSpec {
+            mounts: vec![MigrateMount {
+                kind: "bind".into(),
+                source: "/srv/conf".into(),
+                target: "/etc/app".into(),
+                read_only: true,
+            }],
+            ..Default::default()
+        };
+        assert!(spec_to_create_args(&spec, true).contains(&"/srv/conf:/etc/app:ro".to_string()));
+    }
+
+    #[test]
+    fn named_volumes_excludes_bind_mounts() {
+        // Only docker-managed volumes have data we can copy; a bind mount is
+        // a host path that may not exist on the target at all.
+        let spec = DockerRuntimeSpec {
+            mounts: vec![
+                MigrateMount { kind: "volume".into(), source: "appdata".into(), target: "/data".into(), read_only: false },
+                MigrateMount { kind: "bind".into(), source: "/srv/conf".into(), target: "/etc/app".into(), read_only: true },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(spec.named_volumes(), vec!["appdata".to_string()]);
+    }
+
+    #[test]
+    fn restart_policy_and_limits_render() {
+        let spec = DockerRuntimeSpec {
+            restart_policy: "unless-stopped".into(),
+            memory_bytes: 536_870_912,
+            nano_cpus: 1_500_000_000,
+            ..Default::default()
+        };
+        let args = spec_to_create_args(&spec, true);
+        assert!(args.windows(2).any(|w| w[0] == "--restart" && w[1] == "unless-stopped"), "{:?}", args);
+        assert!(args.windows(2).any(|w| w[0] == "--memory" && w[1] == "536870912"), "{:?}", args);
+        // NanoCpus is CPUs x 1e9 — 1.5 CPUs, not 1500000000 of them.
+        assert!(args.windows(2).any(|w| w[0] == "--cpus" && w[1] == "1.500"), "{:?}", args);
+    }
+
+    #[test]
+    fn an_empty_spec_produces_no_flags() {
+        // A container with nothing special must not gain stray arguments.
+        assert!(spec_to_create_args(&DockerRuntimeSpec::default(), true).is_empty());
     }
 }

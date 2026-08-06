@@ -11957,6 +11957,12 @@ pub async fn docker_clone(
 pub struct DockerMigrateRequest {
     pub target_url: String,
     pub remove_source: Option<bool>,
+    /// What to do with the source's volumes — chosen by the operator in the
+    /// migrate dialog. Absent means `declare`: recreate the mounts but never
+    /// silently copy gigabytes of data the operator didn't ask for, and never
+    /// silently drop mounts they expected to keep.
+    #[serde(default)]
+    pub volume_mode: Option<containers::VolumeMode>,
 }
 pub async fn docker_migrate(
     req: HttpRequest,
@@ -11967,7 +11973,8 @@ pub async fn docker_migrate(
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
     let remove = body.remove_source.unwrap_or(false);
-    match containers::docker_migrate(&id, &body.target_url, remove, &state.cluster_secret) {
+    let volume_mode = body.volume_mode.unwrap_or(containers::VolumeMode::Declare);
+    match containers::docker_migrate(&id, &body.target_url, remove, &state.cluster_secret, volume_mode) {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
     }
@@ -13626,12 +13633,111 @@ pub async fn network_conflicts(
     HttpResponse::Ok().json(conflicts)
 }
 
+/// POST /api/containers/docker/import-spec — receive the runtime configuration
+/// of a container that is about to be migrated here.
+///
+/// Arrives just before the image. Staged to disk and consumed by the import,
+/// so the destination can recreate ports, networks and mounts instead of
+/// creating a bare container.
+pub async fn docker_import_spec(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if require_cluster_auth(&req, &state).is_err() {
+        if let Err(resp) = require_auth(&req, &state) { return resp; }
+    }
+    let name = match query.get("name") {
+        Some(n) if crate::auth::is_safe_name(n) => n.clone(),
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid or missing container name"
+        })),
+    };
+    let path = containers::staged_spec_path(&name);
+    match std::fs::write(&path, body.to_string()) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to stage runtime spec: {}", e)
+        })),
+    }
+}
+
+/// POST /api/containers/docker/import-volume — receive a named volume's
+/// contents for a container being migrated here.
+pub async fn docker_import_volume(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    mut payload: web::Payload,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if require_cluster_auth(&req, &state).is_err() {
+        if let Err(resp) = require_auth(&req, &state) { return resp; }
+    }
+    let volume = match query.get("volume") {
+        Some(v) if crate::auth::is_safe_name(v) => v.clone(),
+        _ => return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Invalid or missing volume name"
+        })),
+    };
+
+    // Streamed to disk for the same reason as the image: volume data is the
+    // largest part of most migrations and must never sit in RAM.
+    let staging = crate::paths::transfer_staging_dir();
+    let tar_path = format!("{}/wolfstack-volin-{}.tar", staging, volume);
+
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let mut file = match tokio::fs::File::create(&tar_path).await {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to open volume file: {}", e)
+        })),
+    };
+    while let Some(chunk) = payload.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tar_path).await;
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Volume transfer interrupted: {}", e)
+                }));
+            }
+        };
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&tar_path).await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to write volume file: {}", e)
+            }));
+        }
+    }
+    if let Err(e) = file.flush().await {
+        let _ = tokio::fs::remove_file(&tar_path).await;
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to flush volume file: {}", e)
+        }));
+    }
+    drop(file);
+
+    let result = containers::docker_restore_volume(&volume, &tar_path);
+    let _ = tokio::fs::remove_file(&tar_path).await;
+    match result {
+        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// POST /api/containers/docker/import — receive a migrated container image
 /// Auth: X-WolfStack-Secret (same cluster) or X-Transfer-Token (cross-cluster) or session cookie
 pub async fn docker_import(
     req: HttpRequest,
     state: web::Data<AppState>,
-    body: web::Bytes,
+    // web::Payload, not web::Bytes: Bytes materialises the ENTIRE image in RAM
+    // before the handler runs, and is capped by the 2 GB PayloadConfig — so a
+    // container larger than that could never be received at all, however much
+    // memory the node had. Streamed to disk instead, there is no ceiling beyond
+    // free disk on the staging volume.
+    mut payload: web::Payload,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
     let has_secret = require_cluster_auth(&req, &state).is_ok();
@@ -13656,15 +13762,54 @@ pub async fn docker_import(
         }));
     }
 
-    // Save to temp file
-    let tar_path = format!("/tmp/wolfstack-import-{}.tar", container_name);
-    if let Err(e) = std::fs::write(&tar_path, &body) {
+    // Stream the body straight to disk. NOT /tmp — that is tmpfs on stock
+    // Debian 13 and most systemd distros, so the image would land in RAM on the
+    // receiving node exactly as it did on the sender.
+    let staging = crate::paths::transfer_staging_dir();
+    let tar_path = format!("{}/wolfstack-import-{}.tar", staging, container_name);
+
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = match tokio::fs::File::create(&tar_path).await {
+        Ok(f) => f,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to open import file: {}", e)
+        })),
+    };
+    while let Some(chunk) = payload.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tar_path).await;
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("Transfer interrupted: {}", e)
+                }));
+            }
+        };
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&tar_path).await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to write import file: {}", e)
+            }));
+        }
+    }
+    // Flush before docker reads it — a buffered tail would make `docker load`
+    // fail on a truncated archive.
+    if let Err(e) = file.flush().await {
+        let _ = tokio::fs::remove_file(&tar_path).await;
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Failed to save import file: {}", e)
+            "error": format!("Failed to flush import file: {}", e)
         }));
     }
+    drop(file);
 
-    match containers::docker_import_image(&tar_path, &container_name) {
+    let result = containers::docker_import_image(&tar_path, &container_name);
+    // The staged tar is large and no longer needed either way — leaving it
+    // would fill the staging volume one migration at a time.
+    let _ = tokio::fs::remove_file(&tar_path).await;
+
+    match result {
         Ok(msg) => {
             // Imported container is left stopped — user starts it manually when ready
             HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
@@ -42929,6 +43074,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/docker/{id}/migrate", web::post().to(docker_migrate))
         .route("/api/containers/docker/{id}/volumes", web::get().to(docker_volumes))
         .route("/api/containers/docker/import", web::post().to(docker_import))
+        .route("/api/containers/docker/import-spec", web::post().to(docker_import_spec))
+        .route("/api/containers/docker/import-volume", web::post().to(docker_import_volume))
         .route("/api/containers/docker/{id}/config", web::post().to(docker_update_config))
         .route("/api/containers/docker/{id}/env", web::post().to(docker_update_env))
         .route("/api/containers/docker/{id}/raw-config", web::post().to(docker_update_raw_config))

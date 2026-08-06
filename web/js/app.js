@@ -30732,8 +30732,9 @@ async function migrateDockerContainer(name) {
                         <option value="">Auto (default)</option>
                     </select>
                 </div>
+                <div id="migrate-volume-choice"></div>
                 <div style="background:var(--info-bg,#1a2332);border:1px solid var(--info,#3b82f6);border-radius:8px;padding:10px 12px;margin-bottom:1rem;color:var(--info,#3b82f6);font-size:0.82em;">
-                    The source container will keep running. The destination will be imported but not started — start it manually when ready.
+                    Ports, networks, restart policy and resource limits are carried across. The source container will keep running. The destination will be imported but not started — start it manually when ready.
                 </div>
                 <div style="display:flex; gap:8px;">
                     <button class="btn btn-primary" onclick="doMigrate('${name}')">Migrate</button>
@@ -30757,8 +30758,9 @@ async function migrateDockerContainer(name) {
                         <option value="">Auto (default)</option>
                     </select>
                 </div>
+                <div id="migrate-volume-choice"></div>
                 <div style="background:var(--info-bg,#1a2332);border:1px solid var(--info,#3b82f6);border-radius:8px;padding:10px 12px;margin-bottom:1rem;color:var(--info,#3b82f6);font-size:0.82em;">
-                    The source container will keep running. The destination will be imported but not started — start it manually when ready.
+                    Ports, networks, restart policy and resource limits are carried across. The source container will keep running. The destination will be imported but not started — start it manually when ready.
                 </div>
                 <div style="display:flex; gap:8px;">
                     <button class="btn btn-primary" onclick="doMigrate('${name}')">Migrate</button>
@@ -30767,6 +30769,61 @@ async function migrateDockerContainer(name) {
             </div>
         `;
     }
+    // Both branches render the placeholder; fill it in once the dialog exists.
+    renderMigrateVolumeChoice(name);
+}
+
+// Ask the operator what should happen to this container's volumes.
+//
+// There is no safe default to assume: copying multi-GB volume data is slow and
+// often unwanted, while re-declaring mounts without the data leaves e.g. a
+// database pointed at an empty directory. So when the container has mounts we
+// render the choice with NOTHING preselected and refuse to submit until one is
+// picked. Containers with no mounts never see this block.
+async function renderMigrateVolumeChoice(name) {
+    const host = document.getElementById('migrate-volume-choice');
+    if (!host) return;
+    let mounts = [];
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(name)}/volumes`));
+        if (resp.ok) {
+            const data = await resp.json();
+            mounts = Array.isArray(data) ? data : (data.mounts || []);
+        }
+    } catch (e) {
+        // Can't tell — say so rather than quietly migrating with a guess.
+        host.innerHTML = `<div role="alert" style="background:var(--warning-bg,#332a1a);border:1px solid var(--warning,#f59e0b);border-radius:8px;padding:10px 12px;margin-bottom:1rem;color:var(--warning,#f59e0b);font-size:0.82em;">
+            Could not read this container's volumes (${escapeHtml(e.message)}). Mounts will be re-declared without copying data.
+        </div>`;
+        return;
+    }
+    if (!mounts.length) return;   // nothing to decide
+
+    const named = mounts.filter(m => (m.mount_type || m.type) === 'volume');
+    const list = mounts.map(m =>
+        `<li><code>${escapeHtml(m.host_path || m.source || '')}</code> → <code>${escapeHtml(m.container_path || m.target || '')}</code>${m.read_only ? ' (ro)' : ''}</li>`
+    ).join('');
+
+    host.innerHTML = `
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:1rem;">
+            <legend style="padding:0 6px;font-size:0.85em;font-weight:600;">Volumes — choose one</legend>
+            <ul style="margin:0 0 10px 1.1em;padding:0;font-size:0.8em;color:var(--text-secondary);">${list}</ul>
+            <label style="display:block;margin-bottom:6px;font-size:0.85em;cursor:pointer;">
+                <input type="radio" name="migrate-volume-mode" value="copy"${named.length ? '' : ' disabled'}>
+                Copy volume data${named.length ? '' : ' (no named volumes — bind mounts can\'t be copied)'}
+                <span style="display:block;margin-left:22px;color:var(--text-secondary);font-size:0.92em;">Transfers the contents of ${named.length} named volume(s). Slow for large data.</span>
+            </label>
+            <label style="display:block;margin-bottom:6px;font-size:0.85em;cursor:pointer;">
+                <input type="radio" name="migrate-volume-mode" value="declare">
+                Re-declare mounts only
+                <span style="display:block;margin-left:22px;color:var(--text-secondary);font-size:0.92em;">Same mounts, no data. Move the data yourself before starting the destination.</span>
+            </label>
+            <label style="display:block;font-size:0.85em;cursor:pointer;">
+                <input type="radio" name="migrate-volume-mode" value="skip">
+                No volumes at all
+                <span style="display:block;margin-left:22px;color:var(--text-secondary);font-size:0.92em;">Destination is created without these mounts.</span>
+            </label>
+        </fieldset>`;
 }
 
 async function doMigrate(name) {
@@ -30779,6 +30836,15 @@ async function doMigrate(name) {
         return;
     }
 
+    // Only present when the container actually has mounts. If it does, a
+    // choice is required — we will not pick on the operator's behalf.
+    const volumeChoiceShown = !!document.querySelector('input[name="migrate-volume-mode"]');
+    const volumeMode = document.querySelector('input[name="migrate-volume-mode"]:checked')?.value || '';
+    if (volumeChoiceShown && !volumeMode) {
+        showToast('Choose what to do with this container\'s volumes before migrating', 'error');
+        return;
+    }
+
     closeContainerDetail();
     showToast(`Migrating ${name} to ${targetUrl}... This may take a while.`, 'info');
 
@@ -30788,6 +30854,7 @@ async function doMigrate(name) {
     try {
         const migrateBody = { target_url: targetUrl };
         if (storageVal) migrateBody.storage = storageVal;
+        if (volumeMode) migrateBody.volume_mode = volumeMode;
         const resp = await fetch(apiUrl(`/api/containers/docker/${name}/migrate`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

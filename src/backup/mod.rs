@@ -3685,11 +3685,17 @@ fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(
             // -s silences the progress meter; -S keeps error text on stderr so
             // a 4xx/5xx isn't reported as a blank message.
             "-s", "-S", "-f",
-            "--max-time", "600",
+            // Stall detection rather than a hard ceiling — 600s fails a healthy
+            // large backup purely for being big. Under 1 KB/s for 60s means the
+            // peer is gone, whatever the size.
+            "--speed-limit", "1024",
+            "--speed-time", "60",
             "-X", "POST",
             "-H", "Content-Type: application/octet-stream",
             "-H", &format!("X-WolfStack-Secret: {}", secret),
-            "--data-binary", &format!("@{}", local_path.display()),
+            // -T streams; `--data-binary @file` buffers the entire archive in
+            // curl's memory and dies with "out of memory" on a big one.
+            "-T", &local_path.display().to_string(),
             &import_url,
         ])
         .output()

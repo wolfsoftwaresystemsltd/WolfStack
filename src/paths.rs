@@ -217,6 +217,39 @@ fn default_backup_staging_dir() -> String {
     "/tmp/wolfstack-backups".into()
 }
 
+/// Directory for staging a large archive before it ships somewhere — a container
+/// migration image, a backup bundle.
+///
+/// Reuses the operator's `backup_staging_dir`: it is the one path they have
+/// already pointed at somewhere with room. Refuses to hand back a RAM-backed
+/// directory, because staging a multi-GB image on tmpfs spends exactly the
+/// memory the transfer itself needs — `docker save -o /tmp/...` on a stock
+/// Debian 13 (tmpfs /tmp) put the whole image in RAM before curl had even been
+/// invoked. Same failure shape as the 2026-07-21 wolfstack-1 incident described
+/// on `default_backup_staging_dir`.
+pub fn transfer_staging_dir() -> String {
+    let configured = get().backup_staging_dir.clone();
+    if std::fs::create_dir_all(&configured).is_ok() && !dir_is_memory_backed(&configured) {
+        return configured;
+    }
+    let fallback = "/var/lib/wolfstack/transfer-staging";
+    if std::fs::create_dir_all(fallback).is_ok() && !dir_is_memory_backed(fallback) {
+        tracing::warn!(
+            "staging: {} is memory-backed, using {} instead",
+            configured, fallback
+        );
+        return fallback.to_string();
+    }
+    // Nothing better exists on this host. Proceed and let the caller fail
+    // honestly rather than silently writing somewhere unexpected.
+    tracing::warn!(
+        "staging: no disk-backed staging directory available; using {} (RAM-backed) — \
+         a large transfer may exhaust memory",
+        configured
+    );
+    configured
+}
+
 /// Whether `path` lives on a RAM-backed filesystem — anything staged there is
 /// competing with the machine's memory, not its disk.
 ///
