@@ -846,9 +846,9 @@ pub fn test_feed_blocking() -> FeedTestResult {
 /// file (which `parse_allowlist` re-reads on every sync, so the next
 /// feed refresh can't re-block it). Daemon-independent break-glass.
 pub fn cli_unblock_ip(ip: &str) {
-    let _ = std::process::Command::new("ipset").args(["del", IPSET_NAME, ip]).output();
+    let outcome = crate::auth::ipset_del(IPSET_NAME, ip);
     let _ = std::fs::create_dir_all("/var/lib/wolfstack/threat-intel");
-    println!("  ✓ predictive blocklist: removed from ipset '{}'", IPSET_NAME);
+    println!("{}", outcome.describe("predictive blocklist", IPSET_NAME));
     let existing = std::fs::read_to_string(ALLOWLIST_PATH).unwrap_or_default();
     if existing.lines().any(|l| l.trim() == ip) {
         println!("  ✓ predictive allowlist: already contains {}", ip);

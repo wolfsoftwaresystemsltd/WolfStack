@@ -2073,6 +2073,82 @@ const BLOCK_SET_V6: &str = "wolfstack_block6";
 /// `ipset` usable on this host? Cached after first lookup. When false we fall
 /// back to per-IP iptables rules so blocking still works (Golden Rule: never
 /// make blocking worse), just without the O(1) win.
+/// What actually happened to an `ipset del`.
+///
+/// Every unblock surface used to discard the exit status and print
+/// "✓ removed from ipset" regardless, so an operator hunting a lockout got a
+/// confident success line whether or not the address had ever been in the set.
+/// That is worse than no message: it rules out a suspect that was never
+/// eliminated. `ipset del` exits non-zero when the entry (or the set) isn't
+/// there, so the truth was always available — it just wasn't read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpsetDel {
+    /// The entry was there and is now gone.
+    Removed,
+    /// `ipset` ran and declined — the entry, or the set itself, wasn't there.
+    NotPresent,
+    /// No `ipset` binary on this host, so there is no set to remove from.
+    NoIpset,
+}
+
+impl IpsetDel {
+    /// One operator-facing report line, so the three unblock surfaces describe
+    /// the same outcome the same way. A tick means something actually changed.
+    pub fn describe(self, label: &str, set: &str) -> String {
+        match self {
+            IpsetDel::Removed => format!("  ✓ {}: removed from ipset '{}'", label, set),
+            IpsetDel::NotPresent => {
+                format!("  · {}: was not in ipset '{}' — nothing to remove", label, set)
+            }
+            IpsetDel::NoIpset => format!("  · {}: ipset not installed on this host", label),
+        }
+    }
+}
+
+/// Delete `ip` from `set`, reporting what actually happened.
+pub fn ipset_del(set: &str, ip: &str) -> IpsetDel {
+    if !ipset_available() {
+        return IpsetDel::NoIpset;
+    }
+    match std::process::Command::new("ipset")
+        .args(["del", set, ip])
+        .output()
+    {
+        Ok(o) if o.status.success() => IpsetDel::Removed,
+        _ => IpsetDel::NotPresent,
+    }
+}
+
+/// What `kernel_unblock_ip` actually removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelUnblock {
+    pub ipset: IpsetDel,
+    /// Per-IP DROP rules deleted across INPUT + FORWARD, both rule forms.
+    pub rules_removed: usize,
+}
+
+impl KernelUnblock {
+    /// One report line covering both halves of a kernel block. Only claims a
+    /// removal when something was removed.
+    pub fn describe(&self) -> String {
+        let label = "login-lockout / NMAP-protection";
+        match (self.ipset, self.rules_removed) {
+            (IpsetDel::Removed, 0) => {
+                format!("  ✓ {}: removed from ipset (no iptables rule present)", label)
+            }
+            (IpsetDel::Removed, n) => format!(
+                "  ✓ {}: removed from ipset and {} iptables rule(s)",
+                label, n
+            ),
+            (_, 0) => format!("  · {}: no kernel block was in place", label),
+            (_, n) => format!(
+                "  ✓ {}: removed {} iptables rule(s); was not in the ipset",
+                label, n
+            ),
+        }
+    }
+}
+
 fn ipset_available() -> bool {
     use std::sync::OnceLock;
     static AVAIL: OnceLock<bool> = OnceLock::new();
@@ -2462,30 +2538,30 @@ fn remove_legacy_per_ip_rule(cmd: &str, chain: &str, ip: &str) {
 /// Remove the kernel DROP rules for `ip` from both INPUT and FORWARD
 /// chains. Loops per chain while the rule exists (handles duplicate
 /// INSERTs that can accumulate across restarts).
-pub fn kernel_unblock_ip(ip: &str) {
+pub fn kernel_unblock_ip(ip: &str) -> KernelUnblock {
     // to_canonical: must mirror kernel_block_ip so a mapped spelling
     // removes the same iptables rule the block wrote.
     let target: std::net::IpAddr = match ip.parse::<std::net::IpAddr>() {
         Ok(a) => a.to_canonical(),
-        Err(_) => return,
+        Err(_) => return KernelUnblock { ipset: IpsetDel::NotPresent, rules_removed: 0 },
     };
     let canon = target.to_string();
     let ip = canon.as_str();
     let v6 = matches!(target, std::net::IpAddr::V6(_));
     // Remove from the ipset (new path) AND any legacy per-IP rule (blocks
     // written before the ipset migration, or on hosts without ipset).
-    if ipset_available() {
-        let set = if v6 { BLOCK_SET_V6 } else { BLOCK_SET_V4 };
-        let _ = std::process::Command::new("ipset")
-            .args(["del", set, ip])
-            .output();
-    }
+    let set = if v6 { BLOCK_SET_V6 } else { BLOCK_SET_V4 };
+    let ipset = ipset_del(set, ip);
     let cmd = if v6 { "ip6tables" } else { "iptables" };
-    remove_drop_rule(cmd, "INPUT", ip);
-    remove_drop_rule(cmd, "FORWARD", ip);
-    tracing::info!("auth: kernel-unblocked {} (ipset + INPUT/FORWARD)", ip);
+    let rules_removed =
+        remove_drop_rule(cmd, "INPUT", ip) + remove_drop_rule(cmd, "FORWARD", ip);
+    tracing::info!(
+        "auth: kernel-unblocked {} (ipset: {:?}, {} iptables rule(s))",
+        ip, ipset, rules_removed
+    );
     // Lift the mirrored block from any macvlan/ipvlan container too.
     trigger_macvlan_reconcile();
+    KernelUnblock { ipset, rules_removed }
 }
 
 /// Remove every per-IP DROP for `ip` from `chain` — BOTH the current
@@ -2496,18 +2572,22 @@ pub fn kernel_unblock_ip(ip: &str) {
 /// the upgrade and unblocked after has both. Deleting only the form
 /// this build happens to write would leave the other in place and the
 /// address blocked forever with nothing in the UI to explain it.
-fn remove_drop_rule(cmd: &str, chain: &str, ip: &str) {
+/// Returns how many rules were actually deleted, so the CLI can report a real
+/// outcome instead of claiming a removal that never happened.
+fn remove_drop_rule(cmd: &str, chain: &str, ip: &str) -> usize {
+    let mut removed = 0usize;
     for rule in [per_ip_rule_spec(ip), legacy_per_ip_rule_spec(ip)] {
         for _ in 0..10 {
             let r = std::process::Command::new(cmd)
                 .arg("-D").arg(chain).args(&rule)
                 .output();
             match r {
-                Ok(o) if o.status.success() => continue,
+                Ok(o) if o.status.success() => { removed += 1; continue; }
                 _ => break,
             }
         }
     }
+    removed
 }
 
 // ─── macvlan / ipvlan block fan-in ───────────────────────────────────────────
@@ -3094,6 +3174,49 @@ mod lockout_tests {
 
     fn locked(ip: &str) -> PersistedLockout {
         PersistedLockout { ip: ip.into(), locked_at: 1_000, lockout_seconds: 48 * 3600 }
+    }
+
+    #[test]
+    fn only_a_real_removal_gets_a_tick() {
+        // The whole point: an operator scanning this output for what actually
+        // changed must be able to trust the tick. Previously every line got
+        // one, so a set the address was never in looked like a cleared block.
+        assert!(IpsetDel::Removed.describe("blocklist", "s").contains('✓'));
+        assert!(!IpsetDel::NotPresent.describe("blocklist", "s").contains('✓'));
+        assert!(!IpsetDel::NoIpset.describe("blocklist", "s").contains('✓'));
+    }
+
+    #[test]
+    fn a_no_op_does_not_claim_a_removal() {
+        let msg = IpsetDel::NotPresent.describe("blocklist", "wolfstack_blocklist");
+        assert!(msg.contains("was not in"), "{}", msg);
+        assert!(!msg.contains("removed from"), "{}", msg);
+    }
+
+    #[test]
+    fn missing_ipset_says_so_rather_than_blaming_the_entry() {
+        // "not in the set" would be misleading when there is no set at all.
+        let msg = IpsetDel::NoIpset.describe("blocklist", "wolfstack_blocklist");
+        assert!(msg.contains("ipset not installed"), "{}", msg);
+    }
+
+    #[test]
+    fn kernel_unblock_describes_each_combination_honestly() {
+        let both = KernelUnblock { ipset: IpsetDel::Removed, rules_removed: 2 };
+        assert!(both.describe().contains('✓'));
+        assert!(both.describe().contains("2 iptables rule(s)"), "{}", both.describe());
+
+        let set_only = KernelUnblock { ipset: IpsetDel::Removed, rules_removed: 0 };
+        assert!(set_only.describe().contains("no iptables rule present"));
+
+        let rules_only = KernelUnblock { ipset: IpsetDel::NotPresent, rules_removed: 1 };
+        assert!(rules_only.describe().contains("was not in the ipset"));
+        assert!(rules_only.describe().contains('✓'), "a real rule removal is still a change");
+
+        // Nothing there at all — the case that used to print a confident tick.
+        let nothing = KernelUnblock { ipset: IpsetDel::NotPresent, rules_removed: 0 };
+        assert!(!nothing.describe().contains('✓'), "{}", nothing.describe());
+        assert!(nothing.describe().contains("no kernel block was in place"));
     }
 
     #[test]
