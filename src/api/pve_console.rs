@@ -213,7 +213,28 @@ async fn vnc_tcp_bridge(
                         let _ = session.pong(&bytes).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    // An errored browser stream MUST end the bridge.
+                    //
+                    // actix-ws does NOT terminate its stream after an error:
+                    // `MessageStream::poll_next` returns it WITHOUT setting
+                    // `closing` (actix-ws 0.3.1 stream.rs:176; the `?` on
+                    // codec.decode at :189 does the same while the offending
+                    // bytes stay buffered). Every later poll therefore yields
+                    // the same error, immediately ready, for ever.
+                    //
+                    // A catch-all `_ => {}` let that fall through, so the select
+                    // loop re-polled with nothing to await — a hot spin that also
+                    // never dropped either side's socket. Measured on a user's
+                    // node 2026-08-06: seven actix workers pegged, 29,344 sockets
+                    // stranded in CLOSE-WAIT and 42 leaked /dev/ptmx handles,
+                    // until the fd table hit its 65,535 ceiling and accept()
+                    // began failing.
+                    Some(Err(e)) => {
+                        error!("pve_console: browser websocket error: {} — closing", e);
+                        break;
+                    }
+                    // Pong / Continuation / Nop — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
         }
@@ -318,7 +339,16 @@ async fn vnc_ws_bridge(
                         let _ = qemu_tx.send(tungstenite::Message::Pong(data)).await;
                     }
                     Some(Ok(tungstenite::Message::Close(_))) | None => break,
-                    _ => {}
+                    // Break on an upstream error too. tungstenite is better
+                    // behaved than actix-ws here, but a bridge whose remote leg
+                    // has errored cannot do anything useful, and swallowing it
+                    // risks the same never-terminating loop as the browser side.
+                    Some(Err(e)) => {
+                        error!("pve_console: upstream websocket error: {} — closing", e);
+                        break;
+                    }
+                    // Pong / Frame / Continuation — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
             // Browser → QEMU
@@ -334,7 +364,28 @@ async fn vnc_ws_bridge(
                         let _ = browser_session.pong(&bytes).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    // An errored browser stream MUST end the bridge.
+                    //
+                    // actix-ws does NOT terminate its stream after an error:
+                    // `MessageStream::poll_next` returns it WITHOUT setting
+                    // `closing` (actix-ws 0.3.1 stream.rs:176; the `?` on
+                    // codec.decode at :189 does the same while the offending
+                    // bytes stay buffered). Every later poll therefore yields
+                    // the same error, immediately ready, for ever.
+                    //
+                    // A catch-all `_ => {}` let that fall through, so the select
+                    // loop re-polled with nothing to await — a hot spin that also
+                    // never dropped either side's socket. Measured on a user's
+                    // node 2026-08-06: seven actix workers pegged, 29,344 sockets
+                    // stranded in CLOSE-WAIT and 42 leaked /dev/ptmx handles,
+                    // until the fd table hit its 65,535 ceiling and accept()
+                    // began failing.
+                    Some(Err(e)) => {
+                        error!("pve_console: browser websocket error: {} — closing", e);
+                        break;
+                    }
+                    // Pong / Continuation / Nop — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
         }
@@ -557,7 +608,16 @@ async fn pve_bridge(
                             tungstenite::Message::Pong(data)).await;
                     }
                     Some(Ok(tungstenite::Message::Close(_))) | None => break,
-                    _ => {}
+                    // Break on an upstream error too. tungstenite is better
+                    // behaved than actix-ws here, but a bridge whose remote leg
+                    // has errored cannot do anything useful, and swallowing it
+                    // risks the same never-terminating loop as the browser side.
+                    Some(Err(e)) => {
+                        error!("pve_console: upstream websocket error: {} — closing", e);
+                        break;
+                    }
+                    // Pong / Frame / Continuation — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
 
@@ -579,7 +639,28 @@ async fn pve_bridge(
                         let _ = session.pong(&bytes).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    // An errored browser stream MUST end the bridge.
+                    //
+                    // actix-ws does NOT terminate its stream after an error:
+                    // `MessageStream::poll_next` returns it WITHOUT setting
+                    // `closing` (actix-ws 0.3.1 stream.rs:176; the `?` on
+                    // codec.decode at :189 does the same while the offending
+                    // bytes stay buffered). Every later poll therefore yields
+                    // the same error, immediately ready, for ever.
+                    //
+                    // A catch-all `_ => {}` let that fall through, so the select
+                    // loop re-polled with nothing to await — a hot spin that also
+                    // never dropped either side's socket. Measured on a user's
+                    // node 2026-08-06: seven actix workers pegged, 29,344 sockets
+                    // stranded in CLOSE-WAIT and 42 leaked /dev/ptmx handles,
+                    // until the fd table hit its 65,535 ceiling and accept()
+                    // began failing.
+                    Some(Err(e)) => {
+                        error!("pve_console: browser websocket error: {} — closing", e);
+                        break;
+                    }
+                    // Pong / Continuation / Nop — nothing to forward.
+                    Some(Ok(_)) => {}
                 }
             }
         }

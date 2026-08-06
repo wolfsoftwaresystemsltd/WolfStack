@@ -255,3 +255,78 @@ fn process_scans_are_rate_limited() {
          temporary System they are released when it drops.\n",
     );
 }
+
+/// A WebSocket bridge must END on a stream error, never swallow it.
+///
+/// `actix-ws` does NOT terminate its stream after an error: `MessageStream`
+/// returns the error WITHOUT setting `closing` (0.3.1 stream.rs:176), and the
+/// `?` on `codec.decode` at :189 behaves the same while the offending bytes
+/// stay buffered. Every subsequent poll therefore yields the SAME error,
+/// immediately ready, for ever.
+///
+/// Four bridges — terminal console, Proxmox console, container VNC and the
+/// cluster browser — each ended their message match with a catch-all
+/// `_ => {}`. That arm caught `Some(Err(_))`, so the surrounding
+/// `loop { select! { .. } }` re-polled with nothing to await: a hot spin that
+/// ALSO never dropped either side's socket. On a user's node this produced
+/// seven pegged actix workers, 29,344 sockets stranded in CLOSE-WAIT and 42
+/// leaked /dev/ptmx handles, until the descriptor table hit 65,535 and
+/// accept() began failing (2026-08-06).
+///
+/// The rule: in any match over WebSocket stream items, `Some(Err(..))` must be
+/// handled explicitly. A bare `_ => {}` next to a `None => break` is the exact
+/// shape that hides it, so that shape is what this test bans.
+#[test]
+fn websocket_bridges_do_not_swallow_stream_errors() {
+    let mut violations = Vec::new();
+
+    for path in source_files() {
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        if !raw.contains("actix_ws") && !raw.contains("tungstenite") {
+            continue;
+        }
+        let display = path.display().to_string();
+
+        // A `None => break` arm means this match is over stream items. If the
+        // very next arm is a catch-all, it is swallowing Some(Err(..)).
+        let lines: Vec<&str> = raw.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("None => break") {
+                continue;
+            }
+            // Skip forward over comment lines to the next real arm.
+            let mut j = i + 1;
+            while j < lines.len() {
+                let t = lines[j].trim();
+                if t.is_empty() || t.starts_with("//") { j += 1; continue; }
+                break;
+            }
+            if j < lines.len() {
+                let next = lines[j].trim();
+                if next == "_ => {}" || next == "_ => {}," || next.starts_with("_ =>") {
+                    violations.push(format!("{}:{}", display, j + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "\n\n\
+         ═══ RESOURCE SAFETY VIOLATION: WebSocket bridge swallows stream errors ═══\n\n\
+         {} catch-all arm(s) directly after a `None => break`:\n  {}\n\n\
+         A catch-all there absorbs `Some(Err(..))`. actix-ws does NOT end its\n\
+         stream after an error (0.3.1 stream.rs:176 returns the error without\n\
+         setting `closing`), so the next poll yields the SAME error immediately,\n\
+         for ever. Inside `loop {{ select! {{ .. }} }}` that is a hot spin which\n\
+         also never drops either socket.\n\n\
+         Measured on a user's node 2026-08-06: 7 actix workers pegged, 29,344\n\
+         sockets in CLOSE-WAIT, 42 leaked /dev/ptmx, fd table exhausted at\n\
+         65,535 and accept() failing.\n\n\
+         FIX: handle `Some(Err(e))` explicitly — log it and `break`. Use\n\
+         `Some(Ok(_)) => {{}}` for the genuinely-ignorable frames (Pong,\n\
+         Continuation, Nop) so a future variant cannot hide in the catch-all.\n",
+        violations.len(),
+        violations.join("\n  "),
+    );
+}

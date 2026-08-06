@@ -5842,7 +5842,7 @@ dependencies = [
 
 [[package]]
 name = "wolfstack"
-version = "25.10.6"
+version = "25.10.7"
 dependencies = [
  "actix-cors",
  "actix-files",
