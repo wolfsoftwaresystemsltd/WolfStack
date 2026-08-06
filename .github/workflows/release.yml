@@ -10,6 +10,19 @@ on:
       - '.github/workflows/release.yml'
   workflow_dispatch:
 
+# Serialise releases. Two releases minutes apart is not unusual, and every run
+# ends by pushing a regenerated CHANGELOG.md to master — concurrent runs race
+# that push and one of them loses it. Queue instead of colliding.
+#
+# cancel-in-progress is deliberately FALSE. The release job DELETES its tag and
+# GitHub release before recreating them (see the `gh release delete` step), so a
+# run cancelled at the wrong moment can leave the tag gone and nothing
+# republished. A superseded build wasting 35 minutes is far cheaper than a
+# half-published release someone has to repair by hand.
+concurrency:
+  group: release-binaries
+  cancel-in-progress: false
+
 jobs:
   build:
     strategy:

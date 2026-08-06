@@ -13779,17 +13779,27 @@ pub async fn docker_import_volume(
     if require_cluster_auth(&req, &state).is_err() {
         if let Err(resp) = require_auth(&req, &state) { return resp; }
     }
-    let volume = match query.get("volume") {
-        Some(v) if crate::auth::is_safe_name(v) => v.clone(),
+    // Two restore modes: a named volume (by name) or a bind mount (by absolute
+    // path). The bind path is validated again in docker_restore_bind — this is
+    // a sending node's input, so it is checked at both ends.
+    let bind_path = query.get("kind").map(|k| k == "bind").unwrap_or(false)
+        .then(|| query.get("path").cloned())
+        .flatten();
+    let volume = match (&bind_path, query.get("volume")) {
+        (Some(_), _) => String::new(),
+        (None, Some(v)) if crate::auth::is_safe_name(v) => v.clone(),
         _ => return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Invalid or missing volume name"
+            "error": "Invalid or missing volume name (or kind=bind without path)"
         })),
     };
 
     // Streamed to disk for the same reason as the image: volume data is the
     // largest part of most migrations and must never sit in RAM.
     let staging = crate::paths::transfer_staging_dir();
-    let tar_path = format!("{}/wolfstack-volin-{}.tar", staging, volume);
+    let tag: String = bind_path.as_deref().unwrap_or(&volume).chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let tar_path = format!("{}/wolfstack-volin-{}.tar", staging, tag);
 
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -13824,7 +13834,10 @@ pub async fn docker_import_volume(
     }
     drop(file);
 
-    let result = containers::docker_restore_volume(&volume, &tar_path);
+    let result = match &bind_path {
+        Some(path) => containers::docker_restore_bind(path, &tar_path),
+        None => containers::docker_restore_volume(&volume, &tar_path),
+    };
     let _ = tokio::fs::remove_file(&tar_path).await;
     match result {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),

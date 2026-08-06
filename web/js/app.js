@@ -30811,9 +30811,9 @@ async function renderMigrateVolumeChoice(name) {
             <legend style="padding:0 6px;font-size:0.85em;font-weight:600;">Volumes — choose one</legend>
             <ul style="margin:0 0 10px 1.1em;padding:0;font-size:0.8em;color:var(--text-secondary);">${list}</ul>
             <label style="display:block;margin-bottom:6px;font-size:0.85em;cursor:pointer;">
-                <input type="radio" name="migrate-volume-mode" value="copy"${named.length ? '' : ' disabled'}>
-                Copy volume data${named.length ? '' : ' (no named volumes — bind mounts can\'t be copied)'}
-                <span style="display:block;margin-left:22px;color:var(--text-secondary);font-size:0.92em;">Transfers the contents of ${named.length} named volume(s). Slow for large data.</span>
+                <input type="radio" name="migrate-volume-mode" value="copy"${copyable.length ? '' : ' disabled'}>
+                Copy the data${copyable.length ? '' : ' (nothing copyable on this container)'}
+                <span style="display:block;margin-left:22px;color:var(--text-secondary);font-size:0.92em;">Transfers the contents of ${copyable.length} mount(s) — named volumes and bind mounts. Slow for large data. A path that already exists on the destination is reported, never overwritten.</span>
             </label>
             <label style="display:block;margin-bottom:6px;font-size:0.85em;cursor:pointer;">
                 <input type="radio" name="migrate-volume-mode" value="declare">
