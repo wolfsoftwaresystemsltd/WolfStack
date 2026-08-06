@@ -10863,34 +10863,76 @@ region = us-east-1"></textarea>
              must NOT raise a full-screen blocker. -->
         <script>
             (function () {
-                var probeTimer = null, shown = false;
+                // "WolfStack is starting" — shown INSTEAD of a dead page when a
+                // required script cannot load, which in practice means the
+                // daemon is restarting under an upgrade.
+                //
+                // The first version of this reloaded the whole page the moment
+                // the missing asset answered, which read to the operator as an
+                // endless loop: reload, fail, overlay, reload. The mistake was
+                // treating "the file is served" as "the server is ready". It now
+                // waits for GET /api/ready — an unauthenticated probe that only
+                // answers once the listener is bound — and reloads ONCE, when a
+                // reload will actually succeed.
+                //
+                // It cannot show true server-side progress: until the listener
+                // binds there is nothing to ask, so a browser sees
+                // connection-refused, not a phase. The honest fix for that window
+                // was to shrink it — public-IP detection used to block the bind
+                // for up to 12s and now runs in the background.
+                var probeTimer = null, shown = false, probes = 0;
                 var ATTEMPT_KEY = 'ws-asset-retry';
+                var BASE_DELAY = 1000, MAX_DELAY = 5000, MAX_ATTEMPTS = 5, MAX_PROBES = 40;
+                // A server that has only just bound may still be seconds away
+                // from a second bounce (setup.sh schedules a restart 3s after it
+                // finishes). Waiting for a little uptime avoids reloading into it.
+                var MIN_UPTIME_SECS = 2;
+
+                function attempts() {
+                    try { return parseInt(sessionStorage.getItem(ATTEMPT_KEY) || '0', 10) || 0; }
+                    catch (e) { return 0; }
+                }
+                function recordAttempt(n) {
+                    try { sessionStorage.setItem(ATTEMPT_KEY, String(n)); } catch (e) { }
+                }
+
+                function say(text) {
+                    var el = document.getElementById('ws-boot-msg');
+                    if (el) el.textContent = text;
+                }
 
                 function overlay() {
                     if (shown) return;
                     shown = true;
                     var box = document.createElement('div');
-                    // role=alert + assertive: this is a blocking failure, not a
-                    // status update — a screen reader must announce it at once.
-                    box.setAttribute('role', 'alert');
-                    box.setAttribute('aria-live', 'assertive');
+                    // role=status + polite: this is a "please wait", not a
+                    // failure. It only becomes an alert if we give up (below),
+                    // so a screen reader is not shouting at someone who just
+                    // needs to wait three seconds.
+                    box.setAttribute('role', 'status');
+                    box.setAttribute('aria-live', 'polite');
                     box.id = 'ws-asset-recovery';
-                    // Deliberately self-contained styling. styles.css may itself
-                    // be one of the things that failed to load, so this must not
-                    // depend on a CSS variable to stay readable. #f8fafc on
-                    // #111827 is ~17:1, well past WCAG AA either way.
+                    // Self-contained styling — styles.css may be one of the
+                    // things that failed to load. #f8fafc on #111827 is ~17:1.
                     box.style.cssText = 'position:fixed;inset:0;z-index:2147483647;'
                         + 'display:flex;align-items:center;justify-content:center;'
-                        + 'background:rgba(3,7,18,0.92);font-family:Inter,system-ui,sans-serif;';
+                        + 'background:#030712;font-family:Inter,system-ui,sans-serif;';
                     box.innerHTML =
-                        '<div style="max-width:420px;padding:28px 32px;border-radius:12px;'
+                        '<style>@keyframes ws-boot-spin{to{transform:rotate(360deg)}}'
+                        + '@keyframes ws-boot-pulse{0%,100%{opacity:.35}50%{opacity:1}}</style>'
+                        + '<div style="max-width:440px;padding:34px 38px;border-radius:14px;'
                         + 'background:#111827;border:1px solid #374151;color:#f8fafc;text-align:center;">'
-                        + '<div style="font-size:17px;font-weight:600;margin-bottom:10px;">'
-                        + 'WolfStack is restarting</div>'
-                        + '<div id="ws-asset-msg" style="font-size:14px;line-height:1.5;color:#cbd5e1;">'
-                        + 'The dashboard could not finish loading because the server went away '
-                        + 'mid-request — normally an upgrade. Reconnecting automatically…</div>'
-                        + '<button type="button" id="ws-asset-reload" style="margin-top:18px;'
+                        + '<div style="width:34px;height:34px;margin:0 auto 18px;border-radius:50%;'
+                        + 'border:3px solid #374151;border-top-color:#dc2626;'
+                        + 'animation:ws-boot-spin 900ms linear infinite;"></div>'
+                        + '<div style="font-size:18px;font-weight:600;letter-spacing:-0.2px;">'
+                        // Same wording as login.html's wsApiReady overlay, so an
+                        // operator who sees both recognises the same state.
+                        + 'Starting WolfStack on ' + location.hostname + '…</div>'
+                        + '<div id="ws-boot-msg" style="font-size:14px;line-height:1.5;color:#cbd5e1;'
+                        + 'margin-top:10px;animation:ws-boot-pulse 1.8s ease-in-out infinite;">'
+                        + 'Waiting for the API to come up. Auto-retrying.</div>'
+                        + '<button type="button" id="ws-asset-reload" style="margin-top:20px;'
                         + 'padding:9px 20px;border-radius:8px;border:1px solid #4b5563;cursor:pointer;'
                         + 'background:#1f2937;color:#f8fafc;font-size:14px;">Reload now</button>'
                         + '</div>';
@@ -10899,79 +10941,56 @@ region = us-east-1"></textarea>
                     if (btn) btn.addEventListener('click', function () { location.reload(); });
                 }
 
-                // Probe the ASSET THAT FAILED, never a generic liveness URL.
-                //
-                // The first cut of this probed /login.html — "is the server
-                // up?" — and reloaded as soon as it answered. Measured against
-                // a server that was up but still missing the asset, that reloaded
-                // the whole 873 KB page every 2 seconds, for ever: 19 full page
-                // loads in 19 seconds. A client timer hammering a server that is
-                // already in trouble is the exact fault this release exists to
-                // remove, so it is not allowed in the recovery path either.
-                //
-                // Asking for the failed asset itself answers the only question
-                // that matters — can the page actually load now — and backing
-                // off means a genuinely broken asset costs one request every
-                // 15s rather than a page load every 2s.
-                // 2s,4s,8s,15s,15s… — 12 probes spans roughly 2.5 minutes, which
-                // comfortably covers a real upgrade (the listener bound 7.5s
-                // after systemd said "Started" on wolfstack-1, and a slow node
-                // with a cold cache takes longer) without polling for ever.
-                var BASE_DELAY = 2000, MAX_DELAY = 15000, MAX_ATTEMPTS = 5, MAX_PROBES = 12;
-                var probes = 0;
-
-                function attempts() {
-                    try { return parseInt(sessionStorage.getItem(ATTEMPT_KEY) || '0', 10) || 0; }
-                    catch (e) { return 0; }   // private mode / storage disabled
-                }
-                function recordAttempt(n) {
-                    try { sessionStorage.setItem(ATTEMPT_KEY, String(n)); } catch (e) { }
-                }
-
-                function probe(url) {
-                    fetch(url.split('#')[0] + (url.indexOf('?') === -1 ? '?' : '&') + 'ws-probe=' + Date.now(),
-                          { method: 'HEAD', cache: 'no-store' })
+                function probe() {
+                    fetch('/api/ready?t=' + Date.now(), { cache: 'no-store' })
                         .then(function (r) {
-                            if (!r.ok) return schedule(url);   // 404/5xx — not back yet
-                            recordAttempt(attempts() + 1);
-                            location.reload();
+                            if (!r.ok) throw new Error('not ready');
+                            return r.json();
                         })
-                        .catch(function () { schedule(url); });
+                        .then(function (d) {
+                            if (!d || d.ready !== true) throw new Error('not ready');
+                            var up = typeof d.uptime_secs === 'number' ? d.uptime_secs : MIN_UPTIME_SECS;
+                            if (up < MIN_UPTIME_SECS) {
+                                say('Server is up — letting it settle…');
+                                throw new Error('too fresh');
+                            }
+                            say('Server is ready — loading the dashboard…');
+                            recordAttempt(attempts() + 1);
+                            setTimeout(function () { location.reload(); }, 250);
+                        })
+                        .catch(function () { schedule(); });
                 }
 
-                function schedule(url) {
+                function schedule() {
                     if (attempts() >= MAX_ATTEMPTS) { exhausted(); return; }
-                    // Back off on the PROBE count, not the reload count. Reloads
-                    // only happen when the asset comes back, so keying the delay
-                    // off them left a still-404 asset polling flat-out at 2s for
-                    // ever — measured at 34 probes in 70s, an unbounded client
-                    // timer by another name. Probes are what actually repeat, so
-                    // they are what has to widen.
-                    var delay = Math.min(BASE_DELAY * Math.pow(2, probes), MAX_DELAY);
+                    var delay = Math.min(BASE_DELAY * Math.pow(1.6, probes), MAX_DELAY);
                     probes++;
                     if (probes > MAX_PROBES) { exhausted(); return; }
-                    probeTimer = setTimeout(function () { probe(url); }, delay);
+                    if (probes > 3) say('Still waiting for the server to come back…');
+                    probeTimer = setTimeout(probe, delay);
                 }
 
                 function exhausted() {
-                    var msg = document.getElementById('ws-asset-msg');
-                    if (msg) {
-                        msg.textContent = 'The dashboard still cannot load its scripts after several '
-                            + 'attempts. The server may not have come back up. Check '
-                            + '"systemctl status wolfstack" on this host, then reload.';
+                    var box = document.getElementById('ws-asset-recovery');
+                    // Now it IS a failure, so escalate how it is announced.
+                    if (box) {
+                        box.setAttribute('role', 'alert');
+                        box.setAttribute('aria-live', 'assertive');
                     }
+                    say('WolfStack has not come back. Check "systemctl status wolfstack" '
+                        + 'on this host, then reload.');
                 }
 
                 window.wsAssetFailed = function (src) {
                     console.error('WolfStack: required asset failed to load:', src);
                     overlay();
-                    if (probeTimer) return;             // one probe chain, whichever asset failed first
+                    if (probeTimer) return;
                     if (attempts() >= MAX_ATTEMPTS) { exhausted(); return; }
-                    schedule(src);
+                    schedule();
                 };
 
-                // A clean load clears the counter, so the NEXT upgrade starts
-                // with a full retry budget instead of inheriting this one's.
+                // A clean load clears the counter so the NEXT upgrade starts with
+                // a full retry budget rather than inheriting this one's.
                 window.addEventListener('load', function () {
                     if (!shown) { try { sessionStorage.removeItem(ATTEMPT_KEY); } catch (e) { } }
                 });

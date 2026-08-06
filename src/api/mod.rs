@@ -26025,6 +26025,44 @@ pub async fn ping(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse 
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
 
+/// When this process began serving. Used by /api/ready to report how long the
+/// daemon has been up, which is what lets a waiting browser avoid reloading
+/// into a server that is about to bounce again.
+static PROCESS_START: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+
+/// Start the uptime clock. Must be called once from main() BEFORE the server
+/// binds: a `LazyLock` initialises on first ACCESS, so without this the first
+/// /api/ready request would set the clock and every node would for ever report
+/// an uptime of roughly zero regardless of how long it had been running.
+pub fn init_process_start() {
+    let _ = *PROCESS_START;
+}
+
+/// GET /api/ready — UNAUTHENTICATED readiness probe.
+///
+/// Deliberately distinct from /api/ping, which requires a session and so cannot
+/// tell "server is down" from "you are logged out" — that ambiguity is why the
+/// dashboard's recovery path could not use it and had to probe a static file
+/// instead.
+///
+/// Note on honesty: this cannot report startup *progress*, because until the
+/// HTTP listener is bound there is nothing to ask. A browser waiting through a
+/// restart sees connection-refused, not a phase. The fix for that window is to
+/// make it short — public-IP detection was moved off the pre-bind path for
+/// exactly that reason — not to pretend we can narrate it.
+///
+/// `uptime_secs` and `version` are the useful part: a client can wait until the
+/// daemon has been up long enough to be worth reloading into, and can tell that
+/// an upgrade actually changed the running version.
+pub async fn ready() -> HttpResponse {
+    HttpResponse::Ok().json(serde_json::json!({
+        "ready": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": PROCESS_START.elapsed().as_secs(),
+    }))
+}
+
 // ─── Home-dashboard widget fetch proxy ───
 
 /// Pooled client for the home-dashboard widget fetch proxy (RSS feeds,
@@ -43396,6 +43434,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/user/preferences", web::patch().to(user_prefs_patch))
         // Lightweight liveness probe for the connection-loss banner
         .route("/api/ping", web::get().to(ping))
+        // Unauthenticated by design — a browser waiting out a restart has
+        // no session yet, and /api/ping's 401 cannot be told apart from
+        // a server that is still coming up.
+        .route("/api/ready", web::get().to(ready))
         // Home-dashboard widget fetch proxy (RSS / weather — no CORS upstream)
         .route("/api/dashboard/fetch-proxy", web::get().to(dashboard_fetch_proxy))
         // Per-user interface lock (idle lock + PIN)

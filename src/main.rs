@@ -108,6 +108,7 @@ use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use actix_files;
 use clap::Parser;
 use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -589,6 +590,9 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| "unknown".to_string());
 
     info!("");
+    // Start the /api/ready uptime clock before anything else can read it.
+    api::init_process_start();
+
     info!("  🐺 WolfStack v{}", env!("CARGO_PKG_VERSION"));
     info!("  ──────────────────────────────────");
     info!("  Node ID:    {}", node_id);
@@ -675,36 +679,57 @@ async fn main() -> std::io::Result<()> {
                especially if this node is network-reachable.");
     }
 
-    // Fetch public IP (best effort — try multiple services)
-    let public_ip = {
-        let services = [
-            "https://api.ipify.org",
-            "https://ifconfig.me/ip",
-            "https://icanhazip.com",
-            "https://checkip.amazonaws.com",
-        ];
-        let mut detected: Option<String> = None;
-        if let Ok(client) = crate::api::ipv4_only_client_builder().timeout(Duration::from_secs(3)).build() {
+    // Public IP detection runs in the BACKGROUND, never in front of the bind.
+    //
+    // This used to be awaited here: four external services tried serially with
+    // a 3-second timeout each — up to 12 seconds, and measured at 5.3s on
+    // wolfstack-1 — during which nothing is listening on 8553 and every client
+    // gets connection-refused. That is the bulk of the 7.4-second dark window
+    // after an upgrade (Started 11:47:57.13, listener bound 11:48:04.52), and
+    // it is the window that leaves a reloading dashboard bouncing off a closed
+    // port. The rule directly below this — monitoring "must not be able to
+    // block the HTTP bind" — always applied here too; this call simply predated
+    // it.
+    //
+    // Nothing needs the address to bind. Its only consumer is
+    // `cluster.update_self`, which runs on a repeating tick, so a value that
+    // arrives a second or two later is advertised on the very next cycle. Until
+    // then the node advertises `None`, which is what it already did whenever
+    // detection failed.
+    let public_ip: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    {
+        let slot = public_ip.clone();
+        tokio::spawn(async move {
+            let services = [
+                "https://api.ipify.org",
+                "https://ifconfig.me/ip",
+                "https://icanhazip.com",
+                "https://checkip.amazonaws.com",
+            ];
+            let Ok(client) = crate::api::ipv4_only_client_builder()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(3))
+                .build()
+            else {
+                warn!("public IP: client build failed — detection skipped");
+                return;
+            };
             for url in &services {
                 if let Ok(resp) = client.get(*url).send().await {
                     if resp.status().is_success() {
                         if let Ok(text) = resp.text().await {
                             let ip = text.trim().to_string();
                             if ip.parse::<std::net::Ipv4Addr>().is_ok() {
-                                detected = Some(ip);
-                                break;
+                                info!("  Public IP:  {}", ip);
+                                *slot.write().await = Some(ip);
+                                return;
                             }
                         }
                     }
                 }
             }
-        }
-        detected
-    };
-    if let Some(ip) = &public_ip {
-        info!("  Public IP:  {}", ip);
-    } else {
-        info!("  Public IP:  (detection failed)");
+            info!("  Public IP:  (detection failed)");
+        });
     }
     info!("");
 
@@ -814,7 +839,11 @@ async fn main() -> std::io::Result<()> {
             });
             match rx.recv_timeout(std::time::Duration::from_secs(10)) {
                 Ok((mon, metrics, components, has_docker, has_lxc, has_kvm)) => {
-                    cluster.update_self(metrics, components, 0, 0, 0, 0, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
+                    // Detection runs in the background and has almost
+                    // certainly not landed yet — the 2s self-monitor loop
+                    // below re-advertises the moment it does.
+                    let ip_now = public_ip.try_read().ok().and_then(|g| g.clone());
+                    cluster.update_self(metrics, components, 0, 0, 0, 0, ip_now, has_docker, has_lxc, has_kvm, tls_enabled);
                     mon
                 }
                 Err(_) => {
@@ -2420,7 +2449,7 @@ async fn main() -> std::io::Result<()> {
                     lxc_count,
                     vm_count,
                     compose_count,
-                    public_ip: public_ip.clone(),
+                    public_ip: public_ip.read().await.clone(),
                     known_nodes,
                     deleted_ids,
                     wolfnet_ips: containers::wolfnet_used_ips_cached(),
@@ -2448,7 +2477,7 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
+                cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip.read().await.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
             }
         });
 
