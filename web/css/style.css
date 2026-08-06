@@ -5268,12 +5268,14 @@ body.learn-drawer-open #task-log-footer { right: var(--learn-drawer-w) !importan
 .probe::before {
     content: "";
     position: absolute; inset: 0;
+    /* Derived from the theme, not literal white: WolfStack ships nine themes
+       and hardcoded white dots are invisible on `light` and wrong on `amber`. */
     background-image:
-        radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,.35) 50%, transparent 50%),
-        radial-gradient(1px 1px at 70% 20%, rgba(255,255,255,.25) 50%, transparent 50%),
-        radial-gradient(1px 1px at 45% 70%, rgba(255,255,255,.20) 50%, transparent 50%),
-        radial-gradient(1px 1px at 85% 60%, rgba(255,255,255,.30) 50%, transparent 50%);
-    opacity: .5; pointer-events: none;
+        radial-gradient(1px 1px at 20% 30%, var(--text-muted) 50%, transparent 50%),
+        radial-gradient(1px 1px at 70% 20%, var(--text-muted) 50%, transparent 50%),
+        radial-gradient(1px 1px at 45% 70%, var(--text-muted) 50%, transparent 50%),
+        radial-gradient(1px 1px at 85% 60%, var(--text-muted) 50%, transparent 50%);
+    opacity: .45; pointer-events: none;
 }
 
 .probe-art { position: relative; height: 116px; display: grid; place-items: center; }

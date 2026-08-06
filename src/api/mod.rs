@@ -13666,6 +13666,30 @@ pub async fn notify_rules_put(
     }
 }
 
+/// POST /api/notify/ai-draft — draft a probe from a plain-English description.
+///
+/// Returns the drafted rule for review. It is deliberately NOT saved: an
+/// auto-installed rule that quietly matches nothing looks deployed and never
+/// fires, which is the worst thing this subsystem can do. The operator sees it
+/// in the configure form and presses save.
+pub async fn notify_ai_draft(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if description.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "describe what you want the probe to watch"
+        }));
+    }
+    match crate::notify::ai_draft_rule(&description).await {
+        Ok(rule) => HttpResponse::Ok().json(serde_json::json!({ "rule": rule })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    }
+}
+
 /// POST /api/notify/test — push a synthetic event through the live rule set.
 ///
 /// The only honest way to answer "will this rule actually page me?" without
@@ -43159,6 +43183,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/notify/rules", web::get().to(notify_rules_get))
         .route("/api/notify/rules", web::put().to(notify_rules_put))
         .route("/api/notify/test", web::post().to(notify_test))
+        .route("/api/notify/ai-draft", web::post().to(notify_ai_draft))
         .route("/api/containers/docker/import-volume", web::post().to(docker_import_volume))
         .route("/api/containers/docker/{id}/config", web::post().to(docker_update_config))
         .route("/api/containers/docker/{id}/env", web::post().to(docker_update_env))

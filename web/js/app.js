@@ -80440,7 +80440,14 @@ function renderProbeBay() {
             <div class="bay-stat"><span class="n">${deployed}</span><span class="l">deployed</span></div>
             <div class="bay-stat"><span class="n">${docked}</span><span class="l">docked</span></div>
             <div class="bay-stat"><span class="n">${rules.length}</span><span class="l">probes built</span></div>
-            <button class="btn btn-primary" style="margin-left:auto;" onclick="probeEdit(null)">Build a probe</button>`;
+            <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <input id="probe-ai-desc" type="text" placeholder="Describe a probe: &quot;tell me if any -db container dies&quot;"
+                       aria-label="Describe the probe you want"
+                       style="min-width:280px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:.84rem;"
+                       onkeydown="if(event.key==='Enter'){probeAiDraft();}">
+                <button class="btn" onclick="probeAiDraft()" id="probe-ai-btn">Draft with AI</button>
+                <button class="btn btn-primary" onclick="probeEdit(null)">Build a probe</button>
+            </div>`;
     }
 
     const cards = rules.map((r, i) => {
@@ -80558,14 +80565,55 @@ async function probeSave() {
     }
 }
 
+/** Draft a probe from plain English. The result is opened for review, never
+ *  saved directly — an auto-installed rule that quietly matches nothing looks
+ *  deployed and never fires, which is the worst outcome here. */
+async function probeAiDraft() {
+    const input = document.getElementById('probe-ai-desc');
+    const btn = document.getElementById('probe-ai-btn');
+    const description = (input?.value || '').trim();
+    if (!description) {
+        showToast('Describe what the probe should watch first', 'error');
+        input?.focus();
+        return;
+    }
+    // Visible progress: the model call takes seconds, and a dead-looking
+    // button invites a second click and a second bill.
+    const restore = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Drafting…'; }
+    probeAnnounce('Drafting a probe with AI');
+    try {
+        const resp = await fetch(apiUrl('/api/notify/ai-draft'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ description }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        // Open for review WITHOUT adding it to the bay: an unapproved draft
+        // must not appear as a live probe, and cancelling must leave nothing
+        // behind.
+        probeEdit(null, data.rule);
+        showToast('Drafted — check what it watches, then save', 'info');
+        if (input) input.value = '';
+    } catch (e) {
+        showToast(`Could not draft a probe: ${e.message}`, 'error');
+        probeAnnounce('Drafting failed');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = restore; }
+    }
+}
+
 function probeModalClose() {
     if (window.__probeModalEl) { window.__probeModalEl.remove(); window.__probeModalEl = null; }
 }
 
-/** Build/configure a probe. `i` is null for a new one. */
-function probeEdit(i) {
+/** Build/configure a probe. `i` is null for a new one; `draft` supplies a
+ *  pre-filled rule (from AI) WITHOUT adding it to the bay — it only lands in
+ *  the list if the operator saves it. */
+function probeEdit(i, draft) {
     const isNew = (i === null || i === undefined);
-    const r = isNew ? {
+    const r = draft ? draft : isNew ? {
         id: 'probe-' + Math.random().toString(36).slice(2, 10),
         name: '', enabled: true, scope: 'node', mode: 'simple',
         match: { events: [], backends: [], objects: [], labels: {}, nodes: [] },
