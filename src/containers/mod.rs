@@ -12231,8 +12231,14 @@ pub fn docker_migrate(container: &str, target_url: &str, _remove_source: bool, c
         ));
     }
 
-    // Step 3: Export the image to a tar file
-    let export_path = format!("/tmp/wolfstack-migrate-{}.tar", container);
+    // Step 3: Export the image to a tar file.
+    //
+    // NOT /tmp: that is tmpfs on stock Debian 13 and most systemd distros, so
+    // the export would land in RAM and compete with the transfer that follows.
+    // transfer_staging_dir picks the operator's configured (disk-backed)
+    // staging path — the same fix backups got after the 2026-07-21 incident.
+    let staging = crate::paths::transfer_staging_dir();
+    let export_path = format!("{}/wolfstack-migrate-{}.tar", staging, container);
     let output = Command::new("docker")
         .args(["save", "-o", &export_path, &temp_image])
         .output()
@@ -12258,11 +12264,20 @@ pub fn docker_migrate(container: &str, target_url: &str, _remove_source: bool, c
             .args([
                 "-s", "-f", "-k",    // --fail + accept self-signed certs
                 "--connect-timeout", "5",
-                "--max-time", "300", // 5 minute timeout for large images
+                // No --max-time: a hard ceiling fails an otherwise healthy
+                // multi-GB transfer purely for being big (300s only covers
+                // ~1GB on a slow link). Abort on a STALL instead — under
+                // 1 KB/s for 60s means the peer is gone, at any size.
+                "--speed-limit", "1024",
+                "--speed-time", "60",
                 "-X", "POST",
                 "-H", "Content-Type: application/octet-stream",
                 "-H", &secret_header,
-                "--data-binary", &format!("@{}", export_path),
+                // -T streams the file. `--data-binary @file` reads the WHOLE
+                // file into curl's memory first and dies with
+                // "option --data-binary: out of memory" on a large image, even
+                // with GBs free (RutgerDiehard, 2026-08-06).
+                "-T", &export_path,
                 import_url,
             ])
             .output();
