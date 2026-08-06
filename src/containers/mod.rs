@@ -12264,13 +12264,20 @@ pub struct DockerRuntimeSpec {
 }
 
 impl DockerRuntimeSpec {
-    /// Named (docker-managed) volumes only — the ones whose data can be copied.
-    /// Bind mounts point at host paths that may or may not exist on the target;
-    /// we re-declare them but never invent their contents.
-    pub fn named_volumes(&self) -> Vec<String> {
+    /// Every mount whose data we can actually move — named volumes AND bind
+    /// mounts.
+    ///
+    /// Bind mounts were originally excluded on the theory that a host path
+    /// "may or may not exist on the target". That reasoning was wrong in the
+    /// case that matters: a container whose entire state lives in bind mounts
+    /// (very common — anything created by a compose file with relative paths,
+    /// or pointed inside another volume's _data) had NOTHING copyable, so the
+    /// only option left re-declared the paths empty and the destination came up
+    /// with no config at all. RutgerDiehard, 2026-08-06.
+    pub fn copyable_mounts(&self) -> Vec<&MigrateMount> {
         self.mounts.iter()
-            .filter(|m| m.kind == "volume")
-            .map(|m| m.source.clone())
+            .filter(|m| m.kind == "volume" || m.kind == "bind")
+            .filter(|m| !m.source.is_empty())
             .collect()
     }
 }
@@ -12507,39 +12514,72 @@ fn send_runtime_spec(
     Err(last)
 }
 
-/// Tar a named volume's contents and stream them to the destination.
+/// Tar a mount's data and stream it to the destination.
 ///
-/// The volume's on-disk location comes from `docker volume inspect`, not a
-/// guessed path under /var/lib/docker — non-default drivers and a relocated
-/// data-root both make that guess wrong.
-fn send_volume_data(
+/// Two shapes, because the kinds restore differently:
+///
+/// * **named volume** — archive the mountpoint's *contents* (`tar -C <mp> .`).
+///   The volume's path differs per host, so only contents are portable; the
+///   destination creates the volume and unpacks into it.
+/// * **bind mount** — archive the entry itself from its parent
+///   (`tar -C <dirname> <basename>`) so the destination recreates it at the
+///   same absolute path. This also handles a bind mount of a single FILE,
+///   common for config files, which a contents-only archive cannot represent.
+///
+/// A volume's on-disk location comes from `docker volume inspect`, never a
+/// guessed path under /var/lib/docker — a non-default driver or a relocated
+/// data-root makes that guess wrong.
+fn send_mount_data(
     target_url: &str,
     container: &str,
-    volume: &str,
+    mount: &MigrateMount,
     cluster_secret: &str,
     staging: &str,
 ) -> Result<(), String> {
-    if !crate::auth::is_safe_name(volume) {
-        return Err("unsafe volume name".into());
-    }
-    let out = Command::new("docker")
-        .args(["volume", "inspect", "-f", "{{.Mountpoint}}", volume])
-        .output()
-        .map_err(|e| format!("docker volume inspect: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "docker volume inspect: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let mountpoint = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if mountpoint.is_empty() {
-        return Err("volume has no local mountpoint (non-local driver?)".into());
-    }
+    // (dir to tar from, entry to tar, query telling the far end how to restore)
+    let (tar_dir, tar_entry, query): (String, String, String) = if mount.kind == "volume" {
+        if !crate::auth::is_safe_name(&mount.source) {
+            return Err("unsafe volume name".into());
+        }
+        let out = Command::new("docker")
+            .args(["volume", "inspect", "-f", "{{.Mountpoint}}", &mount.source])
+            .output()
+            .map_err(|e| format!("docker volume inspect: {}", e))?;
+        if !out.status.success() {
+            return Err(format!("docker volume inspect: {}",
+                String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        let mountpoint = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if mountpoint.is_empty() {
+            return Err("volume has no local mountpoint (non-local driver?)".into());
+        }
+        (mountpoint, ".".to_string(), format!("volume={}", urlencode(&mount.source)))
+    } else {
+        // Bind mount: the path is the operator's, not ours. Refuse anything
+        // that isn't a plain absolute path rather than trying to normalise it.
+        let src = std::path::Path::new(&mount.source);
+        if !src.is_absolute() || mount.source.contains("..") {
+            return Err(format!("refusing a non-absolute or traversing path: {}", mount.source));
+        }
+        if !src.exists() {
+            return Err(format!("source path does not exist: {}", mount.source));
+        }
+        let parent = src.parent()
+            .ok_or_else(|| format!("no parent directory for {}", mount.source))?
+            .to_string_lossy().to_string();
+        let base = src.file_name()
+            .ok_or_else(|| format!("no basename for {}", mount.source))?
+            .to_string_lossy().to_string();
+        (parent, base, format!("kind=bind&path={}", urlencode(&mount.source)))
+    };
 
-    let tar_path = format!("{}/wolfstack-vol-{}-{}.tar", staging, container, volume);
+    let safe_tag: String = mount.source.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let tar_path = format!("{}/wolfstack-mnt-{}-{}.tar", staging, container, safe_tag);
+
     let tar = Command::new("tar")
-        .args(["-C", &mountpoint, "-cf", &tar_path, "."])
+        .args(["-C", &tar_dir, "-cf", &tar_path, &tar_entry])
         .output()
         .map_err(|e| format!("tar: {}", e))?;
     if !tar.status.success() {
@@ -12549,7 +12589,7 @@ fn send_volume_data(
 
     let urls = crate::api::build_external_urls(
         target_url,
-        &format!("/api/containers/docker/import-volume?name={}&volume={}", container, volume),
+        &format!("/api/containers/docker/import-volume?name={}&{}", container, query),
     );
     let mut last = String::from("no endpoint reachable");
     let mut ok = false;
@@ -12563,7 +12603,7 @@ fn send_volume_data(
                 "-X", "POST",
                 "-H", "Content-Type: application/octet-stream",
                 "-H", &format!("X-WolfStack-Secret: {}", cluster_secret),
-                "-T", &tar_path,      // stream — volumes are the big ones
+                "-T", &tar_path,      // stream — mount data is the big part
                 url,
             ])
             .output();
@@ -12575,6 +12615,15 @@ fn send_volume_data(
     }
     let _ = std::fs::remove_file(&tar_path);
     if ok { Ok(()) } else { Err(last) }
+}
+
+/// Percent-encode a value for a query string. Bind-mount paths contain `/`
+/// and may contain spaces, so they cannot be interpolated raw.
+fn urlencode(v: &str) -> String {
+    v.bytes().map(|b| match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+        _ => format!("%{:02X}", b),
+    }).collect()
 }
 
 /// Migrate a Docker container to a remote WolfStack node
@@ -12646,9 +12695,9 @@ pub fn docker_migrate(
 
     // Step 3c: Volume data, only if the operator asked for it.
     if volume_mode == VolumeMode::Copy {
-        for volume in spec.named_volumes() {
-            if let Err(e) = send_volume_data(target_url, container, &volume, cluster_secret, &staging) {
-                warnings.push(format!("volume '{}' was not copied: {}", volume, e));
+        for m in spec.copyable_mounts() {
+            if let Err(e) = send_mount_data(target_url, container, m, cluster_secret, &staging) {
+                warnings.push(format!("{} '{}' was not copied: {}", m.kind, m.source, e));
             }
         }
     }
@@ -12723,10 +12772,12 @@ pub fn docker_migrate(
         "Container transferred to {}. Destination is stopped — start it manually when ready. {}",
         target_url, last_response
     );
-    if volume_mode == VolumeMode::Declare && !spec.named_volumes().is_empty() {
+    if volume_mode == VolumeMode::Declare && !spec.copyable_mounts().is_empty() {
+        let names: Vec<String> = spec.copyable_mounts().iter()
+            .map(|m| m.source.clone()).collect();
         msg.push_str(&format!(
-            " Volume data was NOT copied ({}) — move it before starting the destination.",
-            spec.named_volumes().join(", ")
+            " Data was NOT copied ({}) — move it before starting the destination.",
+            names.join(", ")
         ));
     }
     if volume_mode == VolumeMode::Skip && !spec.mounts.is_empty() {
@@ -12861,6 +12912,48 @@ fn take_staged_spec(container: &str) -> Option<(DockerRuntimeSpec, bool)> {
     let spec: DockerRuntimeSpec = serde_json::from_value(v.get("spec")?.clone()).ok()?;
     let include_mounts = v.get("include_mounts").and_then(|b| b.as_bool()).unwrap_or(true);
     Some((spec, include_mounts))
+}
+
+/// Restore a bind mount's data at its original absolute path.
+///
+/// Far more dangerous than a volume restore: this writes to an arbitrary host
+/// path chosen by the *sending* node, so every guard here matters.
+///
+/// * The path must be absolute and free of `..` — no traversal, no relative
+///   surprises.
+/// * An existing NON-EMPTY directory is refused outright. Unpacking over live
+///   data to "help" is how a migration destroys the thing it was copying; the
+///   operator is told instead, and moves it themselves.
+/// * The archive is unpacked into the parent, because it contains the entry
+///   itself (see send_mount_data) — which is what lets a single bind-mounted
+///   FILE round-trip, not just a directory.
+pub fn docker_restore_bind(path: &str, tar_path: &str) -> Result<String, String> {
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() || path.contains("..") {
+        return Err(format!("refusing a non-absolute or traversing path: {}", path));
+    }
+    if p.is_dir() {
+        let empty = std::fs::read_dir(p).map(|mut d| d.next().is_none()).unwrap_or(false);
+        if !empty {
+            return Err(format!(
+                "{} already exists and is not empty — refusing to unpack over it;                  move or clear it first", path
+            ));
+        }
+    } else if p.exists() {
+        return Err(format!("{} already exists — refusing to overwrite it", path));
+    }
+    let parent = p.parent()
+        .ok_or_else(|| format!("no parent directory for {}", path))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("could not create {}: {}", parent.display(), e))?;
+    let out = Command::new("tar")
+        .args(["-C", &parent.to_string_lossy(), "-xf", tar_path])
+        .output()
+        .map_err(|e| format!("tar: {}", e))?;
+    if !out.status.success() {
+        return Err(format!("tar: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(format!("Bind mount '{}' restored", path))
 }
 
 /// Restore a named volume's contents from a tar staged by the import-volume
@@ -14990,9 +15083,11 @@ mod migrate_spec_tests {
     }
 
     #[test]
-    fn named_volumes_excludes_bind_mounts() {
-        // Only docker-managed volumes have data we can copy; a bind mount is
-        // a host path that may not exist on the target at all.
+    fn copyable_mounts_includes_bind_mounts() {
+        // This test previously asserted the OPPOSITE, and that assumption is
+        // what left RutgerDiehard unable to move a container whose entire state
+        // lived in bind mounts under another volume's _data (2026-08-06). Both
+        // kinds carry data we can move.
         let spec = DockerRuntimeSpec {
             mounts: vec![
                 MigrateMount { kind: "volume".into(), source: "appdata".into(), target: "/data".into(), read_only: false },
@@ -15000,7 +15095,23 @@ mod migrate_spec_tests {
             ],
             ..Default::default()
         };
-        assert_eq!(spec.named_volumes(), vec!["appdata".to_string()]);
+        let srcs: Vec<&str> = spec.copyable_mounts().iter().map(|m| m.source.as_str()).collect();
+        assert_eq!(srcs, vec!["appdata", "/srv/conf"]);
+    }
+
+    #[test]
+    fn a_mount_with_no_source_is_not_copyable() {
+        // tmpfs and anonymous mounts have nothing to move; including them would
+        // produce a confusing "was not copied" warning for something that never
+        // had data.
+        let spec = DockerRuntimeSpec {
+            mounts: vec![
+                MigrateMount { kind: "bind".into(), source: "".into(), target: "/x".into(), read_only: false },
+                MigrateMount { kind: "tmpfs".into(), source: "".into(), target: "/tmp".into(), read_only: false },
+            ],
+            ..Default::default()
+        };
+        assert!(spec.copyable_mounts().is_empty());
     }
 
     #[test]
@@ -15022,5 +15133,68 @@ mod migrate_spec_tests {
     fn an_empty_spec_produces_no_flags() {
         // A container with nothing special must not gain stray arguments.
         assert!(spec_to_create_args(&DockerRuntimeSpec::default(), true).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bind_restore_tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("wolfstack-bindtest-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    }
+
+    #[test]
+    fn refuses_a_relative_path() {
+        let e = docker_restore_bind("etc/app", "/nonexistent.tar").unwrap_err();
+        assert!(e.contains("non-absolute"), "{}", e);
+    }
+
+    #[test]
+    fn refuses_path_traversal() {
+        let e = docker_restore_bind("/srv/../etc/shadow", "/nonexistent.tar").unwrap_err();
+        assert!(e.contains("traversing"), "{}", e);
+    }
+
+    #[test]
+    fn refuses_to_unpack_over_a_non_empty_directory() {
+        // The guard that matters: unpacking over live data to "help" is how a
+        // migration destroys the thing it was copying.
+        let d = tmpdir("nonempty");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("keep-me.conf"), b"important").unwrap();
+        let e = docker_restore_bind(&d.to_string_lossy(), "/nonexistent.tar").unwrap_err();
+        assert!(e.contains("not empty"), "{}", e);
+        // and it really is untouched
+        assert_eq!(std::fs::read(d.join("keep-me.conf")).unwrap(), b"important");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_existing_file() {
+        let d = tmpdir("file");
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("config.yml");
+        std::fs::write(&f, b"live").unwrap();
+        let e = docker_restore_bind(&f.to_string_lossy(), "/nonexistent.tar").unwrap_err();
+        assert!(e.contains("already exists"), "{}", e);
+        assert_eq!(std::fs::read(&f).unwrap(), b"live");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_empty_existing_directory_is_allowed_through() {
+        // Re-declare-then-copy leaves an empty dir behind; that must not block
+        // the copy, or the two options could never be combined.
+        let d = tmpdir("empty");
+        std::fs::create_dir_all(&d).unwrap();
+        // Fails at the tar step (no archive), NOT at the guard — that is the
+        // distinction being asserted.
+        let e = docker_restore_bind(&d.to_string_lossy(), "/definitely-not-here.tar").unwrap_err();
+        assert!(e.contains("tar"), "should have reached the tar step, got: {}", e);
+        assert!(!e.contains("not empty"), "{}", e);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
