@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.4: SystemMonitor construction stops claiming half the fd table** _(2026-08-05 — [`90cff603`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/90cff603f199df3533983709bf0c137b95cc4330))_
 - **v25.10.3: the cluster poller finally bounds its connects — fixes fleet-wide fd exhaustion** _(2026-08-05 — [`3a1036a7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/3a1036a714952999d2f8470433176f3d8a530a15))_
 - **v25.10.1: service discovery no longer leaks a socket per probe and pegs the node** _(2026-08-05 — [`e9d8769a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e9d8769a65c9f02284a597f41b67506f3fdf0f13))_
 - **v25.10.0: an exposed rpcbind is now caught by WolfStack, not by your provider's abuse desk** _(2026-08-05 — [`df51826c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/df51826c50c25948e613781aeeae112b828841d8))_
