@@ -695,6 +695,11 @@ async fn list_do_droplets(creds: &digitalocean_lb::DigitalOceanCreds) -> Result<
     // droplet shape isn't worth exposing from that module.
     let url = "https://api.digitalocean.com/v2/droplets?per_page=200";
     let client = reqwest::Client::builder()
+        // Bound the CONNECT, not just the request: a SYN to an
+        // unroutable host holds a descriptor for the kernel's full
+        // retry window (~130s). Enforced by tests/resource_safety.rs
+        // after the 2026-08-05 fd-exhaustion outage.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("build reqwest: {}", e))?;
@@ -811,6 +816,11 @@ pub async fn find_tunnel_by_name(
         urlencode_str(&creds.account_id), urlencode_str(name)
     );
     let client = reqwest::Client::builder()
+        // Bound the CONNECT, not just the request: a SYN to an
+        // unroutable host holds a descriptor for the kernel's full
+        // retry window (~130s). Enforced by tests/resource_safety.rs
+        // after the 2026-08-05 fd-exhaustion outage.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("build reqwest: {}", e))?;

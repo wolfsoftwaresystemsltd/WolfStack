@@ -38,6 +38,11 @@ use tokio_tungstenite::tungstenite::Message;
 /// insecure.
 static TN_CLIENT_STRICT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
+        // Bound the CONNECT, not just the request: a SYN to an
+        // unroutable host holds a descriptor for the kernel's full
+        // retry window (~130s). Enforced by tests/resource_safety.rs
+        // after the 2026-08-05 fd-exhaustion outage.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
@@ -48,6 +53,11 @@ static TN_CLIENT_STRICT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 /// flag, on by default in the register form).
 static TN_CLIENT_INSECURE: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
+        // Bound the CONNECT, not just the request: a SYN to an
+        // unroutable host holds a descriptor for the kernel's full
+        // retry window (~130s). Enforced by tests/resource_safety.rs
+        // after the 2026-08-05 fd-exhaustion outage.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
         .danger_accept_invalid_certs(true)
         .build()

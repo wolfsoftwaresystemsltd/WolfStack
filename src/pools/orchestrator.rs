@@ -114,6 +114,8 @@ async fn drive_pool(pool: &Pool) -> Result<(), String> {
             return Err("leader_up pool missing leader_url or pool_secret".into());
         }
         let client = reqwest::Client::builder()
+            // Bound the CONNECT — see tests/resource_safety.rs
+            .connect_timeout(Duration::from_secs(5))
             .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(15))
             .build()

@@ -154,6 +154,11 @@ pub async fn ping(creds: &DigitalOceanCreds) -> Result<usize, String> {
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        // Bound the CONNECT, not just the request: a SYN to an
+        // unroutable host holds a descriptor for the kernel's full
+        // retry window (~130s). Enforced by tests/resource_safety.rs
+        // after the 2026-08-05 fd-exhaustion outage.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
         .build()
         .expect("reqwest client builder")

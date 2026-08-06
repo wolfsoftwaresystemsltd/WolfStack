@@ -339,6 +339,11 @@ pub fn client_for(instance: &crate::wolfhost::models::directadmin::DirectAdminIn
 impl DaClient {
     pub fn new(url: &str, user: &str, pass: &str) -> Self {
         let client = reqwest::Client::builder()
+            // Bound the CONNECT, not just the request: a SYN to an
+            // unroutable host holds a descriptor for the kernel's full
+            // retry window (~130s). Enforced by tests/resource_safety.rs
+            // after the 2026-08-05 fd-exhaustion outage.
+            .connect_timeout(std::time::Duration::from_secs(5))
             .danger_accept_invalid_certs(true)
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -1320,6 +1325,11 @@ impl DaClient {
         // `self.client` has a 30s timeout that's fine for JSON API
         // calls but kills any backup over ~50 MB on a slow link.
         let big_client = reqwest::Client::builder()
+            // Bound the CONNECT, not just the request: a SYN to an
+            // unroutable host holds a descriptor for the kernel's full
+            // retry window (~130s). Enforced by tests/resource_safety.rs
+            // after the 2026-08-05 fd-exhaustion outage.
+            .connect_timeout(std::time::Duration::from_secs(5))
             .danger_accept_invalid_certs(true)
             .timeout(std::time::Duration::from_secs(60 * 30))
             .build()

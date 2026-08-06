@@ -89,6 +89,33 @@ jobs:
         # `cookie` 0.16.2 on rustc 1.96 and failed the v24.39.0 release.
         run: cargo check --locked
 
+      - name: Resource-safety gate + test suite
+        # Operator rule (2026-08-06): WolfStack must never be capable of
+        # taking down the estate it manages. `cargo check` compiles but runs
+        # NOTHING, so until this step existed the test suite — including
+        # tests/resource_safety.rs — never ran in CI at all, and every rule it
+        # encodes was advisory.
+        #
+        # What this gates:
+        #   - every outbound HTTP client bounds its CONNECT, not just the
+        #     request. A SYN to an unroutable host holds a descriptor for the
+        #     kernel's ~130s retry window; a client on a timer stacks those
+        #     until the fd table is gone. That is the 2026-08-05 fleet
+        #     meltdown: 2,422 SYN-SENT, 2,868 CLOSE-WAIT, ~700 sockets/min
+        #     across twelve production nodes.
+        #   - sysinfo never refreshes all processes off the demand path. It
+        #     caches an open /proc/<pid>/stat handle per process and claims
+        #     HALF of RLIMIT_NOFILE to do it.
+        #
+        # Runs natively BEFORE the slow cross builds, same reasoning as the
+        # warnings gate above: a violation fails in ~2 minutes, not 20.
+        # Only on the x86_64 leg — the rules are host-independent and running
+        # them three times buys nothing.
+        if: matrix.arch == 'x86_64'
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test --locked
+
       - name: Install cross
         # Pinned to an exact commit (last crates.io release v0.2.5 is from
         # 2023, so git install is required). --locked builds cross with its
