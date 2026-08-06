@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.7: WebSocket bridges spun for ever on a stream error and never freed a socket** _(2026-08-06 — [`c6d9926c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c6d9926ca8b92038252eb47fc736504f2745b10e))_
 - **v25.10.6: an upgrade can no longer leave the dashboard permanently dead** _(2026-08-06 — [`aab55361`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/aab55361e7de1e5bef2cd124067388824de349db))_
 - **v25.10.5: the dashboard's own 15s poll was still running a full /proc walk** _(2026-08-06 — [`619e2da1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/619e2da170daa8a183a3baadf2c57a8c564e3429))_
 - **v25.10.4: SystemMonitor construction stops claiming half the fd table** _(2026-08-05 — [`90cff603`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/90cff603f199df3533983709bf0c137b95cc4330))_
