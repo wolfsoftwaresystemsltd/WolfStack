@@ -481,8 +481,7 @@ async fn main() -> std::io::Result<()> {
             Ok(parsed) => {
                 let ip = parsed.to_canonical().to_string();
                 println!("Unblocking {} from every WolfStack enforcement surface:", ip);
-                auth::kernel_unblock_ip(&ip);
-                println!("  ✓ login-lockout / NMAP-protection: kernel block removed (ipset + INPUT/FORWARD)");
+                println!("{}", auth::kernel_unblock_ip(&ip).describe());
                 // The kernel rule is only half of a login lockout. The half
                 // that refuses the password lives in the running daemon's
                 // memory and cannot be reached from this process — ask the

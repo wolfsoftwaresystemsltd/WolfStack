@@ -257,12 +257,12 @@ pub fn known_clusters() -> Vec<String> {
 pub fn cli_unblock_ip(ip: &str) {
     let v6 = ip.contains(':');
     let set = if v6 { IPSET_NAME_V6 } else { IPSET_NAME_V4 };
-    let _ = std::process::Command::new("ipset").args(["del", set, ip]).output();
+    let outcome = crate::auth::ipset_del(set, ip);
     let mut clusters = known_clusters();
     if clusters.is_empty() {
         clusters.push(String::new());
     }
-    println!("  ✓ threat-intel: removed from ipset '{}'", set);
+    println!("{}", outcome.describe("threat-intel", set));
     let mut failed = 0u32;
     for cluster in clusters {
         let mut cfg = ThreatIntelConfig::load_for(&cluster);
