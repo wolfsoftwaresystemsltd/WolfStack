@@ -1,0 +1,54 @@
+# Lint gate for the web UI.
+#
+# WHY: setup.sh installs web/ straight from the git branch (`git clone -b
+# $BRANCH` + copy), so a broken app.js on master reaches every new install
+# and every upgrade IMMEDIATELY — no release build sits in between, and the
+# release workflow's path filter doesn't even watch web/**. On 2026-08-07 a
+# template literal referencing an undefined variable shipped exactly this
+# way: `node --check` passes it (it parses), and nothing else looked at the
+# file. The ESLint config in web/ catches that class (no-undef plus other
+# guaranteed-runtime-error rules); this workflow runs it on every push and
+# PR that touches the web UI.
+#
+# The same gate runs locally as an editor hook, so a red run here means a
+# change bypassed the local tooling — treat it as the last line, not the
+# first.
+name: Web UI Lint
+
+on:
+  push:
+    branches: [master, beta]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-lint.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-lint.yml'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Parse EVERYTHING first, lint second: eslint only covers js/*.js,
+      # but a syntax error anywhere in web (including vendored files a
+      # bad edit could clobber) still blanks the UI for every user.
+      - name: Parse-check all JS
+        run: |
+          set -e
+          for f in $(find web/js -name '*.js'); do
+            node --check "$f"
+          done
+
+      - name: Lint
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint

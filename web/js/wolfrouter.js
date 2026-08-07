@@ -2789,7 +2789,7 @@
         // manual toggle across refreshes via the `wr-cluster-banner`
         // class — tagging it here so the selector finds it.
         return `
-            <details ${(totalErr > 0 || totalWarn > 0 || unreachable > 0) ? 'open' : ''} class="card wr-cluster-banner" style="margin-bottom:12px;">
+            <details ${(nodesErr > 0 || nodesWarn > 0 || unreachable > 0) ? 'open' : ''} class="card wr-cluster-banner" style="margin-bottom:12px;">
                 <summary class="card-header" style="cursor:pointer; display:flex; gap:10px; align-items:center;">
                     <span style="color:${summaryColour}; font-weight:600;">Cluster validation:</span>
                     <span>${escHtml(summary)}</span>

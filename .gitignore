@@ -10,3 +10,4 @@
 .vscode/
 .iso-build/
 *.iso
+web/node_modules/

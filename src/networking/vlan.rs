@@ -1090,25 +1090,41 @@ fn validate_vlan_attachment(v: &VlanAttachment) -> Result<(), String> {
             v.bridge_name, v.bridge_name.len()
         ));
     }
-    // L2-only attachment: empty subnet AND empty self_ip = a pure
-    // bridge with no host address (e.g. a vSwitch whose IPs live only
-    // on the guests attached to it — the container-driven auto-wire
-    // path uses this). Skip the L3 checks for that case; routes need a
-    // subnet, so they're disallowed without one.
+    // An EMPTY self_ip means the host takes no address on this VLAN — the
+    // bridge is written as `inet manual` and only the guests attached to it
+    // are on the subnet. That is how ESXi/XCP-ng/Proxmox behave by default,
+    // and operators coming from those expect it. Two shapes are valid:
+    //
+    //   subnet + self_ip  -> host is on the VLAN (full L3)
+    //   subnet, no self_ip-> host off the VLAN, but the IP plan is known, so
+    //                        guest auto-allocation and Docker IPAM still work
+    //   neither           -> pure L2, no IP plan at all
+    //
+    // A self_ip WITHOUT a subnet stays invalid: there is no prefix to derive
+    // a netmask from, so the address could not be written.
     let subnet_empty = v.subnet.is_empty();
     let self_ip_empty = v.self_ip.is_empty();
-    if subnet_empty != self_ip_empty {
-        return Err("subnet and self_ip must both be set or both be empty \
-            (both empty = an L2-only bridge with no host IP)".into());
+    if subnet_empty && !self_ip_empty {
+        return Err("self_ip needs a subnet — the prefix length comes from it. \
+            Set a subnet, or clear self_ip for a bridge with no host IP".into());
+    }
+    // Routes are written as `up ip route add <dest> via <via> dev <bridge>`.
+    // The kernel rejects that when the bridge has no address in the gateway's
+    // subnet ("Nexthop has invalid gateway"), so routes require a self_ip —
+    // not merely a subnet.
+    if self_ip_empty && !v.routes.is_empty() {
+        return Err("routes require this host to have an IP on the VLAN — \
+            `ip route ... via` needs a source address on the bridge. \
+            Set a self IP, or remove the routes".into());
     }
     if subnet_empty {
-        if !v.routes.is_empty() {
-            return Err("an L2-only VLAN attachment (no subnet/self_ip) cannot \
-                carry routes — routes require a subnet".into());
-        }
         return Ok(());
     }
     parse_cidr(&v.subnet).map_err(|e| format!("subnet: {}", e))?;
+    if self_ip_empty {
+        // Subnet-only: nothing further to check — the host takes no address.
+        return Ok(());
+    }
     parse_ip(&v.self_ip).map_err(|e| format!("self_ip: {}", e))?;
     if !ip_in_cidr(&v.self_ip, &v.subnet)? {
         return Err(format!(
@@ -1208,17 +1224,24 @@ pub fn next_available_ip(v: &VlanAttachment, cluster_used: &[String]) -> Option<
     let mask = if prefix == 0 { 0u32 } else { !0u32 << host_bits };
     let net_addr = net_n & mask;
     let bcast_addr = net_addr | !mask;
-    let self_ip: std::net::Ipv4Addr = v.self_ip.parse().ok()?;
-    let self_n = u32::from(self_ip);
+    // On an addressless VLAN the host holds no IP, so there is nothing of ours
+    // to exclude — but the picker must still work, because "the host is off
+    // this VLAN" is exactly the case where guests need allocating. Parsing
+    // with `?` here used to abort the whole picker and silently return no
+    // candidate at all.
+    let self_n: Option<u32> = v.self_ip.parse::<std::net::Ipv4Addr>().ok().map(u32::from);
     // Build the "used" set from local + external + cluster-supplied.
     let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
     used.insert(net_addr);
     used.insert(bcast_addr);
-    used.insert(self_n);
-    // Conventional gateway = first usable IP. Treat as used UNLESS
-    // self is the gateway (operator chose the .1 slot deliberately).
+    if let Some(n) = self_n {
+        used.insert(n);
+    }
+    // Conventional gateway = first usable IP. Treat as used UNLESS self is the
+    // gateway (operator chose the .1 slot deliberately). With no host IP we
+    // don't know who the gateway is, so leave it reserved.
     let conventional_gw = net_addr.wrapping_add(1);
-    if self_n != conventional_gw {
+    if self_n != Some(conventional_gw) {
         used.insert(conventional_gw);
     }
     for a in &v.allocations {
@@ -2959,13 +2982,54 @@ mod tests {
             notes: String::new(),
         };
         validate_vlan_attachment(&v).expect("L2-only attachment must pass");
-        // Exactly one of subnet/self_ip empty = inconsistent → rejected.
+        // Subnet WITHOUT self_ip is the common case for operators coming from
+        // ESXi/XCP-ng/Proxmox: the guests share an IP plan, the host is simply
+        // not on it. Must be accepted — rejecting it made the mode unusable
+        // for anyone who also wanted guest auto-allocation or Docker macvlan.
         v.subnet = "10.0.1.0/24".into();
-        assert!(validate_vlan_attachment(&v).is_err(), "subnet without self_ip must fail");
-        // L2-only cannot carry routes (routes need a subnet).
+        validate_vlan_attachment(&v).expect("subnet with no host IP must pass");
+        // self_ip WITHOUT a subnet stays invalid — no prefix to derive a
+        // netmask from, so the address could not be written.
         v.subnet = String::new();
+        v.self_ip = "10.0.1.5".into();
+        assert!(validate_vlan_attachment(&v).is_err(), "self_ip without subnet must fail");
+        // Routes need a host address, not merely a subnet: `ip route ... via`
+        // fails on a bridge with no source address in the gateway's subnet.
+        v.self_ip = String::new();
+        v.subnet = "10.0.1.0/24".into();
         v.routes = vec![RouteEntry { destination: "10.0.0.0/16".into(), via: "10.0.1.1".into() }];
-        assert!(validate_vlan_attachment(&v).is_err(), "L2-only with routes must fail");
+        assert!(validate_vlan_attachment(&v).is_err(), "routes with no host IP must fail");
+        // ...and with a host address, the same routes are fine.
+        v.self_ip = "10.0.1.5".into();
+        validate_vlan_attachment(&v).expect("routes with a host IP must pass");
+    }
+
+    #[test]
+    fn addressless_bridge_is_written_as_inet_manual() {
+        // The whole point of the mode: the bridge must carry no address, so
+        // the host never appears on the guests' VLAN.
+        let store = VlanStore {
+            vlans: vec![VlanAttachment {
+                id: "v1".into(),
+                name: "guests".into(),
+                provider: VlanProvider::Custom,
+                parent_iface: "eno1".into(),
+                vlan_id: 100,
+                mtu: 1500,
+                bridge_name: "vmbr100".into(),
+                subnet: "10.0.1.0/24".into(),
+                self_ip: String::new(),
+                routes: vec![], allocations: vec![], external_reservations: vec![],
+                notes: String::new(),
+            }],
+            ..Default::default()
+        };
+        let out = render_ifupdown(&store);
+        assert!(out.contains("iface vmbr100 inet manual"), "bridge must be addressless:\n{}", out);
+        assert!(!out.contains("address "), "no address may be written:\n{}", out);
+        // Classic ifupdown syntax only — plain Debian has no ifupdown2.
+        assert!(!out.contains("bridge-vlan-aware"), "must not emit ifupdown2 syntax:\n{}", out);
+        assert!(out.contains("bridge-ports eno1.100"));
     }
 
     #[test]
@@ -3087,6 +3151,18 @@ mod tests {
         // are network/broadcast. First usable should be .2.
         let v = mk_attach("10.0.1.5");
         let ip = next_available_ip(&v, &[]).expect("should find an IP");
+        assert_eq!(ip, "10.0.1.2");
+    }
+
+    #[test]
+    fn next_available_ip_works_when_the_host_has_no_ip() {
+        // The addressless case is precisely when guests need allocating, so
+        // the picker must still produce candidates. It previously bailed out
+        // and returned None, leaving the UI with an empty auto-pick and no
+        // explanation.
+        let v = mk_attach("");
+        let ip = next_available_ip(&v, &[]).expect("must still allocate with no host IP");
+        // .0 network, .1 gateway (unknown owner — stays reserved), .255 bcast.
         assert_eq!(ip, "10.0.1.2");
     }
 

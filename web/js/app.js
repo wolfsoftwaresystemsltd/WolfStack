@@ -19259,8 +19259,11 @@ function certIssueDialog() {
     // sidebar uses; if it's not initialised yet, the picker shows only
     // "this node" and the operator gets the legacy behaviour.
     let nodePickerHtml = '';
-    if (_certScope === 'cluster' && typeof nodes !== 'undefined' && Array.isArray(nodes)) {
-        const opts = nodes
+    // `allNodes` is the sidebar's cached node list (declared near the top of
+    // this file). This previously referenced a non-existent `nodes` global
+    // behind a typeof guard, so the picker silently never rendered.
+    if (_certScope === 'cluster' && Array.isArray(allNodes)) {
+        const opts = allNodes
             .filter(n => n.online && n.node_type === 'wolfstack')
             .map(n => `<option value="${escapeAttr(n.is_self ? '' : n.id)}">${escapeHtml(n.hostname || n.id)}${n.is_self ? ' (this)' : ''}</option>`)
             .join('');
@@ -22375,7 +22378,7 @@ function renderVlanAttachments(data) {
                         </span>
                     </div>
                     <div style="margin-top:6px; font-size:12px; color:var(--text-secondary); font-family:var(--font-mono);">
-                        ${vlanEsc(v.parent_iface)}.${v.vlan_id} on bridge <strong>${vlanEsc(v.bridge_name)}</strong> · ${vlanEsc(v.self_ip)} (${vlanEsc(v.subnet)}) · MTU ${v.mtu}
+                        ${vlanEsc(v.parent_iface)}.${v.vlan_id} on bridge <strong>${vlanEsc(v.bridge_name)}</strong> · ${v.self_ip ? `${vlanEsc(v.self_ip)} (${vlanEsc(v.subnet)})` : (v.subnet ? `no host IP (guests: ${vlanEsc(v.subnet)})` : 'L2-only, no host IP')} · MTU ${v.mtu}
                     </div>
                     ${(v.routes||[]).length > 0 ? `<div style="margin-top:4px; font-size:11px; color:var(--text-muted); font-family:var(--font-mono);">routes: ${v.routes.map(r => `${vlanEsc(r.destination)} via ${vlanEsc(r.via)}`).join('; ')}</div>` : ''}
                     ${v.notes ? `<div style="margin-top:4px; font-size:11px; color:var(--text-muted);">${vlanEsc(v.notes)}</div>` : ''}
@@ -22455,6 +22458,12 @@ async function vlanShowAddDialog(existing) {
     const helperStyle = 'color:var(--text-muted); font-size:11px; margin-top:4px; display:block; line-height:1.5;';
     const detailsStyle = 'background:var(--bg-input,rgba(255,255,255,0.03)); border:1px solid var(--border,#2d2f3a); border-radius:6px; padding:8px 12px; font-size:12px; color:var(--text-secondary);';
     const summaryStyle = 'cursor:pointer; user-select:none; font-weight:500; color:var(--text-primary); padding:2px 0;';
+    // An existing attachment with no self IP is one where the host stays off
+    // the VLAN. A NEW attachment also has it empty, so require an id to tell
+    // them apart — otherwise the dialog would reopen in that mode every time.
+    // The subnet is independent: it can be set (guests have an IP plan the
+    // host isn't part of) or empty (pure L2, no plan at all).
+    const isL2Only = !!ex.id && !ex.self_ip;
     const html = `
         <div class="modal-overlay active" id="vlan-add-modal">
             <div class="modal" style="max-width:560px;">
@@ -22527,11 +22536,23 @@ async function vlanShowAddDialog(existing) {
                     </div>
 
                     <div class="form-group">
-                        <label for="vlanatt-subnet">Subnet (CIDR)</label>
-                        <input class="form-control" id="vlanatt-subnet" value="${vlanEsc(ex.subnet)}" placeholder="10.0.1.0/24">
-                        <small style="${helperStyle}">RFC1918 range for this VLAN. All servers on the same VLAN must agree.</small>
+                        <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer; font-weight:normal;">
+                            <input type="checkbox" id="vlanatt-l2only" ${isL2Only ? 'checked' : ''}
+                                   onchange="vlanL2OnlyChanged()" style="margin-top:3px; flex-shrink:0;">
+                            <span>
+                                <strong>This host has no IP on this VLAN (L2-only)</strong>
+                                <small style="${helperStyle}">For a VLAN that only carries guest traffic: WolfStack builds the tagged interface and bridge, but the host stays off the subnet — only the containers/VMs attached to it get IPs. This is how ESXi, XCP-ng and Proxmox behave by default. Leave unticked if this server itself needs to talk on the VLAN.</small>
+                            </span>
+                        </label>
                     </div>
 
+                    <div class="form-group">
+                        <label for="vlanatt-subnet">Subnet (CIDR) <span id="vlanatt-subnet-opt" style="color:var(--text-muted); font-weight:normal;${isL2Only ? '' : 'display:none;'}">— optional</span></label>
+                        <input class="form-control" id="vlanatt-subnet" value="${vlanEsc(ex.subnet)}" placeholder="10.0.1.0/24">
+                        <small style="${helperStyle}">RFC1918 range for this VLAN. All servers on the same VLAN must agree. <span id="vlanatt-subnet-l2note" style="${isL2Only ? '' : 'display:none;'}">Still worth setting even with no host IP — it's what guest IP auto-allocation and Docker macvlan/ipvlan networks allocate from. Leave blank only for a pure L2 segment where every guest is addressed by hand or by DHCP.</span></small>
+                    </div>
+
+                    <div id="vlanatt-l3-fields" style="${isL2Only ? 'display:none;' : ''}">
                     <div class="form-group">
                         <label for="vlanatt-self-ip">This server's IP on the subnet</label>
                         <input class="form-control" id="vlanatt-self-ip" value="${vlanEsc(ex.self_ip)}" placeholder="10.0.1.5">
@@ -22542,6 +22563,7 @@ async function vlanShowAddDialog(existing) {
                         <label for="vlanatt-routes">Optional gateway routes</label>
                         <textarea class="form-control" id="vlanatt-routes" rows="2" placeholder="10.0.0.0/16 via 10.0.1.1">${(ex.routes||[]).map(r => `${vlanEsc(r.destination)} via ${vlanEsc(r.via)}`).join('\n')}</textarea>
                         <small style="${helperStyle}">One per line, format <code>DEST_CIDR via VIA_IP</code>. Hetzner Cloud-Network bridging: <code>10.0.0.0/16 via 10.0.1.1</code>.</small>
+                    </div>
                     </div>
 
                     <div class="form-group" style="margin-bottom:0;">
@@ -22573,6 +22595,22 @@ function vlanProviderChanged() {
         }
     }
     vlanSyncBridgeName();
+}
+
+// Show/hide the L3 group when the operator toggles L2-only. The fields are
+// hidden rather than removed so an accidental tick doesn't discard what was
+// already typed — untick and the values are still there.
+function vlanL2OnlyChanged() {
+    const on = !!(document.getElementById('vlanatt-l2only') || {}).checked;
+    // Self IP and routes belong to the host being on the VLAN, so they go away
+    // together. The subnet stays visible either way — it describes the guests'
+    // IP plan, which outlives the host having an address on it.
+    const grp = document.getElementById('vlanatt-l3-fields');
+    if (grp) grp.style.display = on ? 'none' : '';
+    const opt = document.getElementById('vlanatt-subnet-opt');
+    if (opt) opt.style.display = on ? '' : 'none';
+    const note = document.getElementById('vlanatt-subnet-l2note');
+    if (note) note.style.display = on ? '' : 'none';
 }
 
 function vlanSyncBridgeName() {
@@ -22618,8 +22656,15 @@ async function vlanSave(existingId) {
     if (!Number.isInteger(vlanId) || vlanId < 1 || vlanId > 4094) missing.push('VLAN ID (must be 1-4094)');
     if (!Number.isInteger(mtu) || mtu < 576 || mtu > 9216) missing.push('MTU (must be 576-9216)');
     if (!bridge) missing.push('Bridge name');
-    if (!subnet) missing.push('Subnet (CIDR)');
-    if (!selfIp) missing.push('This server\'s IP on the subnet');
+    // L2-only: the host takes no address, so self IP and routes must be sent
+    // empty regardless of what's still sitting in the hidden fields. The
+    // subnet is NOT cleared — it describes the guests' IP plan and is what
+    // guest auto-allocation and Docker IPAM draw from.
+    const l2Only = !!(document.getElementById('vlanatt-l2only') || {}).checked;
+    if (!l2Only) {
+        if (!subnet) missing.push('Subnet (CIDR)');
+        if (!selfIp) missing.push('This server\'s IP on the subnet');
+    }
     if (missing.length > 0) {
         showToast(`Missing or invalid: ${missing.join(', ')}`, 'error', 8000);
         return;
@@ -22628,7 +22673,10 @@ async function vlanSave(existingId) {
         id: existingId || '',
         name, provider, parent_iface: parent,
         vlan_id: vlanId, mtu, bridge_name: bridge,
-        subnet, self_ip: selfIp, routes, notes
+        subnet,
+        self_ip: l2Only ? '' : selfIp,
+        routes: l2Only ? [] : routes,
+        notes
     };
     // 1) Preflight — surface any "this is going to break X" findings
     //    before we commit. The backend re-runs the same check and
@@ -30775,13 +30823,28 @@ async function migrateDockerContainer(name) {
 async function renderMigrateVolumeChoice(name) {
     const host = document.getElementById('migrate-volume-choice');
     if (!host) return;
-    let mounts = [];
-    let readFailed = '';
     // Render the placeholder immediately. Without this the section is simply
     // ABSENT while the lookup is in flight — and if the lookup never returns,
     // absent for ever, with no hint that anything was meant to be there
     // (RutgerDiehard, 2026-08-07: no choice, no error, nothing).
     host.innerHTML = `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:1rem;color:var(--text-muted);font-size:0.8em;">Checking this container's volumes…</div>`;
+    try {
+        await renderMigrateVolumeChoiceBody(host, name);
+    } catch (e) {
+        // Any exception in the body — including a plain JS bug in the render
+        // path — must NOT leave "Checking this container's volumes…" up for
+        // ever (RutgerDiehard, 2026-08-07: exactly that, from an undefined
+        // variable in the template). The caller doesn't await us, so a
+        // rejected promise would otherwise vanish into the console.
+        host.innerHTML = `<div role="alert" style="background:var(--warning-bg,#332a1a);border:1px solid var(--warning,#f59e0b);border-radius:8px;padding:10px 12px;margin-bottom:1rem;color:var(--warning,#f59e0b);font-size:0.82em;">
+            <b>Could not display this container's volumes</b> (${escapeHtml(e && e.message ? e.message : String(e))}). Migration will re-declare any mounts without copying their data — move it yourself before starting the destination.
+        </div>`;
+    }
+}
+
+async function renderMigrateVolumeChoiceBody(host, name) {
+    let mounts = [];
+    let readFailed = '';
     try {
         // A hung request must not leave the operator staring at nothing —
         // 10s then say so.
@@ -30820,7 +30883,13 @@ async function renderMigrateVolumeChoice(name) {
         return;
     }
 
-    const named = mounts.filter(m => (m.mount_type || m.type) === 'volume');
+    // Mirrors DockerRuntimeSpec::copyable_mounts (containers/mod.rs): named
+    // volumes AND bind mounts with a source path can have their data copied;
+    // tmpfs/npipe cannot. The API serialises mount_type/host_path
+    // (ContainerMount, no serde rename).
+    const copyable = mounts.filter(m =>
+        ((m.mount_type || m.type) === 'volume' || (m.mount_type || m.type) === 'bind')
+        && (m.host_path || m.source || '') !== '');
     const list = mounts.map(m =>
         `<li><code>${escapeHtml(m.host_path || m.source || '')}</code> → <code>${escapeHtml(m.container_path || m.target || '')}</code>${m.read_only ? ' (ro)' : ''}</li>`
     ).join('');
@@ -37162,7 +37231,11 @@ async function pbsTargetSave() {
         await loadPbsTargets();
         // Refresh the backup destination dropdown so the new entry is
         // usable immediately rather than after a page reload.
-        if (typeof loadBackupStorageOptions === 'function') loadBackupStorageOptions();
+        // populateStorageDropdown rebuilds the schedule destination <select>
+        // (it no-ops when that select isn't on screen). This previously
+        // typeof-guarded a function name that never existed, so the promised
+        // "usable immediately" refresh silently never happened.
+        populateStorageDropdown();
     } catch (e) {
         pbsTargetSetResult(`Network error: ${e.message || e}`, 'error');
     }
@@ -37187,7 +37260,11 @@ async function pbsTargetDelete(id) {
         }
         showToast(`Destination "${t.name}" deleted`, 'success');
         await loadPbsTargets();
-        if (typeof loadBackupStorageOptions === 'function') loadBackupStorageOptions();
+        // populateStorageDropdown rebuilds the schedule destination <select>
+        // (it no-ops when that select isn't on screen). This previously
+        // typeof-guarded a function name that never existed, so the promised
+        // "usable immediately" refresh silently never happened.
+        populateStorageDropdown();
     } catch (e) {
         showToast(`Network error: ${e.message || e}`, 'error', 0);
     }
@@ -37638,8 +37715,11 @@ async function restorePbsSnapshot(snapshot, backupType) {
         if (ok) {
             cancelBtn.textContent = 'Close';
             goBtn.style.display = 'none';
-            if (typeof loadContainers === 'function') loadContainers();
-            if (typeof loadVMs === 'function') loadVMs();
+            // Refresh the list the restore actually changed. The old
+            // typeof-guarded names (loadContainers / capital-M loadVMs) never
+            // existed, so neither list ever refreshed after a restore.
+            if (snapType === 'ct') loadLxcContainers();
+            if (snapType === 'vm') loadVms();
         } else {
             goBtn.disabled = false;
             goBtn.textContent = 'Restore';
@@ -51441,7 +51521,7 @@ async function installCertbotPlugin(plugin) {
         });
         var data = await resp.json();
         if (resp.ok && data.ok) {
-            toast('dns-' + plugin + ' installed', 'success');
+            showToast('dns-' + plugin + ' installed', 'success');
         } else {
             var err = data.error || ('HTTP ' + resp.status);
             // Show install log in a modal so the operator can debug.
@@ -51456,7 +51536,10 @@ async function installCertbotPlugin(plugin) {
             document.body.appendChild(modal);
         }
     } catch (e) {
-        toast('Install error: ' + (e.message || String(e)), 'error');
+        // Sticky (duration 0): an install failure must stay readable, not
+        // auto-dismiss. `toast(...)` was a ReferenceError — the catch itself
+        // crashed, so install failures surfaced as nothing at all.
+        showToast('Install error: ' + (e.message || String(e)), 'error', 0);
     }
     // Re-check status (succeeded or failed, get the fresh picture).
     loadCertbotPlugins();
@@ -74950,60 +75033,70 @@ function predictiveAutofixProgressUI(total, onCancel) {
 /// is in flight we publish an `abort()` on it so the Cancel button can
 /// stop the run (which closes this terminal and rejects with
 /// 'cancelled'); we clear it again the moment the wait settles.
-function predictiveAutofixOne(p, ctl) {
-    return new Promise(async (resolve, reject) => {
-        // Resolve the proposal's console target AND the composed
-        // remediation command (whole recipe, not just index 0) via the
-        // autofix-command endpoint. Same auth / remote-console hop /
-        // console_name resolution as the regular ▶ Run path.
-        let meta;
-        try {
-            const r = await fetch(`/api/proposals/${encodeURIComponent(p.id)}/autofix-command`);
-            if (!r.ok) {
-                const data = await r.json().catch(() => ({}));
-                return reject(new Error(data.error || `HTTP ${r.status} resolving target`));
-            }
-            meta = await r.json();
-        } catch (e) {
-            return reject(new Error(`couldn't resolve target: ${e.message || e}`));
+async function predictiveAutofixOne(p, ctl) {
+    // Deliberately NOT `new Promise(async (resolve, reject) => …)`: an
+    // exception thrown inside an async executor rejects the executor's own
+    // invisible promise, not the one being constructed — so the caller's
+    // `await` would hang for ever with the pane stuck on "Connecting…".
+    // The awaits live in this async function (throws propagate normally);
+    // only the genuinely callback-driven sentinel wait gets an executor.
+
+    // Resolve the proposal's console target AND the composed
+    // remediation command (whole recipe, not just index 0) via the
+    // autofix-command endpoint. Same auth / remote-console hop /
+    // console_name resolution as the regular ▶ Run path.
+    let meta;
+    try {
+        const r = await fetch(`/api/proposals/${encodeURIComponent(p.id)}/autofix-command`);
+        if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            const err = new Error(data.error || `HTTP ${r.status} resolving target`);
+            err.alreadyDescribed = true; // don't re-wrap below
+            throw err;
         }
-        if (!meta || !meta.command) {
-            return reject(new Error('proposal returned no command to run'));
-        }
-        // Cancelled while we were resolving — don't open a terminal.
-        if (ctl && ctl.cancelled) {
-            return reject(new Error('cancelled'));
-        }
+        meta = await r.json();
+    } catch (e) {
+        if (e && e.alreadyDescribed) throw e;
+        throw new Error(`couldn't resolve target: ${e.message || e}`);
+    }
+    if (!meta || !meta.command) {
+        throw new Error('proposal returned no command to run');
+    }
+    // Cancelled while we were resolving — don't open a terminal.
+    if (ctl && ctl.cancelled) {
+        throw new Error('cancelled');
+    }
 
-        // Sentinel marker — pool a per-proposal id into the string so
-        // a leftover from a previous target can't false-trigger ours.
-        const sentinel = `__WSAFXDONE_${p.id.replace(/[^A-Za-z0-9_-]/g, '')}__`;
-        // `; printf …\n` so the sentinel prints whether the update
-        // exited 0 or non-zero (operator still sees the failure in
-        // the terminal — we just want to know the command finished).
-        const wrapped = `${meta.command} ; printf '\\n${sentinel}\\n'`;
+    // Sentinel marker — pool a per-proposal id into the string so
+    // a leftover from a previous target can't false-trigger ours.
+    const sentinel = `__WSAFXDONE_${p.id.replace(/[^A-Za-z0-9_-]/g, '')}__`;
+    // `; printf …\n` so the sentinel prints whether the update
+    // exited 0 or non-zero (operator still sees the failure in
+    // the terminal — we just want to know the command finished).
+    const wrapped = `${meta.command} ; printf '\\n${sentinel}\\n'`;
 
-        // Tear down any prior session (previous AUTOFIX target or a
-        // manual ▶ Run from earlier) so the new target opens cleanly.
-        if (predTermState.proposalId && predTermState.proposalId !== p.id) {
-            predTermClose();
-        }
+    // Tear down any prior session (previous AUTOFIX target or a
+    // manual ▶ Run from earlier) so the new target opens cleanly.
+    if (predTermState.proposalId && predTermState.proposalId !== p.id) {
+        predTermClose();
+    }
 
-        // Reuse predictiveShowTerminalStub for the immediate-feedback
-        // overlay so the right pane visibly switches to the new
-        // target within one frame.
-        predictiveShowTerminalStub('Connecting…');
-        predTermShowSpinner('Connecting…');
+    // Reuse predictiveShowTerminalStub for the immediate-feedback
+    // overlay so the right pane visibly switches to the new
+    // target within one frame.
+    predictiveShowTerminalStub('Connecting…');
+    predTermShowSpinner('Connecting…');
 
-        // Open the terminal with the wrapped command. predTermOpen
-        // sets predTermState.ws synchronously, so we can wrap
-        // .onmessage immediately after.
-        predTermOpen(p.id, { ...meta, command: wrapped });
+    // Open the terminal with the wrapped command. predTermOpen
+    // sets predTermState.ws synchronously, so we can wrap
+    // .onmessage immediately after.
+    predTermOpen(p.id, { ...meta, command: wrapped });
 
-        if (!predTermState.ws) {
-            return reject(new Error('terminal failed to open — see toast'));
-        }
+    if (!predTermState.ws) {
+        throw new Error('terminal failed to open — see toast');
+    }
 
+    return new Promise((resolve, reject) => {
         // Wrap ws.onmessage so the original (xterm write) still fires
         // AND we accumulate text into a buffer to scan for the sentinel.
         const ws = predTermState.ws;

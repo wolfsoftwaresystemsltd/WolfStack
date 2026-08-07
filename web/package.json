@@ -1,0 +1,12 @@
+{
+  "name": "wolfstack-web-lint",
+  "private": true,
+  "description": "Lint gate for the WolfStack web UI — no-undef and other guaranteed-runtime-error rules. See eslint.config.mjs for why this exists.",
+  "scripts": {
+    "lint": "eslint js/*.js"
+  },
+  "devDependencies": {
+    "eslint": "10.8.0",
+    "globals": "17.9.0"
+  }
+}
