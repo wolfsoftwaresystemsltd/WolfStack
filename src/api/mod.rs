@@ -8242,12 +8242,29 @@ fn build_web_candidates(runtime: &str, name: &str) -> Vec<WebCandidate> {
 /// that's how "no web UI ⇒ no icon" is enforced.
 async fn web_candidate_responds(host: &str, port: u16) -> bool {
     let url = format!("http://{}:{}/", host, port);
-    API_HTTP_CLIENT
-        .get(&url)
-        .timeout(std::time::Duration::from_millis(700))
-        .send()
-        .await
-        .is_ok()
+    // 700ms was too tight and hid working apps. RutgerDiehard's
+    // speedtest-tracker answers with a normal 302 to its setup wizard, but a
+    // cold PHP/Laravel boot does not manage it inside 700ms — so the container
+    // had no "Open in browser" button despite serving perfectly
+    // (2026-08-07). Anything that has to warm an interpreter, open a database
+    // or run migrations on first hit is in the same position.
+    //
+    // Two attempts: the first pays any cold-start cost and warms the app, the
+    // second then answers quickly. A container with NO web UI still fails fast
+    // — the connection is refused rather than timing out — so this does not
+    // slow down the common case of a database container.
+    for timeout_ms in [2_500u64, 4_000] {
+        let ok = API_HTTP_CLIENT
+            .get(&url)
+            .timeout(std::time::Duration::from_millis(timeout_ms))
+            .send()
+            .await
+            .is_ok();
+        if ok {
+            return true;
+        }
+    }
+    false
 }
 
 /// GET /api/containers/{runtime}/{id}/web-url — resolve an "open in browser"
