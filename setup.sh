@@ -488,9 +488,15 @@ port_open() {
 # until the share recovers, but the node RUNS, which is the whole point:
 # the array must never get a vote on whether this agent starts.
 stage_binary() {
+    # 9>&- for the same reason the agent launch closes it: this subshell is
+    # DELIBERATELY ABANDONED below when the array stalls, and an flock belongs
+    # to the open file description — so a D-state cp holding fd 9 keeps the
+    # supervisor lock after the supervisor dies, and every later supervisor
+    # exits silently at the flock check. That is the 2026-07-31 signature:
+    # two S-state processes on the lock, zero log entries for 36 hours.
     ( cp -f "$WS_APPDATA/wolfstack" "$RAM_BIN.next" 2>/dev/null \
         && chmod +x "$RAM_BIN.next" 2>/dev/null \
-        && mv -f "$RAM_BIN.next" "$RAM_BIN" 2>/dev/null ) &
+        && mv -f "$RAM_BIN.next" "$RAM_BIN" 2>/dev/null ) 9>&- &
     _cp=$!
     _w=0
     while [ "$_w" -lt 60 ] && kill -0 "$_cp" 2>/dev/null; do
@@ -544,9 +550,18 @@ while true; do
     # flapping a healthy agent. Port re-read per check so an operator
     # port move is honoured without restarting the supervisor.
     fails=0
+    _tick=0
+    # Poll at 5s, not 60s. A crash-on-startup child is still reapable at the
+    # instant the loop is entered, so a 60s sleep made EVERY immediate crash
+    # report "exited after 60s" — which hid the real symptom (JJ's Unraid node,
+    # 2026-08-07: an agent dying in milliseconds looked like a healthy minute)
+    # and made the `_ran -lt 10` fast-crash backoff below unreachable. The port
+    # check stays on its minute cadence via _tick.
     while kill -0 "$AGENT" 2>/dev/null; do
-        sleep 60
+        sleep 5
         kill -0 "$AGENT" 2>/dev/null || break
+        _tick=$(( _tick + 5 ))
+        [ $(( _tick % 60 )) -ne 0 ] && continue
         # In-flight log cap: the pre-launch rotation only runs between
         # restarts, and a HEALTHY long-lived agent never restarts — its
         # log would grow unbounded in tmpfs (= RAM). The agent's fd is

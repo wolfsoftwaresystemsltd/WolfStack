@@ -633,11 +633,19 @@ async fn main() -> std::io::Result<()> {
     if should_refuse_shell_launch(running_as_systemd_service, cli.foreground, has_cli_args) {
         eprintln!("wolfstack is a system service — it is not meant to be started by hand.");
         eprintln!();
-        eprintln!("Refusing to launch a second daemon alongside the running service.");
-        eprintln!("To check on the real one:");
+        eprintln!("Refusing to launch a second daemon alongside the running one.");
+        eprintln!("To check on it:");
         eprintln!();
-        eprintln!("    systemctl status wolfstack");
-        eprintln!("    journalctl -u wolfstack -f");
+        // Not every host has systemd — Unraid runs the agent from a bash
+        // supervisor, and telling that operator to run journalctl sends them
+        // somewhere that does not exist.
+        if std::path::Path::new("/run/systemd/system").exists() {
+            eprintln!("    systemctl status wolfstack");
+            eprintln!("    journalctl -u wolfstack -f");
+        } else {
+            eprintln!("    pgrep -af 'wolfstack --agent'");
+            eprintln!("    tail -f /var/log/wolfstack-agent.log");
+        }
         eprintln!();
         eprintln!("The dashboard is HTTPS on the `api` port from /etc/wolfstack/ports.json");
         eprintln!("(8553 by default) — not the status-page or inter-node port.");
@@ -681,11 +689,18 @@ async fn main() -> std::io::Result<()> {
     // The service persists the chosen port back to ports.json so restarts are
     // stable; a manual shell launch (which normally finds the port busy because
     // the service itself holds it) uses the fallback for that run only.
+    // `|| cli.agent`: on a host with no systemd (Unraid, containers) an agent
+    // is supervised and long-lived, but running_as_systemd_service is always
+    // false — so a port fallback was never persisted and the node could pick a
+    // DIFFERENT inter-node/status port on every restart while its master held
+    // the old one. The rule this guards against is a transient shell poke
+    // rewriting config; a supervised agent is not that.
+    let may_persist_ports = running_as_systemd_service || cli.agent;
     let status_port: u16 = ports::reserve_status_port(
         &cli.bind,
         status_preferred,
         8550..=8599,
-        running_as_systemd_service,
+        may_persist_ports,
     );
 
     // Lock down /etc/wolfstack and known sensitive files. Pre-v18.7.27
@@ -693,6 +708,29 @@ async fn main() -> std::io::Result<()> {
     // join-token, license.key world-readable (0644). This is a no-op on
     // already-locked-down installs; on upgraded installs it migrates
     // the permissions in place. See paths::harden_existing for scope.
+    // Stage 2 of the cluster-secret migration: if this is a fresh
+    // install (no on-disk custom secret + no peers in nodes.json),
+    // generate a per-install secret right now so we never start up
+    // using the built-in default that every WolfStack installation
+    // shares. The helper refuses to act on anything that looks like
+    // an existing install — see auth::auto_generate_for_fresh_install.
+    // MUST run before the fresh-install check below and before the secret is
+    // read. On Unraid the config dir is a symlink into appdata: if the array
+    // has not mounted yet, an EXISTING install looks empty, so
+    // auto_generate_for_fresh_install would mint a brand-new cluster secret
+    // and load_cluster_secret would fall back to the built-in default —
+    // either way the node comes up with the wrong identity, reports itself
+    // online, and has every proxied request rejected by its peers with 401
+    // (klas, 2026-07-31). Returns immediately on a healthy host.
+    paths::wait_for_config_dir(120).await;
+
+    // MOVED ABOVE harden_existing and the node-ID block (2026-08-07). Both
+    // touch the config dir, and the node ID was being read, regenerated and
+    // written 76 lines BEFORE this wait — so on an Unraid box whose array had
+    // not mounted, an existing node minted a fresh ws-xxxxxxxx identity on
+    // every boot and could not persist it. Exactly the churn this wait was
+    // added to prevent for the cluster secret, one field over.
+
     paths::harden_existing();
 
     // Load or generate node ID. An empty / whitespace-only file is
@@ -765,21 +803,6 @@ async fn main() -> std::io::Result<()> {
         containers::reapply_wolfnet_routes();
     });
 
-    // Stage 2 of the cluster-secret migration: if this is a fresh
-    // install (no on-disk custom secret + no peers in nodes.json),
-    // generate a per-install secret right now so we never start up
-    // using the built-in default that every WolfStack installation
-    // shares. The helper refuses to act on anything that looks like
-    // an existing install — see auth::auto_generate_for_fresh_install.
-    // MUST run before the fresh-install check below and before the secret is
-    // read. On Unraid the config dir is a symlink into appdata: if the array
-    // has not mounted yet, an EXISTING install looks empty, so
-    // auto_generate_for_fresh_install would mint a brand-new cluster secret
-    // and load_cluster_secret would fall back to the built-in default —
-    // either way the node comes up with the wrong identity, reports itself
-    // online, and has every proxied request rejected by its peers with 401
-    // (klas, 2026-07-31). Returns immediately on a healthy host.
-    paths::wait_for_config_dir(120).await;
 
     let _ = auth::auto_generate_for_fresh_install();
 
@@ -4649,7 +4672,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     inter_node_pref,
                     8554..=8599,
                     &[api_port, status_port],
-                    running_as_systemd_service,
+                    may_persist_ports,
                 ))
             } else {
                 None
