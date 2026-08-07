@@ -30776,20 +30776,38 @@ async function renderMigrateVolumeChoice(name) {
     const host = document.getElementById('migrate-volume-choice');
     if (!host) return;
     let mounts = [];
+    let readFailed = '';
     try {
         const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(name)}/volumes`));
         if (resp.ok) {
             const data = await resp.json();
             mounts = Array.isArray(data) ? data : (data.mounts || []);
+        } else {
+            // A non-ok response used to fall through to "no mounts" and render
+            // NOTHING — the copy option just vanished with no explanation
+            // (RutgerDiehard, 2026-08-07: "I don't get the copy option now").
+            readFailed = `HTTP ${resp.status}`;
         }
     } catch (e) {
-        // Can't tell — say so rather than quietly migrating with a guess.
+        readFailed = e.message;
+    }
+
+    if (readFailed) {
         host.innerHTML = `<div role="alert" style="background:var(--warning-bg,#332a1a);border:1px solid var(--warning,#f59e0b);border-radius:8px;padding:10px 12px;margin-bottom:1rem;color:var(--warning,#f59e0b);font-size:0.82em;">
-            Could not read this container's volumes (${escapeHtml(e.message)}). Mounts will be re-declared without copying data.
+            <b>Could not read this container's volumes</b> (${escapeHtml(readFailed)}). Migration will re-declare any mounts without copying their data — move it yourself before starting the destination.
         </div>`;
         return;
     }
-    if (!mounts.length) return;   // nothing to decide
+
+    if (!mounts.length) {
+        // Say so explicitly. An absent section is indistinguishable from a
+        // broken one, and this container genuinely having no mounts is useful
+        // information when you are deciding whether the migration is complete.
+        host.innerHTML = `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:1rem;color:var(--text-secondary);font-size:0.8em;">
+            This container has no volumes or bind mounts — there is no data to copy.
+        </div>`;
+        return;
+    }
 
     const named = mounts.filter(m => (m.mount_type || m.type) === 'volume');
     const list = mounts.map(m =>
