@@ -728,32 +728,81 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
         return Err(format!("No image found for container '{}'", container_name));
     }
 
-    // Get local digest
-    let local_digest = match get_local_digest(container_name).await {
-        Ok(d) => d,
-        Err(e) => {
-            return Ok(ImageCheckResult {
-                container_name: container_name.into(),
-                image: image.clone(),
-                local_digest: String::new(),
-                remote_digest: None,
-                update_available: false,
-                last_checked: now,
-                error: Some(format!("Could not get local digest: {}", e)),
-            });
-        }
-    };
+    // Migrated snapshots (`wolfstack-migrate/<name>`) are local commit images
+    // no registry knows about, and they carry no RepoDigests — checking them
+    // as-is fails twice over: the local digest lookup errors, and the remote
+    // lookup 404s against docker.io for ever (RutgerDiehard, 2026-08-07).
+    // Migration records the real registry image in the container's origin
+    // labels, so check THAT instead — the honest question for a snapshot is
+    // "has upstream moved since this was migrated?". Containers migrated
+    // before the labels existed get one clear explanation, not an eternal
+    // registry error.
+    let (check_image, local_digest, local_known) =
+        if crate::containers::is_migrated_snapshot_image(&image) {
+            let labels_out = tokio::process::Command::new("docker")
+                .args(["inspect", "--format", "{{json .Config.Labels}}", container_name])
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run docker inspect: {}", e))?;
+            let labels: serde_json::Value =
+                serde_json::from_slice(&labels_out.stdout).unwrap_or(serde_json::Value::Null);
+            let get_label = |name: &str| -> Option<String> {
+                labels.get(name)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            match get_label(crate::containers::ORIGIN_IMAGE_LABEL) {
+                Some(origin) => {
+                    let digest = get_label(crate::containers::ORIGIN_DIGEST_LABEL);
+                    let known = digest.is_some();
+                    (origin, digest.unwrap_or_default(), known)
+                }
+                None => {
+                    return Ok(ImageCheckResult {
+                        container_name: container_name.into(),
+                        image: image.clone(),
+                        local_digest: String::new(),
+                        remote_digest: None,
+                        update_available: false,
+                        last_checked: now,
+                        error: Some(
+                            "migrated snapshot with no origin recorded — containers migrated \
+                             before v25.10.25 lose their registry lineage. Re-migrate on a \
+                             newer version, or recreate the container from its original \
+                             image, to restore update checks.".into(),
+                        ),
+                    });
+                }
+            }
+        } else {
+            let local = match get_local_digest(container_name).await {
+                Ok(d) => d,
+                Err(e) => {
+                    return Ok(ImageCheckResult {
+                        container_name: container_name.into(),
+                        image: image.clone(),
+                        local_digest: String::new(),
+                        remote_digest: None,
+                        update_available: false,
+                        last_checked: now,
+                        error: Some(format!("Could not get local digest: {}", e)),
+                    });
+                }
+            };
+            (image.clone(), local, true)
+        };
 
     // Parse the image reference and fetch the remote digest
-    let image_ref = ImageRef::parse(&image);
+    let image_ref = ImageRef::parse(&check_image);
     match get_remote_digest(&image_ref).await {
         Ok(remote) => {
             // A previously-failing image now checks cleanly — log the
             // recovery once and forget the failure so a relapse warns anew.
             {
                 let mut last = DIGEST_CHECK_LAST_ERRORS.lock().unwrap_or_else(|p| p.into_inner());
-                if last.remove(&image).is_some() {
-                    tracing::info!("Remote digest check recovered for {}", image);
+                if last.remove(&check_image).is_some() {
+                    tracing::info!("Remote digest check recovered for {}", check_image);
                 }
             }
             // Extract just the digest portion from the local repo-digest (after '@')
@@ -761,16 +810,25 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
                 .rsplit_once('@')
                 .map(|(_, h)| h)
                 .unwrap_or(&local_digest);
-            let update_available = local_hash != remote;
+            // A migrated snapshot whose origin digest wasn't recorded has no
+            // local side to compare — claiming an update from "" != remote
+            // would be a guess, so say what we know instead.
+            let update_available = local_known && local_hash != remote;
 
             Ok(ImageCheckResult {
                 container_name: container_name.into(),
-                image,
+                image: check_image,
                 local_digest,
                 remote_digest: Some(remote),
                 update_available,
                 last_checked: now,
-                error: None,
+                error: if local_known {
+                    None
+                } else {
+                    Some("migrated snapshot — origin digest unknown, so upstream drift \
+                          can't be detected. Applying an update rebases onto the latest \
+                          origin image.".into())
+                },
             })
         }
         Err(e) => {
@@ -783,14 +841,14 @@ pub async fn check_container_update(container_name: &str) -> Result<ImageCheckRe
             // warns again.
             {
                 let mut last = DIGEST_CHECK_LAST_ERRORS.lock().unwrap_or_else(|p| p.into_inner());
-                if last.get(&image).map(|prev| prev != &e).unwrap_or(true) {
-                    warn!("Failed to check remote digest for {}: {}", image, e);
-                    last.insert(image.clone(), e.clone());
+                if last.get(&check_image).map(|prev| prev != &e).unwrap_or(true) {
+                    warn!("Failed to check remote digest for {}: {}", check_image, e);
+                    last.insert(check_image.clone(), e.clone());
                 }
             }
             Ok(ImageCheckResult {
                 container_name: container_name.into(),
-                image,
+                image: check_image,
                 local_digest,
                 remote_digest: None,
                 update_available: false,
@@ -942,6 +1000,39 @@ fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> Ima
         return event;
     }
 
+    // Migrated snapshot: "update" means REBASE — pull the origin registry
+    // image the container originally ran (recorded in its labels at
+    // migration time) and recreate from that. Container-filesystem changes
+    // captured in the snapshot are discarded, exactly as any docker image
+    // update discards them; volumes are untouched. After the rebase the
+    // container's Config.Image is the origin ref, so it checks and updates
+    // like a normal container from then on. Without an origin label there is
+    // nothing sane to pull — pulling `wolfstack-migrate/<name>` from
+    // docker.io would 404 — so refuse with a real explanation.
+    let pull_image = if crate::containers::is_migrated_snapshot_image(&image) {
+        match inspect
+            .pointer(&format!("/Config/Labels/{}", crate::containers::ORIGIN_IMAGE_LABEL))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            Some(origin) => {
+                event.image = origin.to_string();
+                origin.to_string()
+            }
+            None => {
+                event.status = ImageUpdateStatus::Failed;
+                event.error = Some(
+                    "migrated snapshot with no origin recorded — cannot update. \
+                     Re-migrate on v25.10.25+ or recreate the container from its \
+                     original registry image.".into(),
+                );
+                return event;
+            }
+        }
+    } else {
+        image.clone()
+    };
+
     // Step 3: optional backup.
     if policy.backup_before_update {
         event.status = ImageUpdateStatus::BackingUp;
@@ -970,15 +1061,16 @@ fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> Ima
         }
     }
 
-    // Step 4: pull.
+    // Step 4: pull. `pull_image` is the origin ref for a migrated snapshot,
+    // the container's own image otherwise.
     event.status = ImageUpdateStatus::Pulling;
-    if let Err(e) = crate::containers::docker_pull(&image) {
+    if let Err(e) = crate::containers::docker_pull(&pull_image) {
         event.status = ImageUpdateStatus::Failed;
         event.error = Some(format!("docker pull failed: {}", e));
         return event;
     }
     let new_image_id = Command::new("docker")
-        .args(["image", "inspect", "--format", "{{.Id}}", &image])
+        .args(["image", "inspect", "--format", "{{.Id}}", &pull_image])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -1006,7 +1098,16 @@ fn run_update_blocking(container_name: &str, config: &ImageWatcherConfig) -> Ima
     // vanished from the list (RutgerDiehard 2026-07-17). Hand the fn the full
     // lifecycle; on failure it has already restored the original container.
     event.status = ImageUpdateStatus::Recreating;
-    if let Err(e) = crate::containers::docker_recreate_from_inspect(container_name, &inspect) {
+    // For a migrated snapshot the recreate must resolve the ORIGIN image,
+    // not the snapshot tag the inspect still names — recreate_with_image
+    // rewrites Config.Image before handing over, which also makes the
+    // rebased container check and update normally from now on.
+    let recreate_result = if pull_image != image {
+        recreate_with_image(&inspect, container_name, &pull_image)
+    } else {
+        crate::containers::docker_recreate_from_inspect(container_name, &inspect)
+    };
+    if let Err(e) = recreate_result {
         event.status = ImageUpdateStatus::Failed;
         event.error = Some(format!("docker recreate failed: {}", e));
         return event;

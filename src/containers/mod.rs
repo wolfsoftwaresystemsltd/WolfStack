@@ -10929,6 +10929,126 @@ pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, car
     let _ = std::fs::write(&config_path, out);
 }
 
+/// Build the `pct create --net0` value from the source's native LXC config,
+/// carrying across what the source actually had instead of hard-coding
+/// `bridge=vmbr0,ip=dhcp`:
+///
+/// * `lxc.net.0.link`     → `bridge=` — but only if that bridge exists on
+///   THIS host (`bridge_exists`). A missing bridge falls back to `vmbr0`
+///   with a returned warning, because `pct create` accepts any bridge name
+///   and the container then simply fails to start later.
+/// * `lxc.net.0.hwaddr`   → `hwaddr=` — preserving the MAC keeps the
+///   container's DHCP lease, so it comes up on the SAME address it had.
+/// * `lxc.net.0.ipv4.address` (+ `.gateway`) → static `ip=`/`gw=` when the
+///   address is a valid CIDR; otherwise `ip=dhcp`.
+///
+/// `lxcbr0` (LXC's private NAT bridge) is deliberately treated as "no
+/// specific network": PVE hosts don't have it, and the equivalent default
+/// there is `vmbr0`.
+///
+/// Pure apart from the injected `bridge_exists` — unit-testable.
+fn pve_net0_from_lxc_config(
+    cfg: &str,
+    bridge_exists: &dyn Fn(&str) -> bool,
+) -> (String, Option<String>) {
+    let (mut link, mut hwaddr, mut ipv4, mut gw) =
+        (String::new(), String::new(), String::new(), String::new());
+    for line in cfg.lines() {
+        let Some((k, v)) = line.trim().split_once('=') else { continue };
+        match k.trim() {
+            "lxc.net.0.link" => link = v.trim().to_string(),
+            "lxc.net.0.hwaddr" => hwaddr = v.trim().to_string(),
+            "lxc.net.0.ipv4.address" => ipv4 = v.trim().to_string(),
+            "lxc.net.0.ipv4.gateway" => gw = v.trim().to_string(),
+            _ => {}
+        }
+    }
+
+    let mut warning = None;
+    let bridge = if link.is_empty() || link == "lxcbr0" {
+        "vmbr0".to_string()
+    } else if bridge_exists(&link) {
+        link.clone()
+    } else {
+        warning = Some(format!(
+            "the source container was attached to bridge '{}', which does not \
+             exist on this host — it has been attached to vmbr0 (the management \
+             bridge) instead. Create '{}' here, or edit the container's network \
+             settings, before relying on its connectivity.",
+            link, link,
+        ));
+        "vmbr0".to_string()
+    };
+
+    let mut net0 = format!("name=eth0,bridge={}", bridge);
+    if !hwaddr.is_empty() {
+        net0.push_str(&format!(",hwaddr={}", hwaddr));
+    }
+    if is_ipv4_cidr(&ipv4) {
+        net0.push_str(&format!(",ip={}", ipv4));
+        if !gw.is_empty() {
+            net0.push_str(&format!(",gw={}", gw));
+        }
+    } else {
+        net0.push_str(",ip=dhcp");
+    }
+    (net0, warning)
+}
+
+/// The source's memory limit in MB from `lxc.cgroup2.memory.max` (bytes) or
+/// the legacy `lxc.cgroup.memory.limit_in_bytes`. None when unlimited or
+/// unparseable — the caller keeps its default.
+fn lxc_config_memory_mb(cfg: &str) -> Option<u64> {
+    for line in cfg.lines() {
+        let Some((k, v)) = line.trim().split_once('=') else { continue };
+        let k = k.trim();
+        if k == "lxc.cgroup2.memory.max" || k == "lxc.cgroup.memory.limit_in_bytes" {
+            let bytes: u64 = v.trim().parse().ok()?;
+            // Round up so a 512.5 MB limit doesn't become a 512 MB squeeze.
+            return Some(bytes.div_ceil(1024 * 1024).max(16));
+        }
+    }
+    None
+}
+
+/// The source's CPU allowance as a whole-core count for `pct create --cores`.
+/// `lxc.cgroup2.cpu.max = "<quota> <period>"` → ceil(quota/period);
+/// `lxc.cgroup2.cpuset.cpus = "0-3,8"` → the number of listed CPUs.
+/// None when neither is set (unlimited) — pct then applies its own default.
+fn lxc_config_cpu_cores(cfg: &str) -> Option<u64> {
+    for line in cfg.lines() {
+        let Some((k, v)) = line.trim().split_once('=') else { continue };
+        match k.trim() {
+            "lxc.cgroup2.cpu.max" => {
+                let mut parts = v.trim().split_whitespace();
+                let quota: u64 = parts.next()?.parse().ok()?;
+                let period: u64 = parts.next().unwrap_or("100000").parse().ok()?;
+                if period == 0 { return None; }
+                return Some(quota.div_ceil(period).max(1));
+            }
+            "lxc.cgroup2.cpuset.cpus" | "lxc.cgroup.cpuset.cpus" => {
+                // "0-3,8" → 5 CPUs. A malformed range counts as 1 rather
+                // than aborting the whole import over a cosmetic limit.
+                let mut count: u64 = 0;
+                for part in v.trim().split(',') {
+                    let part = part.trim();
+                    if let Some((a, b)) = part.split_once('-') {
+                        match (a.trim().parse::<u64>(), b.trim().parse::<u64>()) {
+                            (Ok(a), Ok(b)) if b >= a => count += b - a + 1,
+                            _ => count += 1,
+                        }
+                    } else if !part.is_empty() {
+                        count += 1;
+                    }
+                }
+                return if count > 0 { Some(count) } else { None };
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Import an LXC container from an archive file.
 ///
 /// `carried_config` is the source's LXC config (ContainerExportMeta
@@ -10966,7 +11086,8 @@ pub fn lxc_import(
         };
 
         if is_vzdump {
-            // vzdump archive — pct restore handles it natively
+            // vzdump archive — pct restore handles it natively (the vzdump
+            // carries its own pct.conf, network settings included)
             let output = Command::new("pct")
                 .args(["restore", &new_vmid.to_string(), archive_path,
                        "--storage", storage_id, "--hostname", new_name])
@@ -10984,24 +11105,52 @@ pub fn lxc_import(
                 Err(format!("Import failed: {} {}", stderr.trim(), stdout.trim()))
             }
         } else {
-            // Plain rootfs tar.gz from standalone WolfStack
-            // Use pct create with the archive as the ostemplate — Proxmox handles it natively
+            // Plain rootfs tar.gz from standalone WolfStack.
+            // Use pct create with the archive as the ostemplate — Proxmox
+            // handles it natively. The network and memory come from the
+            // carried source config: this used to hard-code
+            // `bridge=vmbr0,ip=dhcp` + 512 MB, which silently dropped a
+            // container that lived on a VLAN bridge onto the management
+            // LAN of the PVE host (RutgerDiehard, 2026-08-07, vlc→PVE).
+            let (net0, net_warning) = pve_net0_from_lxc_config(
+                carried_config.unwrap_or(""),
+                &|bridge| std::path::Path::new(&format!("/sys/class/net/{}", bridge)).exists(),
+            );
+            let memory_mb = lxc_config_memory_mb(carried_config.unwrap_or("")).unwrap_or(512);
             let rootfs_spec = format!("{}:4", storage_id);
+            let mut args: Vec<String> = vec![
+                "create".into(), new_vmid.to_string(), archive_path.to_string(),
+                "--hostname".into(), new_name.to_string(),
+                "--storage".into(), storage_id.to_string(),
+                "--rootfs".into(), rootfs_spec,
+                "--memory".into(), memory_mb.to_string(),
+                "--swap".into(), "512".into(),
+                "--net0".into(), net0,
+                "--unprivileged".into(), "1".into(),
+            ];
+            if let Some(cores) = lxc_config_cpu_cores(carried_config.unwrap_or("")) {
+                args.push("--cores".into());
+                args.push(cores.to_string());
+            }
             let output = Command::new("pct")
-                .args(["create", &new_vmid.to_string(), archive_path,
-                       "--hostname", new_name,
-                       "--storage", storage_id,
-                       "--rootfs", &rootfs_spec,
-                       "--memory", "512",
-                       "--swap", "512",
-                       "--net0", "name=eth0,bridge=vmbr0,ip=dhcp",
-                       "--unprivileged", "1"])
+                .args(&args)
                 .output()
                 .map_err(|e| format!("pct create failed: {}", e))?;
 
             if output.status.success() {
+                let mut message = format!(
+                    "Container '{}' imported (VMID {}, storage: {})",
+                    new_name, new_vmid, storage_id
+                );
+                // The warning must reach the operator, not a log file — a
+                // container silently on the wrong network looks migrated
+                // until something can't reach it.
+                if let Some(w) = net_warning {
+                    message.push_str(". WARNING: ");
+                    message.push_str(&w);
+                }
                 Ok(LxcImportOutcome {
-                    message: format!("Container '{}' imported (VMID {}, storage: {})", new_name, new_vmid, storage_id),
+                    message,
                     start_id: new_vmid.to_string(),
                 })
             } else {
@@ -12261,7 +12410,31 @@ pub struct DockerRuntimeSpec {
     /// `hostname:ip`
     #[serde(default)]
     pub extra_hosts: Vec<String>,
+    /// The registry image the container originally ran (e.g.
+    /// `lscr.io/linuxserver/speedtest-tracker:latest`). Migration commits the
+    /// container to a `wolfstack-migrate/<name>` snapshot, which severs the
+    /// registry lineage — without this the destination's update checker has
+    /// nothing to check (RutgerDiehard, 2026-08-07). Carried onto the created
+    /// container as the `wolfstack.origin-image` label.
+    #[serde(default)]
+    pub origin_image: Option<String>,
+    /// The origin image's repo digest hash (`sha256:…`, the part after `@`)
+    /// at migration time. Lets the checker say whether upstream has moved
+    /// since. None for locally-built images that were never pulled/pushed.
+    #[serde(default)]
+    pub origin_digest: Option<String>,
 }
+
+/// Migration snapshots: `wolfstack-migrate/<name>` is the current migrate
+/// path's `docker commit` tag; `wolfrun-migrate:<name>` is the legacy one.
+/// Both are local-only names no registry knows about.
+pub fn is_migrated_snapshot_image(image: &str) -> bool {
+    image.starts_with("wolfstack-migrate/") || image.starts_with("wolfrun-migrate:")
+}
+
+/// Label names carrying origin provenance on migrated containers.
+pub const ORIGIN_IMAGE_LABEL: &str = "wolfstack.origin-image";
+pub const ORIGIN_DIGEST_LABEL: &str = "wolfstack.origin-digest";
 
 impl DockerRuntimeSpec {
     /// Every mount whose data we can actually move — named volumes AND bind
@@ -12383,6 +12556,25 @@ pub fn capture_runtime_spec(container: &str) -> Result<DockerRuntimeSpec, String
         }).collect()
     }).unwrap_or_default();
 
+    // Origin provenance. If the source container is ITSELF a migrated
+    // snapshot (chained migration: host A → B → C), its Config.Image is
+    // already a wolfstack-migrate name — carry the labels from the previous
+    // hop forward instead of recording the snapshot as the "origin".
+    let image = c.pointer("/Config/Image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let label = |name: &str| -> Option<String> {
+        c.pointer(&format!("/Config/Labels/{}", name))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let (origin_image, origin_digest) = if is_migrated_snapshot_image(&image) {
+        (label(ORIGIN_IMAGE_LABEL), label(ORIGIN_DIGEST_LABEL))
+    } else if !image.is_empty() {
+        (Some(image.clone()), image_repo_digest_hash(&image))
+    } else {
+        (None, None)
+    };
+
     Ok(DockerRuntimeSpec {
         ports,
         restart_policy,
@@ -12394,7 +12586,24 @@ pub fn capture_runtime_spec(container: &str) -> Result<DockerRuntimeSpec, String
         cap_add: str_list(&host["CapAdd"]),
         devices,
         extra_hosts: str_list(&host["ExtraHosts"]),
+        origin_image,
+        origin_digest,
     })
+}
+
+/// The repo-digest hash (`sha256:…`, after the `@`) of a local image, or None
+/// when the image has none (built locally, never pulled/pushed). Stored bare —
+/// the checker compares it directly against the registry manifest digest.
+fn image_repo_digest_hash(image: &str) -> Option<String> {
+    let out = Command::new("docker")
+        .args(["image", "inspect", "--format", "{{index .RepoDigests 0}}", image])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    full.rsplit_once('@').map(|(_, h)| h.to_string()).filter(|h| !h.is_empty())
 }
 
 /// Build the `docker create` flags that reproduce `spec`.
@@ -12458,6 +12667,17 @@ pub fn spec_to_create_args(spec: &DockerRuntimeSpec, include_mounts: bool) -> Ve
     for h in &spec.extra_hosts {
         args.push("--add-host".into());
         args.push(h.clone());
+    }
+    // Origin provenance labels — what lets the destination's update checker
+    // (and a later re-migration) see through the wolfstack-migrate snapshot
+    // name to the real registry image.
+    if let Some(origin) = spec.origin_image.as_deref().filter(|s| !s.is_empty()) {
+        args.push("--label".into());
+        args.push(format!("{}={}", ORIGIN_IMAGE_LABEL, origin));
+    }
+    if let Some(digest) = spec.origin_digest.as_deref().filter(|s| !s.is_empty()) {
+        args.push("--label".into());
+        args.push(format!("{}={}", ORIGIN_DIGEST_LABEL, digest));
     }
     args
 }
@@ -15133,6 +15353,103 @@ mod migrate_spec_tests {
     fn an_empty_spec_produces_no_flags() {
         // A container with nothing special must not gain stray arguments.
         assert!(spec_to_create_args(&DockerRuntimeSpec::default(), true).is_empty());
+    }
+
+    #[test]
+    fn origin_labels_are_emitted_when_recorded() {
+        // The whole point of the labels: the destination's update checker must
+        // be able to see through the wolfstack-migrate snapshot name to the
+        // real registry image (RutgerDiehard, 2026-08-07).
+        let spec = DockerRuntimeSpec {
+            origin_image: Some("lscr.io/linuxserver/speedtest-tracker:latest".into()),
+            origin_digest: Some("sha256:abc123".into()),
+            ..Default::default()
+        };
+        let args = spec_to_create_args(&spec, true);
+        assert!(args.windows(2).any(|w| w[0] == "--label"
+            && w[1] == "wolfstack.origin-image=lscr.io/linuxserver/speedtest-tracker:latest"), "{:?}", args);
+        assert!(args.windows(2).any(|w| w[0] == "--label"
+            && w[1] == "wolfstack.origin-digest=sha256:abc123"), "{:?}", args);
+        // Digest may legitimately be unknown (locally-built origin) — the
+        // image label must still be emitted alone, and an empty string must
+        // not produce a dangling `--label k=`.
+        let spec2 = DockerRuntimeSpec {
+            origin_image: Some("myapp:dev".into()),
+            origin_digest: Some(String::new()),
+            ..Default::default()
+        };
+        let args2 = spec_to_create_args(&spec2, true);
+        assert!(args2.windows(2).any(|w| w[0] == "--label" && w[1] == "wolfstack.origin-image=myapp:dev"));
+        assert!(!args2.iter().any(|a| a == "wolfstack.origin-digest="), "{:?}", args2);
+    }
+
+    #[test]
+    fn pve_net0_carries_the_source_bridge_mac_and_static_ip() {
+        // The Rutger case (2026-08-07): source on a VLAN bridge; the import
+        // used to hard-code bridge=vmbr0 and silently drop the container on
+        // the PVE management LAN.
+        let cfg = "lxc.net.0.type = veth\n\
+                   lxc.net.0.link = vmbr100\n\
+                   lxc.net.0.hwaddr = BC:24:11:05:3E:E0\n\
+                   lxc.net.0.name = eth0\n";
+        let (net0, warn) = pve_net0_from_lxc_config(cfg, &|b| b == "vmbr100");
+        assert_eq!(net0, "name=eth0,bridge=vmbr100,hwaddr=BC:24:11:05:3E:E0,ip=dhcp");
+        assert!(warn.is_none());
+
+        // Static IPv4 + gateway carried verbatim.
+        let cfg_static = "lxc.net.0.link = vmbr100\n\
+                          lxc.net.0.ipv4.address = 10.0.1.7/24\n\
+                          lxc.net.0.ipv4.gateway = 10.0.1.1\n";
+        let (net0s, _) = pve_net0_from_lxc_config(cfg_static, &|_| true);
+        assert_eq!(net0s, "name=eth0,bridge=vmbr100,ip=10.0.1.7/24,gw=10.0.1.1");
+    }
+
+    #[test]
+    fn pve_net0_missing_bridge_falls_back_with_a_loud_warning() {
+        // pct create accepts any bridge name and the container just fails to
+        // start later — so a missing bridge must fall back AND say so.
+        let cfg = "lxc.net.0.link = vmbr4000\n";
+        let (net0, warn) = pve_net0_from_lxc_config(cfg, &|_| false);
+        assert!(net0.starts_with("name=eth0,bridge=vmbr0"));
+        let w = warn.expect("must warn when the source bridge is absent");
+        assert!(w.contains("vmbr4000"), "warning must name the missing bridge: {}", w);
+
+        // lxcbr0 (LXC's private NAT bridge) is 'no specific network' — the
+        // vmbr0 default is correct and silent.
+        let (net0d, warnd) = pve_net0_from_lxc_config("lxc.net.0.link = lxcbr0\n", &|_| false);
+        assert_eq!(net0d, "name=eth0,bridge=vmbr0,ip=dhcp");
+        assert!(warnd.is_none());
+        // No carried config at all (older source): same silent default.
+        let (net0e, warne) = pve_net0_from_lxc_config("", &|_| false);
+        assert_eq!(net0e, "name=eth0,bridge=vmbr0,ip=dhcp");
+        assert!(warne.is_none());
+    }
+
+    #[test]
+    fn lxc_config_limits_parse_memory_and_cores() {
+        // 1 GiB memory.max → 1024 MB; ceil so a hair over doesn't shrink.
+        assert_eq!(lxc_config_memory_mb("lxc.cgroup2.memory.max = 1073741824\n"), Some(1024));
+        assert_eq!(lxc_config_memory_mb("lxc.cgroup2.memory.max = 1073741825\n"), Some(1025));
+        assert_eq!(lxc_config_memory_mb("lxc.cgroup.memory.limit_in_bytes = 536870912\n"), Some(512));
+        assert_eq!(lxc_config_memory_mb(""), None);
+        assert_eq!(lxc_config_memory_mb("lxc.cgroup2.memory.max = max\n"), None);
+
+        // cpu.max "150000 100000" = 1.5 CPUs → 2 whole cores.
+        assert_eq!(lxc_config_cpu_cores("lxc.cgroup2.cpu.max = 150000 100000\n"), Some(2));
+        // cpuset "0-3,8" = 5 CPUs.
+        assert_eq!(lxc_config_cpu_cores("lxc.cgroup2.cpuset.cpus = 0-3,8\n"), Some(5));
+        assert_eq!(lxc_config_cpu_cores(""), None);
+    }
+
+    #[test]
+    fn migrated_snapshot_images_are_recognised_and_real_ones_are_not() {
+        // Both generations of migrate tag, and nothing else.
+        assert!(is_migrated_snapshot_image("wolfstack-migrate/speedtest:latest"));
+        assert!(is_migrated_snapshot_image("wolfrun-migrate:speedtest"));
+        assert!(!is_migrated_snapshot_image("lscr.io/linuxserver/speedtest-tracker:latest"));
+        assert!(!is_migrated_snapshot_image("nginx"));
+        // A registry image that merely CONTAINS the word must not match.
+        assert!(!is_migrated_snapshot_image("myrepo/wolfstack-migrate:v1"));
     }
 }
 
