@@ -11974,9 +11974,26 @@ pub async fn docker_migrate(
     let id = path.into_inner();
     let remove = body.remove_source.unwrap_or(false);
     let volume_mode = body.volume_mode.unwrap_or(containers::VolumeMode::Declare);
-    match containers::docker_migrate(&id, &body.target_url, remove, &state.cluster_secret, volume_mode) {
-        Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+    // web::block, NOT a direct call: docker_migrate is fully blocking (docker
+    // commit, docker save, curl transfers of the image and every copied
+    // volume) and can run for minutes. Called inline it pins an actix worker
+    // for the whole migration — with only `default_workers` of them, and
+    // keep_alive at 2s, the browser's connection is torn down mid-migration
+    // and reports "NetworkError when attempting to fetch resource"
+    // (RutgerDiehard, 2026-08-07). It also blocked every other request that
+    // landed on the same worker.
+    let target_url = body.target_url.clone();
+    let secret = state.cluster_secret.clone();
+    let result = web::block(move || {
+        containers::docker_migrate(&id, &target_url, remove, &secret, volume_mode)
+    }).await;
+
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("migration task failed: {}", e)
+        })),
     }
 }
 
@@ -13855,10 +13872,15 @@ pub async fn docker_import_volume(
     }
     drop(file);
 
-    let result = match &bind_path {
-        Some(path) => containers::docker_restore_bind(path, &tar_path),
-        None => containers::docker_restore_volume(&volume, &tar_path),
-    };
+    // Blocking: `docker volume create` plus a tar extraction of the whole
+    // volume. Same reasoning as docker_migrate — off the worker.
+    let bp = bind_path.clone();
+    let vol = volume.clone();
+    let tp = tar_path.clone();
+    let result = web::block(move || match &bp {
+        Some(path) => containers::docker_restore_bind(path, &tp),
+        None => containers::docker_restore_volume(&vol, &tp),
+    }).await.unwrap_or_else(|e| Err(format!("restore task failed: {}", e)));
     let _ = tokio::fs::remove_file(&tar_path).await;
     match result {
         Ok(msg) => HttpResponse::Ok().json(serde_json::json!({ "message": msg })),
@@ -13943,7 +13965,13 @@ pub async fn docker_import(
     }
     drop(file);
 
-    let result = containers::docker_import_image(&tar_path, &container_name);
+    // `docker load` of a multi-GB image, then docker create — blocking, and
+    // long. The sender is waiting on this response, so pinning a worker here
+    // stalls the very transfer that is being completed.
+    let tp = tar_path.clone();
+    let cn = container_name.clone();
+    let result = web::block(move || containers::docker_import_image(&tp, &cn))
+        .await.unwrap_or_else(|e| Err(format!("import task failed: {}", e)));
     // The staged tar is large and no longer needed either way — leaving it
     // would fill the staging volume one migration at a time.
     let _ = tokio::fs::remove_file(&tar_path).await;

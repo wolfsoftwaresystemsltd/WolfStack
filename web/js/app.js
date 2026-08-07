@@ -30728,12 +30728,7 @@ async function migrateDockerContainer(name) {
                         ${nodeOpts}
                     </select>` : `<input id="migrate-target" type="text" placeholder="https://target-host.example.com" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">`}
                 </div>
-                <div style="margin-bottom: 1rem;">
-                    <label style="display:block; margin-bottom:4px; font-weight:600;">Target Storage</label>
-                    <select id="docker-migrate-storage" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
-                        <option value="">Auto (default)</option>
-                    </select>
-                </div>
+
                 <div id="migrate-volume-choice"></div>
                 <div style="background:var(--info-bg,#1a2332);border:1px solid var(--info,#3b82f6);border-radius:8px;padding:10px 12px;margin-bottom:1rem;color:var(--info,#3b82f6);font-size:0.82em;">
                     Ports, networks, restart policy and resource limits are carried across. The source container will keep running. The destination will be imported but not started — start it manually when ready.
@@ -30754,12 +30749,7 @@ async function migrateDockerContainer(name) {
                     <label style="display:block; margin-bottom:4px; font-weight:600;">Target URL</label>
                     <input id="migrate-target" type="text" placeholder="https://target-host.example.com" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
                 </div>
-                <div style="margin-bottom: 1rem;">
-                    <label style="display:block; margin-bottom:4px; font-weight:600;">Target Storage</label>
-                    <select id="docker-migrate-storage" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg-primary); color:var(--text-primary);">
-                        <option value="">Auto (default)</option>
-                    </select>
-                </div>
+
                 <div id="migrate-volume-choice"></div>
                 <div style="background:var(--info-bg,#1a2332);border:1px solid var(--info,#3b82f6);border-radius:8px;padding:10px 12px;margin-bottom:1rem;color:var(--info,#3b82f6);font-size:0.82em;">
                     Ports, networks, restart policy and resource limits are carried across. The source container will keep running. The destination will be imported but not started — start it manually when ready.
@@ -30831,7 +30821,6 @@ async function renderMigrateVolumeChoice(name) {
 async function doMigrate(name) {
     const targetEl = document.getElementById('migrate-target');
     const targetUrl = normalizeWolfStackUrl(targetEl.value.trim());
-    const storageVal = document.getElementById('docker-migrate-storage')?.value || '';
 
     if (!targetUrl) {
         showToast('Please enter a target URL', 'error');
@@ -30855,7 +30844,6 @@ async function doMigrate(name) {
 
     try {
         const migrateBody = { target_url: targetUrl };
-        if (storageVal) migrateBody.storage = storageVal;
         if (volumeMode) migrateBody.volume_mode = volumeMode;
         const resp = await fetch(apiUrl(`/api/containers/docker/${name}/migrate`), {
             method: 'POST',
@@ -80581,6 +80569,161 @@ async function probeSave() {
     }
 }
 
+// ─── Apply-to tree ───────────────────────────────────────────────────────
+// Clusters → nodes → containers/VMs, mirroring the left-hand sidebar so the
+// shape is already familiar. Built from `allNodes` + wsScopeClusters/
+// wsScopeNodes — the same data and helpers the sidebar uses, rather than a
+// second source of truth that could disagree with it.
+//
+// Node objects are fetched lazily on expand: eagerly loading every node would
+// make opening the editor as slow as the slowest node in the fleet, and on a
+// fleet with hundreds of containers per node it would pull megabytes nobody
+// asked for.
+
+let probeTreeSel = { nodes: new Set(), objects: new Set() };   // objects: "node\u0000name"
+let probeTreeLoaded = {};                                       // node -> [{name,backend,state}]
+
+function probeTreeNodes() {
+    const list = (typeof allNodes !== 'undefined' && Array.isArray(allNodes)) ? allNodes : [];
+    return list.filter(n => n.node_type !== 'proxmox');
+}
+
+function probeRenderTree() {
+    const host = document.getElementById('probe-tree');
+    if (!host) return;
+    const nodes = probeTreeNodes();
+    if (!nodes.length) {
+        host.innerHTML = '<div style="color:var(--text-muted);font-size:.8rem;padding:4px;">No nodes known yet — use the pattern box below, or tick Everywhere.</div>';
+        return;
+    }
+    const clusters = (typeof wsScopeClusters === 'function') ? wsScopeClusters(nodes)
+                     : Array.from(new Set(nodes.map(n => n.cluster_name || 'WolfStack')));
+    host.innerHTML = clusters.map(cl => {
+        const members = (typeof wsScopeNodes === 'function') ? wsScopeNodes(nodes, cl)
+                        : nodes.filter(n => (n.cluster_name || 'WolfStack') === cl);
+        const rows = members.map(n => {
+            const name = n.hostname || n.address || '';
+            const on = probeTreeSel.nodes.has(name);
+            const objs = probeTreeLoaded[name];
+            const kids = objs === undefined ? '' : (objs.length ? objs.map(o => {
+                const key = name + '\u0000' + o.name;
+                return `<label class="probe-tree-row" data-search="${escapeHtml((name+' '+o.name).toLowerCase())}"
+                           style="display:flex;gap:7px;align-items:center;font-size:.78rem;padding:1px 0 1px 34px;cursor:pointer;">
+                      <input type="checkbox" class="probe-obj" data-node="${escapeHtml(name)}" value="${escapeHtml(o.name)}" ${probeTreeSel.objects.has(key) ? 'checked' : ''} onchange="probeTreeObjToggled(this)">
+                      <span style="flex:1;">${escapeHtml(o.name)}</span>
+                      <span style="color:var(--text-muted);">${escapeHtml(o.backend)}</span>
+                      <span style="color:${/running|up/i.test(o.state||'') ? 'var(--success)' : 'var(--text-muted)'};">${escapeHtml(o.state||'')}</span>
+                    </label>`;
+            }).join('') : `<div style="padding:2px 0 2px 34px;font-size:.76rem;color:var(--text-muted);">nothing running here</div>`);
+            return `
+            <div class="probe-tree-node">
+              <label class="probe-tree-row" data-search="${escapeHtml(name.toLowerCase())}"
+                     style="display:flex;gap:7px;align-items:center;font-size:.82rem;padding:2px 0 2px 16px;cursor:pointer;">
+                <button type="button" onclick="probeTreeExpand('${escapeHtml(name)}','${escapeHtml(n.id||'')}')"
+                        title="Show containers" aria-label="Show containers on ${escapeHtml(name)}"
+                        style="background:none;border:none;color:var(--text-muted);cursor:pointer;padding:0 2px;font-size:.9em;">${objs === undefined ? '▸' : '▾'}</button>
+                <input type="checkbox" class="probe-node" value="${escapeHtml(name)}" ${on ? 'checked' : ''} onchange="probeTreeNodeToggled(this)">
+                <span>${escapeHtml(name)}</span>
+              </label>
+              ${kids}
+            </div>`;
+        }).join('');
+        return `<div class="probe-tree-group" style="margin-bottom:6px;">
+            <div style="font-size:.74rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);padding:2px 0;">${escapeHtml(cl)}</div>
+            ${rows}
+          </div>`;
+    }).join('');
+    probeTreeFilter();
+}
+
+/** Ticking a node means "everything on it" — its individual object ticks become
+ *  redundant, so clear them rather than storing a contradictory selection. */
+function probeTreeNodeToggled(el) {
+    const name = el.value;
+    if (el.checked) {
+        probeTreeSel.nodes.add(name);
+        Array.from(probeTreeSel.objects).forEach(k => { if (k.startsWith(name + '\u0000')) probeTreeSel.objects.delete(k); });
+    } else {
+        probeTreeSel.nodes.delete(name);
+    }
+    probeRenderTree();
+}
+
+function probeTreeObjToggled(el) {
+    const key = el.dataset.node + '\u0000' + el.value;
+    if (el.checked) probeTreeSel.objects.add(key); else probeTreeSel.objects.delete(key);
+}
+
+/** Load a node's containers/VMs on demand. Local node reads directly; a remote
+ *  one goes through the existing node proxy. */
+async function probeTreeExpand(nodeName, nodeId) {
+    if (probeTreeLoaded[nodeName] !== undefined) {
+        delete probeTreeLoaded[nodeName];      // collapse
+        probeRenderTree();
+        return;
+    }
+    probeTreeLoaded[nodeName] = [];            // placeholder so the arrow flips
+    probeRenderTree();
+    try {
+        const isLocal = (nodeName === probeTargets.self_node) || !nodeId;
+        const url = isLocal ? '/api/notify/targets'
+                            : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/api/notify/targets`;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        probeTreeLoaded[nodeName] = Array.isArray(data.objects) ? data.objects : [];
+    } catch (e) {
+        // Say so on the row rather than silently showing an empty node, which
+        // would read as "this node has nothing running".
+        probeTreeLoaded[nodeName] = [];
+        showToast(`Could not list ${nodeName}: ${e.message}`, 'error');
+    }
+    probeRenderTree();
+}
+
+function probeTreeFilter() {
+    const q = (document.getElementById('probe-treefilter')?.value || '').trim().toLowerCase();
+    document.querySelectorAll('#probe-tree .probe-tree-row').forEach(row => {
+        row.style.display = (!q || (row.dataset.search || '').includes(q)) ? 'flex' : 'none';
+    });
+    // Hide a cluster heading once everything under it is filtered out — a bare
+    // "WOLF" label with nothing beneath it reads as an empty cluster rather
+    // than as "no matches here".
+    document.querySelectorAll('#probe-tree .probe-tree-group').forEach(group => {
+        const anyVisible = Array.from(group.querySelectorAll('.probe-tree-row'))
+            .some(r => r.style.display !== 'none');
+        group.style.display = anyVisible ? '' : 'none';
+    });
+    // And say so when the filter matches nothing at all, rather than showing a
+    // blank box that looks broken.
+    const host = document.getElementById('probe-tree');
+    if (host) {
+        let empty = host.querySelector('.probe-tree-empty');
+        const nothing = q && !Array.from(host.querySelectorAll('.probe-tree-row'))
+            .some(r => r.style.display !== 'none');
+        if (nothing && !empty) {
+            empty = document.createElement('div');
+            empty.className = 'probe-tree-empty';
+            empty.style.cssText = 'color:var(--text-muted);font-size:.8rem;padding:4px;';
+            empty.textContent = 'No nodes or containers match that filter.';
+            host.appendChild(empty);
+        } else if (!nothing && empty) {
+            empty.remove();
+        }
+    }
+}
+
+/** "Everywhere" supersedes individual picks — grey the tree so the two can't
+ *  disagree on screen. */
+function probeEverywhereChanged() {
+    const on = document.getElementById('probe-everywhere')?.checked;
+    const tree = document.getElementById('probe-tree');
+    if (tree) {
+        tree.style.opacity = on ? '.4' : '';
+        tree.style.pointerEvents = on ? 'none' : '';
+    }
+}
+
 function probeModalClose() {
     if (window.__probeModalEl) { window.__probeModalEl.remove(); window.__probeModalEl = null; }
 }
@@ -80608,24 +80751,17 @@ async function probeEdit(i, draft) {
     // Ticked names are stored in match.objects alongside any patterns, so an
     // existing rule's exact names come back ticked and its globs stay in the
     // pattern box.
-    const chosen = new Set((m.objects || []).filter(o => !o.includes('*')));
     const patterns = (m.objects || []).filter(o => o.includes('*'));
-
-    const objChecks = probeTargets.objects.map(o => `
-        <label class="probe-obj-row" data-name="${escapeHtml(o.name.toLowerCase())}"
-               style="display:flex;align-items:center;gap:7px;font-size:.8rem;padding:2px 3px;cursor:pointer;">
-            <input type="checkbox" class="probe-obj" value="${escapeHtml(o.name)}" ${chosen.has(o.name) ? 'checked' : ''}>
-            <span style="flex:1;">${escapeHtml(o.name)}</span>
-            <span style="color:var(--text-muted);font-size:.9em;">${escapeHtml(o.backend)}</span>
-            <span style="color:${/running|up/i.test(o.state||'') ? 'var(--success)' : 'var(--text-muted)'};font-size:.9em;">${escapeHtml(o.state || '')}</span>
-        </label>`).join('');
-
-    const pickedNodes = new Set((m.nodes || []).filter(n => n !== '*'));
-    const nodeChecks = (probeTargets.nodes || []).map(n => `
-        <label style="display:block;font-size:.82rem;padding:2px 3px;cursor:pointer;">
-            <input type="checkbox" class="probe-node" value="${escapeHtml(n.name)}" ${pickedNodes.has(n.name) ? 'checked' : ''}>
-            ${escapeHtml(n.name)}
-        </label>`).join('') || '<div style="color:var(--text-muted);font-size:.8rem;">No other nodes known.</div>';
+    // Seed the tree from the rule. Exact object names are node-scoped in the
+    // tree but stored flat on the rule, so they attach to whichever nodes the
+    // rule targets (or the local node when it targets none).
+    probeTreeSel = { nodes: new Set(), objects: new Set() };
+    probeTreeLoaded = {};
+    (m.nodes || []).filter(n => n !== '*').forEach(n => probeTreeSel.nodes.add(n));
+    const exact = (m.objects || []).filter(o => !o.includes('*'));
+    const seedNodes = (m.nodes || []).filter(n => n !== '*');
+    const attachTo = seedNodes.length ? seedNodes : [probeTargets.self_node];
+    exact.forEach(o => attachTo.forEach(n => probeTreeSel.objects.add(n + '\u0000' + o)));
 
     const bkChecks = PROBE_BACKENDS.map(([val, label, cadence]) => `
         <label style="display:block;font-size:.84rem;margin-bottom:5px;cursor:pointer;">
@@ -80653,31 +80789,23 @@ async function probeEdit(i, draft) {
                style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);margin-bottom:14px;">
 
         <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
-          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Which nodes</legend>
-          <label style="font-size:.84rem;margin-right:14px;cursor:pointer;"><input type="radio" name="probe-nodescope" value="this" onchange="probeNodeScopeChanged()" ${(!m.nodes || !m.nodes.length) ? 'checked' : ''}> This node</label>
-          <label style="font-size:.84rem;margin-right:14px;cursor:pointer;"><input type="radio" name="probe-nodescope" value="fleet" onchange="probeNodeScopeChanged()" ${(m.nodes||[]).includes('*') ? 'checked' : ''}> Whole fleet</label>
-          <label style="font-size:.84rem;cursor:pointer;"><input type="radio" name="probe-nodescope" value="pick" onchange="probeNodeScopeChanged()" ${((m.nodes||[]).length && !(m.nodes||[]).includes('*')) ? 'checked' : ''}> Choose nodes</label>
-          <div id="probe-nodelist" style="margin-top:8px;max-height:120px;overflow:auto;${((m.nodes||[]).length && !(m.nodes||[]).includes('*')) ? '' : 'display:none;'}">
-            ${nodeChecks}
-          </div>
-        </fieldset>
-
-        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
-          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Which containers / VMs</legend>
-          <input id="probe-objfilter" type="text" placeholder="Filter ${probeTargets.objects.length} on this node…"
-                 oninput="probeFilterObjects()" aria-label="Filter objects"
-                 style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:.82rem;margin-bottom:6px;">
-          <div id="probe-objlist" style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px;">
-            ${objChecks || '<div style="color:var(--text-muted);font-size:.8rem;padding:4px;">Nothing found on this node.</div>'}
-          </div>
-          <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
+          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Apply to</legend>
+          <input id="probe-treefilter" type="text" placeholder="Filter nodes and containers…"
+                 oninput="probeTreeFilter()" aria-label="Filter the apply-to tree"
+                 style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:.82rem;margin-bottom:8px;">
+          <label style="display:block;font-size:.84rem;margin-bottom:8px;cursor:pointer;">
+            <input type="checkbox" id="probe-everywhere" ${(m.nodes||[]).includes('*') ? 'checked' : ''} onchange="probeEverywhereChanged()">
+            <b>Everywhere</b> — the whole fleet, including nodes added later
+          </label>
+          <div id="probe-tree" style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px;${(m.nodes||[]).includes('*') ? 'opacity:.4;pointer-events:none;' : ''}"></div>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap;">
             <button type="button" class="btn" style="font-size:.74rem;padding:4px 8px;" onclick="probeSuggestPattern()">Turn selection into a pattern</button>
-            <span style="font-size:.72rem;color:var(--text-muted);">for rules that should cover future containers too</span>
+            <span style="font-size:.72rem;color:var(--text-muted);">so the rule also covers containers created later</span>
           </div>
-          <label style="display:block;margin-top:8px;font-size:.78rem;color:var(--text-secondary);">Or match by pattern</label>
+          <label style="display:block;margin-top:8px;font-size:.78rem;color:var(--text-secondary);">Or match by name pattern</label>
           <input id="probe-objects" type="text" value="${escapeHtml(patterns.join(', '))}" placeholder="e.g.  *-db, postgres"
                  style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:.82rem;">
-          <div style="font-size:.72rem;color:var(--text-muted);margin-top:4px;">Ticked names and patterns are combined. Both empty = watch everything.</div>
+          <div style="font-size:.72rem;color:var(--text-muted);margin-top:4px;">Tick a cluster or node to watch everything on it, or expand to pick individual containers. Ticks and patterns combine.</div>
         </fieldset>
 
         <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
@@ -80724,6 +80852,7 @@ async function probeEdit(i, draft) {
     // never has — so hold the element and remove it ourselves.
     const overlays = document.querySelectorAll('.modal-overlay');
     window.__probeModalEl = overlays[overlays.length - 1] || null;
+    probeRenderTree();
 }
 
 async function probeEditSave(i) {
@@ -80736,22 +80865,23 @@ async function probeEditSave(i) {
     }
     r.name = name;
     r.match = r.match || {};
-    // Ticked exact names + typed patterns, de-duplicated.
-    const tickedObjs = Array.from(document.querySelectorAll('.probe-obj:checked')).map(el => el.value);
     const typedPatterns = (document.getElementById('probe-objects')?.value || '')
         .split(',').map(s => s.trim()).filter(Boolean);
-    r.match.objects = [...new Set([...tickedObjs, ...typedPatterns])];
+    const everywhere = document.getElementById('probe-everywhere')?.checked;
 
-    const nodeScope = document.querySelector('input[name="probe-nodescope"]:checked')?.value || 'this';
-    if (nodeScope === 'fleet') {
+    if (everywhere) {
         r.match.nodes = ['*'];
         r.scope = 'cluster';
-    } else if (nodeScope === 'pick') {
-        r.match.nodes = Array.from(document.querySelectorAll('.probe-node:checked')).map(el => el.value);
-        r.scope = 'cluster';
+        r.match.objects = [...new Set(typedPatterns)];
     } else {
-        r.match.nodes = [];
-        r.scope = 'node';
+        // A ticked container implies its node, so the rule still matches when
+        // the event arrives carrying that node name.
+        const objNodes = Array.from(probeTreeSel.objects).map(k => k.split('\u0000')[0]);
+        const nodes = [...new Set([...probeTreeSel.nodes, ...objNodes])];
+        const objNames = Array.from(probeTreeSel.objects).map(k => k.split('\u0000')[1]);
+        r.match.nodes = nodes;
+        r.match.objects = [...new Set([...objNames, ...typedPatterns])];
+        r.scope = nodes.length > 1 ? 'cluster' : 'node';
     }
     r.match.events = Array.from(document.querySelectorAll('.probe-ev:checked')).map(el => el.value);
     r.match.backends = Array.from(document.querySelectorAll('.probe-bk:checked')).map(el => el.value);
