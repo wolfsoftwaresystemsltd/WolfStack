@@ -289,6 +289,89 @@ needs to be a deliberate choice rather than a default. Credentials must never be
 collected at all, which the 2026-08-06 collector already enforced by never
 reading secret files.
 
+## 5c. Phase 2 plan — what shipped in v25.10.12 is not yet usable (Paul, 2026-08-06)
+
+Verdict after using it: *"it's got so much missing… it's not really usable as is."*
+Fair. What shipped proves the pipeline (event → rule → channel) but the rule
+builder assumes you already know what you want to type. Below is the plan.
+
+### 5c.1 Placement
+
+Move the probe bay out of the top nav strip into the **Apps & Tools drawer**
+(`APP_DRAWER_TILES` in app.js). The top strip is for things hit several times a
+session; probes are configured occasionally and then left alone.
+
+### 5c.2 Email as a signalling channel
+
+Email already works in `alerting.rs`, but through a *separate* fan-out
+(`ai::send_alert_email`, gated on `email_enabled` + `email_to`) rather than
+`dispatch_to_channels`. So `Channel::Email` must route to that path, not to a
+webhook. Small, but it is not simply "add a fourth enum variant".
+
+### 5c.3 Targeting — the real gap
+
+The rule model already carries `backends`, `nodes` and `labels`; **the UI
+exposes none of them**. That is why it feels empty. Targeting is three
+independent questions and the UI should ask them in this order:
+
+| Question | Options |
+|---|---|
+| **Where** | this node · named nodes · whole fleet |
+| **What kind** | the machine itself · Docker container · LXC container · VM (libvirt / Proxmox) |
+| **Which** | pick from a live list · or a glob pattern |
+
+**Both a picker and globs, not one or the other.** With hundreds of containers a
+checkbox list is unusable on its own, and a glob is unusable when you want three
+specific containers out of 300. The picker should list nodes, expand to their
+containers, and offer "add as pattern" so a selection can be generalised
+(`select 4 db containers → suggest *-db`).
+
+### 5c.4 How often should a probe activate?
+
+The honest answer is that **the question only applies to some probes**, and the
+UI conflating them would be actively misleading:
+
+| Probe kind | Cadence | Why |
+|---|---|---|
+| Docker lifecycle | **Continuous — event-driven** | `docker events` pushes; latency ~1s. An interval here is meaningless, and showing one would imply outages are missed between polls. |
+| libvirt VM lifecycle | **Continuous — event-driven** | `virsh event --loop`, same shape. |
+| LXC / Proxmox state | **Poll, default 60s** | No event stream exists; must diff `lxc-ls -f` / `pct list`. |
+| Egress / reachability | **Poll, default 60s**, fire after 3 consecutive failures | One dropped packet is not an outage. |
+| Survey / documentation | **On demand or cron** | Produces an artefact, not a stream (§5b). |
+
+So the UI shows **"Continuous"** (not a dropdown) for event-backed probes, and an
+interval selector (30s · 1m · 5m · 15m · 1h) only for polled ones. A "run once"
+option belongs to survey probes, not monitors.
+
+### 5c.5 AI drafting belongs in the chat
+
+The separate "Draft with AI" box was the wrong shape — it is a second, worse
+chat. Instead register a **`create_probe` tool** on the existing agent (which
+already has `exec_all`, `exec_local`, `propose_action`, `read_file`), so:
+
+> "tell me if any of the db containers on wolfstack-2 stop"
+
+works in the normal AI chat, and the agent replies with the drafted probe for
+approval. Remove the box from the bay. Approval stays mandatory — an
+auto-installed rule that matches nothing looks deployed and never fires.
+
+### 5c.6 The honesty problem this creates
+
+Offering "LXC container" and "VM" as targets while **only the Docker source
+exists** would produce rules that can never fire — the worst failure mode this
+subsystem has. So 5c.3 cannot ship before the LXC/Proxmox and libvirt sources
+do. Either build them in the same change, or the picker must show those kinds as
+unavailable with a reason, never as silently-empty options.
+
+### 5c.7 Order of work
+
+1. Drawer placement + email channel *(small, independent, ship first)*
+2. LXC/Proxmox poll source + libvirt event source *(unblocks targeting)*
+3. Targeting UI: where / what kind / which, with picker + globs
+4. Cadence model: continuous vs interval, shown correctly per kind
+5. `create_probe` agent tool; remove the drafting box
+6. Egress probes (§3b-ii)
+
 ## 6. Open decisions
 
 1. Does a cluster-scoped rule notify once per cluster, or once per node that

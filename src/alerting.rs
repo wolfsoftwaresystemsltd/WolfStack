@@ -927,10 +927,15 @@ pub enum Channel {
     Slack,
     Telegram,
     Ntfy,
+    /// Delivered via `ai::send_alert_email`, NOT through the webhook fan-out —
+    /// email settings live on AiConfig (`email_enabled`, `email_to`), which is
+    /// why this needs its own branch rather than another webhook field.
+    Email,
 }
 
 impl Channel {
-    pub const ALL: [Channel; 4] = [Channel::Discord, Channel::Slack, Channel::Telegram, Channel::Ntfy];
+    pub const ALL: [Channel; 5] =
+        [Channel::Discord, Channel::Slack, Channel::Telegram, Channel::Ntfy, Channel::Email];
 }
 
 /// Send to an explicit subset of channels. A channel with no credentials
@@ -965,6 +970,20 @@ pub async fn dispatch_to_selected(
         && let Err(e) = send_ntfy(&config.ntfy_server, &config.ntfy_topic, &config.ntfy_token, title, message, ntfy_priority).await
     {
         warn!("ntfy alert failed: {}", e);
+    }
+    // Email is a different transport entirely — SMTP via AiConfig, and
+    // blocking, so it goes to a blocking thread rather than stalling the
+    // async worker for the length of an SMTP conversation.
+    if channels.contains(&Channel::Email) {
+        let email_cfg = crate::ai::AiConfig::load();
+        if email_cfg.email_enabled && !email_cfg.email_to.is_empty() {
+            let (t, b) = (title.to_string(), message.to_string());
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = crate::ai::send_alert_email(&email_cfg, &t, &b) {
+                    warn!("email alert failed: {}", e);
+                }
+            }).await;
+        }
     }
 }
 

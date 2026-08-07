@@ -36,6 +36,7 @@
 //! this one.
 
 pub mod source_docker;
+pub mod source_poll;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -834,6 +835,68 @@ mod ai_tests {
         for e in ["object_failed", "object_oom_killed", "object_restart_looping",
                   "object_egress_failed", "source_degraded"] {
             assert!(p.contains(e), "prompt is missing {}", e);
+        }
+    }
+}
+
+/// Poll LXC, libvirt and Proxmox for state changes.
+///
+/// Runs alongside the Docker event source, covering every backend that has no
+/// event stream to subscribe to. Cadence is fixed at 60s: fast enough that an
+/// outage is noticed promptly, slow enough that it costs nothing on a node with
+/// hundreds of containers (the LXC snapshot reuses the shared listing cache).
+pub async fn run_poll_sources(node: String) {
+    use std::collections::HashMap;
+
+    let mut last_fired: HashMap<String, u64> = HashMap::new();
+    // None = never polled. The FIRST poll of each backend only seeds the
+    // baseline and emits nothing; otherwise every daemon restart would report
+    // every stopped container on the node as a fresh event.
+    let mut prev: HashMap<&'static str, source_poll::StateMap> = HashMap::new();
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Snapshots shell out, so keep them off the async worker threads.
+        let snaps: Vec<(&'static str, source_poll::StateMap)> =
+            match tokio::task::spawn_blocking(|| {
+                vec![
+                    ("lxc", source_poll::snapshot_lxc()),
+                    ("libvirt", source_poll::snapshot_libvirt()),
+                    ("pve", source_poll::snapshot_pve()),
+                ]
+            }).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("notify: poll snapshot task failed: {}", e);
+                    continue;
+                }
+            };
+
+        for (backend, now_map) in snaps {
+            // A backend with no tooling installed reports nothing, forever —
+            // don't let that look like "everything disappeared".
+            if now_map.is_empty() && !prev.contains_key(backend) {
+                continue;
+            }
+            match prev.get(backend) {
+                None => {
+                    tracing::info!(
+                        "notify: {} poll seeded with {} object(s)", backend, now_map.len()
+                    );
+                }
+                Some(prev_map) => {
+                    for event in source_poll::diff_states(prev_map, &now_map, backend, &node, now_ts) {
+                        handle_event(event, &mut last_fired).await;
+                    }
+                }
+            }
+            prev.insert(backend, now_map);
         }
     }
 }
