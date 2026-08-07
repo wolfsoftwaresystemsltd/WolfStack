@@ -13729,7 +13729,22 @@ pub async fn notify_targets(req: HttpRequest, state: web::Data<AppState>) -> Htt
             out.push(serde_json::json!({ "backend": "pve", "name": name, "state": st }));
         }
         out
-    }).await.unwrap_or_default();
+    }).await;
+
+    // NOT unwrap_or_default. web::block turns a panic in any of those listers
+    // into an Err, and defaulting it to an empty Vec answered 200 OK with
+    // "objects": [] — so a node full of containers reported itself as empty and
+    // the probe tree faithfully displayed that. A failure to list is an error;
+    // saying so lets the UI show a reason instead of a blank list.
+    let objects = match objects {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("notify targets: listing failed: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("could not list containers or VMs on this node: {}", e)
+            }));
+        }
+    };
 
     let nodes: Vec<serde_json::Value> = {
         let n = state.cluster.nodes.read().unwrap();
