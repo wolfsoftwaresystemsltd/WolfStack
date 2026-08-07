@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.25: migrated containers keep their registry lineage and their network** _(2026-08-07 — [`1f44c6b4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1f44c6b4f3b468ce1945e98d905b19dfd3e347ba))_
 - **v25.10.24: undefined-name UI bugs can no longer ship, and L2-only VLANs actually work** _(2026-08-07 — [`36e6eca5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/36e6eca51b7ecbf86c3151273d2bde3e2c2b726c))_
 - **v25.10.23: the migrate dialog's volume section always says something** _(2026-08-07 — [`6da5b48d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6da5b48d65b4a6f5c80aa87dd4777e1a6211f9fe))_
 - **v25.10.22: probe target tree lists containers on remote nodes** _(2026-08-07 — [`cc1221b0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cc1221b0422565cf0b4b4b9b8b9e54d3b7d81257))_
