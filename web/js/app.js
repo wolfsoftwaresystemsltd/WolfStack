@@ -75781,6 +75781,10 @@ window.predTermClose = predTermClose;
 
 const APP_DRAWER_TILES = [
     {
+        id: 'probes', icon: '', name: 'Probe Bay',
+        desc: 'Launch probes that watch your containers and VMs — Docker, LXC, libvirt, Proxmox — and signal you on Discord, Slack, Telegram, ntfy or email when something goes down.',
+    },
+    {
         id: 'wolfhost', icon: '', name: 'WolfHost',
         desc: 'Managed web hosting — customers, plans, billing, domains, email, SSL, and a white-label customer portal. Free, built in.',
     },
@@ -80367,6 +80371,17 @@ const PROBE_CHANNELS = [
     ['slack', 'Slack'],
     ['telegram', 'Telegram'],
     ['ntfy', 'ntfy'],
+    ['email', 'Email'],
+];
+
+// What a probe can watch. Docker is event-driven (instant); the rest are polled
+// every 60s because they expose no event stream — stated in the UI so nobody
+// assumes a poll catches everything a push would.
+const PROBE_BACKENDS = [
+    ['docker',  'Docker containers', 'instant'],
+    ['lxc',     'LXC containers',    'checked every 60s'],
+    ['libvirt', 'VMs (libvirt)',     'checked every 60s'],
+    ['pve',     'VMs (Proxmox)',     'checked every 60s'],
 ];
 
 function probeAnnounce(msg) {
@@ -80456,6 +80471,9 @@ function renderProbeBay() {
         const channels = (r.channels && r.channels.length)
             ? r.channels.join(', ')
             : 'every configured channel';
+        const kinds = (r.match?.backends?.length)
+            ? r.match.backends.map(b => (PROBE_BACKENDS.find(p => p[0] === b)?.[1] || b)).join(', ')
+            : 'Docker, LXC, VMs';
         const events = (r.match?.events?.length)
             ? r.match.events.map(e => (PROBE_EVENTS.find(p => p[0] === e)?.[1] || e)).join(', ')
             : 'anything at all';
@@ -80470,6 +80488,7 @@ function renderProbeBay() {
             <div class="probe-status ${stateCls}">${stateLabel}${r.scope === 'cluster' ? ' · fleet-wide' : ''}</div>
             <ul class="probe-spec">
                 <li><span class="k">Watches</span><span class="v">${escapeHtml(objects)}</span></li>
+                <li><span class="k">Kind</span><span class="v">${escapeHtml(kinds)}</span></li>
                 <li><span class="k">On</span><span class="v">${escapeHtml(nodes)}</span></li>
                 <li><span class="k">Reports</span><span class="v">${escapeHtml(events)}</span></li>
                 <li><span class="k">Signals</span><span class="v">${escapeHtml(channels)}</span></li>
@@ -80621,6 +80640,13 @@ function probeEdit(i, draft) {
     } : JSON.parse(JSON.stringify(probeRules.rules[i]));
 
     const m = r.match || {};
+    const bkChecks = PROBE_BACKENDS.map(([val, label, cadence]) => `
+        <label style="display:block;font-size:.84rem;margin-bottom:5px;cursor:pointer;">
+            <input type="checkbox" class="probe-bk" value="${val}" ${(m.backends||[]).includes(val) ? 'checked' : ''}>
+            ${escapeHtml(label)}
+            <span style="color:var(--text-muted);font-size:.92em;">— ${escapeHtml(cadence)}</span>
+        </label>`).join('');
+
     const evChecks = PROBE_EVENTS.map(([val, label]) => `
         <label style="display:block;font-size:.84rem;margin-bottom:5px;cursor:pointer;">
             <input type="checkbox" class="probe-ev" value="${val}" ${(m.events||[]).includes(val) ? 'checked' : ''}>
@@ -80643,6 +80669,12 @@ function probeEdit(i, draft) {
         <input id="probe-objects" type="text" value="${escapeHtml((m.objects||[]).join(', '))}" placeholder="* or  *-db, postgres"
                style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);">
         <div style="font-size:.75rem;color:var(--text-muted);margin:4px 0 14px;">Comma separated. <code>*</code> matches anything; <code>*-db</code> matches names ending in <code>-db</code>. Leave blank for everything.</div>
+
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Watch which kind</legend>
+          ${bkChecks}
+          <div style="font-size:.75rem;color:var(--text-muted);margin-top:4px;">Nothing ticked = every kind. Docker reports instantly; the others are checked every 60 seconds because they publish no event stream.</div>
+        </fieldset>
 
         <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
           <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Report when they…</legend>
@@ -80702,6 +80734,7 @@ async function probeEditSave(i) {
     r.match.objects = (document.getElementById('probe-objects')?.value || '')
         .split(',').map(s => s.trim()).filter(Boolean);
     r.match.events = Array.from(document.querySelectorAll('.probe-ev:checked')).map(el => el.value);
+    r.match.backends = Array.from(document.querySelectorAll('.probe-bk:checked')).map(el => el.value);
     r.channels = Array.from(document.querySelectorAll('.probe-ch:checked')).map(el => el.value);
     r.scope = document.querySelector('input[name="probe-scope"]:checked')?.value || 'node';
     const mins = parseInt(document.getElementById('probe-cooldown')?.value, 10);

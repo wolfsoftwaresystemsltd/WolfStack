@@ -828,8 +828,13 @@ async fn main() -> std::io::Result<()> {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "unknown".to_string());
+        let poll_node = notify_node.clone();
         tokio::spawn(async move {
             notify::run_docker_source(notify_node).await;
+        });
+        // LXC, libvirt and Proxmox have no event stream — polled instead.
+        tokio::spawn(async move {
+            notify::run_poll_sources(poll_node).await;
         });
     }
 
