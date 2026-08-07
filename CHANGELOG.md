@@ -8,6 +8,9 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.23: the migrate dialog's volume section always says something** _(2026-08-07 — [`6da5b48d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/6da5b48d65b4a6f5c80aa87dd4777e1a6211f9fe))_
+- **v25.10.22: probe target tree lists containers on remote nodes** _(2026-08-07 — [`cc1221b0`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/cc1221b0422565cf0b4b4b9b8b9e54d3b7d81257))_
+- **v25.10.21: the probe target tree lists containers on every node again** _(2026-08-07 — [`7cc62381`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7cc62381f11a153cb16bd0bb2606051848a9751e))_
 - **v25.10.20: the migrate dialog's volume choice explains itself instead of vanishing** _(2026-08-07 — [`73b0d584`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/73b0d584ac2f80c1151a86f07643eaffa4923bdb))_
 - **v25.10.19: containers with a web UI get their "Open in browser" button back** _(2026-08-07 — [`53ac3f1d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/53ac3f1d7ad90411462bfa5a9525bac5715cdb56))_
 - **v25.10.18: migrations stop dying with NetworkError, and probes get a proper target tree** _(2026-08-07 — [`8d317701`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d3177014a220b2282dd04469e65570c13916abf))_
