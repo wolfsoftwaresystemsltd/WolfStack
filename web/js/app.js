@@ -80622,8 +80622,19 @@ function probeRenderTree() {
         const rows = members.map(n => {
             const name = n.hostname || n.address || '';
             const on = probeTreeSel.nodes.has(name);
-            const objs = probeTreeLoaded[name];
-            const kids = objs === undefined ? '' : (objs.length ? objs.map(o => {
+            const entry = probeTreeLoaded[name];
+            const objs = entry === undefined ? undefined : entry.objects;
+            // Three distinct states, because collapsing them is what made a
+            // 404 look like an idle node.
+            let kids;
+            if (entry === undefined) {
+                kids = '';
+            } else if (entry.loading) {
+                kids = `<div style="padding:2px 0 2px 34px;font-size:.76rem;color:var(--text-muted);">loading…</div>`;
+            } else if (entry.error) {
+                kids = `<div style="padding:2px 0 2px 34px;font-size:.76rem;color:var(--warning,#f59e0b);">could not list this node (${escapeHtml(entry.error)}) — it may be running an older WolfStack</div>`;
+            } else {
+                kids = (objs.length ? objs.map(o => {
                 const key = name + '\u0000' + o.name;
                 return `<label class="probe-tree-row" data-search="${escapeHtml((name+' '+o.name).toLowerCase())}"
                            style="display:flex;gap:7px;align-items:center;font-size:.78rem;padding:1px 0 1px 34px;cursor:pointer;">
@@ -80632,12 +80643,13 @@ function probeRenderTree() {
                       <span style="color:var(--text-muted);">${escapeHtml(o.backend)}</span>
                       <span style="color:${/running|up/i.test(o.state||'') ? 'var(--success)' : 'var(--text-muted)'};">${escapeHtml(o.state||'')}</span>
                     </label>`;
-            }).join('') : `<div style="padding:2px 0 2px 34px;font-size:.76rem;color:var(--text-muted);">nothing running here</div>`);
+            }).join('') : `<div style="padding:2px 0 2px 34px;font-size:.76rem;color:var(--text-muted);">no containers or VMs on this node</div>`);
+            }
             return `
             <div class="probe-tree-node">
               <label class="probe-tree-row" data-search="${escapeHtml(name.toLowerCase())}"
                      style="display:flex;gap:7px;align-items:center;font-size:.82rem;padding:2px 0 2px 16px;cursor:pointer;">
-                <button type="button" onclick="probeTreeExpand('${escapeHtml(name)}','${escapeHtml(n.id||'')}')"
+                <button type="button" onclick="probeTreeExpand('${escapeHtml(name)}','${escapeHtml(n.id||'')}',${n.is_self ? 'true' : 'false'})"
                         title="Show containers" aria-label="Show containers on ${escapeHtml(name)}"
                         style="background:none;border:none;color:var(--text-muted);cursor:pointer;padding:0 2px;font-size:.9em;">${objs === undefined ? '▸' : '▾'}</button>
                 <input type="checkbox" class="probe-node" value="${escapeHtml(name)}" ${on ? 'checked' : ''} onchange="probeTreeNodeToggled(this)">
@@ -80672,30 +80684,70 @@ function probeTreeObjToggled(el) {
     if (el.checked) probeTreeSel.objects.add(key); else probeTreeSel.objects.delete(key);
 }
 
-/** Load a node's containers/VMs on demand. Local node reads directly; a remote
- *  one goes through the existing node proxy. */
-async function probeTreeExpand(nodeName, nodeId) {
+/** Load a node's containers/VMs on demand.
+ *
+ *  Tries /api/notify/targets first (all four kinds, one round trip) and falls
+ *  back to the long-standing /api/containers/{docker,lxc} routes. That fallback
+ *  is not defensive padding: notify/targets only exists from v25.10.15, so in a
+ *  fleet mid-upgrade every older peer 404s — and the old code rendered that as
+ *  "nothing running here", which is indistinguishable from a genuinely idle
+ *  node and is exactly what was reported (2026-08-07).
+ */
+async function probeTreeExpand(nodeName, nodeId, isSelf) {
     if (probeTreeLoaded[nodeName] !== undefined) {
         delete probeTreeLoaded[nodeName];      // collapse
         probeRenderTree();
         return;
     }
-    probeTreeLoaded[nodeName] = [];            // placeholder so the arrow flips
+    probeTreeLoaded[nodeName] = { objects: [], loading: true, error: null };
     probeRenderTree();
+
+    const local = isSelf || nodeName === probeTargets.self_node || !nodeId;
+    const at = (path) => local ? path
+        : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/${path.replace(/^\//, '')}`;
+
+    let objects = null;
+    let firstError = '';
+
+    // Preferred: every kind in one call.
     try {
-        const isLocal = (nodeName === probeTargets.self_node) || !nodeId;
-        const url = isLocal ? '/api/notify/targets'
-                            : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/api/notify/targets`;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        probeTreeLoaded[nodeName] = Array.isArray(data.objects) ? data.objects : [];
-    } catch (e) {
-        // Say so on the row rather than silently showing an empty node, which
-        // would read as "this node has nothing running".
-        probeTreeLoaded[nodeName] = [];
-        showToast(`Could not list ${nodeName}: ${e.message}`, 'error');
+        const r = await fetch(at('/api/notify/targets'));
+        if (r.ok) {
+            const d = await r.json();
+            if (Array.isArray(d.objects)) objects = d.objects;
+        } else {
+            firstError = `HTTP ${r.status}`;
+        }
+    } catch (e) { firstError = e.message; }
+
+    // Fallback for peers that predate that endpoint.
+    if (objects === null) {
+        const merged = [];
+        let anyOk = false;
+        for (const [path, backend] of [['/api/containers/docker', 'docker'], ['/api/containers/lxc', 'lxc']]) {
+            try {
+                const r = await fetch(at(path));
+                if (!r.ok) continue;
+                const d = await r.json();
+                const list = Array.isArray(d) ? d : (d.containers || []);
+                list.forEach(c => merged.push({ name: c.name, backend, state: c.state || c.status || '' }));
+                anyOk = true;
+            } catch (_) { /* try the other runtime */ }
+        }
+        if (anyOk) {
+            objects = merged;
+        } else {
+            probeTreeLoaded[nodeName] = {
+                objects: [], loading: false,
+                error: firstError || 'could not reach that node',
+            };
+            probeRenderTree();
+            return;
+        }
     }
+
+    objects.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    probeTreeLoaded[nodeName] = { objects, loading: false, error: null };
     probeRenderTree();
 }
 
