@@ -250,7 +250,19 @@ fn detect_systemd_service_context() -> bool {
 
 /// Should this invocation refuse to start the daemon and print help instead?
 ///
-/// True for a shell launch that hasn't explicitly asked for a foreground run.
+/// ONLY for a bare `wolfstack` with no arguments at all, outside systemd.
+///
+/// The original rule refused every non-systemd launch unless `--foreground` was
+/// passed, and that broke every host WITHOUT systemd. Unraid runs the agent from
+/// a bash supervisor as `wolfstack --agent`: no INVOCATION_ID, no --foreground,
+/// so the guard printed help and exited 1 in a 60-second restart loop, and the
+/// node never came up (customer report, 25.10.14, 2026-08-07). Docker images and
+/// any other non-systemd supervisor would hit exactly the same wall.
+///
+/// Passing ANY argument — `--agent`, `--port`, `--bind`, `--foreground` — is a
+/// deliberate invocation and is honoured. The thing actually worth stopping is
+/// someone typing `wolfstack` at a prompt to see if the service is up, and that
+/// is precisely the zero-argument case.
 /// A bare `wolfstack` typed at a prompt is nearly always someone checking
 /// whether the service is up, and answering that by starting a second daemon
 /// is actively harmful — it contends for every port with the real one, and the
@@ -259,8 +271,8 @@ fn detect_systemd_service_context() -> bool {
 /// Only reached after the one-shot modes (`--show-token`, `--unblock`,
 /// `--leave-cluster`, `--wolfrouter-*`) have already returned, so this never
 /// blocks an operator's break-glass commands.
-fn should_refuse_shell_launch(running_as_service: bool, foreground: bool) -> bool {
-    !running_as_service && !foreground
+fn should_refuse_shell_launch(running_as_service: bool, foreground: bool, has_args: bool) -> bool {
+    !running_as_service && !foreground && !has_args
 }
 
 /// Agent-mode root handler — returned for any path the SPA would normally
@@ -614,7 +626,11 @@ async fn main() -> std::io::Result<()> {
     // shell one — INVOCATION_ID is necessary but NOT sufficient, because a
     // desktop terminal or a unit-spawned script inherits it.
     let running_as_systemd_service = detect_systemd_service_context();
-    if should_refuse_shell_launch(running_as_systemd_service, cli.foreground) {
+    // std::env::args() includes argv[0], so >1 means the operator passed
+    // something. Read from the real argv rather than inspecting `cli`, whose
+    // defaults make "not supplied" and "supplied the default" indistinguishable.
+    let has_cli_args = std::env::args().len() > 1;
+    if should_refuse_shell_launch(running_as_systemd_service, cli.foreground, has_cli_args) {
         eprintln!("wolfstack is a system service — it is not meant to be started by hand.");
         eprintln!();
         eprintln!("Refusing to launch a second daemon alongside the running service.");
@@ -5189,23 +5205,38 @@ mod shell_launch_tests {
 
     #[test]
     fn bare_shell_launch_is_refused() {
-        // jdelrue's test node: `wolfstack` typed at a prompt while the service
-        // was already running. Starting a second daemon is never the answer.
-        assert!(should_refuse_shell_launch(false, false));
+        // The case worth stopping: `wolfstack` typed at a prompt to see whether
+        // the service is up. No systemd, no flag, no arguments.
+        assert!(should_refuse_shell_launch(false, false, false));
     }
 
     #[test]
     fn systemd_service_always_starts() {
-        // The real launch path. --foreground is irrelevant here: the unit
-        // doesn't pass it, and it must start either way.
-        assert!(!should_refuse_shell_launch(true, false));
-        assert!(!should_refuse_shell_launch(true, true));
+        assert!(!should_refuse_shell_launch(true, false, false));
+        assert!(!should_refuse_shell_launch(true, true, true));
     }
 
     #[test]
     fn explicit_foreground_is_honoured() {
-        // Debugging, or a host with no systemd (a container) where the
-        // operator supervises the process themselves.
-        assert!(!should_refuse_shell_launch(false, true));
+        assert!(!should_refuse_shell_launch(false, true, true));
+    }
+
+    #[test]
+    fn a_non_systemd_supervisor_passing_agent_must_start() {
+        // REGRESSION. Unraid has no systemd: a bash supervisor runs
+        // `wolfstack --agent`, so INVOCATION_ID is unset and --foreground is
+        // not passed. The original guard refused, printed help, and exited 1
+        // every 60s — the node never came up (customer, 25.10.14, 2026-08-07).
+        // Any argument at all means the launch was deliberate.
+        assert!(!should_refuse_shell_launch(false, false, true));
+    }
+
+    #[test]
+    fn any_argument_counts_as_deliberate() {
+        // --port, --bind, --agent, --no-tls … all of them. The refusal is for
+        // the zero-argument case only, so no supervisor anywhere is blocked.
+        for has_args in [true] {
+            assert!(!should_refuse_shell_launch(false, false, has_args));
+        }
     }
 }
