@@ -30777,8 +30777,18 @@ async function renderMigrateVolumeChoice(name) {
     if (!host) return;
     let mounts = [];
     let readFailed = '';
+    // Render the placeholder immediately. Without this the section is simply
+    // ABSENT while the lookup is in flight — and if the lookup never returns,
+    // absent for ever, with no hint that anything was meant to be there
+    // (RutgerDiehard, 2026-08-07: no choice, no error, nothing).
+    host.innerHTML = `<div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:1rem;color:var(--text-muted);font-size:0.8em;">Checking this container's volumes…</div>`;
     try {
-        const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(name)}/volumes`));
+        // A hung request must not leave the operator staring at nothing —
+        // 10s then say so.
+        const ctrl = new AbortController();
+        const killer = setTimeout(() => ctrl.abort(), 10000);
+        const resp = await fetch(apiUrl(`/api/containers/docker/${encodeURIComponent(name)}/volumes`), { signal: ctrl.signal })
+            .finally(() => clearTimeout(killer));
         if (resp.ok) {
             const data = await resp.json();
             mounts = Array.isArray(data) ? data : (data.mounts || []);
@@ -30789,7 +30799,8 @@ async function renderMigrateVolumeChoice(name) {
             readFailed = `HTTP ${resp.status}`;
         }
     } catch (e) {
-        readFailed = e.message;
+        readFailed = (e.name === 'AbortError')
+            ? 'timed out after 10s' : e.message;
     }
 
     if (readFailed) {

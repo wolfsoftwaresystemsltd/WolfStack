@@ -13119,8 +13119,17 @@ pub async fn docker_volumes(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    let mounts = containers::docker_list_volumes(&id);
-    HttpResponse::Ok().json(mounts)
+    // web::block: docker_list_volumes shells out to `docker inspect`. Inline in
+    // an async handler it pins a worker, and when the workers are busy the
+    // request simply stalls — the migrate dialog's volume section then never
+    // renders at all, showing neither the copy choice nor an error
+    // (RutgerDiehard, 2026-08-07).
+    match web::block(move || containers::docker_list_volumes(&id)).await {
+        Ok(mounts) => HttpResponse::Ok().json(mounts),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("could not read this container's mounts: {}", e)
+        })),
+    }
 }
 
 #[derive(Deserialize)]
