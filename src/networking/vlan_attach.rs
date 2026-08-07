@@ -668,14 +668,33 @@ pub fn attach_docker(
     let inspect = Command::new("docker").args(["network", "inspect", &net_name]).output()
         .map_err(|e| format!("spawn docker: {}", e))?;
     if !inspect.status.success() {
+        // Docker's macvlan/ipvlan IPAM cannot allocate without a subnet.
+        // The API handler already refuses attaches on a subnet-less VLAN, so
+        // this is a backstop for any other caller — `docker network create
+        // --subnet ""` fails with an opaque parse error that tells the
+        // operator nothing.
+        if subnet.is_empty() {
+            return Err(format!(
+                "VLAN `{}` has no subnet recorded, and Docker's {} driver needs one to \
+                 assign container IPs. Set the VLAN's subnet — this host's own IP can \
+                 stay blank if it should remain off the VLAN.",
+                p.bridge, driver.driver_arg(),
+            ));
+        }
         let mut args: Vec<String> = vec![
             "network".into(), "create".into(),
             "--driver".into(), driver.driver_arg().into(),
             "--subnet".into(), subnet.into(),
-            "--gateway".into(), gateway_ip.into(),
             "-o".into(), format!("parent={}", parent_iface),
             "-o".into(), format!("com.docker.network.driver.mtu={}", p.mtu),
         ];
+        // Only pin a gateway when there is one. On an L2-only VLAN the host
+        // holds no address, so we let Docker default it rather than passing
+        // `--gateway ""`, which docker rejects.
+        if !gateway_ip.is_empty() {
+            args.push("--gateway".into());
+            args.push(gateway_ip.into());
+        }
         // ipvlan needs explicit mode flag.
         if matches!(driver, DockerVlanDriver::IpvlanL2) {
             args.push("-o".into());

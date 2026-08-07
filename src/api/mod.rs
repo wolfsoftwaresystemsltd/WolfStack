@@ -18643,6 +18643,23 @@ pub async fn vlan_attach(
         })),
     };
 
+    // Attaching through WolfStack assigns the guest a static IP, and both
+    // auto-pick and the prefix length come from the VLAN's subnet. Without one
+    // we would either report the misleading "no free IPs left" (auto-pick) or
+    // silently guess /24 onto an operator-supplied address — refuse up front
+    // instead. This is NOT the same as the host having no IP: self_ip may be
+    // blank (L2-only host) as long as the guests' subnet is recorded.
+    if vlan.subnet.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!(
+                "VLAN '{}' has no subnet recorded, so WolfStack cannot assign guest IPs on it. \
+                 Set the VLAN's subnet (this host's own IP can stay blank if it should remain \
+                 off the VLAN), or attach nothing and configure addressing inside the guest by hand.",
+                vlan.name,
+            ),
+        }));
+    }
+
     // Pick the IP — operator-supplied or next-available.
     let ip = if body.ip.is_empty() {
         // Aggregate cluster-wide used IPs for this subnet first so we
@@ -18660,8 +18677,16 @@ pub async fn vlan_attach(
 
     let cidr_prefix = vlan.subnet.split('/').nth(1).and_then(|s| s.parse::<u8>().ok()).unwrap_or(24);
     let ip_cidr = format!("{}/{}", ip, cidr_prefix);
+    // On an L2-only VLAN the host takes no address, so there is no gateway to
+    // hand the guest — `self_ip` is empty and must NOT be passed through as a
+    // blank gateway (that would write `gateway ` into the guest's config, or
+    // `--gateway ""` for Docker, and fail at apply time).
     let gateway = vlan.routes.first().map(|r| r.via.as_str())
-        .or(if vlan.self_ip != ip { Some(vlan.self_ip.as_str()) } else { None });
+        .or(if !vlan.self_ip.is_empty() && vlan.self_ip != ip {
+            Some(vlan.self_ip.as_str())
+        } else {
+            None
+        });
     let params = crate::networking::vlan_attach::AttachParams {
         bridge: &vlan.bridge_name,
         ip_cidr: &ip_cidr,
