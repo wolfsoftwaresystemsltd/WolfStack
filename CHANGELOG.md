@@ -8,6 +8,12 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.20: the migrate dialog's volume choice explains itself instead of vanishing** _(2026-08-07 — [`73b0d584`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/73b0d584ac2f80c1151a86f07643eaffa4923bdb))_
+- **v25.10.19: containers with a web UI get their "Open in browser" button back** _(2026-08-07 — [`53ac3f1d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/53ac3f1d7ad90411462bfa5a9525bac5715cdb56))_
+- **v25.10.18: migrations stop dying with NetworkError, and probes get a proper target tree** _(2026-08-07 — [`8d317701`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8d3177014a220b2282dd04469e65570c13916abf))_
+- **v25.10.17: Unraid agents stay up, and the supervisor stops deadlocking itself** _(2026-08-07 — [`d97dd0d4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d97dd0d4cda3cb26c80007c1bd5086cfc36fb3cd))_
+- **v25.10.16: agents start again on hosts without systemd** _(2026-08-07 — [`5a7f3f7b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5a7f3f7b52ae9b7b414e4cad00504debada0427c))_
+- **v25.10.15: pick probe targets from lists, and build probes in the AI chat** _(2026-08-07 — [`e4af7b8a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e4af7b8af4c7d02378abc4b7f5c28e6d25a66e1e))_
 - **v25.10.14: probes watch LXC, libvirt and Proxmox, and can signal by email** _(2026-08-07 — [`bccac584`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/bccac58429195b7415d5998d32525710a560ca11))_
 - **v25.10.13: migration copies bind-mount data, not just named volumes** _(2026-08-06 — [`a2d08964`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a2d0896414dd42a167d5dc28bb677a4d8b9d152a))_
 - **v25.10.12: WolfNotify — probes that tell you when a container falls over** _(2026-08-06 — [`c99322a7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c99322a7196815fdfd58c48ec23b19bb0fb1611a))_
