@@ -80703,8 +80703,13 @@ async function probeTreeExpand(nodeName, nodeId, isSelf) {
     probeRenderTree();
 
     const local = isSelf || nodeName === probeTargets.self_node || !nodeId;
+    // The proxy handler re-adds "/api/" itself (api/mod.rs: format!("/api/{}")),
+    // so the path here must have it STRIPPED — exactly what apiUrl does. Passing
+    // "api/notify/targets" produced "/api/api/notify/targets" on the remote and
+    // 404'd every time, which is why local nodes listed fine and remote ones
+    // came back empty (2026-08-07).
     const at = (path) => local ? path
-        : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/${path.replace(/^\//, '')}`;
+        : `/api/nodes/${encodeURIComponent(nodeId)}/proxy/${path.replace(/^\/api\//, '')}`;
 
     let objects = null;
     let firstError = '';
