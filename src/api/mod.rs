@@ -13666,28 +13666,49 @@ pub async fn notify_rules_put(
     }
 }
 
-/// POST /api/notify/ai-draft — draft a probe from a plain-English description.
+/// GET /api/notify/targets — what a probe can be pointed at.
 ///
-/// Returns the drafted rule for review. It is deliberately NOT saved: an
-/// auto-installed rule that quietly matches nothing looks deployed and never
-/// fires, which is the worst thing this subsystem can do. The operator sees it
-/// in the configure form and presses save.
-pub async fn notify_ai_draft(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-    body: web::Json<serde_json::Value>,
-) -> HttpResponse {
+/// Exists because typing globs is not a usable way to choose 3 containers out
+/// of several hundred. Returns this node's objects grouped by kind, plus the
+/// cluster's node list so the editor can offer node/fleet targeting.
+///
+/// Remote nodes are NOT enumerated here: fanning out to every peer to build a
+/// picker would make opening the editor as slow as the slowest node in the
+/// fleet. The UI fetches a remote node's objects through the existing node
+/// proxy only when one is selected.
+pub async fn notify_targets(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let description = body.get("description").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    if description.is_empty() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "describe what you want the probe to watch"
-        }));
-    }
-    match crate::notify::ai_draft_rule(&description).await {
-        Ok(rule) => HttpResponse::Ok().json(serde_json::json!({ "rule": rule })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e })),
-    }
+
+    // Listing shells out; keep it off the async workers.
+    let objects = web::block(|| {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for c in containers::docker_list_all_cached() {
+            out.push(serde_json::json!({ "backend": "docker", "name": c.name, "state": c.state }));
+        }
+        for c in containers::lxc_list_all_cached() {
+            out.push(serde_json::json!({ "backend": "lxc", "name": c.name, "state": c.state }));
+        }
+        for (name, st) in crate::notify::source_poll::snapshot_libvirt() {
+            out.push(serde_json::json!({ "backend": "libvirt", "name": name, "state": st }));
+        }
+        for (name, st) in crate::notify::source_poll::snapshot_pve() {
+            out.push(serde_json::json!({ "backend": "pve", "name": name, "state": st }));
+        }
+        out
+    }).await.unwrap_or_default();
+
+    let nodes: Vec<serde_json::Value> = {
+        let n = state.cluster.nodes.read().unwrap();
+        n.values()
+            .map(|node| serde_json::json!({ "id": node.id, "name": node.hostname }))
+            .collect()
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "self_node": crate::notify::local_node_name(),
+        "nodes": nodes,
+        "objects": objects,
+    }))
 }
 
 /// POST /api/notify/test — push a synthetic event through the live rule set.
@@ -43196,7 +43217,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/notify/rules", web::get().to(notify_rules_get))
         .route("/api/notify/rules", web::put().to(notify_rules_put))
         .route("/api/notify/test", web::post().to(notify_test))
-        .route("/api/notify/ai-draft", web::post().to(notify_ai_draft))
+        .route("/api/notify/targets", web::get().to(notify_targets))
         .route("/api/containers/docker/import-volume", web::post().to(docker_import_volume))
         .route("/api/containers/docker/{id}/config", web::post().to(docker_update_config))
         .route("/api/containers/docker/{id}/env", web::post().to(docker_update_env))

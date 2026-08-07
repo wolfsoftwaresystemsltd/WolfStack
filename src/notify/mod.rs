@@ -692,152 +692,7 @@ async fn report_degraded(
     .await;
 }
 
-// ─── AI drafting ───
 
-/// Pull the first balanced JSON object out of an LLM reply.
-///
-/// Models wrap JSON in ```json fences, prefix it with "Here's the rule:", or
-/// both, depending on provider and mood. Scanning for a balanced object is the
-/// only thing that survives all of them — and it must ignore braces inside
-/// strings, or a rule whose name contains one truncates the parse.
-pub fn extract_json_object(reply: &str) -> Option<&str> {
-    let bytes = reply.as_bytes();
-    let start = reply.find('{')?;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for i in start..bytes.len() {
-        let c = bytes[i] as char;
-        if in_string {
-            if escaped { escaped = false; }
-            else if c == '\\' { escaped = true; }
-            else if c == '"' { in_string = false; }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&reply[start..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// System prompt for drafting a probe. Enumerates the vocabulary explicitly —
-/// a model inventing an event kind produces a rule that parses and never fires.
-pub fn ai_system_prompt() -> String {
-    let events = [
-        "object_failed", "object_oom_killed", "object_health_failed",
-        "object_restart_looping", "object_stopped", "object_started",
-        "object_egress_failed", "object_egress_restored", "source_degraded",
-    ].join(", ");
-    format!(
-        "You turn a plain-English request into ONE WolfStack notification rule.\n\
-         Reply with a single JSON object and nothing else — no prose, no code fences.\n\n\
-         Schema:\n\
-         {{\n\
-           \"id\": string (short slug),\n\
-           \"name\": string (human label),\n\
-           \"enabled\": bool,\n\
-           \"scope\": \"node\" | \"cluster\",\n\
-           \"mode\": \"simple\",\n\
-           \"match\": {{\n\
-             \"events\": [ {} ],\n\
-             \"backends\": [\"docker\"],\n\
-             \"objects\": [glob strings, * wildcard],\n\
-             \"labels\": {{key: value}},\n\
-             \"nodes\": [glob strings]\n\
-           }},\n\
-           \"channels\": [\"discord\"|\"slack\"|\"telegram\"|\"ntfy\"],\n\
-           \"cooldown_secs\": integer\n\
-         }}\n\n\
-         Rules:\n\
-         - Use ONLY the event names listed. Never invent one.\n\
-         - An empty array means \"match anything\", so leave it empty rather than guessing.\n\
-         - \"mode\" must be \"simple\": advanced conditions are not implemented yet.\n\
-         - Default cooldown_secs to 900 unless the request implies otherwise.\n\
-         - If the request does not name channels, leave \"channels\" empty (all configured channels).",
-        events
-    )
-}
-
-/// Draft a rule from a description. Returns the rule for the operator to
-/// review — deliberately NOT saved. An auto-installed rule that quietly
-/// matches nothing is the worst outcome this subsystem can produce.
-pub async fn ai_draft_rule(description: &str) -> Result<NotifyRule, String> {
-    let cfg = crate::ai::AiConfig::load();
-    let reply = crate::ai::simple_chat(&cfg, &ai_system_prompt(), &[], description).await?;
-    let json = extract_json_object(&reply)
-        .ok_or_else(|| format!("the model did not return JSON: {}", reply.chars().take(160).collect::<String>()))?;
-    let mut rule: NotifyRule = serde_json::from_str(json)
-        .map_err(|e| format!("drafted rule did not fit the schema ({}): {}", e, json))?;
-    // Never let the model decide these two.
-    rule.mode = Mode::Simple;
-    if rule.id.trim().is_empty() {
-        rule.id = format!("probe-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    }
-    Ok(rule)
-}
-
-#[cfg(test)]
-mod ai_tests {
-    use super::*;
-
-    #[test]
-    fn extracts_bare_json() {
-        assert_eq!(extract_json_object(r#"{"a":1}"#), Some(r#"{"a":1}"#));
-    }
-
-    #[test]
-    fn extracts_json_from_code_fences_and_prose() {
-        // The two most common ways a model ignores "JSON only".
-        let reply = "Here's the rule:\n```json\n{\"name\":\"db\"}\n```\nHope that helps!";
-        assert_eq!(extract_json_object(reply), Some(r#"{"name":"db"}"#));
-    }
-
-    #[test]
-    fn handles_nested_objects() {
-        let reply = r#"{"match":{"labels":{"tier":"prod"}},"id":"x"}"#;
-        assert_eq!(extract_json_object(reply), Some(reply));
-    }
-
-    #[test]
-    fn a_brace_inside_a_string_does_not_truncate() {
-        // A rule named `db {prod}` would otherwise cut the parse short and
-        // produce a confusing schema error instead of a working rule.
-        let reply = r#"{"name":"db {prod}","id":"x"}"#;
-        assert_eq!(extract_json_object(reply), Some(reply));
-    }
-
-    #[test]
-    fn an_escaped_quote_does_not_confuse_the_scanner() {
-        let reply = r#"{"name":"say \"hi\"","id":"x"}"#;
-        assert_eq!(extract_json_object(reply), Some(reply));
-    }
-
-    #[test]
-    fn returns_none_when_there_is_no_json() {
-        assert!(extract_json_object("I'm sorry, I can't do that.").is_none());
-        assert!(extract_json_object("{unterminated").is_none());
-    }
-
-    #[test]
-    fn the_prompt_lists_every_event_kind() {
-        // A model that invents an event name yields a rule that parses and
-        // never fires, so the vocabulary must be stated in full.
-        let p = ai_system_prompt();
-        for e in ["object_failed", "object_oom_killed", "object_restart_looping",
-                  "object_egress_failed", "source_degraded"] {
-            assert!(p.contains(e), "prompt is missing {}", e);
-        }
-    }
-}
 
 /// Poll LXC, libvirt and Proxmox for state changes.
 ///
@@ -899,4 +754,137 @@ pub async fn run_poll_sources(node: String) {
             prev.insert(backend, now_map);
         }
     }
+}
+
+/// Create a probe from an AI tool call and persist it **docked**.
+///
+/// The approval gate in a chat context. In the bay, an AI draft opens in the
+/// editor and only exists if the operator saves it; there is no editor in a
+/// chat, so the equivalent is to save it disabled. The operator sees it in the
+/// Probe Bay, checks what it watches, and launches it deliberately.
+///
+/// Saving it live would mean a sentence typed into a chat window silently
+/// arms fleet-wide notifications — and an AI-invented rule that matches nothing
+/// looks deployed while never firing.
+pub fn create_probe_docked(
+    name: &str,
+    events: Vec<String>,
+    backends: Vec<String>,
+    objects: Vec<String>,
+    nodes: Vec<String>,
+    channels: Vec<String>,
+    cooldown_minutes: Option<u64>,
+) -> Result<NotifyRule, String> {
+    if name.trim().is_empty() {
+        return Err("a probe needs a name".into());
+    }
+    // Unknown event names are dropped rather than stored: a rule carrying an
+    // invented event parses fine and then never matches anything, which is the
+    // worst outcome this subsystem has.
+    let parsed_events: Vec<EventKind> = events.iter()
+        .filter_map(|e| serde_json::from_value(serde_json::Value::String(e.clone())).ok())
+        .collect();
+    if !events.is_empty() && parsed_events.is_empty() {
+        return Err(format!(
+            "none of those event names exist: {}. Valid: object_failed, object_stopped, \
+             object_started, object_oom_killed, object_health_failed, \
+             object_restart_looping, object_egress_failed, source_degraded",
+            events.join(", ")
+        ));
+    }
+    let parsed_channels: Vec<crate::alerting::Channel> = channels.iter()
+        .filter_map(|c| serde_json::from_value(serde_json::Value::String(c.to_lowercase())).ok())
+        .collect();
+
+    let rule = NotifyRule {
+        id: format!("probe-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        name: name.trim().to_string(),
+        enabled: false,          // docked until the operator launches it
+        scope: if nodes.iter().any(|n| n == "*") { Scope::Cluster } else { Scope::Node },
+        mode: Mode::Simple,
+        match_spec: MatchSpec {
+            events: parsed_events,
+            backends,
+            objects,
+            labels: HashMap::new(),
+            nodes,
+        },
+        channels: parsed_channels,
+        cooldown_secs: cooldown_minutes.unwrap_or(15) * 60,
+        run_flow: None,
+    };
+
+    let mut store = NotifyRules::load();
+    store.rules.push(rule.clone());
+    store.save()?;
+    Ok(rule)
+}
+
+/// Human summary of a probe, for the chat reply.
+pub fn describe_rule(r: &NotifyRule) -> String {
+    let objects = if r.match_spec.objects.is_empty() { "anything".to_string() }
+                  else { r.match_spec.objects.join(", ") };
+    let kinds = if r.match_spec.backends.is_empty() { "all types".to_string() }
+                else { r.match_spec.backends.join(", ") };
+    let events = if r.match_spec.events.is_empty() { "any event".to_string() }
+                 else { r.match_spec.events.iter().map(|e| e.label()).collect::<Vec<_>>().join(", ") };
+    let channels = if r.channels.is_empty() { "every configured channel".to_string() }
+                   else { r.channels.iter()
+                            .map(|c| format!("{:?}", c).to_lowercase())
+                            .collect::<Vec<_>>().join(", ") };
+    format!(
+        "**{}** — watches {} ({}), reports {}, signals {}. Quiet {} min per object after firing.",
+        r.name, objects, kinds, events, channels, r.cooldown_secs / 60
+    )
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+
+    #[test]
+    fn an_invented_event_name_is_rejected_not_stored() {
+        // The failure that matters: a rule carrying a hallucinated event parses
+        // fine and then never matches anything, looking deployed for ever.
+        let e = create_probe_docked(
+            "bad", vec!["container_exploded".into()], vec![], vec![], vec![], vec![], None,
+        ).unwrap_err();
+        assert!(e.contains("none of those event names exist"), "{}", e);
+    }
+
+    #[test]
+    fn a_probe_needs_a_name() {
+        assert!(create_probe_docked("   ", vec![], vec![], vec![], vec![], vec![], None).is_err());
+    }
+
+    #[test]
+    fn describe_rule_states_what_it_watches() {
+        let r = NotifyRule {
+            id: "x".into(), name: "DBs".into(), enabled: false,
+            scope: Scope::Node, mode: Mode::Simple,
+            match_spec: MatchSpec {
+                events: vec![EventKind::ObjectFailed],
+                backends: vec!["docker".into()],
+                objects: vec!["*-db".into()],
+                labels: HashMap::new(), nodes: vec![],
+            },
+            channels: vec![crate::alerting::Channel::Email],
+            cooldown_secs: 900, run_flow: None,
+        };
+        let d = describe_rule(&r);
+        assert!(d.contains("*-db"), "{}", d);
+        assert!(d.contains("docker"), "{}", d);
+        assert!(d.contains("email"), "{}", d);
+        assert!(d.contains("15 min"), "{}", d);
+    }
+}
+
+/// This node's name, as events and rules refer to it.
+pub fn local_node_name() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }

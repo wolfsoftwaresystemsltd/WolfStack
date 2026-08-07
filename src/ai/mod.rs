@@ -928,6 +928,7 @@ impl AiAgent {
             let has_exec        = response.contains("[EXEC]")          && response.contains("[/EXEC]");
             let has_exec_all    = response.contains("[EXEC_ALL]")      && response.contains("[/EXEC_ALL]");
             let has_wolfnote    = response.contains("[WOLFNOTE")       && response.contains("[/WOLFNOTE]");
+            let has_probe       = response.contains("[PROBE]")         && response.contains("[/PROBE]");
             let has_websearch   = response.contains("[WEBSEARCH")      && response.contains("[/WEBSEARCH]");
             let has_fetch       = response.contains("[FETCH")          && response.contains("[/FETCH]");
             let has_audit       = response.contains("[SECURITY_AUDIT]") && response.contains("[/SECURITY_AUDIT]");
@@ -939,6 +940,11 @@ impl AiAgent {
                     final_response = execute_wolfnote_tags(&response).await;
                 } else {
                     final_response = response;
+                }
+                // Probe creation is fire-and-forget like WolfNote — no tool
+                // loop needed, and it must run whether or not a note was made.
+                if has_probe {
+                    final_response = execute_probe_tags(&final_response);
                 }
                 break;
             }
@@ -2254,6 +2260,46 @@ pub fn log_action_audit(action: &AiAction, event: &str, user: &str, output: &str
 
 // ─── WolfNote Tag Handler ───
 
+/// Parse and execute [PROBE]{json}[/PROBE] tags — the AI creating a WolfNotify
+/// probe from a plain-English request.
+///
+/// The probe is saved DOCKED, and the reply says so. Creating it live would let
+/// a sentence typed into a chat silently arm fleet-wide notifications, and an
+/// AI-invented rule that matches nothing looks deployed while never firing.
+fn execute_probe_tags(response: &str) -> String {
+    let mut result = response.to_string();
+    loop {
+        let start = match result.find("[PROBE]") { Some(i) => i, None => break };
+        let end = match result[start..].find("[/PROBE]") { Some(i) => start + i, None => break };
+        let json = result[start + 7..end].trim().to_string();
+
+        let replacement = match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(v) => {
+                let arr = |k: &str| -> Vec<String> {
+                    v.get(k).and_then(|x| x.as_array())
+                        .map(|a| a.iter().filter_map(|i| i.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default()
+                };
+                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                let cooldown = v.get("cooldown_minutes").and_then(|x| x.as_u64());
+                match crate::notify::create_probe_docked(
+                    name, arr("events"), arr("backends"), arr("objects"),
+                    arr("nodes"), arr("channels"), cooldown,
+                ) {
+                    Ok(rule) => format!(
+                        "✅ Probe created — **docked**, not yet live.\n\n{}\n\nOpen **Apps & Tools → Probe Bay** and press **Launch** when you're happy with it.",
+                        crate::notify::describe_rule(&rule)
+                    ),
+                    Err(e) => format!("⚠️ Could not create that probe: {}", e),
+                }
+            }
+            Err(e) => format!("⚠️ Could not create that probe (malformed arguments: {})", e),
+        };
+        result.replace_range(start..end + 8, &replacement);
+    }
+    result
+}
+
 /// Parse and execute [WOLFNOTE title="..."]content[/WOLFNOTE] tags in an AI response.
 /// Returns the response with tags replaced by confirmation text.
 async fn execute_wolfnote_tags(response: &str) -> String {
@@ -2528,6 +2574,7 @@ const MAIN_AI_TOOLS: &[&str] = &[
     "security_audit",
     "wolfnote_create",
     "propose_action",
+    "create_probe",
 ];
 
 fn openai_tools_schema() -> serde_json::Value {
@@ -2543,6 +2590,46 @@ fn openai_tools_schema() -> serde_json::Value {
                         "command": { "type": "string", "description": "The shell command to run." }
                     },
                     "required": ["command"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_probe",
+                "description": "Create a WolfNotify probe that watches containers or VMs and signals the operator when something happens (e.g. a container stops, is OOM-killed, restart-loops, or goes unhealthy). Use this whenever the user asks to be told/notified/alerted about containers or VMs going down. The probe is created DOCKED — visible in the Probe Bay but not live until the operator launches it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Short human label, e.g. 'Production databases'." },
+                        "events": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["object_failed","object_stopped","object_started","object_oom_killed","object_health_failed","object_restart_looping","object_egress_failed","source_degraded"] },
+                            "description": "Which events to report. Empty = all of them. Use ONLY these names."
+                        },
+                        "backends": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["docker","lxc","libvirt","pve"] },
+                            "description": "Which kinds to watch. Empty = every kind."
+                        },
+                        "objects": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Container/VM names, or globs such as *-db. Empty = everything."
+                        },
+                        "nodes": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Node names, or [\"*\"] for the whole fleet. Empty = this node only."
+                        },
+                        "channels": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["discord","slack","telegram","ntfy","email"] },
+                            "description": "Where to signal. Empty = every configured channel."
+                        },
+                        "cooldown_minutes": { "type": "integer", "description": "Silence per object after firing. Default 15." }
+                    },
+                    "required": ["name"]
                 }
             }
         },
@@ -2664,6 +2751,11 @@ fn tool_call_to_bracket(name: &str, args: &serde_json::Value) -> Option<String> 
         "web_search"  => { let q = s("query");   if q.is_empty() { None } else { Some(format!("[WEBSEARCH query=\"{}\"][/WEBSEARCH]", q.replace('"', "\\\""))) } },
         "fetch_url"   => { let u = s("url");     if u.is_empty() { None } else { Some(format!("[FETCH url=\"{}\"][/FETCH]", u.replace('"', "\\\""))) } },
         "security_audit" => Some("[SECURITY_AUDIT][/SECURITY_AUDIT]".to_string()),
+        "create_probe" => {
+            let name = s("name");
+            if name.is_empty() { None }
+            else { Some(format!("[PROBE]{}[/PROBE]", args)) }
+        },
         "wolfnote_create" => {
             let title = s("title");
             let content = s("content");

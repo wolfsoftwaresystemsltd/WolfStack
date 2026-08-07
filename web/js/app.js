@@ -80355,6 +80355,7 @@ window.fleetMenuBarInit = fleetMenuBarInit;
 // ═══════════════════════════════════════════════════════════════
 
 let probeRules = { rules: [], version: 0 };
+let probeTargets = { self_node: '', nodes: [], objects: [] };
 
 const PROBE_EVENTS = [
     ['object_failed',          'Exited with an error'],
@@ -80455,12 +80456,8 @@ function renderProbeBay() {
             <div class="bay-stat"><span class="n">${deployed}</span><span class="l">deployed</span></div>
             <div class="bay-stat"><span class="n">${docked}</span><span class="l">docked</span></div>
             <div class="bay-stat"><span class="n">${rules.length}</span><span class="l">probes built</span></div>
-            <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                <input id="probe-ai-desc" type="text" placeholder="Describe a probe: &quot;tell me if any -db container dies&quot;"
-                       aria-label="Describe the probe you want"
-                       style="min-width:280px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:.84rem;"
-                       onkeydown="if(event.key==='Enter'){probeAiDraft();}">
-                <button class="btn" onclick="probeAiDraft()" id="probe-ai-btn">Draft with AI</button>
+            <div style="margin-left:auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <span style="font-size:.78rem;color:var(--text-muted);">Ask the AI chat to build one — e.g. &ldquo;tell me if any db container stops&rdquo;</span>
                 <button class="btn btn-primary" onclick="probeEdit(null)">Build a probe</button>
             </div>`;
     }
@@ -80584,45 +80581,6 @@ async function probeSave() {
     }
 }
 
-/** Draft a probe from plain English. The result is opened for review, never
- *  saved directly — an auto-installed rule that quietly matches nothing looks
- *  deployed and never fires, which is the worst outcome here. */
-async function probeAiDraft() {
-    const input = document.getElementById('probe-ai-desc');
-    const btn = document.getElementById('probe-ai-btn');
-    const description = (input?.value || '').trim();
-    if (!description) {
-        showToast('Describe what the probe should watch first', 'error');
-        input?.focus();
-        return;
-    }
-    // Visible progress: the model call takes seconds, and a dead-looking
-    // button invites a second click and a second bill.
-    const restore = btn ? btn.textContent : '';
-    if (btn) { btn.disabled = true; btn.textContent = 'Drafting…'; }
-    probeAnnounce('Drafting a probe with AI');
-    try {
-        const resp = await fetch(apiUrl('/api/notify/ai-draft'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ description }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-        // Open for review WITHOUT adding it to the bay: an unapproved draft
-        // must not appear as a live probe, and cancelling must leave nothing
-        // behind.
-        probeEdit(null, data.rule);
-        showToast('Drafted — check what it watches, then save', 'info');
-        if (input) input.value = '';
-    } catch (e) {
-        showToast(`Could not draft a probe: ${e.message}`, 'error');
-        probeAnnounce('Drafting failed');
-    } finally {
-        if (btn) { btn.disabled = false; btn.textContent = restore; }
-    }
-}
-
 function probeModalClose() {
     if (window.__probeModalEl) { window.__probeModalEl.remove(); window.__probeModalEl = null; }
 }
@@ -80630,7 +80588,14 @@ function probeModalClose() {
 /** Build/configure a probe. `i` is null for a new one; `draft` supplies a
  *  pre-filled rule (from AI) WITHOUT adding it to the bay — it only lands in
  *  the list if the operator saves it. */
-function probeEdit(i, draft) {
+async function probeEdit(i, draft) {
+    // Load what this node actually has, so the picker shows real containers
+    // rather than asking the operator to remember names.
+    try {
+        const resp = await fetch(apiUrl('/api/notify/targets'));
+        if (resp.ok) probeTargets = await resp.json();
+    } catch (_) { /* picker degrades to pattern-only, which still works */ }
+
     const isNew = (i === null || i === undefined);
     const r = draft ? draft : isNew ? {
         id: 'probe-' + Math.random().toString(36).slice(2, 10),
@@ -80640,6 +80605,28 @@ function probeEdit(i, draft) {
     } : JSON.parse(JSON.stringify(probeRules.rules[i]));
 
     const m = r.match || {};
+    // Ticked names are stored in match.objects alongside any patterns, so an
+    // existing rule's exact names come back ticked and its globs stay in the
+    // pattern box.
+    const chosen = new Set((m.objects || []).filter(o => !o.includes('*')));
+    const patterns = (m.objects || []).filter(o => o.includes('*'));
+
+    const objChecks = probeTargets.objects.map(o => `
+        <label class="probe-obj-row" data-name="${escapeHtml(o.name.toLowerCase())}"
+               style="display:flex;align-items:center;gap:7px;font-size:.8rem;padding:2px 3px;cursor:pointer;">
+            <input type="checkbox" class="probe-obj" value="${escapeHtml(o.name)}" ${chosen.has(o.name) ? 'checked' : ''}>
+            <span style="flex:1;">${escapeHtml(o.name)}</span>
+            <span style="color:var(--text-muted);font-size:.9em;">${escapeHtml(o.backend)}</span>
+            <span style="color:${/running|up/i.test(o.state||'') ? 'var(--success)' : 'var(--text-muted)'};font-size:.9em;">${escapeHtml(o.state || '')}</span>
+        </label>`).join('');
+
+    const pickedNodes = new Set((m.nodes || []).filter(n => n !== '*'));
+    const nodeChecks = (probeTargets.nodes || []).map(n => `
+        <label style="display:block;font-size:.82rem;padding:2px 3px;cursor:pointer;">
+            <input type="checkbox" class="probe-node" value="${escapeHtml(n.name)}" ${pickedNodes.has(n.name) ? 'checked' : ''}>
+            ${escapeHtml(n.name)}
+        </label>`).join('') || '<div style="color:var(--text-muted);font-size:.8rem;">No other nodes known.</div>';
+
     const bkChecks = PROBE_BACKENDS.map(([val, label, cadence]) => `
         <label style="display:block;font-size:.84rem;margin-bottom:5px;cursor:pointer;">
             <input type="checkbox" class="probe-bk" value="${val}" ${(m.backends||[]).includes(val) ? 'checked' : ''}>
@@ -80665,10 +80652,33 @@ function probeEdit(i, draft) {
         <input id="probe-name" type="text" value="${escapeHtml(r.name)}" placeholder="e.g. Production databases"
                style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);margin-bottom:14px;">
 
-        <label style="display:block;font-weight:600;margin-bottom:4px;">Watch these containers</label>
-        <input id="probe-objects" type="text" value="${escapeHtml((m.objects||[]).join(', '))}" placeholder="* or  *-db, postgres"
-               style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);">
-        <div style="font-size:.75rem;color:var(--text-muted);margin:4px 0 14px;">Comma separated. <code>*</code> matches anything; <code>*-db</code> matches names ending in <code>-db</code>. Leave blank for everything.</div>
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Which nodes</legend>
+          <label style="font-size:.84rem;margin-right:14px;cursor:pointer;"><input type="radio" name="probe-nodescope" value="this" onchange="probeNodeScopeChanged()" ${(!m.nodes || !m.nodes.length) ? 'checked' : ''}> This node</label>
+          <label style="font-size:.84rem;margin-right:14px;cursor:pointer;"><input type="radio" name="probe-nodescope" value="fleet" onchange="probeNodeScopeChanged()" ${(m.nodes||[]).includes('*') ? 'checked' : ''}> Whole fleet</label>
+          <label style="font-size:.84rem;cursor:pointer;"><input type="radio" name="probe-nodescope" value="pick" onchange="probeNodeScopeChanged()" ${((m.nodes||[]).length && !(m.nodes||[]).includes('*')) ? 'checked' : ''}> Choose nodes</label>
+          <div id="probe-nodelist" style="margin-top:8px;max-height:120px;overflow:auto;${((m.nodes||[]).length && !(m.nodes||[]).includes('*')) ? '' : 'display:none;'}">
+            ${nodeChecks}
+          </div>
+        </fieldset>
+
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+          <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Which containers / VMs</legend>
+          <input id="probe-objfilter" type="text" placeholder="Filter ${probeTargets.objects.length} on this node…"
+                 oninput="probeFilterObjects()" aria-label="Filter objects"
+                 style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:.82rem;margin-bottom:6px;">
+          <div id="probe-objlist" style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px;">
+            ${objChecks || '<div style="color:var(--text-muted);font-size:.8rem;padding:4px;">Nothing found on this node.</div>'}
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
+            <button type="button" class="btn" style="font-size:.74rem;padding:4px 8px;" onclick="probeSuggestPattern()">Turn selection into a pattern</button>
+            <span style="font-size:.72rem;color:var(--text-muted);">for rules that should cover future containers too</span>
+          </div>
+          <label style="display:block;margin-top:8px;font-size:.78rem;color:var(--text-secondary);">Or match by pattern</label>
+          <input id="probe-objects" type="text" value="${escapeHtml(patterns.join(', '))}" placeholder="e.g.  *-db, postgres"
+                 style="width:100%;padding:7px 9px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:.82rem;">
+          <div style="font-size:.72rem;color:var(--text-muted);margin-top:4px;">Ticked names and patterns are combined. Both empty = watch everything.</div>
+        </fieldset>
 
         <fieldset style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
           <legend style="padding:0 6px;font-size:.82rem;font-weight:600;">Watch which kind</legend>
@@ -80689,11 +80699,6 @@ function probeEdit(i, draft) {
         </fieldset>
 
         <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;">
-          <div>
-            <label style="display:block;font-weight:600;margin-bottom:4px;font-size:.86rem;">Scope</label>
-            <label style="font-size:.84rem;margin-right:12px;cursor:pointer;"><input type="radio" name="probe-scope" value="node" ${r.scope !== 'cluster' ? 'checked' : ''}> This node</label>
-            <label style="font-size:.84rem;cursor:pointer;"><input type="radio" name="probe-scope" value="cluster" ${r.scope === 'cluster' ? 'checked' : ''}> Whole fleet</label>
-          </div>
           <div>
             <label style="display:block;font-weight:600;margin-bottom:4px;font-size:.86rem;">Stay quiet for</label>
             <input id="probe-cooldown" type="number" min="0" step="1" value="${Math.round((r.cooldown_secs ?? 900)/60)}"
@@ -80731,12 +80736,26 @@ async function probeEditSave(i) {
     }
     r.name = name;
     r.match = r.match || {};
-    r.match.objects = (document.getElementById('probe-objects')?.value || '')
+    // Ticked exact names + typed patterns, de-duplicated.
+    const tickedObjs = Array.from(document.querySelectorAll('.probe-obj:checked')).map(el => el.value);
+    const typedPatterns = (document.getElementById('probe-objects')?.value || '')
         .split(',').map(s => s.trim()).filter(Boolean);
+    r.match.objects = [...new Set([...tickedObjs, ...typedPatterns])];
+
+    const nodeScope = document.querySelector('input[name="probe-nodescope"]:checked')?.value || 'this';
+    if (nodeScope === 'fleet') {
+        r.match.nodes = ['*'];
+        r.scope = 'cluster';
+    } else if (nodeScope === 'pick') {
+        r.match.nodes = Array.from(document.querySelectorAll('.probe-node:checked')).map(el => el.value);
+        r.scope = 'cluster';
+    } else {
+        r.match.nodes = [];
+        r.scope = 'node';
+    }
     r.match.events = Array.from(document.querySelectorAll('.probe-ev:checked')).map(el => el.value);
     r.match.backends = Array.from(document.querySelectorAll('.probe-bk:checked')).map(el => el.value);
     r.channels = Array.from(document.querySelectorAll('.probe-ch:checked')).map(el => el.value);
-    r.scope = document.querySelector('input[name="probe-scope"]:checked')?.value || 'node';
     const mins = parseInt(document.getElementById('probe-cooldown')?.value, 10);
     r.cooldown_secs = Number.isFinite(mins) && mins >= 0 ? mins * 60 : 900;
 
