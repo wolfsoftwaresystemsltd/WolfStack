@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.10.27: migration name clashes ask for a rename up front — with zero downtime** _(2026-08-08 — [`e2ce6703`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e2ce6703de9a8f56307ac60e6880f90cf360e634))_
 - **v25.10.26: migrated LXCs arrive named, limited and on the right network** _(2026-08-08 — [`83210e16`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/83210e160d3070f7b388c9b8a7f92fccf2e48ee7))_
 - **v25.10.25: migrated containers keep their registry lineage and their network** _(2026-08-07 — [`1f44c6b4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1f44c6b4f3b468ce1945e98d905b19dfd3e347ba))_
 - **v25.10.24: undefined-name UI bugs can no longer ship, and L2-only VLANs actually work** _(2026-08-07 — [`36e6eca5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/36e6eca51b7ecbf86c3151273d2bde3e2c2b726c))_
