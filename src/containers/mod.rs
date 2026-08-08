@@ -11534,7 +11534,10 @@ pub fn lxc_import(
         let container_dir = format!("{}/{}", LXC_DEFAULT_PATH, new_name);
         let rootfs_target = format!("{}/rootfs", container_dir);
         if std::path::Path::new(&container_dir).exists() {
-            return Err(format!("Container '{}' already exists", new_name));
+            return Err(format!(
+                "Container '{}' already exists on this node — re-run with a different Destination name to import it alongside",
+                new_name
+            ));
         }
 
         std::fs::create_dir_all(&rootfs_target)
@@ -11571,6 +11574,20 @@ pub fn lxc_import(
             }
         }
     }
+}
+
+/// Would an import under `new_name` collide on THIS node? Mirrors
+/// `lxc_import`'s own collision rule exactly: native imports land in
+/// `LXC_DEFAULT_PATH/<name>` and refuse an existing dir; Proxmox
+/// destinations get a fresh VMID and allow duplicate hostnames, so a
+/// name is never "taken" there. Used by the migrate orchestrators to
+/// fail BEFORE the upload (RutgerDiehard 2026-08-08: "shouldn't we ask
+/// the user for a different name rather than blocking?").
+pub fn lxc_import_name_taken(new_name: &str) -> bool {
+    if is_proxmox() {
+        return false;
+    }
+    std::path::Path::new(&format!("{}/{}", LXC_DEFAULT_PATH, new_name)).exists()
 }
 
 /// Clean up export files after transfer
