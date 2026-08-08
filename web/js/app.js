@@ -4272,6 +4272,9 @@ function buildServerTree(nodes) {
                 <a class="nav-item server-child-item cluster-backups-item" data-cluster="${escapedName}" data-view="cluster-backups" onclick="showClusterBackupsPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon ws-icon-clean-wrap" data-icon="save" style="font-size:15px;"></span> <span style="font-weight:600;">Backups</span>
                 </a>
+                <a class="nav-item server-child-item wolfha-cluster-item" data-cluster="${escapedName}" data-view="wolfha" onclick="showWolfHaPage('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
+                    <span class="icon ws-icon-clean-wrap" data-icon="health" style="font-size:15px;"></span> <span style="font-weight:600;">WolfHA</span>
+                </a>
 
                 <a class="nav-item server-child-item shares-cluster-item" data-cluster="${escapedName}" data-view="shares-cluster" onclick="showSharesForCluster('${escapedName}')" style="margin-left: 8px; padding: 0 10px; line-height:1.4; display:flex; align-items:center; gap:5px;">
                     <span class="icon ws-icon-clean-wrap" data-icon="folder-open" style="font-size:15px;"></span> <span style="font-weight:600;">Shares</span>
@@ -27743,10 +27746,11 @@ function lxcCardHtml(c, s) {
         const diskPct = hasStorage ? Math.round((c.disk_usage / c.disk_total) * 100) : 0;
         const diskColor = diskPct > 90 ? '#ef4444' : diskPct > 70 ? '#f59e0b' : '#10b981';
 
-        const svcItems = (c.services && c.services.length > 0) ? c.services.map(sv => {
+        const svcItems = ((c.ha_replica ? `<span title="WolfHA standby — promote it from the WolfHA page; do not start it by hand." style="font-size:9px;padding:1px 4px;border-radius:2px;background:#22c55e22;color:#22c55e;">HA standby</span> ` : '') +
+            ((c.services && c.services.length > 0) ? c.services.map(sv => {
             const sColor = sv.status === 'running' ? '#10b981' : '#ef4444';
             return `<span style="font-size:9px;padding:1px 4px;border-radius:2px;background:${sColor}22;color:${sColor};">${sv.name}</span>`;
-        }).join(' ') : '';
+        }).join(' ') : ''));
 
         const pies = [];
         if (cpuPct >= 0) pies.push(`<div style="text-align:center;flex:1;" title="${escapeHtml(cpu.title)}">${svgPie(cpuPct, cpuColor, 64)}<div style="font-size:9px;color:var(--text-muted);">CPU</div></div>`);
@@ -29130,7 +29134,8 @@ function renderLxcContainers(containers, stats) {
             const sColor = s.status === 'running' ? '#10b981' : '#ef4444';
             return `<span style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:${sColor}22;color:${sColor};border:1px solid ${sColor}44;">${s.name}</span>`;
         }).join('') : '';
-        const lxcBadgeRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;">${lxcSvcItems}<span data-update-badge="lxc:${c.name}"></span></div>`;
+        const haBadge = c.ha_replica ? `<span title="WolfHA standby — a stopped replica kept in sync from its primary node. Promote it from the WolfHA page; do not start it by hand." style="display:inline-block;font-size:10px;padding:1px 6px;border-radius:3px;background:#22c55e22;color:#22c55e;border:1px solid #22c55e44;">HA standby</span>` : '';
+        const lxcBadgeRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:3px;">${haBadge}${lxcSvcItems}<span data-update-badge="lxc:${c.name}"></span></div>`;
 
         return `<tr data-name="${escapeAttr(c.name)}">
             <td><strong>${c.hostname || c.name}</strong>${lxcBadgeRow}${c.hostname ? `<div style="font-size:11px;color:var(--text-muted);">CT ${c.name}</div>` : ''}</td>
@@ -81144,4 +81149,374 @@ async function probeEditSave(i) {
         probeAnnounce(`Probe ${r.name} saved`);
         renderProbeBay();
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WolfHA — manual high availability (cluster-level page)
+// ═══════════════════════════════════════════════════════════════════
+
+let wolfHaCurrentCluster = null;
+let _wolfHaRefreshTimer = null;
+
+function showWolfHaPage(clusterName) {
+    closeSidebarMobile();
+    wolfHaCurrentCluster = clusterName;
+    currentPage = 'wolfha';
+    currentNodeId = null;
+    currentComponent = null;
+    document.querySelectorAll('.page-view').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-wolfha');
+    if (el) el.style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const item = document.querySelector(`.wolfha-cluster-item[data-cluster="${clusterName}"]`);
+    if (item) item.classList.add('active');
+    document.getElementById('page-title').textContent = `WolfHA — ${clusterName}`;
+    loadWolfHa();
+    clearInterval(_wolfHaRefreshTimer);
+    _wolfHaRefreshTimer = setInterval(() => {
+        if (currentPage !== 'wolfha') { clearInterval(_wolfHaRefreshTimer); return; }
+        loadWolfHa();
+    }, 30000);
+}
+
+function wolfHaAge(unixSecs) {
+    if (!unixSecs) return 'never';
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+    if (s < 90) return `${s}s ago`;
+    if (s < 5400) return `${Math.round(s / 60)}m ago`;
+    if (s < 172800) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+}
+
+async function loadWolfHa() {
+    const listEl = document.getElementById('wolfha-list');
+    if (!listEl) return;
+    const nodes = getClusterNodes(wolfHaCurrentCluster).filter(n => n.online);
+    const results = await Promise.allSettled(nodes.map(async (node) => {
+        const resp = await fetch(nodeApiUrl(node.id, '/api/wolfha/list'));
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        return { node, entries: data.entries || [] };
+    }));
+
+    // Group by container: one card per protected container, rows per copy.
+    const byContainer = {};
+    results.forEach(r => {
+        if (r.status !== 'fulfilled') return;
+        r.value.entries.forEach(e => {
+            (byContainer[e.container] = byContainer[e.container] || []).push({ ...e, _node: r.value.node });
+        });
+    });
+
+    const names = Object.keys(byContainer).sort();
+    if (names.length === 0) {
+        listEl.innerHTML = '<p style="color:var(--text-muted); font-size:13px;">No protected containers yet. Click <strong>+ Protect a container</strong> to replicate an LXC container to standby nodes.</p>';
+        return;
+    }
+
+    listEl.innerHTML = names.map(name => {
+        const copies = byContainer[name];
+        const primary = copies.find(c => c.role === 'primary' && !c.stale);
+        const rows = copies.map(c => {
+            const nodeName = c._node.hostname || c._node.id;
+            const roleBadge = c.role === 'primary' && !c.stale
+                ? '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:#22c55e22;color:#22c55e;border:1px solid #22c55e44;">PRIMARY</span>'
+                : c.stale
+                    ? '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b44;" title="This copy missed changes while a takeover happened — it catches up automatically from the active node.">STALE</span>'
+                    : '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:#3b82f622;color:#93c5fd;border:1px solid #3b82f644;">STANDBY</span>';
+            const state = c.active
+                ? '<span style="color:#22c55e;">running</span>'
+                : '<span style="color:var(--text-muted);">stopped</span>';
+            const autoBadge = c.auto_failover
+                ? `<span title="Automatic failover on — witness ${vlanEsc(c.witness || '?')}, promotes after ${c.failover_after_secs || 90}s" style="font-size:10px;padding:1px 6px;border-radius:3px;background:#a855f722;color:#c084fc;border:1px solid #a855f744;">AUTO</span>`
+                : '';
+            let detail = '';
+            if (c.role === 'primary' && !c.stale) {
+                const syncs = (c.replicas || []).map(r => {
+                    const s = (c.last_sync || {})[r.node_id];
+                    if (!s) return `${vlanEsc(r.node_id)}: <span style="color:var(--text-muted);">not synced yet</span>`;
+                    const col = s.ok ? '#22c55e' : '#ef4444';
+                    return `${vlanEsc(r.node_id)}: <span style="color:${col};" title="${vlanEsc(s.message)}">${s.ok ? wolfHaAge(s.at) : 'FAILED — ' + vlanEsc(s.message)}</span>`;
+                });
+                detail = `sync every ${c.interval_minutes} min · ${syncs.join(' · ') || 'no replicas'}`;
+            } else {
+                detail = `last delta ${wolfHaAge(c.last_delta_at)}`;
+            }
+            let actions = '';
+            if (c.role === 'primary' && !c.stale) {
+                actions = `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;" onclick="wolfHaSyncNow('${vlanEsc(c._node.id)}', '${vlanEsc(name)}')">Sync now</button>
+                    <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;" onclick='wolfHaOpenSettings(${JSON.stringify(c._node.id)}, ${JSON.stringify(name)}, ${JSON.stringify({interval_minutes: c.interval_minutes, auto_failover: !!c.auto_failover, witness: c.witness || "", failover_after_secs: c.failover_after_secs || 90})})'>Settings</button>
+                    <button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px;" onclick="wolfHaDisable('${vlanEsc(c._node.id)}', '${vlanEsc(name)}')">Disable HA</button>`;
+            } else {
+                const label = primary ? 'Promote (failover)' : 'Promote — primary is gone';
+                actions = `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:#f59e0b;color:#111;border-color:#f59e0b;" onclick="wolfHaPromote('${vlanEsc(c._node.id)}', '${vlanEsc(name)}', ${primary ? 'true' : 'false'})">${label}</button>`;
+            }
+            return `<div style="display:flex;align-items:center;gap:10px;padding:6px 10px;background:var(--bg-tertiary);border-radius:6px;margin-top:4px;font-size:12px;flex-wrap:wrap;">
+                <strong style="min-width:120px;">${vlanEsc(nodeName)}</strong>
+                ${roleBadge}${autoBadge}
+                <span>${state}</span>
+                <span style="color:var(--text-muted);flex:1;min-width:200px;">${detail}</span>
+                <span style="display:flex;gap:6px;">${actions}</span>
+            </div>`;
+        }).join('');
+        const warn = primary ? '' :
+            '<div style="margin-top:6px;font-size:11px;color:#f59e0b;">No active primary is reachable for this container — promote the freshest standby to bring it back.</div>';
+        return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:var(--bg-secondary);">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span style="font-weight:700;">${vlanEsc(name)}</span>
+                <span style="font-size:10px;color:var(--text-muted);">${copies.length} cop${copies.length === 1 ? 'y' : 'ies'}</span>
+            </div>
+            ${rows}${warn}
+        </div>`;
+    }).join('');
+}
+
+// Poll a migration-style task on a SPECIFIC node (WolfHA tasks live in
+// the memory of whichever node runs the operation).
+async function wolfHaPollTask(nodeId, taskId, label) {
+    for (let i = 0; i < 7200; i++) {
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+            const resp = await fetch(nodeApiUrl(nodeId, `/api/migration/${taskId}/status`));
+            if (!resp.ok) continue;
+            const s = await resp.json();
+            showToast(`${label}: ${s.message}`, s.completed ? (s.error ? 'error' : 'success') : 'info', s.completed ? 10000 : 4000, `wolfha-${taskId}`);
+            if (s.completed) { loadWolfHa(); return; }
+        } catch (e) { /* transient — keep polling */ }
+    }
+}
+
+async function wolfHaSyncNow(nodeId, container) {
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/wolfha/sync'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ container }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) { showToast(data.message || 'Sync started', 'info'); setTimeout(loadWolfHa, 3000); }
+        else showToast(data.error || 'Sync failed to start', 'error');
+    } catch (e) { showToast(`Sync failed: ${e.message}`, 'error'); }
+}
+
+function wolfHaPromote(nodeId, container, primaryReachable) {
+    document.getElementById('wolfha-promote-modal')?.remove();
+    const node = allNodes.find(n => n.id === nodeId);
+    const nodeName = node ? (node.hostname || node.id) : nodeId;
+    const modal = document.createElement('div');
+    modal.id = 'wolfha-promote-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    const planned = primaryReachable
+        ? '<p style="font-size:12px;color:var(--text-secondary);">The current primary is reachable: it will be <strong>stopped</strong>, push a final delta here, and demote itself — a clean, lossless handoff.</p>'
+        : '<p style="font-size:12px;color:#f59e0b;">The current primary is <strong>not reachable</strong>. This standby starts with the state of its <strong>last completed sync</strong> — changes on the primary since then are not on this copy. If the old node comes back, its copy stays stopped and marked stale.</p>';
+    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <h3 style="margin:0 0 10px;">Promote '${vlanEsc(container)}' on ${vlanEsc(nodeName)}?</h3>
+        ${planned}
+        <p style="font-size:12px;color:var(--text-secondary);">The container keeps its name, MAC and IP — DNS and clients follow automatically on a shared bridge.</p>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+            <button class="btn" onclick="document.getElementById('wolfha-promote-modal')?.remove()">Cancel</button>
+            <button class="btn" style="background:#f59e0b;color:#111;" onclick="wolfHaDoPromote('${vlanEsc(nodeId)}', '${vlanEsc(container)}')">Promote</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+async function wolfHaDoPromote(nodeId, container) {
+    document.getElementById('wolfha-promote-modal')?.remove();
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/wolfha/promote'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ container }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data.task_id) {
+            showToast(data.error || 'Promotion failed to start', 'error');
+            return;
+        }
+        showToast(`Promoting '${container}'…`, 'info', 4000, `wolfha-${data.task_id}`);
+        wolfHaPollTask(nodeId, data.task_id, `Promote '${container}'`);
+    } catch (e) { showToast(`Promotion failed: ${e.message}`, 'error'); }
+}
+
+function wolfHaDisable(nodeId, container) {
+    document.getElementById('wolfha-disable-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'wolfha-disable-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <h3 style="margin:0 0 10px;">Disable HA for '${vlanEsc(container)}'?</h3>
+        <p style="font-size:12px;color:var(--text-secondary);">Replication stops. The container keeps running on its current node.</p>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin:10px 0;">
+            <input type="checkbox" id="wolfha-disable-remove"> Also delete the standby copies on the replica nodes
+        </label>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+            <button class="btn" onclick="document.getElementById('wolfha-disable-modal')?.remove()">Cancel</button>
+            <button class="btn btn-danger" onclick="wolfHaDoDisable('${vlanEsc(nodeId)}', '${vlanEsc(container)}')">Disable</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+async function wolfHaDoDisable(nodeId, container) {
+    const remove = document.getElementById('wolfha-disable-remove')?.checked || false;
+    document.getElementById('wolfha-disable-modal')?.remove();
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/wolfha/disable'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ container, remove_replicas: remove }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) { showToast(data.message || 'HA disabled', 'success'); loadWolfHa(); }
+        else showToast(data.error || 'Disable failed', 'error');
+    } catch (e) { showToast(`Disable failed: ${e.message}`, 'error'); }
+}
+
+function wolfHaOpenSettings(nodeId, container, current) {
+    document.getElementById('wolfha-settings-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'wolfha-settings-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;min-width:380px;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <h3 style="margin:0 0 12px;">HA settings — '${vlanEsc(container)}'</h3>
+        <div style="display:flex;flex-direction:column;gap:10px;font-size:13px;">
+            <div><label style="color:var(--text-muted);">Sync interval (minutes)</label>
+                <input id="wolfha-s-interval" type="number" min="1" value="${current.interval_minutes || 5}" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;"></div>
+            <label style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="wolfha-s-auto" ${current.auto_failover ? 'checked' : ''}> <strong>Automatic failover</strong>
+            </label>
+            <div><label style="color:var(--text-muted);">Witness IP</label>
+                <input id="wolfha-s-witness" type="text" value="${vlanEsc(current.witness || '')}" placeholder="e.g. 10.0.40.1" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;"></div>
+            <div><label style="color:var(--text-muted);">Promote after primary unreachable for (seconds)</label>
+                <input id="wolfha-s-after" type="number" min="30" value="${current.failover_after_secs || 90}" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;">
+                <button class="btn" onclick="document.getElementById('wolfha-settings-modal')?.remove()">Cancel</button>
+                <button class="btn btn-primary" onclick="wolfHaSaveSettings('${vlanEsc(nodeId)}', '${vlanEsc(container)}')">Save</button>
+            </div>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+async function wolfHaSaveSettings(nodeId, container) {
+    const interval = parseInt(document.getElementById('wolfha-s-interval')?.value, 10) || 5;
+    const auto = document.getElementById('wolfha-s-auto')?.checked || false;
+    const witness = document.getElementById('wolfha-s-witness')?.value.trim() || '';
+    const after = parseInt(document.getElementById('wolfha-s-after')?.value, 10) || 90;
+    if (auto && !witness) { showToast('Automatic failover needs a witness IP', 'error'); return; }
+    document.getElementById('wolfha-settings-modal')?.remove();
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/wolfha/update'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ container, interval_minutes: interval, auto_failover: auto, witness, failover_after_secs: after }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) { showToast(data.message || 'Settings saved', 'success'); loadWolfHa(); }
+        else showToast(data.error || 'Save failed', 'error');
+    } catch (e) { showToast(`Save failed: ${e.message}`, 'error'); }
+}
+
+function wolfHaOpenProtectModal() {
+    document.getElementById('wolfha-protect-modal')?.remove();
+    _wolfHaTickOrder = [];
+    const nodes = getClusterNodes(wolfHaCurrentCluster).filter(n => n.online);
+    const modal = document.createElement('div');
+    modal.id = 'wolfha-protect-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
+    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <h3 style="margin:0 0 12px;">Protect a container</h3>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+            <div><label style="font-size:13px;color:var(--text-muted);">Node the container runs on</label>
+                <select id="wolfha-node" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;" onchange="wolfHaLoadContainers()">
+                    <option value="">— select node —</option>
+                    ${nodes.map(n => `<option value="${vlanEsc(n.id)}">${vlanEsc(n.hostname || n.id)}</option>`).join('')}
+                </select></div>
+            <div><label style="font-size:13px;color:var(--text-muted);">Container (native LXC)</label>
+                <select id="wolfha-container" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                    <option value="">— select node first —</option>
+                </select></div>
+            <div><label style="font-size:13px;color:var(--text-muted);">Replica nodes <span style="font-size:11px;">(tick order = failover priority)</span></label>
+                <div id="wolfha-replicas" style="display:flex;flex-direction:column;gap:4px;margin-top:4px;font-size:13px;">
+                    ${nodes.map(n => `<label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" class="wolfha-replica-cb" value="${vlanEsc(n.id)}" onchange="wolfHaReplicaTick(this)"> ${vlanEsc(n.hostname || n.id)} <span class="wolfha-prio" data-node="${vlanEsc(n.id)}" style="font-size:10px;color:var(--text-muted);"></span></label>`).join('')}
+                </div>
+                <span style="font-size:11px;color:var(--text-muted);">The container's own node is ignored if ticked. The first-ticked standby is preferred at failover.</span></div>
+            <div><label style="font-size:13px;color:var(--text-muted);">Sync interval (minutes)</label>
+                <input id="wolfha-interval" type="number" min="1" value="5" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                <span style="font-size:11px;color:var(--text-muted);">A failover can lose up to this much recent change — containers running databases should use the database's own replication instead.</span></div>
+            <div style="border:1px solid var(--border,#444);border-radius:8px;padding:10px 12px;">
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+                    <input type="checkbox" id="wolfha-auto" onchange="document.getElementById('wolfha-auto-fields').style.display=this.checked?'block':'none'">
+                    <strong>Automatic failover</strong>
+                </label>
+                <div id="wolfha-auto-fields" style="display:none;margin-top:8px;">
+                    <label style="font-size:12px;color:var(--text-muted);">Witness IP (usually your gateway)</label>
+                    <input id="wolfha-witness" type="text" placeholder="e.g. 10.0.40.1" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin:4px 0 8px;">
+                    <label style="font-size:12px;color:var(--text-muted);">Promote after primary unreachable for (seconds)</label>
+                    <input id="wolfha-after" type="number" min="30" value="90" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">A node only acts while it can ping the witness: an isolated node holds still, and the primary stops its own copy at half this time — so a network split never runs two copies. Standbys also refuse to promote while the container's IP still answers on the bridge.</div>
+                </div>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;">
+                <button class="btn" onclick="document.getElementById('wolfha-protect-modal')?.remove()">Cancel</button>
+                <button class="btn btn-primary" onclick="wolfHaSubmitProtect()">Protect</button>
+            </div>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+async function wolfHaLoadContainers() {
+    const nodeId = document.getElementById('wolfha-node')?.value;
+    const sel = document.getElementById('wolfha-container');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">loading…</option>';
+    if (!nodeId) { sel.innerHTML = '<option value="">— select node first —</option>'; return; }
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/containers/lxc'));
+        const list = resp.ok ? await resp.json() : [];
+        const cts = (Array.isArray(list) ? list : []).filter(c => !c.ha_replica);
+        sel.innerHTML = cts.length
+            ? '<option value="">— select container —</option>' + cts.map(c => `<option value="${vlanEsc(c.name)}">${vlanEsc(c.hostname || c.name)}</option>`).join('')
+            : '<option value="">no LXC containers on this node</option>';
+    } catch (e) {
+        sel.innerHTML = '<option value="">could not list containers</option>';
+    }
+}
+
+// Tick-order tracking: the sequence replicas are ticked IS the failover
+// priority the backend stores. Unticking removes; re-ticking re-appends.
+let _wolfHaTickOrder = [];
+function wolfHaReplicaTick(cb) {
+    _wolfHaTickOrder = _wolfHaTickOrder.filter(id => id !== cb.value);
+    if (cb.checked) _wolfHaTickOrder.push(cb.value);
+    document.querySelectorAll('.wolfha-prio').forEach(el => {
+        const idx = _wolfHaTickOrder.indexOf(el.getAttribute('data-node'));
+        el.textContent = idx >= 0 ? `priority ${idx + 1}` : '';
+    });
+}
+
+async function wolfHaSubmitProtect() {
+    const nodeId = document.getElementById('wolfha-node')?.value;
+    const container = document.getElementById('wolfha-container')?.value;
+    const interval = parseInt(document.getElementById('wolfha-interval')?.value, 10) || 5;
+    const replicas = _wolfHaTickOrder.filter(id => id !== nodeId &&
+        document.querySelector(`.wolfha-replica-cb[value="${id}"]`)?.checked);
+    const autoFailover = document.getElementById('wolfha-auto')?.checked || false;
+    const witness = document.getElementById('wolfha-witness')?.value.trim() || '';
+    const after = parseInt(document.getElementById('wolfha-after')?.value, 10) || 90;
+    if (!nodeId || !container) { showToast('Pick a node and a container', 'error'); return; }
+    if (replicas.length === 0) { showToast('Pick at least one replica node (not the container\'s own node)', 'error'); return; }
+    if (autoFailover && !witness) { showToast('Automatic failover needs a witness IP (usually your gateway)', 'error'); return; }
+    document.getElementById('wolfha-protect-modal')?.remove();
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/wolfha/enable'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ container, replica_node_ids: replicas, interval_minutes: interval, auto_failover: autoFailover, witness, failover_after_secs: after }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data.task_id) {
+            showToast(data.error || 'Could not start protection', 'error');
+            return;
+        }
+        showToast(`Seeding replicas of '${container}'…`, 'info', 4000, `wolfha-${data.task_id}`);
+        wolfHaPollTask(nodeId, data.task_id, `Protect '${container}'`);
+    } catch (e) { showToast(`Protection failed: ${e.message}`, 'error'); }
 }

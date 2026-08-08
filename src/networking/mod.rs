@@ -3544,7 +3544,7 @@ fn iface_ipv4_cidrs(iface: &str) -> Vec<String> {
 }
 
 /// Detect this node's WolfNet IP address (for SNAT source)
-fn detect_wolfnet_gateway_ip() -> Option<String> {
+pub fn detect_wolfnet_gateway_ip() -> Option<String> {
     let interfaces = list_interfaces();
     for iface in &interfaces {
         if iface.name.starts_with("wn") || iface.name.starts_with("wolfnet") {

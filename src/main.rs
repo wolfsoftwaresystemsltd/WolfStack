@@ -42,6 +42,7 @@ mod alerting;
 mod notify;
 mod predictive;
 mod wolfrun;
+mod wolfha;
 mod statuspage;
 mod ceph;
 mod gluster;
@@ -2684,6 +2685,22 @@ async fn main() -> std::io::Result<()> {
                 let secret = auth::load_cluster_secret();
                 agent::poll_remote_nodes(cluster_poll.clone(), secret, Some(ai_agent_poll.clone())).await;
             }
+        });
+
+        // WolfHA: boot-time takeover check for HA primaries (their
+        // lxc.start.auto is stripped, so lxc-autostart never races this),
+        // then the periodic replication scheduler and the auto-failover
+        // monitor. Delayed 30s so the cluster poll above has populated
+        // peer reachability first.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            wolfha::boot_guard().await;
+        });
+        tokio::spawn(wolfha::scheduler_forever());
+        let wolfha_cluster = cluster.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(45)).await;
+            wolfha::failover_monitor_forever(wolfha_cluster).await;
         });
 
         // The retroactive cluster-name sweep that used to run here was

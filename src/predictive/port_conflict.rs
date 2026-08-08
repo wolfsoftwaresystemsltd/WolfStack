@@ -548,6 +548,7 @@ mod tests {
             restart_count: None,
             port_mappings: mappings,
             possible_ghost: false,
+            ha_replica: false,
         }
     }
 

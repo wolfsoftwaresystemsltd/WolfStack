@@ -4427,6 +4427,29 @@
             </div>
         </div>
 
+        <!-- ═══ WolfHA Page ═══ -->
+        <div id="page-wolfha" class="page-view" style="display:none;">
+            <div class="card" style="margin-bottom:20px; background:linear-gradient(135deg, rgba(34,197,94,0.12), rgba(59,130,246,0.08)); border-color:rgba(34,197,94,0.25);">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                    <div>
+                        <h2 style="margin:0 0 6px;">WolfHA — High Availability</h2>
+                        <p style="margin:0; color:var(--text-muted); font-size:13px;">
+                            Protected containers replicate their rootfs to standby nodes on a schedule.
+                            Failover is a one-click operator action: the standby takes over the container's
+                            name, MAC and IP on the shared bridge, so DNS never changes.
+                            A promoted copy carries the state of its last completed sync.
+                        </p>
+                    </div>
+                    <button class="btn btn-primary" onclick="wolfHaOpenProtectModal()">+ Protect a container</button>
+                </div>
+            </div>
+            <div class="card">
+                <div id="wolfha-list" style="min-height:80px;">
+                    <p style="color:var(--text-muted); font-size:13px;">Loading…</p>
+                </div>
+            </div>
+        </div>
+
         <!-- ═══ Cluster Backups Page ═══ -->
         <div id="page-cluster-backups" class="page-view" style="display:none;">
             <!-- Header -->
