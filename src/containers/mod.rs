@@ -4155,6 +4155,11 @@ pub struct ContainerInfo {
     /// empty CT could still be one the operator means to keep).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub possible_ghost: bool,
+    /// This copy is a stopped WolfHA standby (`.wolfha-replica` marker).
+    /// The UI badges it instead of showing a puzzling duplicate; it must
+    /// never be started by hand while its primary is active elsewhere.
+    #[serde(default)]
+    pub ha_replica: bool,
 }
 
 /// One requested host→container port mapping, with the published flag
@@ -4805,6 +4810,7 @@ fn docker_list(all: bool) -> Vec<ContainerInfo> {
                 restart_count: Some(fields.restart_count),
                 port_mappings: fields.port_mappings.clone(),
                 possible_ghost: false, // docker containers are never PVE husks
+                ha_replica: false,
             }
         })
         .collect()
@@ -6416,6 +6422,7 @@ fn build_lxc_container_info(
         // Native-LXC builder (non-PVE listing path) — ghost-husk detection is
         // a PVE-adoption artifact, so never flagged here.
         possible_ghost: false,
+        ha_replica: std::path::Path::new(&format!("{}/{}/{}", base_path, name, crate::wolfha::REPLICA_MARKER)).exists(),
     }
 }
 
@@ -6741,6 +6748,8 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                     restart_count: None,  // PVE-LXC: see ContainerInfo::restart_count doc
                     port_mappings: Vec::new(),
                     possible_ghost,
+                    ha_replica: false, // WolfHA replicas are native-only
+
                 }
             })
         }).collect();

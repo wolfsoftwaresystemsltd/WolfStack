@@ -494,6 +494,7 @@ mod tests {
             gateway: "".into(), mac_address: "".into(), network_name: "".into(), restart_count: None,
             port_mappings: Vec::new(),
             possible_ghost: false,
+            ha_replica: false,
         };
         assert!(container_to_fact(&info, Runtime::Docker).is_none(),
             "stopped containers must not be analyzed — disk usage is frozen");
@@ -512,6 +513,7 @@ mod tests {
             gateway: "".into(), mac_address: "".into(), network_name: "".into(), restart_count: None,
             port_mappings: Vec::new(),
             possible_ghost: false,
+            ha_replica: false,
         };
         assert!(container_to_fact(&info, Runtime::Docker).is_none());
     }
@@ -529,6 +531,7 @@ mod tests {
             gateway: "".into(), mac_address: "".into(), network_name: "".into(), restart_count: None,
             port_mappings: Vec::new(),
             possible_ghost: false,
+            ha_replica: false,
         };
         assert!(container_to_fact(&info, Runtime::Docker).is_none());
     }
