@@ -31205,6 +31205,9 @@ async function migrateLxcContainer(name) {
                         <option value="">Auto (default)</option>
                     </select>
                     <span id="migrate-storage-hint" style="font-size:11px;color:var(--text-muted,#666);margin-top:2px;display:block;">Select a target node to load available storages</span></div>
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Destination Name</label>
+                    <input id="migrate-new-name" type="text" value="${vlanEsc(name)}" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                    <span style="font-size:11px;color:var(--text-muted,#666);margin-top:2px;display:block;">Pre-filled with the current name — change it when the destination already has a container by this name. Left unchanged, Proxmox-sourced containers arrive under their hostname.</span></div>
                 <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Destination Network</label>
                     <select id="migrate-bridge" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
                         <option value="">Auto (keep the source network where possible)</option>
@@ -31329,6 +31332,11 @@ async function doMigrateLxc(name) {
     const migrateStorage = document.getElementById('migrate-storage')?.value || '';
     const bridgeSelVal = document.getElementById('migrate-bridge')?.value || '';
     const bridgeTxtVal = document.getElementById('migrate-ext-bridge')?.value.trim() || '';
+    // Only send new_name when the operator actually edited the prefill —
+    // an untouched field must NOT override the backend's default (which
+    // prefers a Proxmox source's hostname over its VMID).
+    const newNameVal = document.getElementById('migrate-new-name')?.value.trim() || '';
+    const newName = (newNameVal && newNameVal !== name) ? newNameVal : '';
     document.getElementById('lxc-migrate-modal')?.remove();
 
     const isExternal = target === '__external__';
@@ -31345,7 +31353,7 @@ async function doMigrateLxc(name) {
             const startResp = await fetch(`/api/containers/lxc/${name}/migrate-external`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_url: extUrl, target_token: extToken, ...(migrateStorage && { storage: migrateStorage }), ...(targetBridge && { target_bridge: targetBridge }) }),
+                body: JSON.stringify({ target_url: extUrl, target_token: extToken, ...(migrateStorage && { storage: migrateStorage }), ...(targetBridge && { target_bridge: targetBridge }), ...(newName && { new_name: newName }) }),
             });
             const startData = await startResp.json().catch(() => ({}));
             if (!startResp.ok || !startData.task_id) {
@@ -31401,6 +31409,7 @@ async function doMigrateLxc(name) {
             if (targetNode) { migrateBody.target_address = targetNode.address; migrateBody.target_port = targetNode.port || 8553; }
             if (migrateStorage) migrateBody.storage = migrateStorage;
             if (targetBridge) migrateBody.target_bridge = targetBridge;
+            if (newName) migrateBody.new_name = newName;
             const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/migrate`), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

@@ -12438,6 +12438,11 @@ pub async fn lxc_migrate(
     let name = path.into_inner();
     // Validate here, before we stop/export anything — a bad name must not
     // cost the operator downtime only to be rejected by the target later.
+    // The URL name doubles as the destination-name fallback and is
+    // interpolated into the preflight check URL, so it gets the same gate.
+    if !crate::auth::is_safe_name(&name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
+    }
     let requested_name = body.new_name.as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -12469,6 +12474,10 @@ pub async fn lxc_migrate(
     } else {
         build_node_urls(&node.address, node.port, "/api/containers/lxc/import")
     };
+    // Same endpoints, name-collision preflight route.
+    let check_urls: Vec<String> = import_urls.iter()
+        .map(|u| u.replace("/api/containers/lxc/import", "/api/containers/lxc/import-name-check"))
+        .collect();
     let target_label = if node.hostname.is_empty() { node.address.clone() } else { node.hostname.clone() };
     let target_addr = node.address.clone();
     let target_is_proxmox = node.node_type == "proxmox";
@@ -12484,6 +12493,19 @@ pub async fn lxc_migrate(
         .map(String::from);
 
     tokio::spawn(async move {
+        // 0. An explicitly-chosen destination name can be collision-checked
+        //    before ANYTHING is stopped — zero downtime on a name clash.
+        //    (RutgerDiehard 2026-08-08: the old flow only found out after
+        //    the stop + export + upload.)
+        if let Some(ref rn) = requested_name
+            && remote_lxc_name_taken(&check_urls, rn, Some(&cluster_secret), None).await
+        {
+            migration_fail(&tasks, &tid, &format!(
+                "'{}' already exists on {} — nothing was stopped or transferred. Pick a different Destination name in the migrate dialog and run it again.",
+                rn, target_label));
+            return;
+        }
+
         // 1. Stop the source for a consistent export. Record whether it was
         //    running so a rollback only restarts a previously-running one.
         migration_update(&tasks, &tid, "stop_source", &format!("Stopping '{}' on the source node…", name));
@@ -12529,6 +12551,20 @@ pub async fn lxc_migrate(
                 name.clone()
             }
         });
+
+        // The defaulted name is only known post-export — collision-check it
+        // before paying for the upload. (An explicit name was already
+        // checked before the source was stopped.)
+        if requested_name.is_none()
+            && remote_lxc_name_taken(&check_urls, &new_name, Some(&cluster_secret), None).await
+        {
+            containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+            if was_running { let _ = containers::lxc_start(&name); }
+            migration_fail(&tasks, &tid, &format!(
+                "'{}' already exists on {} — nothing was transferred, source restarted. Set a different Destination name in the migrate dialog and run it again.",
+                new_name, target_label));
+            return;
+        }
 
         let size_mb = archive_bytes.len() / (1024 * 1024);
         migration_update(&tasks, &tid, "upload", &format!("Transferring {} MB to {}…", size_mb, target_label));
@@ -12685,6 +12721,49 @@ pub(crate) fn validate_transfer_token(token: &str) -> bool {
         }
     }
     false
+}
+
+/// Validate a transfer token WITHOUT consuming it — for read-only
+/// preflight checks (name collision) ahead of the import that will
+/// actually spend the token.
+pub(crate) fn peek_transfer_token(token: &str) -> bool {
+    if let Ok(mut tokens) = TRANSFER_TOKENS.lock() {
+        tokens.retain(|t| t.expires > std::time::Instant::now()); // purge expired
+        return tokens.iter().any(|t| t.token == token);
+    }
+    false
+}
+
+/// GET /api/containers/lxc/import-name-check?name=<x> — would an import
+/// under this name collide here? Lets a migrate orchestrator fail fast
+/// (before stopping/exporting/uploading anything) instead of the
+/// operator discovering the collision after the transfer. Auth mirrors
+/// import-external, but the transfer token is only peeked, never spent.
+pub async fn lxc_import_name_check(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let has_secret = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| crate::auth::validate_inter_node_secret_from(v, &state.cluster_secret, peer_ip(&req)))
+        .unwrap_or(false);
+    let has_token = req.headers().get("X-Transfer-Token")
+        .and_then(|v| v.to_str().ok())
+        .map(peek_transfer_token)
+        .unwrap_or(false);
+    if !has_secret && !has_token
+        && let Err(resp) = require_auth(&req, &state)
+    {
+        return resp;
+    }
+
+    let name = match query.get("name").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(n) => n.to_string(),
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "name parameter required"})),
+    };
+    let taken = web::block(move || containers::lxc_import_name_taken(&name)).await.unwrap_or(false);
+    HttpResponse::Ok().json(serde_json::json!({ "taken": taken }))
 }
 
 /// POST /api/containers/lxc/import-external — import from external cluster
@@ -12928,6 +13007,43 @@ async fn lxc_import_endpoint_inner(
     }
 }
 
+/// Ask a destination whether an LXC import under `name` would collide
+/// there (GET /api/containers/lxc/import-name-check). Returns true only
+/// on a definitive "taken" answer — an unreachable destination or an
+/// older one without the endpoint returns false, so the import-time
+/// collision check remains the backstop. `name` has already passed
+/// is_safe_name, so it needs no URL encoding.
+async fn remote_lxc_name_taken(
+    urls: &[String],
+    name: &str,
+    secret: Option<&str>,
+    token: Option<&str>,
+) -> bool {
+    let client = &*API_HTTP_CLIENT;
+    for url in urls {
+        let mut rb = client
+            .get(format!("{}?name={}", url, name))
+            .timeout(std::time::Duration::from_secs(10));
+        if let Some(s) = secret {
+            rb = rb.header("X-WolfStack-Secret", s.to_string());
+        }
+        if let Some(t) = token {
+            rb = rb.header("X-Transfer-Token", t.to_string());
+        }
+        match rb.send().await {
+            Ok(r) if r.status().is_success() => {
+                return r.json::<serde_json::Value>().await
+                    .ok()
+                    .and_then(|v| v.get("taken").and_then(|t| t.as_bool()))
+                    .unwrap_or(false);
+            }
+            Ok(r) => { let _ = r.bytes().await; }
+            Err(_) => {}
+        }
+    }
+    false
+}
+
 pub type MigrationTasks = Arc<std::sync::RwLock<std::collections::HashMap<String, MigrationTask>>>;
 
 /// Helper: update a migration task's stage/message. Resets the
@@ -13047,6 +13163,11 @@ pub async fn lxc_migrate_external(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+    // The URL name doubles as the destination-name fallback and is
+    // interpolated into the preflight check URL — same gate as new_name.
+    if !crate::auth::is_safe_name(&name) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
+    }
     // An explicit destination name from the caller wins; validate it up
     // front so a bad name fails before anything is stopped or exported.
     let requested_name = body.new_name.as_deref()
@@ -13105,6 +13226,20 @@ pub async fn lxc_migrate_external(
             return;
         }
 
+        // An explicitly-chosen destination name is collision-checked before
+        // anything is stopped or exported — zero downtime on a clash. The
+        // token is only peeked by the check endpoint, never spent.
+        let check_urls = build_external_urls(&target_url, "/api/containers/lxc/import-name-check");
+        let secret_for_check = attach_secret.then(|| cluster_secret.clone());
+        if let Some(ref rn) = requested_name
+            && remote_lxc_name_taken(&check_urls, rn, secret_for_check.as_deref(), Some(&target_token)).await
+        {
+            migration_fail(&tasks, &tid, &format!(
+                "'{}' already exists on the destination — nothing was stopped or transferred. Pick a different Destination name in the migrate dialog and run it again.",
+                rn));
+            return;
+        }
+
         // 2. Export
         migration_update(&tasks, &tid, "export", "Stopping container for export...");
         let _ = containers::lxc_stop(&name);
@@ -13132,6 +13267,18 @@ pub async fn lxc_migrate_external(
                 name.clone()
             }
         });
+
+        // The defaulted name is only known post-export — collision-check it
+        // before paying for the upload (the source is already back up).
+        if requested_name.is_none()
+            && remote_lxc_name_taken(&check_urls, &new_name, secret_for_check.as_deref(), Some(&target_token)).await
+        {
+            containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
+            migration_fail(&tasks, &tid, &format!(
+                "'{}' already exists on the destination — nothing was transferred. Set a different Destination name in the migrate dialog and run it again.",
+                new_name));
+            return;
+        }
 
         let archive_bytes = match std::fs::read(&archive_path) {
             Ok(b) => b,
@@ -43471,6 +43618,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/create", web::post().to(lxc_create))
         .route("/api/containers/lxc/import", web::post().to(lxc_import_endpoint))
         .route("/api/containers/lxc/import-external", web::post().to(lxc_import_external))
+        .route("/api/containers/lxc/import-name-check", web::get().to(lxc_import_name_check))
         .route("/api/containers/transfer-token", web::post().to(generate_transfer_token))
         .route("/api/storage/list", web::get().to(storage_list))
         .route("/api/storage/filesystems", web::get().to(storage_filesystems))
