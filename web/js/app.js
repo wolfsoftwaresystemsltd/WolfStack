@@ -22349,8 +22349,25 @@ function renderVlanAttachments(data) {
         } else {
             vEl.innerHTML = vlans.map(v => {
                 const allocs = (v.allocations || []);
-                const members = allocs.length === 0
-                    ? '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">No containers/VMs attached yet.</div>'
+                // Guests the backend found live on the bridge (configs scanned
+                // server-side) that the page's own attach flow doesn't know
+                // about — without these, pre-existing LXCs/VMs on the bridge
+                // rendered as "No containers/VMs attached yet".
+                const managedIds = new Set(allocs.map(a => a.target_id));
+                const managedIps = new Set(allocs.map(a => a.ip));
+                const found = ((_vlanCache.discovered || {})[v.id] || [])
+                    .filter(g => !managedIds.has(g.name) && !(g.ip && managedIps.has(g.ip)));
+                const foundHtml = found.length === 0 ? '' :
+                    `<div style="margin-top:8px;"><div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">On this bridge (${found.length} unmanaged)</div>
+                        ${found.map(g => `<div style="display:flex; align-items:center; gap:6px; padding:3px 6px; background:var(--bg-tertiary); border-radius:4px; margin-bottom:3px; font-size:11px;">
+                            <span style="width:7px; height:7px; border-radius:50%; flex:none; background:${g.running ? '#22c55e' : 'var(--text-muted)'};" title="${g.running ? 'running' : 'stopped'}"></span>
+                            <span>${vlanEsc(g.name)}</span>
+                            <span style="color:var(--text-muted); font-size:10px;">${vlanEsc(g.kind)}</span>
+                            ${g.ip ? `<span style="font-family:var(--font-mono); color:var(--accent-light);">${vlanEsc(g.ip)}</span>` : '<span style="color:var(--text-muted); font-size:10px;">no static IP</span>'}
+                        </div>`).join('')}
+                       </div>`;
+                const members = (allocs.length === 0
+                    ? (found.length === 0 ? '<div style="font-size:11px; color:var(--text-muted); margin-top:6px;">No containers/VMs attached yet.</div>' : '')
                     : `<div style="margin-top:8px;"><div style="font-size:11px; color:var(--text-muted); margin-bottom:4px;">Attached members (${allocs.length})</div>
                         ${allocs.map(a => `<div style="display:flex; align-items:center; gap:6px; padding:3px 6px; background:var(--bg-tertiary); border-radius:4px; margin-bottom:3px; font-size:11px;">
                             <span style="font-family:var(--font-mono); color:var(--accent-light);">${vlanEsc(a.ip)}</span>
@@ -22359,7 +22376,7 @@ function renderVlanAttachments(data) {
                             <span style="color:var(--text-muted); font-size:10px;">${vlanEsc(a.target_kind)}</span>
                             <button class="btn btn-sm btn-danger" style="margin-left:auto; font-size:10px; padding:1px 6px;" onclick="vlanDetach('${vlanEsc(v.id)}', '${vlanEsc(a.target_kind)}', '${vlanEsc(a.target_id)}', '${vlanEsc(a.ip)}', '${vlanEsc(a.label || a.target_id)}')"><span class="ws-icon-clean-wrap" data-icon="close"></span></button>
                         </div>`).join('')}
-                       </div>`;
+                       </div>`) + foundHtml;
                 const reservations = (v.external_reservations || []);
                 const resHtml = reservations.length === 0 ? '' :
                     `<div style="margin-top:6px; font-size:10px; color:var(--text-muted);">External reservations: ${reservations.map(r => vlanEsc(r.spec)).join(', ')}</div>`;
@@ -31188,6 +31205,12 @@ async function migrateLxcContainer(name) {
                         <option value="">Auto (default)</option>
                     </select>
                     <span id="migrate-storage-hint" style="font-size:11px;color:var(--text-muted,#666);margin-top:2px;display:block;">Select a target node to load available storages</span></div>
+                <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Destination Network</label>
+                    <select id="migrate-bridge" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                        <option value="">Auto (keep the source network where possible)</option>
+                    </select>
+                    <input id="migrate-ext-bridge" type="text" placeholder="e.g. vmbr4001 — leave blank for auto" style="display:none;width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                    <span id="migrate-bridge-hint" style="font-size:11px;color:var(--text-muted,#666);margin-top:2px;display:block;">Which bridge the container's NIC attaches to on the destination. Auto keeps the source bridge when it exists there and warns when it falls back.</span></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
                     <button class="btn" onclick="document.getElementById('lxc-migrate-modal')?.remove()">Cancel</button>
                     <button class="btn" style="background:#ef4444;color:#fff;" onclick="doMigrateLxc('${name}')">Migrate</button>
@@ -31226,10 +31249,41 @@ async function migrateLxcContainer(name) {
         hint.textContent = storages.length ? '' : 'No storages found on the target node';
     }
 
+    // Populate the destination-network dropdown from a target node's live
+    // interface list. Failure degrades to "Auto" — the backend still
+    // validates an explicit choice and warns on fallback.
+    async function lxcPopulateBridges(nodeId) {
+        const sel = document.getElementById('migrate-bridge');
+        if (!sel) return;
+        sel.innerHTML = '<option value="">Auto (keep the source network where possible)</option>';
+        try {
+            const resp = await fetch(`/api/nodes/${nodeId}/proxy/networking/interfaces`);
+            if (!resp.ok) return;
+            const ifaces = await resp.json();
+            (Array.isArray(ifaces) ? ifaces : []).forEach(i => {
+                if (!i || !i.name || i.is_vlan) return; // raw tagged sub-ifs aren't attach targets
+                sel.insertAdjacentHTML('beforeend',
+                    `<option value="${vlanEsc(i.name)}">${vlanEsc(i.name)}${i.state === 'up' ? '' : ' (down)'}</option>`);
+            });
+        } catch (e) { /* keep Auto-only */ }
+    }
+
     // Show/hide external fields + fetch storages from selected target node
     document.getElementById('migrate-target').addEventListener('change', async (e) => {
         const val = e.target.value;
         document.getElementById('migrate-external-fields').style.display = val === '__external__' ? 'block' : 'none';
+
+        // Destination network: dropdown for cluster nodes (interfaces are
+        // fetchable via the node proxy), free-text for external clusters
+        // (no authenticated interface listing across a transfer token).
+        const bridgeSel = document.getElementById('migrate-bridge');
+        const bridgeTxt = document.getElementById('migrate-ext-bridge');
+        if (bridgeSel && bridgeTxt) {
+            bridgeSel.style.display = val === '__external__' ? 'none' : '';
+            bridgeTxt.style.display = val === '__external__' ? '' : 'none';
+            bridgeSel.innerHTML = '<option value="">Auto (keep the source network where possible)</option>';
+        }
+        if (val && val !== '__external__') { lxcPopulateBridges(val); }
 
         const sel = document.getElementById('migrate-storage');
         const hint = document.getElementById('migrate-storage-hint');
@@ -31273,9 +31327,12 @@ async function doMigrateLxc(name) {
     const rawExtUrl = document.getElementById('migrate-ext-url')?.value.trim() || '';
     const extToken = document.getElementById('migrate-ext-token')?.value.trim() || '';
     const migrateStorage = document.getElementById('migrate-storage')?.value || '';
+    const bridgeSelVal = document.getElementById('migrate-bridge')?.value || '';
+    const bridgeTxtVal = document.getElementById('migrate-ext-bridge')?.value.trim() || '';
     document.getElementById('lxc-migrate-modal')?.remove();
 
     const isExternal = target === '__external__';
+    const targetBridge = isExternal ? bridgeTxtVal : bridgeSelVal;
     if (isExternal && (!rawExtUrl || !extToken)) { showToast('Enter URL and token', 'error'); return; }
     const extUrl = isExternal ? normalizeWolfStackUrl(rawExtUrl) : '';
     const lxcTargetLabel = isExternal ? extUrl.replace(/https?:\/\//, '').split('/')[0] : target;
@@ -31288,7 +31345,7 @@ async function doMigrateLxc(name) {
             const startResp = await fetch(`/api/containers/lxc/${name}/migrate-external`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_url: extUrl, target_token: extToken, ...(migrateStorage && { storage: migrateStorage }) }),
+                body: JSON.stringify({ target_url: extUrl, target_token: extToken, ...(migrateStorage && { storage: migrateStorage }), ...(targetBridge && { target_bridge: targetBridge }) }),
             });
             const startData = await startResp.json().catch(() => ({}));
             if (!startResp.ok || !startData.task_id) {
@@ -31343,6 +31400,7 @@ async function doMigrateLxc(name) {
             const migrateBody = { target_node: target };
             if (targetNode) { migrateBody.target_address = targetNode.address; migrateBody.target_port = targetNode.port || 8553; }
             if (migrateStorage) migrateBody.storage = migrateStorage;
+            if (targetBridge) migrateBody.target_bridge = targetBridge;
             const resp = await fetch(apiUrl(`/api/containers/lxc/${name}/migrate`), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
