@@ -6316,6 +6316,27 @@ fn build_lxc_container_info(
         ip = ls_ip.trim().to_string();
     }
 
+    // Read the LXC config once — used for the static-IP fallback here and
+    // the autostart/hostname/gateway/MAC fields below.
+    let config_path = format!("{}/{}/config", base_path, name);
+    let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    // Method 2.5: a stopped container still shows its configured static
+    // address (CIDR suffix stripped) — parity with the PVE path, which
+    // reads `ip=` from the config for stopped CTs. Without this a freshly
+    // migrated/cloned container displays no IP at all until first start.
+    if ip.is_empty() {
+        if let Some(addr) = config_content.lines()
+            .find(|l| l.trim().starts_with("lxc.net.0.ipv4.address"))
+            .and_then(|l| l.split('=').nth(1))
+        {
+            let addr = addr.trim().split('/').next().unwrap_or("").trim();
+            if !addr.is_empty() {
+                ip = addr.to_string();
+            }
+        }
+    }
+
     // Method 3: Check for WolfNet IP marker
     let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", base_path, name);
     let wolfnet_ip = std::fs::read_to_string(&wolfnet_ip_file)
@@ -6330,9 +6351,7 @@ fn build_lxc_container_info(
         }
     }
 
-    // Read config for autostart, hostname, gateway, MAC
-    let config_path = format!("{}/{}/config", base_path, name);
-    let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+    // Parse config for autostart, hostname, gateway, MAC
     let autostart = config_content.lines().any(|l| l.trim() == "lxc.start.auto = 1");
     let hostname = config_content.lines()
         .find(|l| l.trim().starts_with("lxc.uts.name"))
@@ -10830,7 +10849,12 @@ pub(crate) fn lxc_archive_is_vzdump(archive_path: &str) -> bool {
 /// backup's filesystem is taken verbatim — including any legitimate
 /// `/etc/vzdump` it might carry. The caller still owns writing the LXC
 /// `config` (see [`lxc_write_bootable_config`]).
-pub(crate) fn lxc_extract_archive_to_rootfs(archive_path: &str, rootfs_target: &str) -> Result<(), String> {
+///
+/// Returns the salvaged `etc/vzdump/pct.conf` content for a vzdump source
+/// (read before the dir is stripped) — the only record of the Proxmox
+/// container's memory/cpu limits and autostart flag, which the caller can
+/// translate into the native config. `None` for a native archive.
+pub(crate) fn lxc_extract_archive_to_rootfs(archive_path: &str, rootfs_target: &str) -> Result<Option<String>, String> {
     let tar_args: Vec<&str> = if archive_path.ends_with(".tar.zst") || archive_path.ends_with(".zst") {
         vec!["--zstd", "-xf", archive_path, "-C", rootfs_target]
     } else {
@@ -10856,11 +10880,15 @@ pub(crate) fn lxc_extract_archive_to_rootfs(archive_path: &str, rootfs_target: &
             .output();
     }
     // Strip the Proxmox backup-bookkeeping dir ONLY for a vzdump source — a
-    // native container can legitimately carry its own /etc/vzdump.
+    // native container can legitimately carry its own /etc/vzdump. Salvage
+    // pct.conf first: deleting it unread is how a migrated container used to
+    // lose its memory/cpu limits and autostart flag on a native destination.
+    let mut pct_conf = None;
     if lxc_archive_is_vzdump(archive_path) {
+        pct_conf = std::fs::read_to_string(format!("{}/etc/vzdump/pct.conf", rootfs_target)).ok();
         let _ = std::fs::remove_dir_all(format!("{}/etc/vzdump", rootfs_target));
     }
-    Ok(())
+    Ok(pct_conf)
 }
 
 /// Write a *bootable* LXC config for a freshly-imported standalone
@@ -10871,10 +10899,35 @@ pub(crate) fn lxc_extract_archive_to_rootfs(archive_path: &str, rootfs_target: &
 /// left systemd containers stuck in ABORTING for want of cgroup mounts,
 /// an idmap and an apparmor decision — see `lxc_create`'s systemd block
 /// for the authoritative list of what such a rootfs needs.
-pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, carried_config: Option<&str>) {
+///
+/// `pve_config` is the salvaged `pct.conf` of a vzdump source (see
+/// [`lxc_extract_archive_to_rootfs`]): its memory/swap/cores limits and
+/// onboot flag are translated into the synthesised config so a Proxmox
+/// container landing on a native host keeps its resource envelope instead
+/// of arriving unlimited, and its `net0` bridge/MAC/address are carried
+/// where this host can honour them. Ignored when a carried native config
+/// exists — that already holds the real limits.
+///
+/// Returns a warning when the source's network could not be reproduced
+/// (its bridge doesn't exist here) — the caller MUST surface it to the
+/// operator: a container silently dropped onto the wrong network looks
+/// migrated until something can't reach it (RutgerDiehard, 2026-08-07).
+///
+/// `target_bridge` is an operator-chosen destination bridge for the
+/// primary NIC — already validated to exist by the import endpoint. It
+/// overrides both the carried config's `lxc.net.0.link` and the vzdump
+/// translation's bridge choice, and suppresses the fallback warning
+/// (the operator made the call).
+pub(crate) fn lxc_write_bootable_config(
+    container_dir: &str,
+    new_name: &str,
+    carried_config: Option<&str>,
+    pve_config: Option<&str>,
+    target_bridge: Option<&str>,
+) -> Option<String> {
     let config_path = format!("{}/config", container_dir);
     if std::path::Path::new(&config_path).exists() {
-        return; // native tooling already wrote a real config — leave it
+        return None; // native tooling already wrote a real config — leave it
     }
 
     if let Some(cfg) = carried_config.filter(|c| !c.trim().is_empty()) {
@@ -10882,8 +10935,19 @@ pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, car
         // host-specific and get rewritten by lxc_clone_fixup_ip after
         // this returns; everything else (arch, idmap, apparmor, cgroup
         // mounts, cpu/mem limits, mounts, features) is preserved as-is.
-        let _ = std::fs::write(&config_path, cfg);
-        return;
+        // An explicit bridge choice re-points the primary NIC only.
+        let cfg_out = match target_bridge {
+            Some(bridge) => cfg.lines().map(|l| {
+                if l.trim().starts_with("lxc.net.0.link") {
+                    format!("lxc.net.0.link = {}", bridge)
+                } else {
+                    l.to_string()
+                }
+            }).collect::<Vec<_>>().join("\n") + "\n",
+            None => cfg.to_string(),
+        };
+        let _ = std::fs::write(&config_path, cfg_out);
+        return None;
     }
 
     // No carried config (a vzdump landing on a standalone node, or an
@@ -10906,10 +10970,31 @@ pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, car
     }
     lines.push(format!("lxc.rootfs.path = dir:{}/rootfs", container_dir));
     lines.push(format!("lxc.uts.name = {}", new_name));
-    // A real veth on the default bridge — lxc_clone_fixup_ip refines the
-    // hwaddr + IPv4 and lxc_attach_wolfnet adds the WolfNet marker after.
+    // A real veth — the source's own bridge/MAC/address where this host can
+    // honour them (vzdump net0 translation), lxcbr0 otherwise. A clone's
+    // lxc_clone_fixup_ip refines the hwaddr + IPv4 and lxc_attach_wolfnet
+    // adds the WolfNet marker after.
     lines.push("lxc.net.0.type = veth".to_string());
-    lines.push("lxc.net.0.link = lxcbr0".to_string());
+    // With an explicit bridge choice the translator carries everything
+    // (`|_| true` — no fallback, no warning) and the link line is then
+    // re-pointed at the operator's bridge.
+    let (net_lines, net_warning) = match target_bridge {
+        Some(bridge) => {
+            let (net_lines, _) = native_net0_from_pct_conf(pve_config.unwrap_or(""), &|_| true);
+            (net_lines.into_iter().map(|l| {
+                if l.starts_with("lxc.net.0.link") {
+                    format!("lxc.net.0.link = {}", bridge)
+                } else {
+                    l
+                }
+            }).collect::<Vec<_>>(), None)
+        }
+        None => native_net0_from_pct_conf(
+            pve_config.unwrap_or(""),
+            &|bridge| std::path::Path::new(&format!("/sys/class/net/{}", bridge)).exists(),
+        ),
+    };
+    lines.extend(net_lines);
     lines.push("lxc.net.0.flags = up".to_string());
     lines.push("lxc.net.0.name = eth0".to_string());
     if systemd {
@@ -10924,9 +11009,260 @@ pub(crate) fn lxc_write_bootable_config(container_dir: &str, new_name: &str, car
         lines.push("lxc.mount.auto = proc:rw sys:rw cgroup:rw".to_string());
     }
 
+    // A vzdump source's resource envelope, translated from its pct.conf.
+    if let Some(pct) = pve_config.filter(|c| !c.trim().is_empty()) {
+        lines.extend(lxc_limits_from_pct_conf(pct));
+    }
+
     let mut out = lines.join("\n");
     out.push('\n');
     let _ = std::fs::write(&config_path, out);
+    net_warning
+}
+
+/// The reverse of [`pve_net0_from_lxc_config`]: translate a Proxmox
+/// `pct.conf` `net0:` line into native `lxc.net.0.*` entries for a
+/// synthesised config.
+///
+/// * `bridge=` is carried only when that bridge exists on THIS host
+///   (`bridge_exists`); otherwise the container goes on `lxcbr0` and a
+///   warning names the bridge (and old address) so the operator knows the
+///   container changed networks — the silent fallback is exactly what
+///   dropped RutgerDiehard's LXC onto the management VLAN (2026-08-07).
+/// * `hwaddr=` is always carried — preserving the MAC keeps a DHCP lease
+///   on a same-network move; a cross-cluster clone re-MACs it afterwards.
+/// * A static `ip=`/`gw=` pair is carried only WITH its original bridge —
+///   an address from the old network is meaningless on lxcbr0.
+///
+/// No `net0:` at all (or an empty pct.conf) yields the plain lxcbr0 line
+/// and no warning. Only the live section is read (per-snapshot values
+/// must not bleed in). Pure apart from the injected `bridge_exists`.
+fn native_net0_from_pct_conf(
+    pct_conf: &str,
+    bridge_exists: &dyn Fn(&str) -> bool,
+) -> (Vec<String>, Option<String>) {
+    let (mut bridge, mut hwaddr, mut ip, mut gw) =
+        (String::new(), String::new(), String::new(), String::new());
+    for line in pct_conf.lines().take_while(|l| !l.trim_start().starts_with('[')) {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        if k.trim() != "net0" { continue; }
+        for part in v.trim().split(',') {
+            let Some((pk, pv)) = part.trim().split_once('=') else { continue };
+            match pk.trim() {
+                "bridge" => bridge = pv.trim().to_string(),
+                "hwaddr" => hwaddr = pv.trim().to_string(),
+                "ip" => ip = pv.trim().to_string(),
+                "gw" => gw = pv.trim().to_string(),
+                _ => {}
+            }
+        }
+        break;
+    }
+
+    let mut lines = Vec::new();
+    let mut warning = None;
+    let bridge_ok = !bridge.is_empty() && bridge_exists(&bridge);
+    if bridge_ok {
+        lines.push(format!("lxc.net.0.link = {}", bridge));
+    } else {
+        if !bridge.is_empty() {
+            let had_ip = if ip.is_empty() || ip == "dhcp" {
+                String::new()
+            } else {
+                format!(" (it had ip={})", ip)
+            };
+            warning = Some(format!(
+                "the source's bridge '{}' does not exist on this host, so the container was attached to lxcbr0 with a fresh address instead{} — re-attach it to the right bridge in Settings → Resources if it needs its old network",
+                bridge, had_ip
+            ));
+        }
+        lines.push("lxc.net.0.link = lxcbr0".to_string());
+    }
+    if !hwaddr.is_empty() {
+        lines.push(format!("lxc.net.0.hwaddr = {}", hwaddr));
+    }
+    if bridge_ok && !ip.is_empty() && ip != "dhcp" {
+        lines.push(format!("lxc.net.0.ipv4.address = {}", ip));
+        if !gw.is_empty() {
+            lines.push(format!("lxc.net.0.ipv4.gateway = {}", gw));
+        }
+    }
+    (lines, warning)
+}
+
+/// Translate a Proxmox `pct.conf`'s resource keys into native LXC config
+/// lines, using the same cgroup2 keys the Settings UI writes (see
+/// `lxc_update_config`): `memory:`/`swap:` are MB → `memory.max`/
+/// `memory.swap.max` bytes, `cores:` becomes the same CFS-quota entry a
+/// bare integer in the CPU field produces, `onboot: 1` → `lxc.start.auto`.
+/// Only the live section is read — per-snapshot `[snap]` values must not
+/// bleed into the restored container (mirrors `pct_list_all`). Pure —
+/// unit-testable.
+fn lxc_limits_from_pct_conf(pct_conf: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in pct_conf.lines().take_while(|l| !l.trim_start().starts_with('[')) {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let (k, v) = (k.trim(), v.trim());
+        match k {
+            "memory" => {
+                if let Ok(mb) = v.parse::<u64>() {
+                    if mb > 0 {
+                        out.push(format!("lxc.cgroup2.memory.max = {}", mb * 1024 * 1024));
+                    }
+                }
+            }
+            "swap" => {
+                if let Ok(mb) = v.parse::<u64>() {
+                    if mb > 0 {
+                        out.push(format!("lxc.cgroup2.memory.swap.max = {}", mb * 1024 * 1024));
+                    }
+                }
+            }
+            "cores" => {
+                if let Some(limit) = lxc_parse_cpu_input(v) {
+                    let (key, value) = limit.cgroup_entry();
+                    out.push(format!("{} = {}", key, value));
+                }
+            }
+            "onboot" => {
+                if v == "1" {
+                    out.push("lxc.start.auto = 1".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod pct_conf_limit_tests {
+    use super::lxc_limits_from_pct_conf;
+
+    #[test]
+    fn memory_swap_cores_and_onboot_translate() {
+        let pct = "arch: amd64\ncores: 4\nhostname: prod-app\nmemory: 2048\nnet0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:AA:BB:CC,ip=192.168.1.50/24,gw=192.168.1.1\nonboot: 1\nostype: debian\nrootfs: local-lvm:vm-131-disk-0,size=8G\nswap: 512\nunprivileged: 1\n";
+        let lines = lxc_limits_from_pct_conf(pct);
+        assert!(lines.contains(&format!("lxc.cgroup2.memory.max = {}", 2048u64 * 1024 * 1024)));
+        assert!(lines.contains(&format!("lxc.cgroup2.memory.swap.max = {}", 512u64 * 1024 * 1024)));
+        assert!(lines.contains(&"lxc.cgroup2.cpu.max = 400000 100000".to_string()));
+        assert!(lines.contains(&"lxc.start.auto = 1".to_string()));
+    }
+
+    #[test]
+    fn zero_or_absent_values_write_nothing() {
+        assert!(lxc_limits_from_pct_conf("hostname: x\nswap: 0\nonboot: 0\n").is_empty());
+        assert!(lxc_limits_from_pct_conf("").is_empty());
+        assert!(lxc_limits_from_pct_conf("memory: notanumber\n").is_empty());
+    }
+
+    #[test]
+    fn snapshot_sections_do_not_bleed_into_the_live_config() {
+        let pct = "memory: 1024\n[pre-upgrade]\nmemory: 8192\nonboot: 1\n";
+        let lines = lxc_limits_from_pct_conf(pct);
+        assert_eq!(lines, vec![format!("lxc.cgroup2.memory.max = {}", 1024u64 * 1024 * 1024)]);
+    }
+}
+
+#[cfg(test)]
+mod native_net0_tests {
+    use super::native_net0_from_pct_conf;
+
+    const NET0: &str = "hostname: prod-app\nnet0: name=eth0,bridge=vmbr40,firewall=1,hwaddr=BC:24:11:AA:BB:CC,ip=192.168.40.5/24,gw=192.168.40.1,type=veth\n";
+
+    #[test]
+    fn existing_bridge_carries_mac_and_static_address_with_no_warning() {
+        let (lines, warning) = native_net0_from_pct_conf(NET0, &|b| b == "vmbr40");
+        assert_eq!(lines, vec![
+            "lxc.net.0.link = vmbr40".to_string(),
+            "lxc.net.0.hwaddr = BC:24:11:AA:BB:CC".to_string(),
+            "lxc.net.0.ipv4.address = 192.168.40.5/24".to_string(),
+            "lxc.net.0.ipv4.gateway = 192.168.40.1".to_string(),
+        ]);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn missing_bridge_falls_back_to_lxcbr0_and_warns_with_the_old_network() {
+        let (lines, warning) = native_net0_from_pct_conf(NET0, &|_| false);
+        // The stale static address must NOT be carried onto lxcbr0.
+        assert_eq!(lines, vec![
+            "lxc.net.0.link = lxcbr0".to_string(),
+            "lxc.net.0.hwaddr = BC:24:11:AA:BB:CC".to_string(),
+        ]);
+        let w = warning.expect("fallback must warn");
+        assert!(w.contains("vmbr40"), "{}", w);
+        assert!(w.contains("192.168.40.5/24"), "{}", w);
+    }
+
+    #[test]
+    fn dhcp_on_an_existing_bridge_writes_no_static_address() {
+        let pct = "net0: name=eth0,bridge=vmbr0,hwaddr=BC:24:11:00:11:22,ip=dhcp\n";
+        let (lines, warning) = native_net0_from_pct_conf(pct, &|_| true);
+        assert_eq!(lines, vec![
+            "lxc.net.0.link = vmbr0".to_string(),
+            "lxc.net.0.hwaddr = BC:24:11:00:11:22".to_string(),
+        ]);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn no_net0_yields_plain_lxcbr0_and_no_warning() {
+        for pct in ["", "hostname: x\nmemory: 512\n"] {
+            let (lines, warning) = native_net0_from_pct_conf(pct, &|_| true);
+            assert_eq!(lines, vec!["lxc.net.0.link = lxcbr0".to_string()]);
+            assert!(warning.is_none());
+        }
+    }
+
+    #[test]
+    fn snapshot_net0_does_not_bleed_into_the_live_config() {
+        let pct = "memory: 512\n[snap]\nnet0: name=eth0,bridge=vmbr99,ip=10.9.9.9/24\n";
+        let (lines, warning) = native_net0_from_pct_conf(pct, &|_| true);
+        assert_eq!(lines, vec!["lxc.net.0.link = lxcbr0".to_string()]);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn bridge_swap_keeps_every_other_net_part() {
+        use super::pve_net_value_with_bridge;
+        assert_eq!(
+            pve_net_value_with_bridge(
+                "name=eth0,bridge=vmbr40,firewall=1,hwaddr=BC:24:11:AA:BB:CC,ip=192.168.40.5/24,gw=192.168.40.1",
+                "vmbr4001",
+            ),
+            "name=eth0,bridge=vmbr4001,firewall=1,hwaddr=BC:24:11:AA:BB:CC,ip=192.168.40.5/24,gw=192.168.40.1",
+        );
+        // No bridge part → appended; empty value → minimal dhcp NIC.
+        assert_eq!(pve_net_value_with_bridge("name=eth0,ip=dhcp", "vmbr1"), "name=eth0,ip=dhcp,bridge=vmbr1");
+        assert_eq!(pve_net_value_with_bridge("", "vmbr1"), "name=eth0,bridge=vmbr1,ip=dhcp");
+    }
+}
+
+/// Swap (or set) the `bridge=` part of a Proxmox `netN` value, leaving
+/// every other part (name/hwaddr/ip/gw/firewall/…) untouched. An empty
+/// input yields a minimal `name=eth0,bridge=<b>,ip=dhcp` NIC. Pure.
+fn pve_net_value_with_bridge(net_value: &str, bridge: &str) -> String {
+    let v = net_value.trim();
+    if v.is_empty() {
+        return format!("name=eth0,bridge={},ip=dhcp", bridge);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for part in v.split(',') {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+        if part.starts_with("bridge=") {
+            parts.push(format!("bridge={}", bridge));
+            replaced = true;
+        } else {
+            parts.push(part.to_string());
+        }
+    }
+    if !replaced {
+        parts.push(format!("bridge={}", bridge));
+    }
+    parts.join(",")
 }
 
 /// Build the `pct create --net0` value from the source's native LXC config,
@@ -11061,6 +11397,7 @@ pub fn lxc_import(
     new_name: &str,
     storage: Option<&str>,
     carried_config: Option<&str>,
+    target_bridge: Option<&str>,
 ) -> Result<LxcImportOutcome, String> {
     let path = std::path::Path::new(archive_path);
     if !path.exists() {
@@ -11087,10 +11424,32 @@ pub fn lxc_import(
 
         if is_vzdump {
             // vzdump archive — pct restore handles it natively (the vzdump
-            // carries its own pct.conf, network settings included)
+            // carries its own pct.conf, network settings included). An
+            // operator-chosen destination bridge overrides net0's bridge=
+            // while keeping the rest of the NIC (name/hwaddr/ip) — pulled
+            // from the vzdump's own pct.conf so nothing else changes.
+            let mut args: Vec<String> = vec![
+                "restore".into(), new_vmid.to_string(), archive_path.to_string(),
+                "--storage".into(), storage_id.to_string(),
+                "--hostname".into(), new_name.to_string(),
+            ];
+            if let Some(bridge) = target_bridge {
+                let pct_conf = Command::new("tar")
+                    .args(["-xOf", archive_path, "--wildcards", "*/etc/vzdump/pct.conf", "etc/vzdump/pct.conf"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
+                let net0 = pct_conf.lines()
+                    .take_while(|l| !l.trim_start().starts_with('['))
+                    .find_map(|l| l.trim().strip_prefix("net0:").map(|v| v.trim().to_string()))
+                    .unwrap_or_default();
+                args.push("--net0".into());
+                args.push(pve_net_value_with_bridge(&net0, bridge));
+            }
             let output = Command::new("pct")
-                .args(["restore", &new_vmid.to_string(), archive_path,
-                       "--storage", storage_id, "--hostname", new_name])
+                .args(&args)
                 .output()
                 .map_err(|e| format!("pct restore failed: {}", e))?;
 
@@ -11112,10 +11471,21 @@ pub fn lxc_import(
             // `bridge=vmbr0,ip=dhcp` + 512 MB, which silently dropped a
             // container that lived on a VLAN bridge onto the management
             // LAN of the PVE host (RutgerDiehard, 2026-08-07, vlc→PVE).
-            let (net0, net_warning) = pve_net0_from_lxc_config(
-                carried_config.unwrap_or(""),
-                &|bridge| std::path::Path::new(&format!("/sys/class/net/{}", bridge)).exists(),
-            );
+            //
+            // An operator-chosen bridge overrides the translation's bridge
+            // choice but keeps the rest of the NIC (MAC, static address):
+            // with `|_| true` the translator carries everything and emits
+            // no fallback warning — the choice was explicit and the import
+            // endpoint already validated the bridge exists here.
+            let (net0, net_warning) = if let Some(bridge) = target_bridge {
+                let (net0, _) = pve_net0_from_lxc_config(carried_config.unwrap_or(""), &|_| true);
+                (pve_net_value_with_bridge(&net0, bridge), None)
+            } else {
+                pve_net0_from_lxc_config(
+                    carried_config.unwrap_or(""),
+                    &|bridge| std::path::Path::new(&format!("/sys/class/net/{}", bridge)).exists(),
+                )
+            };
             let memory_mb = lxc_config_memory_mb(carried_config.unwrap_or("")).unwrap_or(512);
             let rootfs_spec = format!("{}:4", storage_id);
             let mut args: Vec<String> = vec![
@@ -11173,15 +11543,24 @@ pub fn lxc_import(
         // Shared with the backup-restore path: handles gzip/zstd and the
         // nested-rootfs / etc/vzdump normalisation in one place.
         match lxc_extract_archive_to_rootfs(archive_path, &rootfs_target) {
-            Ok(()) => {
+            Ok(pct_conf) => {
                 // Write a bootable config — the source's own config when it
-                // travelled with the archive, otherwise a synthesised one.
-                // (Replaces the old 3-line stub that left systemd containers
-                // stuck in ABORTING.)
-                lxc_write_bootable_config(&container_dir, new_name, carried_config);
+                // travelled with the archive, otherwise a synthesised one
+                // (with a vzdump source's limits and network translated from
+                // its salvaged pct.conf). (Replaces the old 3-line stub that
+                // left systemd containers stuck in ABORTING.)
+                let net_warning = lxc_write_bootable_config(
+                    &container_dir, new_name, carried_config, pct_conf.as_deref(), target_bridge);
 
+                let mut message = format!("Container '{}' imported from archive", new_name);
+                // Same rule as the Proxmox-destination branch: a network
+                // fallback must reach the operator, not a log file.
+                if let Some(w) = net_warning {
+                    message.push_str(". WARNING: ");
+                    message.push_str(&w);
+                }
                 Ok(LxcImportOutcome {
-                    message: format!("Container '{}' imported from archive", new_name),
+                    message,
                     start_id: new_name.to_string(),
                 })
             }
@@ -11340,7 +11719,7 @@ pub fn pct_adopt_native_orphan(name: &str) -> Result<String, String> {
     }
 
     // Hand the rootfs tarball to `pct create` via the shared import path.
-    let outcome = match lxc_import(&archive_path, name, None, None) {
+    let outcome = match lxc_import(&archive_path, name, None, None, None) {
         Ok(o) => o,
         Err(e) => {
             let _ = std::fs::remove_file(&archive_path);
@@ -13363,6 +13742,7 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
         let mut has_link = false;
         let mut has_name = false;
         let mut has_flags = false;
+        let mut has_ipv4 = false;
         let mut updated: Vec<String> = config.lines().map(|line| {
             let trimmed = line.trim();
             // Fix rootfs path to point to the new container name
@@ -13383,7 +13763,16 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
             if trimmed.starts_with("lxc.net.0.name") { has_name = true; }
             if trimmed.starts_with("lxc.net.0.flags") { has_flags = true; }
             if trimmed.starts_with("lxc.net.0.ipv4.address") {
+                has_ipv4 = true;
                 return format!("lxc.net.0.ipv4.address = {}/24", new_ip);
+            }
+            // The address above was just forced onto lxcbr0's 10.0.3.0/24 —
+            // a gateway carried from the source's network (e.g. a PVE
+            // 192.168.x.1) would be unreachable from it. Follow the bridge.
+            // Only rewrites an existing line: a deliberately gateway-less
+            // net.0 (WolfNet-only NIC) stays gateway-less.
+            if trimmed.starts_with("lxc.net.0.ipv4.gateway") {
+                return "lxc.net.0.ipv4.gateway = 10.0.3.1".to_string();
             }
             line.to_string()
         }).collect();
@@ -13395,6 +13784,10 @@ pub fn lxc_clone_fixup_ip(new_name: &str) {
         if !has_flags { net_additions.push("lxc.net.0.flags = up".to_string()); }
         if !has_name  { net_additions.push("lxc.net.0.name = eth0".to_string()); }
         if !has_hwaddr { net_additions.push(format!("lxc.net.0.hwaddr = {}", new_mac)); }
+        // A synthesised config (vzdump → native import) has no ipv4.address
+        // line — without this the fresh bridge IP lives only inside the
+        // rootfs and the container shows no address while stopped.
+        if !has_ipv4 { net_additions.push(format!("lxc.net.0.ipv4.address = {}/24", new_ip)); }
 
         if !net_additions.is_empty() {
             // Insert after existing lxc.net.0 lines, or at end

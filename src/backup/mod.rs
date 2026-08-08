@@ -5429,13 +5429,17 @@ fn restore_lxc_vzdump_native(archive: &Path, container_name: &str, overwrite: bo
     }
 
     // Shared extractor: handles zstd, flattens a nested rootfs/, strips
-    // etc/vzdump. Leaves the container's root filesystem in `rootfs_target`.
+    // etc/vzdump (salvaging pct.conf for the limits translation below).
+    // Leaves the container's root filesystem in `rootfs_target`.
     let archive_str = archive.to_string_lossy().to_string();
-    if let Err(e) = crate::containers::lxc_extract_archive_to_rootfs(&archive_str, &rootfs_target) {
-        let _ = fs::remove_dir_all(&container_dir);
-        let _ = fs::remove_file(archive);
-        return Err(format!("Failed to unpack vzdump archive for '{}': {}", container_name, e));
-    }
+    let pct_conf = match crate::containers::lxc_extract_archive_to_rootfs(&archive_str, &rootfs_target) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&container_dir);
+            let _ = fs::remove_file(archive);
+            return Err(format!("Failed to unpack vzdump archive for '{}': {}", container_name, e));
+        }
+    };
     // Verify a real root filesystem actually landed — otherwise the container
     // would start and instantly die with "Failed to exec /sbin/init". Keep the
     // (ephemeral) archive until this passes so a failed restore is recoverable.
@@ -5451,9 +5455,13 @@ fn restore_lxc_vzdump_native(archive: &Path, container_name: &str, overwrite: bo
     }
     let _ = fs::remove_file(archive);
 
-    // Synthesise a bootable native config from the rootfs (the carried
-    // pct.conf is Proxmox-format and unusable here).
-    crate::containers::lxc_write_bootable_config(&container_dir, container_name, None);
+    // Synthesise a bootable native config from the rootfs. The carried
+    // pct.conf is Proxmox-format and unusable verbatim, but its resource
+    // limits, autostart flag and (where this host has the same bridge)
+    // network settings translate — pass it through so the restored
+    // container keeps its envelope.
+    let net_warning = crate::containers::lxc_write_bootable_config(
+        &container_dir, container_name, None, pct_conf.as_deref(), None);
 
     // Own the container dir + config as root — NOT recursive, so the rootfs
     // keeps the UIDs tar restored (recursing would break an unprivileged
@@ -5463,11 +5471,18 @@ fn restore_lxc_vzdump_native(archive: &Path, container_name: &str, overwrite: bo
     let _ = Command::new("chown").args(["root:root", &config_path]).output();
     let _ = Command::new("chmod").args(["755", &container_dir]).output();
 
-    Ok(format!(
-        "Proxmox container restored as native LXC '{}' — start it from the Containers page. \
-         Its network was reset to a fresh veth on lxcbr0; adjust it in Settings → Resources if needed.",
+    let mut message = format!(
+        "Proxmox container restored as native LXC '{}' — start it from the Containers page.",
         container_name
-    ))
+    );
+    // The network either carried (same bridge exists here) or fell back to
+    // lxcbr0 — in the fallback case say so explicitly rather than the old
+    // blanket "reset to lxcbr0" text.
+    if let Some(w) = net_warning {
+        message.push_str(" WARNING: ");
+        message.push_str(&w);
+    }
+    Ok(message)
 }
 
 /// Build a human-readable warning about MAC-address duplication risk

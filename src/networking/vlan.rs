@@ -3722,3 +3722,258 @@ iface vlan100 inet static  # production VLAN
         );
     }
 }
+
+// ─── Live bridge-guest discovery ───
+
+/// A guest found LIVE on a VLAN's bridge by scanning container/VM configs —
+/// as opposed to `allocations`, which only records attachments made through
+/// this page. RutgerDiehard (2026-08-07): an LXC sat on each vSwitch bridge,
+/// wired up before WolfStack managed the VLAN — the page claimed "No
+/// containers/VMs attached yet" and Test had nothing to ping.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredGuest {
+    pub name: String,
+    /// "lxc" (native), "lxc-pve", "vm-pve", "vm-libvirt".
+    pub kind: String,
+    pub running: bool,
+    /// Static address from the guest's own config, CIDR suffix stripped.
+    /// None for DHCP / guest-managed addressing — nothing to ping-test.
+    pub ip: Option<String>,
+}
+
+/// Scan a native LXC config for a NIC on `bridge` — EVERY `lxc.net.N`
+/// block, not just net.0: a VLAN NIC added next to the default bridge
+/// NIC is net.1+. Returns `Some(static_ip)` when a NIC references the
+/// bridge (inner `None` = no static address), `None` when none does.
+fn lxc_cfg_nic_on_bridge(cfg: &str, bridge: &str) -> Option<Option<String>> {
+    let mut links: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut addrs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for line in cfg.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("lxc.net.") else { continue };
+        let Some((idx, kv)) = rest.split_once('.') else { continue };
+        let Some((key, val)) = kv.split_once('=') else { continue };
+        match key.trim() {
+            "link" => { links.insert(idx.to_string(), val.trim().to_string()); }
+            "ipv4.address" => { addrs.insert(idx.to_string(), val.trim().to_string()); }
+            _ => {}
+        }
+    }
+    for (idx, link) in &links {
+        if link == bridge {
+            let ip = addrs.get(idx)
+                .map(|a| a.split('/').next().unwrap_or("").trim().to_string())
+                .filter(|s| !s.is_empty());
+            return Some(ip);
+        }
+    }
+    None
+}
+
+/// Scan a Proxmox guest config (`pct` or `qm` format — both use
+/// `netN: key=val,...`) for a NIC on `bridge`. Live section only.
+/// Same return contract as [`lxc_cfg_nic_on_bridge`].
+fn pve_cfg_nic_on_bridge(cfg: &str, bridge: &str) -> Option<Option<String>> {
+    for line in cfg.lines().take_while(|l| !l.trim_start().starts_with('[')) {
+        let Some((k, v)) = line.trim().split_once(':') else { continue };
+        let k = k.trim();
+        if !k.starts_with("net") || k.len() < 4 || !k[3..].chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let (mut br, mut ip) = (String::new(), String::new());
+        for part in v.split(',') {
+            let Some((pk, pv)) = part.trim().split_once('=') else { continue };
+            match pk.trim() {
+                "bridge" => br = pv.trim().to_string(),
+                "ip" => ip = pv.trim().to_string(),
+                _ => {}
+            }
+        }
+        if br == bridge {
+            let ip = ip.split('/').next().unwrap_or("").trim().to_string();
+            return Some((!ip.is_empty() && ip != "dhcp").then_some(ip));
+        }
+    }
+    None
+}
+
+/// First `key: value` line of a Proxmox guest config (live section).
+fn pve_cfg_value(cfg: &str, key: &str) -> Option<String> {
+    cfg.lines()
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .find_map(|l| {
+            let (k, v) = l.trim().split_once(':')?;
+            (k.trim() == key).then(|| v.trim().to_string())
+        })
+        .filter(|v| !v.is_empty())
+}
+
+/// Everything actually wired to `bridge` right now: native LXC configs
+/// (all storage paths), Proxmox LXC + VM configs, libvirt domains.
+/// Docker macvlan/ipvlan guests attach to the parent VLAN interface,
+/// not the bridge, so they are correctly absent here — attachments made
+/// through this page are in `allocations` regardless of backend.
+pub fn discover_bridge_guests(bridge: &str) -> Vec<DiscoveredGuest> {
+    let mut out = Vec::new();
+    if bridge.is_empty() {
+        return out;
+    }
+
+    // Running-state lookup (native name / PVE vmid) from the cached
+    // container list — no per-guest subprocess storms on a page load.
+    let container_running: std::collections::HashMap<String, bool> =
+        crate::containers::lxc_list_all_cached()
+            .into_iter()
+            .map(|c| (c.name.clone(), c.state == "running"))
+            .collect();
+
+    // 1. Native LXC.
+    for base in crate::containers::lxc_storage_paths() {
+        let Ok(dir) = std::fs::read_dir(&base) else { continue };
+        for de in dir.flatten() {
+            let name = de.file_name().to_string_lossy().to_string();
+            let Ok(cfg) = std::fs::read_to_string(de.path().join("config")) else { continue };
+            if let Some(ip) = lxc_cfg_nic_on_bridge(&cfg, bridge) {
+                out.push(DiscoveredGuest {
+                    running: container_running.get(&name).copied().unwrap_or(false),
+                    name,
+                    kind: "lxc".to_string(),
+                    ip,
+                });
+            }
+        }
+    }
+
+    // 2. Proxmox LXC.
+    if let Ok(dir) = std::fs::read_dir("/etc/pve/lxc") {
+        for de in dir.flatten() {
+            let file = de.file_name().to_string_lossy().to_string();
+            let Some(vmid) = file.strip_suffix(".conf") else { continue };
+            let Ok(cfg) = std::fs::read_to_string(de.path()) else { continue };
+            if let Some(ip) = pve_cfg_nic_on_bridge(&cfg, bridge) {
+                out.push(DiscoveredGuest {
+                    name: pve_cfg_value(&cfg, "hostname").unwrap_or_else(|| format!("CT {}", vmid)),
+                    kind: "lxc-pve".to_string(),
+                    running: container_running.get(vmid).copied().unwrap_or(false),
+                    ip,
+                });
+            }
+        }
+    }
+
+    // 3. Proxmox VMs. One `qm list` for all states (VMID / NAME / STATUS).
+    if let Ok(dir) = std::fs::read_dir("/etc/pve/qemu-server") {
+        let qm_running: std::collections::HashMap<String, bool> = Command::new("qm")
+            .arg("list")
+            .output()
+            .ok()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .skip(1)
+                    .filter_map(|l| {
+                        let mut parts = l.split_whitespace();
+                        let vmid = parts.next()?.to_string();
+                        let _name = parts.next()?;
+                        let status = parts.next().unwrap_or("");
+                        Some((vmid, status == "running"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for de in dir.flatten() {
+            let file = de.file_name().to_string_lossy().to_string();
+            let Some(vmid) = file.strip_suffix(".conf") else { continue };
+            let Ok(cfg) = std::fs::read_to_string(de.path()) else { continue };
+            if let Some(ip) = pve_cfg_nic_on_bridge(&cfg, bridge) {
+                out.push(DiscoveredGuest {
+                    name: pve_cfg_value(&cfg, "name").unwrap_or_else(|| format!("VM {}", vmid)),
+                    kind: "vm-pve".to_string(),
+                    running: qm_running.get(vmid).copied().unwrap_or(false),
+                    ip,
+                });
+            }
+        }
+    }
+
+    // 4. libvirt domains — same bare `virsh` invocation vlan_attach uses.
+    let virsh_names = |extra: &[&str]| -> Vec<String> {
+        let mut args = vec!["list", "--name"];
+        args.extend_from_slice(extra);
+        Command::new("virsh")
+            .args(&args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let all_domains = virsh_names(&["--all"]);
+    if !all_domains.is_empty() {
+        let running: std::collections::HashSet<String> =
+            virsh_names(&[]).into_iter().collect();
+        for dom in all_domains {
+            let Ok(xml_out) = Command::new("virsh").args(["dumpxml", &dom]).output() else { continue };
+            if !xml_out.status.success() {
+                continue;
+            }
+            let xml = String::from_utf8_lossy(&xml_out.stdout);
+            // <source bridge='vmbr100'/> — either quote style.
+            let on_bridge = xml.contains(&format!("<source bridge='{}'", bridge))
+                || xml.contains(&format!("<source bridge=\"{}\"", bridge));
+            if on_bridge {
+                out.push(DiscoveredGuest {
+                    running: running.contains(&dom),
+                    name: dom,
+                    kind: "vm-libvirt".to_string(),
+                    ip: None,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::{lxc_cfg_nic_on_bridge, pve_cfg_nic_on_bridge, pve_cfg_value};
+
+    #[test]
+    fn native_vlan_nic_on_net1_is_found_with_its_static_ip() {
+        let cfg = "lxc.uts.name = web1\nlxc.net.0.type = veth\nlxc.net.0.link = lxcbr0\nlxc.net.0.ipv4.address = 10.0.3.5/24\nlxc.net.1.type = veth\nlxc.net.1.link = vmbr100\nlxc.net.1.ipv4.address = 10.0.100.10/24\n";
+        assert_eq!(lxc_cfg_nic_on_bridge(cfg, "vmbr100"), Some(Some("10.0.100.10".to_string())));
+        assert_eq!(lxc_cfg_nic_on_bridge(cfg, "lxcbr0"), Some(Some("10.0.3.5".to_string())));
+        assert_eq!(lxc_cfg_nic_on_bridge(cfg, "vmbr999"), None);
+    }
+
+    #[test]
+    fn native_nic_without_address_reports_inner_none() {
+        let cfg = "lxc.net.0.link = vmbr106\n";
+        assert_eq!(lxc_cfg_nic_on_bridge(cfg, "vmbr106"), Some(None));
+    }
+
+    #[test]
+    fn pve_ct_and_vm_net_lines_are_found() {
+        let ct = "hostname: db1\nnet0: name=eth0,bridge=vmbr108,hwaddr=BC:24:11:00:00:01,ip=10.0.108.4/24\n";
+        assert_eq!(pve_cfg_nic_on_bridge(ct, "vmbr108"), Some(Some("10.0.108.4".to_string())));
+        assert_eq!(pve_cfg_value(ct, "hostname").as_deref(), Some("db1"));
+        // VM confs have no ip= — guest-managed addressing.
+        let vm = "name: win11\nnet0: virtio=BC:24:11:00:00:02,bridge=vmbr108,firewall=1\n";
+        assert_eq!(pve_cfg_nic_on_bridge(vm, "vmbr108"), Some(None));
+        assert_eq!(pve_cfg_nic_on_bridge(vm, "vmbr0"), None);
+    }
+
+    #[test]
+    fn pve_snapshot_sections_do_not_leak_nics() {
+        let cfg = "net0: name=eth0,bridge=vmbr0,ip=dhcp\n[snap1]\nnet0: name=eth0,bridge=vmbr100,ip=10.0.100.9/24\n";
+        assert_eq!(pve_cfg_nic_on_bridge(cfg, "vmbr100"), None);
+    }
+}

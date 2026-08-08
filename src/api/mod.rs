@@ -11935,6 +11935,11 @@ pub struct MigrateRequest {
     pub target_address: Option<String>,
     #[serde(default)]
     pub target_port: Option<u16>,
+    /// Destination bridge for the container's primary NIC. None = keep
+    /// the source network where the destination can honour it (the
+    /// default translation). The destination validates it exists.
+    #[serde(default)]
+    pub target_bridge: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -11945,6 +11950,10 @@ pub struct MigrateExternalRequest {
     pub new_name: Option<String>,
     pub storage: Option<String>,
     pub delete_source: Option<bool>, // accepted but ignored — source is never deleted
+    /// Destination bridge for the container's primary NIC (see
+    /// MigrateRequest::target_bridge).
+    #[serde(default)]
+    pub target_bridge: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -12427,10 +12436,15 @@ pub async fn lxc_migrate(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
-    let new_name = body.new_name.as_deref().unwrap_or(&name).to_string();
     // Validate here, before we stop/export anything — a bad name must not
     // cost the operator downtime only to be rejected by the target later.
-    if !crate::auth::is_safe_name(&new_name) {
+    let requested_name = body.new_name.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref n) = requested_name
+        && !crate::auth::is_safe_name(n)
+    {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
     }
 
@@ -12464,6 +12478,10 @@ pub async fn lxc_migrate(
     let tid = task_id.clone();
     let cluster_secret = state.cluster_secret.clone();
     let storage_val = body.storage.as_deref().unwrap_or("").to_string();
+    let target_bridge = body.target_bridge.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
 
     tokio::spawn(async move {
         // 1. Stop the source for a consistent export. Record whether it was
@@ -12499,6 +12517,19 @@ pub async fn lxc_migrate(
             }
         };
 
+        // Destination name: the operator's explicit choice, else the source's
+        // real hostname from the export metadata. On a Proxmox source `name`
+        // is the bare VMID — defaulting to it named the arrival "131" (and on
+        // a PVE destination set hostname to the old VMID, the exact
+        // fingerprint the ghost-husk heuristic hides). See lxc_migrate_external.
+        let new_name = requested_name.clone().unwrap_or_else(|| {
+            if meta.name != name && crate::auth::is_safe_name(&meta.name) {
+                meta.name.clone()
+            } else {
+                name.clone()
+            }
+        });
+
         let size_mb = archive_bytes.len() / (1024 * 1024);
         migration_update(&tasks, &tid, "upload", &format!("Transferring {} MB to {}…", size_mb, target_label));
 
@@ -12529,6 +12560,9 @@ pub async fn lxc_migrate(
             if let Some(ip) = src_wolfnet_ip.clone() {
                 form = form.text("wolfnet_ip", ip);
             }
+            if let Some(b) = target_bridge.clone() {
+                form = form.text("target_bridge", b);
+            }
 
             match client.post(import_url)
                 .timeout(std::time::Duration::from_secs(3600))
@@ -12550,9 +12584,17 @@ pub async fn lxc_migrate(
                             let note = if target_is_proxmox && meta.source_type == "standalone" {
                                 "\n\nNote: imported onto Proxmox from a standalone node — custom resource limits / LXC settings were not translated; review with `pct config` and adjust via `pct set`."
                             } else { "" };
+                            // The import's own message carries the network-
+                            // fallback warning (wrong-bridge → vmbr0/lxcbr0).
+                            // It MUST reach this dialog — discarding it here is
+                            // how RutgerDiehard's LXC landed on the management
+                            // VLAN with no warning shown (2026-08-07).
+                            let import_warning = data.get("message").and_then(|v| v.as_str())
+                                .and_then(|m| m.find("WARNING:").map(|i| format!("\n\n{}", &m[i..])))
+                                .unwrap_or_default();
                             migration_done(&tasks, &tid, &format!(
-                                "Migrated '{}' to {} — destination is running. Source stopped and kept on the old node as a rollback.{}",
-                                name, target_label, note));
+                                "Migrated '{}' to {} as '{}' — destination is running. Source stopped and kept on the old node as a rollback.{}{}",
+                                name, target_label, new_name, import_warning, note));
                         } else {
                             // Imported but didn't boot — roll back to the source.
                             if was_running { let _ = containers::lxc_start(&name); }
@@ -12689,6 +12731,7 @@ async fn lxc_import_endpoint_inner(
     let mut lxc_config: Option<String> = None;   // source config, for a bootable standalone import
     let mut start_after_import = false;          // migrate sets this to boot + verify the destination
     let mut preserve_identity = false;           // migrate (a move) sets this to keep IP/MAC/WolfNet as-is
+    let mut target_bridge: Option<String> = None; // operator-chosen destination bridge for the primary NIC
 
     use futures::StreamExt;
     while let Some(item) = payload.next().await {
@@ -12751,6 +12794,14 @@ async fn lxc_import_endpoint_inner(
                 let s = String::from_utf8_lossy(&buf).trim().to_ascii_lowercase();
                 preserve_identity = s == "1" || s == "true" || s == "yes";
             }
+            "target_bridge" => {
+                let mut buf = Vec::new();
+                while let Some(chunk) = field.next().await {
+                    if let Ok(data) = chunk { buf.extend_from_slice(&data); }
+                }
+                let s = String::from_utf8_lossy(&buf).trim().to_string();
+                if !s.is_empty() { target_bridge = Some(s); }
+            }
             "archive" => {
                 // Use UUID filename — pick extension based on source archive format
                 let ext = if archive_format == "vzdump" { "tar.zst" } else { "tar.gz" };
@@ -12780,6 +12831,18 @@ async fn lxc_import_endpoint_inner(
     if !crate::auth::is_safe_name(&new_name) {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
     }
+    // An explicitly-requested bridge must exist HERE, on the destination —
+    // pct/lxc both accept any bridge name silently and the container then
+    // just fails to start (or lands nowhere). Refuse up front with the
+    // name so the operator can fix the choice, not debug a dead container.
+    if let Some(ref b) = target_bridge
+        && (!crate::auth::is_safe_name(b)
+            || !std::path::Path::new(&format!("/sys/class/net/{}", b)).exists())
+    {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("bridge '{}' does not exist on this destination node", b),
+        }));
+    }
     let archive = match archive_path {
         Some(p) => p,
         None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "archive file is required"})),
@@ -12793,8 +12856,9 @@ async fn lxc_import_endpoint_inner(
     let storage_c = storage.clone();
     let carried = lxc_config.clone();
     let pre_ip = wolfnet_ip.clone();
+    let bridge_c = target_bridge.clone();
     let blk = web::block(move || -> Result<(String, Option<String>), String> {
-        let outcome = containers::lxc_import(&archive_str, &nn, storage_c.as_deref(), carried.as_deref())?;
+        let outcome = containers::lxc_import(&archive_str, &nn, storage_c.as_deref(), carried.as_deref(), bridge_c.as_deref())?;
         let _ = std::fs::remove_file(&archive_str);
 
         if preserve_identity {
@@ -12983,10 +13047,24 @@ pub async fn lxc_migrate_external(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
-    let new_name = body.new_name.as_deref().unwrap_or(&name).to_string();
+    // An explicit destination name from the caller wins; validate it up
+    // front so a bad name fails before anything is stopped or exported.
+    let requested_name = body.new_name.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref n) = requested_name
+        && !crate::auth::is_safe_name(n)
+    {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
+    }
     let target_url = body.target_url.clone();
     let target_token = body.target_token.clone();
     let storage_val = body.storage.as_deref().unwrap_or("").to_string();
+    let ext_target_bridge = body.target_bridge.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let cluster_secret = state.cluster_secret.clone();
     // Attach our cluster secret only when the destination is a member of THIS
     // cluster. A genuine external cluster authenticates with `target_token`
@@ -13041,6 +13119,20 @@ pub async fn lxc_migrate_external(
         let _ = containers::lxc_start(&name);
         migration_update(&tasks, &tid, "export", "Reading archive...");
 
+        // Destination name: the caller's explicit choice, else the source's
+        // real hostname from the export metadata. On a Proxmox source `name`
+        // is the bare VMID ("131") — defaulting to it shipped containers that
+        // arrived nameless (jdelrue 2026-08-07, PVE→standalone: "name only
+        // arrived as CT131"). Falls back to `name` when the hostname doesn't
+        // survive is_safe_name (it already passed the source's route match).
+        let new_name = requested_name.clone().unwrap_or_else(|| {
+            if meta.name != name && crate::auth::is_safe_name(&meta.name) {
+                meta.name.clone()
+            } else {
+                name.clone()
+            }
+        });
+
         let archive_bytes = match std::fs::read(&archive_path) {
             Ok(b) => b,
             Err(e) => {
@@ -13062,12 +13154,15 @@ pub async fn lxc_migrate_external(
         let mut last_err: Option<String> = None;
 
         for import_url in &import_urls {
-            let form = reqwest::multipart::Form::new()
+            let mut form = reqwest::multipart::Form::new()
                 .text("new_name", new_name.clone())
                 .text("storage", storage_val.clone())
                 .text("meta", serde_json::to_string(&meta).unwrap_or_default())
                 .part("archive", reqwest::multipart::Part::bytes(archive_bytes.clone())
                     .file_name(file_name.clone()));
+            if let Some(b) = ext_target_bridge.clone() {
+                form = form.text("target_bridge", b);
+            }
 
             let mut rb = client.post(import_url)
                 .timeout(std::time::Duration::from_secs(600))
@@ -13082,9 +13177,15 @@ pub async fn lxc_migrate_external(
                 Ok(r) => {
                     containers::lxc_export_cleanup(archive_path.to_str().unwrap_or(""));
                     if r.status().is_success() {
-                        let _ = r.bytes().await;
+                        // The import's message carries the network-fallback
+                        // warning (wrong-bridge → vmbr0/lxcbr0) — surface it,
+                        // don't drop the body (see lxc_migrate).
+                        let body = r.json::<serde_json::Value>().await.unwrap_or_else(|_| serde_json::json!({}));
+                        let import_warning = body.get("message").and_then(|v| v.as_str())
+                            .and_then(|m| m.find("WARNING:").map(|i| format!("\n\n{}", &m[i..])))
+                            .unwrap_or_default();
                         migration_update(&tasks, &tid, "import", "Importing on destination...");
-                        migration_done(&tasks, &tid, &format!("Container '{}' transferred. Destination is stopped — start it manually.", name));
+                        migration_done(&tasks, &tid, &format!("Container '{}' transferred as '{}'. Destination is stopped — start it manually.{}", name, new_name, import_warning));
                     } else {
                         let err = r.text().await.unwrap_or_default();
                         migration_fail(&tasks, &tid, &format!("Import failed: {}", err));
@@ -16145,10 +16246,30 @@ pub async fn net_wireguard_client_config(req: HttpRequest, state: web::Data<AppS
 /// GET /api/networking/vlan — current store + detected network manager.
 pub async fn vlan_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    let store = crate::networking::vlan::VlanStore::load();
+    // Discovery walks container/VM configs and may shell out (qm/virsh) —
+    // keep it off the async workers via web::block.
+    let blk = web::block(|| {
+        let store = crate::networking::vlan::VlanStore::load();
+        // Guests actually wired to each VLAN's bridge, found live — the
+        // persisted `allocations` only know attachments made through this
+        // page, so pre-existing guests were invisible (RutgerDiehard,
+        // 2026-08-07: an LXC on every vSwitch bridge, none listed).
+        let discovered: std::collections::HashMap<String, Vec<crate::networking::vlan::DiscoveredGuest>> =
+            store.vlans.iter()
+                .map(|v| (v.id.clone(), crate::networking::vlan::discover_bridge_guests(&v.bridge_name)))
+                .collect();
+        (store, discovered)
+    }).await;
+    let (store, discovered) = match blk {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("could not read VLAN state: {}", e),
+        })),
+    };
     let manager = crate::networking::vlan::detect_net_manager();
     HttpResponse::Ok().json(serde_json::json!({
         "vlans": store.vlans,
+        "discovered": discovered,
         "public_ips": store.public_ips,
         "net_manager": manager,
         "net_manager_label": manager.label(),
@@ -18842,12 +18963,27 @@ pub async fn vlan_test(
         })),
     };
 
-    // Build the candidate list: local allocations, gateway IPs from
-    // routes, and aggregated peer/external IPs from cluster-used.
+    // Build the candidate list: local allocations, guests discovered live
+    // on the bridge, gateway IPs from routes, and aggregated peer/external
+    // IPs from cluster-used.
     let mut candidates: Vec<(String, String)> = Vec::new();  // (ip, label)
     for a in &vlan.allocations {
         let label = if a.label.is_empty() { a.target_id.clone() } else { a.label.clone() };
         candidates.push((a.ip.clone(), format!("local: {}", label)));
+    }
+    // Guests wired to the bridge outside this page's attach flow — without
+    // these, a bridge full of hand-attached LXCs "has nothing to test"
+    // (RutgerDiehard, 2026-08-07). Discovery shells out; off the workers.
+    let bridge_name = vlan.bridge_name.clone();
+    let discovered = web::block(move || crate::networking::vlan::discover_bridge_guests(&bridge_name))
+        .await
+        .unwrap_or_default();
+    let mut unpingable_guests = 0usize;
+    for g in &discovered {
+        match &g.ip {
+            Some(ip) => candidates.push((ip.clone(), format!("on bridge: {} ({})", g.name, g.kind))),
+            None => unpingable_guests += 1,
+        }
     }
     for r in &vlan.routes {
         candidates.push((r.via.clone(), format!("gateway for {}", r.destination)));
@@ -18865,10 +19001,22 @@ pub async fn vlan_test(
     candidates.retain(|(ip, _)| seen.insert(ip.clone()));
 
     if candidates.is_empty() {
+        // Distinguish "the bridge really is empty" from "guests are there
+        // but none has an address we can ping" (DHCP LXC, VMs that manage
+        // their own IPs) — the blanket "nothing on this VLAN" reading is
+        // what confused RutgerDiehard when his LXCs were right there.
+        let summary = if unpingable_guests > 0 {
+            format!(
+                "Found {} guest{} on bridge {} but none with a known IP to ping — their addresses are DHCP or guest-managed. Add them via Attach (or a Reservation) to make them testable.",
+                unpingable_guests, if unpingable_guests == 1 { "" } else { "s" }, vlan.bridge_name
+            )
+        } else {
+            "Nothing to test — no allocations, guests on the bridge, peers, or gateways known on this VLAN yet.".to_string()
+        };
         return HttpResponse::Ok().json(serde_json::json!({
             "vlan_id": vlan_id,
             "results": [],
-            "summary": "Nothing to test — no allocations, peers, or gateways known on this VLAN yet.",
+            "summary": summary,
         }));
     }
 
