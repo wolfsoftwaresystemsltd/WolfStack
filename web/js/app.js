@@ -31203,7 +31203,14 @@ async function migrateLxcContainer(name) {
                     <label style="font-size:13px;color:var(--text-muted,#aaa);">Target URL</label>
                     <input id="migrate-ext-url" type="text" placeholder="https://target.example.com" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;margin-bottom:8px;">
                     <label style="font-size:13px;color:var(--text-muted,#aaa);">Transfer Token</label>
-                    <input id="migrate-ext-token" type="text" placeholder="wst_..." style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                    <input id="migrate-ext-token" type="text" placeholder="wst_..." style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;margin-bottom:10px;">
+                    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text,#fff);margin-bottom:6px;">
+                        <input type="checkbox" id="migrate-ext-preserve"> Keep the source's IP and MAC address
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text,#fff);">
+                        <input type="checkbox" id="migrate-ext-start"> Start the container on the destination after transfer
+                    </label>
+                    <div style="font-size:11px;color:var(--text-muted,#666);margin-top:6px;">By default a cross-cluster copy arrives <strong>stopped</strong> with a <strong>fresh address</strong>, so it can't clash with the still-running source. Tick these for a prod&nbsp;&rarr;&nbsp;test move where you want it to come up exactly as it was &mdash; only safe when the two clusters don't share a network.</div>
                 </div>
                 <div><label style="font-size:13px;color:var(--text-muted,#aaa);">Target Storage</label>
                     <select id="migrate-storage" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
@@ -31337,6 +31344,8 @@ async function doMigrateLxc(name) {
     const migrateStorage = document.getElementById('migrate-storage')?.value || '';
     const bridgeSelVal = document.getElementById('migrate-bridge')?.value || '';
     const bridgeTxtVal = document.getElementById('migrate-ext-bridge')?.value.trim() || '';
+    const extPreserve = document.getElementById('migrate-ext-preserve')?.checked || false;
+    const extStart = document.getElementById('migrate-ext-start')?.checked || false;
     // Only send new_name when the operator actually edited the prefill —
     // an untouched field must NOT override the backend's default (which
     // prefers a Proxmox source's hostname over its VMID).
@@ -31358,7 +31367,7 @@ async function doMigrateLxc(name) {
             const startResp = await fetch(`/api/containers/lxc/${name}/migrate-external`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_url: extUrl, target_token: extToken, ...(migrateStorage && { storage: migrateStorage }), ...(targetBridge && { target_bridge: targetBridge }), ...(newName && { new_name: newName }) }),
+                body: JSON.stringify({ target_url: extUrl, target_token: extToken, ...(migrateStorage && { storage: migrateStorage }), ...(targetBridge && { target_bridge: targetBridge }), ...(newName && { new_name: newName }), ...(extPreserve && { preserve_address: true }), ...(extStart && { start_after: true }) }),
             });
             const startData = await startResp.json().catch(() => ({}));
             if (!startResp.ok || !startData.task_id) {
@@ -65798,7 +65807,7 @@ function learnContextHelp() {
 // not listed falls back to the WolfStack overview, so the button always
 // goes somewhere useful rather than 404ing. Keys are the live
 // currentPage / view strings, NOT the .php filenames.
-const DOCS_SITE_BASE = 'https://wolfscale.org/';
+const DOCS_SITE_BASE = 'https://wolfstack.org/';
 const DOCS_PAGE_MAP = {
     // Top-level (selectView) pages
     datacenter: 'wolfstack.php',

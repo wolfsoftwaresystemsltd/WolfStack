@@ -11954,6 +11954,18 @@ pub struct MigrateExternalRequest {
     /// MigrateRequest::target_bridge).
     #[serde(default)]
     pub target_bridge: Option<String>,
+    /// Opt-in: keep the source's IP and MAC on the destination instead of
+    /// assigning a fresh identity. Off by default because two independent
+    /// clusters can share an L2, where duplicating the address collides —
+    /// but for an isolated prod→test move it's exactly what you want
+    /// (jdelrue 2026-08-09).
+    #[serde(default)]
+    pub preserve_address: Option<bool>,
+    /// Opt-in: start the container on the destination after transfer.
+    /// Off by default (a cross-cluster copy leaves the source running, so
+    /// booting the copy too would run two of the same container).
+    #[serde(default)]
+    pub start_after: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -14059,6 +14071,15 @@ pub async fn lxc_migrate_external(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
+    let preserve_address = body.preserve_address.unwrap_or(false);
+    let start_after = body.start_after.unwrap_or(false);
+    // The source's WolfNet IP, carried only when the operator asked to keep
+    // the source's identity — mirrors the same-cluster move.
+    let src_wolfnet_ip = if preserve_address {
+        containers::lxc_get_wolfnet_ip(&name)
+    } else {
+        None
+    };
     let cluster_secret = state.cluster_secret.clone();
     // Attach our cluster secret only when the destination is a member of THIS
     // cluster. A genuine external cluster authenticates with `target_token`
@@ -14183,6 +14204,16 @@ pub async fn lxc_migrate_external(
             if let Some(b) = ext_target_bridge.clone() {
                 form = form.text("target_bridge", b);
             }
+            // Opt-in: keep the source's IP/MAC, and/or boot on arrival.
+            if preserve_address {
+                form = form.text("preserve_identity", "1");
+                if let Some(ip) = src_wolfnet_ip.clone() {
+                    form = form.text("wolfnet_ip", ip);
+                }
+            }
+            if start_after {
+                form = form.text("start", "1");
+            }
 
             let mut rb = client.post(import_url)
                 .timeout(std::time::Duration::from_secs(600))
@@ -14205,7 +14236,28 @@ pub async fn lxc_migrate_external(
                             .and_then(|m| m.find("WARNING:").map(|i| format!("\n\n{}", &m[i..])))
                             .unwrap_or_default();
                         migration_update(&tasks, &tid, "import", "Importing on destination...");
-                        migration_done(&tasks, &tid, &format!("Container '{}' transferred as '{}'. Destination is stopped — start it manually.{}", name, new_name, import_warning));
+                        // Report the arrival state honestly: whether it kept
+                        // its address, and whether it started (only when the
+                        // operator asked it to).
+                        let id_note = if preserve_address {
+                            " It kept its source IP and MAC."
+                        } else {
+                            " It was given a fresh IP and MAC — update DNS if needed."
+                        };
+                        let start_note = if start_after {
+                            match body.get("started").and_then(|v| v.as_bool()) {
+                                Some(true) => " Destination is running.".to_string(),
+                                _ => {
+                                    let serr = body.get("start_error").and_then(|v| v.as_str()).unwrap_or("check its log on the destination");
+                                    format!(" It was asked to start but did not reach RUNNING ({}).", serr)
+                                }
+                            }
+                        } else {
+                            " Destination is stopped — start it manually.".to_string()
+                        };
+                        migration_done(&tasks, &tid, &format!(
+                            "Container '{}' transferred as '{}'.{}{}{}",
+                            name, new_name, start_note, id_note, import_warning));
                     } else {
                         let err = r.text().await.unwrap_or_default();
                         migration_fail(&tasks, &tid, &format!("Import failed: {}", err));
