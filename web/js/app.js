@@ -65791,6 +65791,112 @@ function learnContextHelp() {
     openLearnDrawer(lessonId);
 }
 
+// ── Per-view documentation links (the top-bar "?" button) ──
+// Maps the active view (currentPage — set by both selectView and
+// selectServerView, so per-node views like `storage`/`networking` are
+// covered by the same global) to its guide on the docs site. Anything
+// not listed falls back to the WolfStack overview, so the button always
+// goes somewhere useful rather than 404ing. Keys are the live
+// currentPage / view strings, NOT the .php filenames.
+const DOCS_SITE_BASE = 'https://wolfscale.org/';
+const DOCS_PAGE_MAP = {
+    // Top-level (selectView) pages
+    datacenter: 'wolfstack.php',
+    learn: 'wolfstack-learn.php',
+    settings: 'wolfstack-settings.php',
+    docs: 'wolfstack.php',
+    appstore: 'app-store.php',
+    issues: 'wolfstack-issues.php',
+    inbox: 'wolfstack-predictive.php',
+    'global-wolfnet': 'wolfnet.php',
+    kubernetes: 'wolfkube.php',
+    topology: 'wolfstack-networking.php',
+    wolfflow: 'wolfflow.php',
+    wolfagents: 'wolfstack-agents.php',
+    'cluster-browser': 'wolfstack-cluster-browser.php',
+    databases: 'wolfstack-mysql.php',
+    'control-panel': 'wolfstack.php',
+    array: 'wolfstack-array.php',
+    xopools: 'wolfstack-storage.php',
+    tenants: 'wolfstack-security.php',
+    integrations: 'wolfstack.php',
+    'fleet-security': 'wolfstack-security.php',
+    'fleet-manage': 'wolfstack.php',
+    'fleet-logs': 'wolfstack-fleet-logs.php',
+    'dashboard-sync': 'wolfstack-home-dashboard.php',
+    wolfhost: 'wolfhost.php',
+    exposure: 'wolfstack-exposure.php',
+    'ssh-keys': 'wolfstack-security.php',
+    probes: 'wolfstack-statuspage.php',
+    // Cluster-level pages
+    'cluster-storage': 'wolfstack-storage.php',
+    'cluster-backups': 'wolfstack-backups.php',
+    wolffunctions: 'wolffunctions.php',
+    'network-map': 'wolfstack-networking.php',
+    wolfrun: 'wolfrun.php',
+    'wolfdisk-cluster': 'wolfdisk.php',
+    statuspage: 'wolfstack-statuspage.php',
+    shares: 'wolfstack-shares.php',
+    'galera-cluster': 'wolfstack-galera.php',
+    'wolfscale-cluster': 'how-it-works.php',
+    wolfha: 'wolfstack-ha.php',
+    // Per-node views (selectServerView sets currentPage = view)
+    dashboard: 'wolfstack-home-dashboard.php',
+    components: 'wolfstack.php',
+    services: 'wolfstack.php',
+    containers: 'wolfstack-containers.php',
+    compose: 'wolfstack-containers.php',
+    secrets: 'wolfstack-settings.php',
+    lxc: 'wolfstack-containers.php',
+    storage: 'wolfstack-storage.php',
+    files: 'wolfstack-files.php',
+    networking: 'wolfstack-networking.php',
+    wolfnet: 'wolfnet.php',
+    certificates: 'wolfstack-certificates.php',
+    cron: 'wolfstack-cron.php',
+    'pve-resources': 'wolfstack-vms.php',
+    'mysql-editor': 'wolfstack-mysql.php',
+    terminal: 'wolfstack-terminal.php',
+    wolfusb: 'wolfusb.php',
+    syslogs: 'wolfstack-fleet-logs.php',
+    security: 'wolfstack-security.php',
+    ceph: 'wolfstack-ceph.php',
+    wolfkube: 'wolfkube.php',
+    wolfram: 'wolfram.php',
+    wolfrouter: 'wolfrouter.php',
+    alerting: 'wolfstack-alerting.php',
+    // component-detail is resolved separately (see docPageForCurrentView)
+};
+
+// Component-detail views (currentPage === 'component-detail') identify
+// the subject in currentComponent — map the common ones, else overview.
+const DOCS_COMPONENT_MAP = {
+    galera: 'wolfstack-galera.php',
+    ceph: 'wolfstack-ceph.php',
+    wolfnet: 'wolfnet.php',
+    wolfrun: 'wolfrun.php',
+    wolfkube: 'wolfkube.php',
+};
+
+function docPageForCurrentView() {
+    if (currentPage === 'component-detail' && currentComponent) {
+        const key = String(currentComponent).toLowerCase();
+        for (const c in DOCS_COMPONENT_MAP) {
+            if (key.indexOf(c) !== -1) return DOCS_COMPONENT_MAP[c];
+        }
+        return 'wolfstack.php';
+    }
+    return DOCS_PAGE_MAP[currentPage] || 'wolfstack.php';
+}
+
+function openDocsForCurrentView() {
+    const url = DOCS_SITE_BASE + docPageForCurrentView();
+    try {
+        if (typeof window.gtag === 'function') window.gtag('event', 'open_docs', { page: currentPage });
+    } catch (_) {}
+    window.open(url, '_blank', 'noopener');
+}
+
 // "Ask AI about this lesson" — opens the floating AI chat and seeds the input
 // with the current lesson's context, so the user just types their question.
 // sendAiMessage already attaches the current view + node context to the
