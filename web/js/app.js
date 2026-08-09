@@ -11242,7 +11242,7 @@ async function editContainerConfigFile(type, name) {
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);opacity:1;pointer-events:all;';
     const typeIcon = type === 'docker' ? '' : '';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px;min-width:720px;max-width:90vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px;min-width:720px;max-width:90vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 4px;color:var(--text,#fff);">${typeIcon} Edit config file — ${escapeHtml(name)}</h3>
             <p style="margin:0 0 14px;color:var(--text-muted,#aaa);font-size:0.85em;">
                 Type the absolute path of a file inside the container, click <strong>Load</strong>, edit it, then <strong>Save</strong>. Changes usually need a container restart to take effect — tick the restart box if you want that done automatically.
@@ -31000,7 +31000,7 @@ async function cloneLxcContainer(name) {
     modal.id = 'lxc-clone-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 16px;color:var(--text,#fff);">Clone Container</h3>
             <p style="margin:0 0 16px;color:var(--text-muted,#aaa);font-size:0.9em;">Clone <strong>${name}</strong> to a new container.</p>
             <div style="display:flex;flex-direction:column;gap:12px;">
@@ -31080,7 +31080,7 @@ async function doCloneLxc(name) {
     modal.id = 'lxc-op-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
             <div style="width:48px;height:48px;border:4px solid var(--border,#555);border-top:4px solid var(--primary,#3b82f6);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px;"></div>
             <h3 style="margin:0 0 8px;color:var(--text,#fff);">Cloning Container</h3>
             <p id="lxc-op-status" style="margin:0;color:var(--text-muted,#aaa);font-size:0.9em;">Cloning <strong>${name}</strong> → <strong>${newName}</strong>${targetNode ? ' (remote)' : ''}...</p>
@@ -31172,7 +31172,7 @@ async function migrateLxcContainer(name) {
     modal.id = 'lxc-migrate-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 16px;color:var(--text,#fff);">Migrate Container</h3>
             <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Move <strong>${name}</strong> to another node in this cluster: the source is stopped, copied across, and started on the destination — the source is kept (stopped) on the old node as a rollback. <em>Migrating to an external cluster instead copies it and leaves the source running.</em></p>
             <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:10px 12px;margin-bottom:10px;color:var(--danger);font-size:0.85em;">
@@ -31601,7 +31601,7 @@ async function migrateVm(name) {
     modal.id = 'vm-migrate-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 16px;color:var(--text,#fff);">Migrate VM</h3>
             <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Copy <strong>${name}</strong> to another node. The source VM stays running — the destination will be imported but not started.</p>
             <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:10px 12px;margin-bottom:10px;color:var(--danger);font-size:0.85em;">
@@ -31824,7 +31824,7 @@ function showVmMigrateProgressModal(name, steps, noun = 'VM') {
     modal.id = 'vm-op-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:480px;max-width:580px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:480px;max-width:580px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 6px;color:var(--text,#fff);">Migrating ${escapeHtml(noun)}</h3>
             <p style="margin:0 0 16px;color:var(--text-muted,#aaa);font-size:0.85em;">Moving <strong>${escapeHtml(name)}</strong> — progress is polled live from the server.</p>
             <div id="vm-migrate-steps" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;">
@@ -32057,7 +32057,7 @@ async function migrateVmDiskStorage(name) {
     // inline so the modal is interactive immediately on append.
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);opacity:1;pointer-events:all;';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:440px;max-width:560px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:440px;max-width:560px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
             <h3 style="margin:0 0 10px;color:var(--text,#fff);">Migrate VM Disk Storage</h3>
             <p style="margin:0 0 14px;color:var(--text-muted,#aaa);font-size:0.9em;">Move <strong>${escapeHtml(name)}</strong>'s disks to a different storage pool on <em>this</em> node. VM must be stopped; the config is updated to point at the new pool after copy.</p>
             ${isProxmoxHost ? '<div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:var(--text,#fff);">Proxmox host detected — target is a PVE <strong>storage ID</strong> (e.g. <code>local-lvm</code>, <code>wolfpool</code>). The server will call <code>qm move_disk</code> for every disk slot.</div>' : ''}
@@ -32381,7 +32381,7 @@ async function generateTransferToken() {
         modal.id = 'transfer-token-modal';
         modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
         modal.innerHTML = `
-            <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:400px;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
                 <h3 style="margin:0 0 12px;color:var(--text,#fff);">Transfer Token Generated</h3>
                 <p style="color:var(--text-muted,#aaa);font-size:0.9em;margin-bottom:16px;">
                     Share this token with the source cluster admin. It expires in 30 minutes and can only be used once.
@@ -33358,7 +33358,7 @@ async function createLxcContainer() {
     modal.id = 'lxc-create-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:32px 40px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:32px 40px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);text-align:center;">
             <div id="lxc-create-spinner" style="margin-bottom:16px;">
                 <div style="width:48px;height:48px;border:4px solid var(--border,#555);border-top:4px solid var(--primary,#3b82f6);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto;"></div>
             </div>
@@ -81308,7 +81308,7 @@ function wolfHaPromote(nodeId, container, primaryReachable) {
     const planned = primaryReachable
         ? '<p style="font-size:12px;color:var(--text-secondary);">The current primary is reachable: it will be <strong>stopped</strong>, push a final delta here, and demote itself — a clean, lossless handoff.</p>'
         : '<p style="font-size:12px;color:#f59e0b;">The current primary is <strong>not reachable</strong>. This standby starts with the state of its <strong>last completed sync</strong> — changes on the primary since then are not on this copy. If the old node comes back, its copy stays stopped and marked stale.</p>';
-    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+    modal.innerHTML = `<div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
         <h3 style="margin:0 0 10px;">Promote '${vlanEsc(container)}' on ${vlanEsc(nodeName)}?</h3>
         ${planned}
         <p style="font-size:12px;color:var(--text-secondary);">The container keeps its name, MAC and IP — DNS and clients follow automatically on a shared bridge.</p>
@@ -81342,7 +81342,7 @@ function wolfHaDisable(nodeId, container) {
     const modal = document.createElement('div');
     modal.id = 'wolfha-disable-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
-    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+    modal.innerHTML = `<div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
         <h3 style="margin:0 0 10px;">Disable HA for '${vlanEsc(container)}'?</h3>
         <p style="font-size:12px;color:var(--text-secondary);">Replication stops. The container keeps running on its current node.</p>
         <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin:10px 0;">
@@ -81375,7 +81375,7 @@ function wolfHaOpenSettings(nodeId, container, current) {
     const modal = document.createElement('div');
     modal.id = 'wolfha-settings-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
-    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;min-width:380px;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+    modal.innerHTML = `<div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;min-width:380px;max-width:460px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
         <h3 style="margin:0 0 12px;">HA settings — '${vlanEsc(container)}'</h3>
         <div style="display:flex;flex-direction:column;gap:10px;font-size:13px;">
             <div><label style="color:var(--text-muted);">Sync interval (minutes)</label>
@@ -81421,7 +81421,7 @@ function wolfHaOpenProtectModal() {
     const modal = document.createElement('div');
     modal.id = 'wolfha-protect-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
-    modal.innerHTML = `<div style="background:var(--card-bg,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+    modal.innerHTML = `<div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
         <h3 style="margin:0 0 12px;">Protect a container</h3>
         <div style="display:flex;flex-direction:column;gap:10px;">
             <div><label style="font-size:13px;color:var(--text-muted);">Node the container runs on</label>
