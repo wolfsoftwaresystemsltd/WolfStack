@@ -310,7 +310,14 @@
                     <div id="global-search-results" role="listbox" aria-label="Search results"
                         style="display:none; position:absolute; top:calc(100% + 6px); left:0; width:400px; max-width:84vw; max-height:64vh; overflow-y:auto; background:var(--bg-primary); border:1px solid var(--border); border-radius:10px; box-shadow:0 12px 40px rgba(0,0,0,0.45); z-index:10050; padding:6px;"></div>
                 </div>
-                <button id="learn-help-btn" onclick="learnContextHelp()" title="Help for this page — opens the matching lesson"
+                <button id="learn-help-btn" onclick="learnContextHelp()" title="Guided lessons for this page"
+                    style="display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:6px; background:rgba(255,255,255,0.06); color:var(--text-muted); border:none; cursor:pointer; font-size:14px; transition:all 0.2s;"
+                    onmouseover="this.style.background='rgba(255,255,255,0.15)';this.style.color='#fff'"
+                    onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.color='var(--text-muted)'">
+                    <span class="ws-icon-clean-wrap" data-icon="compass"></span>
+                </button>
+                <button id="docs-help-btn" onclick="openDocsForCurrentView()" title="Open the online guide for this page"
+                    aria-label="Open the online documentation for this page"
                     style="display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:6px; background:rgba(255,255,255,0.06); color:var(--text-muted); border:none; cursor:pointer; font-size:14px; transition:all 0.2s;"
                     onmouseover="this.style.background='rgba(255,255,255,0.15)';this.style.color='#fff'"
                     onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.color='var(--text-muted)'">
