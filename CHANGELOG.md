@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.1: WolfHA and migrate modals adapt to the selected theme (light-theme visibility hotfix)** _(2026-08-09 — [`db60dc4a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/db60dc4aaac645eff605c382c5a887cefaeed7d5))_
 - **v25.11.0: WolfHA — one-click and automatic high availability for LXC containers** _(2026-08-08 — [`5872a83c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5872a83c6e3f28b9fc3d353ab55c7fd808bdbc6c))_
 - **v25.10.27: migration name clashes ask for a rename up front — with zero downtime** _(2026-08-08 — [`e2ce6703`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e2ce6703de9a8f56307ac60e6880f90cf360e634))_
 - **v25.10.26: migrated LXCs arrive named, limited and on the right network** _(2026-08-08 — [`83210e16`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/83210e160d3070f7b388c9b8a7f92fccf2e48ee7))_
