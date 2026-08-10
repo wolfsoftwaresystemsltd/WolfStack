@@ -9430,7 +9430,10 @@ dns_cloudflare_api_token = your_token_here"
                 <div class="card-header"
                     style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
                     <h3>Network Interfaces</h3>
-                    <button class="btn btn-sm btn-primary" onclick="vlanShowAddDialog()">+ Add VLAN</button>
+                    <div style="display:flex; gap:6px;">
+                        <button class="btn btn-sm btn-primary" onclick="openCreateLanBridge()" title="Build a real layer-2 LAN bridge that enslaves a physical NIC, so containers and VMs are reachable directly on your LAN"><span class="ws-icon-clean-wrap" data-icon="add"></span> Create LAN bridge</button>
+                        <button class="btn btn-sm btn-primary" onclick="vlanShowAddDialog()">+ Add VLAN</button>
+                    </div>
                 </div>
                 <div class="card-body">
                     <table class="data-table">
