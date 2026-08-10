@@ -11943,6 +11943,11 @@ pub struct MigrateRequest {
     pub target_address: Option<String>,
     #[serde(default)]
     pub target_port: Option<u16>,
+    /// Target's operator-configured migration address (dedicated-NIC IP),
+    /// forwarded by the UI so the source uses the pinned NIC regardless of its
+    /// own gossip view. Empty/absent ⇒ use `Node::migration_host`.
+    #[serde(default)]
+    pub target_migration_address: Option<String>,
     /// Destination bridge for the container's primary NIC. None = keep
     /// the source network where the destination can honour it (the
     /// default translation). The destination validates it exists.
@@ -12487,7 +12492,7 @@ pub async fn lxc_migrate(
 
     // Resolve the destination up front so a bad target fails fast (before
     // we stop anything) rather than inside the background task.
-    let node = match resolve_target_node(&state, &body.target_node, body.target_address.as_deref(), body.target_port) {
+    let mut node = match resolve_target_node(&state, &body.target_node, body.target_address.as_deref(), body.target_port) {
         Some(n) => n,
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "Target node not found"})),
     };
@@ -12496,18 +12501,34 @@ pub async fn lxc_migrate(
             "error": "Target is the source node — migrate moves a container between nodes; use Clone to copy it on the same host"
         }));
     }
+    // The UI forwards the target's operator-configured migration address (from
+    // the master's full cluster view) so the upload uses the pinned NIC even if
+    // THIS node's gossip view of the target predates the setting.
+    if let Some(ma) = body.target_migration_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        node.migration_address = Some(ma.to_string());
+    }
 
     // Build the import endpoints up front (Proxmox nodes register their PVE
     // port, but WolfStack listens on 8553/8552 there). The bulk transfer rides
     // the migration NIC if the operator pinned one (migration_host).
     let mig_host = node.migration_host();
-    let import_urls = if node.node_type == "proxmox" {
+    let mut import_urls = if node.node_type == "proxmox" {
         let mut urls = build_node_urls(mig_host, 8553, "/api/containers/lxc/import");
         urls.extend(build_node_urls(mig_host, 8552, "/api/containers/lxc/import"));
         urls
     } else {
         build_node_urls(mig_host, node.port, "/api/containers/lxc/import")
     };
+    // Fallback to the node's normal address if a distinct migration NIC was
+    // pinned but is unreachable — never fail a migration on the fast path.
+    if mig_host != node.address {
+        if node.node_type == "proxmox" {
+            import_urls.extend(build_node_urls(&node.address, 8553, "/api/containers/lxc/import"));
+            import_urls.extend(build_node_urls(&node.address, 8552, "/api/containers/lxc/import"));
+        } else {
+            import_urls.extend(build_node_urls(&node.address, node.port, "/api/containers/lxc/import"));
+        }
+    }
     // Same endpoints, name-collision preflight route.
     let check_urls: Vec<String> = import_urls.iter()
         .map(|u| u.replace("/api/containers/lxc/import", "/api/containers/lxc/import-name-check"))

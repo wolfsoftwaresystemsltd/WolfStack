@@ -31470,7 +31470,11 @@ async function doMigrateLxc(name) {
         try {
             const targetNode = allNodes.find(n => n.id === target);
             const migrateBody = { target_node: target };
-            if (targetNode) { migrateBody.target_address = targetNode.address; migrateBody.target_port = targetNode.port || 8553; }
+            if (targetNode) {
+                migrateBody.target_address = targetNode.address;
+                migrateBody.target_port = targetNode.port || 8553;
+                if (targetNode.migration_address) migrateBody.target_migration_address = targetNode.migration_address;
+            }
             if (migrateStorage) migrateBody.storage = migrateStorage;
             if (targetBridge) migrateBody.target_bridge = targetBridge;
             if (newName) migrateBody.new_name = newName;
@@ -31831,7 +31835,12 @@ async function doMigrateVm(name) {
         } else {
             const targetNode = allNodes.find(n => n.id === target);
             const migrateBody = { target_node: target };
-            if (targetNode) { migrateBody.target_address = targetNode.address; migrateBody.target_port = targetNode.port || 8553; }
+            if (targetNode) {
+                migrateBody.target_address = targetNode.address;
+                migrateBody.target_port = targetNode.port || 8553;
+                // Forward the target's pinned migration NIC so the source uploads over it.
+                if (targetNode.migration_address) migrateBody.target_migration_address = targetNode.migration_address;
+            }
             if (migrateStorage) migrateBody.storage = migrateStorage;
             if (stagingDir) migrateBody.staging_dir = stagingDir;
             if (targetStagingDir) migrateBody.target_staging_dir = targetStagingDir;

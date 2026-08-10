@@ -1117,6 +1117,12 @@ struct VmMigrateRequest {
     target_address: Option<String>,
     #[serde(default)]
     target_port: Option<u16>,
+    /// Target's operator-configured migration address (its dedicated-NIC IP),
+    /// forwarded by the UI from the master's full cluster view so the source
+    /// uses the pinned NIC regardless of its own gossip view. Empty/absent ⇒
+    /// use whatever this node already knows (`Node::migration_host`).
+    #[serde(default)]
+    target_migration_address: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1262,7 +1268,7 @@ async fn vm_migrate(
 
     // Resolve target node synchronously so bad targets produce a 4xx
     // rather than a task stuck in preflight.
-    let node = match state.cluster.get_node(&body.target_node) {
+    let mut node = match state.cluster.get_node(&body.target_node) {
         Some(n) => n,
         None => {
             if let Some(ref addr) = body.target_address {
@@ -1310,6 +1316,13 @@ async fn vm_migrate(
     };
     if node.is_self {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Cannot migrate to the same node"}));
+    }
+    // The UI passes the target's operator-configured migration address (from
+    // the master's full cluster view) so the upload uses the pinned NIC even
+    // when THIS (source) node's own gossip view of the target predates the
+    // setting. Falls back to whatever this node already knows (migration_host).
+    if let Some(ma) = body.target_migration_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        node.migration_address = Some(ma.to_string());
     }
 
     // Precompute the expected archive size (pre-compression) so the
@@ -1422,13 +1435,24 @@ async fn vm_migrate(
         // Bulk disk upload rides the migration NIC if the operator pinned one
         // (migration_host); otherwise the node's normal address.
         let mig_host = node.migration_host();
-        let import_urls = if node.node_type == "proxmox" {
+        let mut import_urls = if node.node_type == "proxmox" {
             let mut urls = build_node_urls(mig_host, 8553, "/api/vms/import-external");
             urls.extend(build_node_urls(mig_host, 8552, "/api/vms/import-external"));
             urls
         } else {
             build_node_urls(mig_host, node.port, "/api/vms/import-external")
         };
+        // If a distinct migration NIC was pinned, append the node's normal
+        // address as a fallback so a mis-pinned / unreachable fast path can't
+        // fail the whole migration — it just reverts to the management path.
+        if mig_host != node.address {
+            if node.node_type == "proxmox" {
+                import_urls.extend(build_node_urls(&node.address, 8553, "/api/vms/import-external"));
+                import_urls.extend(build_node_urls(&node.address, 8552, "/api/vms/import-external"));
+            } else {
+                import_urls.extend(build_node_urls(&node.address, node.port, "/api/vms/import-external"));
+            }
+        }
 
         // Shared pool — see VM_MIGRATION_CLIENT. 1-hour total timeout
         // set per-request for the long upload; 5s connect_timeout is
