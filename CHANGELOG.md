@@ -8,6 +8,9 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.6: top-bar tidy — "Pricing" badge → "Sponsor"; Reddit folded into the socials dropdown** _(2026-08-10 — [`4cc13d99`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4cc13d9957315d048694c7ef83f2b88ea3bfac2e))_
+- **v25.11.5: top bar no longer overflows — five social icons collapse into one "Follow & share" dropdown** _(2026-08-10 — [`2d0c094b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d0c094bf8f41e46da6f94590a284395f4708243))_
+- **v25.11.4: migrate dialog scrolls with a sticky footer; video tutorials in the Learn course + AI knowledgebase** _(2026-08-10 — [`65645ddf`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65645ddf730fa6550558d2d21ccc0a8dd33faacc))_
 - **v25.11.3: opt-in keep-address/start for cross-cluster migration; help button → wolfstack.org** _(2026-08-09 — [`1a9b9706`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1a9b9706f54f04226284ded6348c4cbdfb7ebf81))_
 - **v25.11.2: in-app "?" help button links each page to its online guide** _(2026-08-09 — [`58c2a72b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/58c2a72b899667065c6027edf0a728edefe4a7f2))_
 - **v25.11.1: WolfHA and migrate modals adapt to the selected theme (light-theme visibility hotfix)** _(2026-08-09 — [`db60dc4a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/db60dc4aaac645eff605c382c5a887cefaeed7d5))_
