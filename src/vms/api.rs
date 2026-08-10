@@ -1175,8 +1175,12 @@ async fn migrate_preflight_intra(
     expected_total: Option<u64>,
     cluster_secret: &str,
 ) -> Result<(), String> {
+    // Preflight over the SAME host the upload will use (the migration NIC if
+    // the operator pinned one) so an unreachable migration path fails here,
+    // before the source VM is stopped — not mid-upload.
+    let mig_host = node.migration_host();
     // ── 1. Name collision ───────────────────────────────────────────
-    let vms_urls = build_node_urls(&node.address, node.port, "/api/vms");
+    let vms_urls = build_node_urls(mig_host, node.port, "/api/vms");
     let mut last_err = String::new();
     let mut name_clash_checked = false;
     for url in &vms_urls {
@@ -1208,7 +1212,7 @@ async fn migrate_preflight_intra(
     // ── 2. Free-space check (only when both storage and size known) ─
     let expected = match expected_total { Some(b) if b > 0 => b, _ => return Ok(()) };
     if storage_id.is_empty() { return Ok(()); }
-    let storage_urls = build_node_urls(&node.address, node.port, "/api/storage/list");
+    let storage_urls = build_node_urls(mig_host, node.port, "/api/storage/list");
     for url in &storage_urls {
         match client.get(url)
             .header("X-WolfStack-Secret", cluster_secret)
@@ -1267,6 +1271,7 @@ async fn vm_migrate(
                 crate::agent::Node {
                     id: body.target_node.clone(),
                     address: addr.clone(),
+                    migration_address: None,
                     port,
                     hostname: addr.clone(),
                     is_self: false,
@@ -1414,12 +1419,15 @@ async fn vm_migrate(
             &format!("Uploading {} to {}…", format_bytes_human(total_bytes), target_label));
         migration_progress(&state_clone.migration_tasks, &tid, Some(0), Some(total_bytes), Some(0.0));
 
+        // Bulk disk upload rides the migration NIC if the operator pinned one
+        // (migration_host); otherwise the node's normal address.
+        let mig_host = node.migration_host();
         let import_urls = if node.node_type == "proxmox" {
-            let mut urls = build_node_urls(&node.address, 8553, "/api/vms/import-external");
-            urls.extend(build_node_urls(&node.address, 8552, "/api/vms/import-external"));
+            let mut urls = build_node_urls(mig_host, 8553, "/api/vms/import-external");
+            urls.extend(build_node_urls(mig_host, 8552, "/api/vms/import-external"));
             urls
         } else {
-            build_node_urls(&node.address, node.port, "/api/vms/import-external")
+            build_node_urls(mig_host, node.port, "/api/vms/import-external")
         };
 
         // Shared pool — see VM_MIGRATION_CLIENT. 1-hour total timeout
