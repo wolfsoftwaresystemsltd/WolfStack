@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.10: VM card view gets a console for PVE VMs; Infrastructure map follows the theme** _(2026-08-10 — [`d0b56992`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d0b56992861b2992876c5d4968df835f8e399a93))_
 - **v25.11.9: LAN bridge survives reboot on ifupdown — safely disable the NIC's stale /etc/network/interfaces stanza** _(2026-08-10 — [`80e0ec09`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/80e0ec097b8b2e47738bf7e9e197462f75034610))_
 - **v25.11.8: top-bar CTA sells licenses, not sponsorship** _(2026-08-10 — [`95f48c52`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/95f48c52cb2f6f4a846992085181a18a30dce184))_
 - **v25.11.7: code-review fixes — honest migrate address note, accessible socials dropdown, DRY lesson video, sponsor CTA target** _(2026-08-10 — [`68d84846`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/68d848468a7ec487f82cb4488b5f6ca49fd04f9c))_
