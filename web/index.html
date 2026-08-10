@@ -335,50 +335,51 @@
                     onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.color='var(--text-muted)'">
                     <span class="ws-icon-clean-wrap" data-icon="edit"></span>
                 </button>
-                <div class="share-icons" style="display:flex; gap:6px; align-items:center; margin-left:8px;" title="Share WolfStack">
-                    <a href="https://x.com/intent/tweet?url=https%3A%2F%2Fwolfstack.org&text=WolfStack%20%E2%80%94%20source-available%20server%20management%20platform.%20Docker%2C%20LXC%2C%20VMs%2C%20clustering%20%26%20more." target="_blank" rel="noopener"
-                        title="Share on X"
-                        style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;background:rgba(255,255,255,0.06);color:var(--text-muted);transition:all 0.2s ease;text-decoration:none;"
-                        onmouseover="this.style.background='rgba(255,255,255,0.15)';this.style.color='#fff';this.style.transform='scale(1.1)'"
-                        onmouseout="this.style.background='rgba(255,255,255,0.06)';this.style.color='var(--text-muted)';this.style.transform='scale(1)'">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-                    </a>
-                    <a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fwolfstack.org" target="_blank" rel="noopener"
-                        title="Share on Facebook"
-                        style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;background:rgba(24,119,242,0.08);color:#1877f2;transition:all 0.2s ease;text-decoration:none;"
-                        onmouseover="this.style.background='rgba(24,119,242,0.2)';this.style.transform='scale(1.1)'"
-                        onmouseout="this.style.background='rgba(24,119,242,0.08)';this.style.transform='scale(1)'">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
-                    </a>
-                    <a href="https://www.linkedin.com/shareArticle?mini=true&url=https%3A%2F%2Fwolfstack.org&title=WolfStack&summary=Source-available%20server%20management%20platform" target="_blank" rel="noopener"
-                        title="Share on LinkedIn"
-                        style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;background:rgba(10,102,194,0.08);color:#0a66c2;transition:all 0.2s ease;text-decoration:none;"
-                        onmouseover="this.style.background='rgba(10,102,194,0.2)';this.style.transform='scale(1.1)'"
-                        onmouseout="this.style.background='rgba(10,102,194,0.08)';this.style.transform='scale(1)'">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
-                    </a>
-                    <span style="width:1px;height:18px;background:var(--border);margin:0 4px;"></span>
+                <div class="socials-menu-wrap" style="position:relative; margin-left:4px;">
+                    <button id="socials-menu-btn" type="button" onclick="toggleSocialsMenu(event)" title="Follow &amp; share WolfStack" aria-haspopup="true" aria-expanded="false"
+                        style="display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:6px; background:rgba(255,255,255,0.06); color:var(--text-muted); border:none; cursor:pointer; transition:all 0.2s;"
+                        onmouseover="this.style.background='rgba(255,255,255,0.15)';this.style.color='#fff'"
+                        onmouseout="if(this.getAttribute('aria-expanded')!=='true'){this.style.background='rgba(255,255,255,0.06)';this.style.color='var(--text-muted)'}">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+                    </button>
+                    <div id="socials-menu" role="menu" aria-label="Follow and share WolfStack"
+                        style="display:none; position:absolute; top:calc(100% + 6px); right:0; min-width:210px; background:var(--bg-primary); border:1px solid var(--border); border-radius:10px; box-shadow:0 12px 40px rgba(0,0,0,0.45); z-index:10050; padding:6px;">
+                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-muted); padding:6px 10px 4px;">Follow us</div>
+                        <a role="menuitem" href="https://www.youtube.com/@wolfsoftwaresystems" target="_blank" rel="noopener" onclick="closeSocialsMenu()"
+                            style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; color:var(--text-primary); text-decoration:none; font-size:13px;"
+                            onmouseover="this.style.background='rgba(255,255,255,0.07)'" onmouseout="this.style.background='transparent'">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="#ff0000"><path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2 31.4 31.4 0 0 0 0 12a31.4 31.4 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1A31.4 31.4 0 0 0 24 12a31.4 31.4 0 0 0-.5-5.8zM9.6 15.6V8.4l6.3 3.6-6.3 3.6z"/></svg>
+                            YouTube
+                        </a>
+                        <a role="menuitem" href="https://discord.gg/q9qMjHjUQY" target="_blank" rel="noopener" onclick="closeSocialsMenu()"
+                            style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; color:var(--text-primary); text-decoration:none; font-size:13px;"
+                            onmouseover="this.style.background='rgba(255,255,255,0.07)'" onmouseout="this.style.background='transparent'">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="#5865f2"><path d="M20.3 4.4A19.6 19.6 0 0 0 15.5 3a14 14 0 0 0-.6 1.3 18.3 18.3 0 0 0-5.8 0A13.5 13.5 0 0 0 8.5 3 19.5 19.5 0 0 0 3.7 4.4 20.7 20.7 0 0 0 .2 17.7a19.7 19.7 0 0 0 6 3 14.6 14.6 0 0 0 1.3-2 12.7 12.7 0 0 1-2-.9l.5-.4a14 14 0 0 0 12 0l.5.4a12.9 12.9 0 0 1-2 .9 14.5 14.5 0 0 0 1.3 2 19.6 19.6 0 0 0 6-3A20.6 20.6 0 0 0 20.3 4.4zM8 15c-1.2 0-2.1-1-2.1-2.3S6.9 10.4 8 10.4s2.2 1 2.1 2.3S9.2 15 8 15zm8 0c-1.2 0-2.1-1-2.1-2.3s.9-2.3 2.1-2.3 2.2 1 2.1 2.3-.9 2.3-2.1 2.3z"/></svg>
+                            Discord
+                        </a>
+                        <div style="height:1px; background:var(--border); margin:6px 8px;"></div>
+                        <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-muted); padding:2px 10px 4px;">Share WolfStack</div>
+                        <a role="menuitem" href="https://x.com/intent/tweet?url=https%3A%2F%2Fwolfstack.org&text=WolfStack%20%E2%80%94%20source-available%20server%20management%20platform.%20Docker%2C%20LXC%2C%20VMs%2C%20clustering%20%26%20more." target="_blank" rel="noopener" onclick="closeSocialsMenu()"
+                            style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; color:var(--text-primary); text-decoration:none; font-size:13px;"
+                            onmouseover="this.style.background='rgba(255,255,255,0.07)'" onmouseout="this.style.background='transparent'">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                            Share on X
+                        </a>
+                        <a role="menuitem" href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fwolfstack.org" target="_blank" rel="noopener" onclick="closeSocialsMenu()"
+                            style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; color:var(--text-primary); text-decoration:none; font-size:13px;"
+                            onmouseover="this.style.background='rgba(255,255,255,0.07)'" onmouseout="this.style.background='transparent'">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="#1877f2"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                            Share on Facebook
+                        </a>
+                        <a role="menuitem" href="https://www.linkedin.com/shareArticle?mini=true&url=https%3A%2F%2Fwolfstack.org&title=WolfStack&summary=Source-available%20server%20management%20platform" target="_blank" rel="noopener" onclick="closeSocialsMenu()"
+                            style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; color:var(--text-primary); text-decoration:none; font-size:13px;"
+                            onmouseover="this.style.background='rgba(255,255,255,0.07)'" onmouseout="this.style.background='transparent'">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="#0a66c2"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                            Share on LinkedIn
+                        </a>
+                    </div>
                 </div>
                 <div style="display:flex; gap:8px; align-items:center;">
-                    <a href="https://www.youtube.com/@wolfsoftwaresystems" target="_blank" rel="noopener"
-                        title="YouTube"
-                        style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;background:rgba(255,0,0,0.1);color:#ff0000;transition:all 0.2s ease;text-decoration:none;"
-                        onmouseover="this.style.background='rgba(255,0,0,0.25)';this.style.transform='scale(1.1)'"
-                        onmouseout="this.style.background='rgba(255,0,0,0.1)';this.style.transform='scale(1)'">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <path
-                                d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2 31.4 31.4 0 0 0 0 12a31.4 31.4 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1A31.4 31.4 0 0 0 24 12a31.4 31.4 0 0 0-.5-5.8zM9.6 15.6V8.4l6.3 3.6-6.3 3.6z" />
-                        </svg>
-                    </a>
-                    <a href="https://discord.gg/q9qMjHjUQY" target="_blank" rel="noopener" title="Discord"
-                        style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;background:rgba(88,101,242,0.1);color:#5865f2;transition:all 0.2s ease;text-decoration:none;"
-                        onmouseover="this.style.background='rgba(88,101,242,0.25)';this.style.transform='scale(1.1)'"
-                        onmouseout="this.style.background='rgba(88,101,242,0.1)';this.style.transform='scale(1)'">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <path
-                                d="M20.3 4.4A19.6 19.6 0 0 0 15.5 3a14 14 0 0 0-.6 1.3 18.3 18.3 0 0 0-5.8 0A13.5 13.5 0 0 0 8.5 3 19.5 19.5 0 0 0 3.7 4.4 20.7 20.7 0 0 0 .2 17.7a19.7 19.7 0 0 0 6 3 14.6 14.6 0 0 0 1.3-2 12.7 12.7 0 0 1-2-.9l.5-.4a14 14 0 0 0 12 0l.5.4a12.9 12.9 0 0 1-2 .9 14.5 14.5 0 0 0 1.3 2 19.6 19.6 0 0 0 6-3A20.6 20.6 0 0 0 20.3 4.4zM8 15c-1.2 0-2.1-1-2.1-2.3S6.9 10.4 8 10.4s2.2 1 2.1 2.3S9.2 15 8 15zm8 0c-1.2 0-2.1-1-2.1-2.3s.9-2.3 2.1-2.3 2.2 1 2.1 2.3-.9 2.3-2.1 2.3z" />
-                        </svg>
-                    </a>
                     <a id="sponsor-header-link" href="https://wolfstack.org/enterprise.php" target="_blank" rel="noopener"
                         title="WolfStack pricing"
                         style="display:flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;background:linear-gradient(135deg, rgba(34,197,94,0.12), rgba(16,163,74,0.08));border:1px solid rgba(34,197,94,0.2);color:var(--text-secondary);transition:all 0.3s ease;text-decoration:none;font-size:12px;white-space:nowrap;cursor:pointer;"
