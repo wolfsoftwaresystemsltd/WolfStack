@@ -31172,7 +31172,8 @@ async function migrateLxcContainer(name) {
     modal.id = 'lxc-migrate-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;width:min(520px,94vw);max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <div style="overflow-y:auto;min-height:0;flex:1 1 auto;padding:28px 36px 8px;">
             <h3 style="margin:0 0 16px;color:var(--text,#fff);">Migrate Container</h3>
             <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Move <strong>${name}</strong> to another node in this cluster: the source is stopped, copied across, and started on the destination — the source is kept (stopped) on the old node as a rollback. <em>Migrating to an external cluster instead copies it and leaves the source running.</em></p>
             <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:10px 12px;margin-bottom:10px;color:var(--danger);font-size:0.85em;">
@@ -31226,10 +31227,11 @@ async function migrateLxcContainer(name) {
                     </select>
                     <input id="migrate-ext-bridge" type="text" placeholder="e.g. vmbr4001 — leave blank for auto" style="display:none;width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
                     <span id="migrate-bridge-hint" style="font-size:11px;color:var(--text-muted,#666);margin-top:2px;display:block;">Which bridge the container's NIC attaches to on the destination. Auto keeps the source bridge when it exists there and warns when it falls back.</span></div>
-                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                    <button class="btn" onclick="document.getElementById('lxc-migrate-modal')?.remove()">Cancel</button>
-                    <button class="btn" style="background:#ef4444;color:#fff;" onclick="doMigrateLxc('${name}')">Migrate</button>
-                </div>
+            </div>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 36px;border-top:1px solid var(--border,#333);background:var(--bg-card,#1e1e2e);border-radius:0 0 12px 12px;flex:0 0 auto;">
+                <button class="btn" onclick="document.getElementById('lxc-migrate-modal')?.remove()">Cancel</button>
+                <button class="btn" style="background:#ef4444;color:#fff;" onclick="doMigrateLxc('${name}')">Migrate</button>
             </div>
         </div>
     `;
@@ -31610,7 +31612,8 @@ async function migrateVm(name) {
     modal.id = 'vm-migrate-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `
-        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:28px 36px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+        <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;width:min(520px,94vw);max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+            <div style="overflow-y:auto;min-height:0;flex:1 1 auto;padding:28px 36px 8px;">
             <h3 style="margin:0 0 16px;color:var(--text,#fff);">Migrate VM</h3>
             <p style="margin:0 0 12px;color:var(--text-muted,#aaa);font-size:0.9em;">Copy <strong>${name}</strong> to another node. The source VM stays running — the destination will be imported but not started.</p>
             <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:10px 12px;margin-bottom:10px;color:var(--danger);font-size:0.85em;">
@@ -31650,10 +31653,11 @@ async function migrateVm(name) {
                     <input type="checkbox" id="vm-migrate-pve"/>
                     <span>Import as <strong>Proxmox-managed VM</strong> on the target (uses <code>qm create</code> + <code>qm importdisk</code>; destination storage above must be a PVE storage ID like <code>local-lvm</code>)</span>
                 </label>
-                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
-                    <button class="btn" onclick="document.getElementById('vm-migrate-modal')?.remove()">Cancel</button>
-                    <button class="btn" style="background:#ef4444;color:#fff;" onclick="doMigrateVm('${name}')">Migrate</button>
-                </div>
+            </div>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 36px;border-top:1px solid var(--border,#333);background:var(--bg-card,#1e1e2e);border-radius:0 0 12px 12px;flex:0 0 auto;">
+                <button class="btn" onclick="document.getElementById('vm-migrate-modal')?.remove()">Cancel</button>
+                <button class="btn" style="background:#ef4444;color:#fff;" onclick="doMigrateVm('${name}')">Migrate</button>
             </div>
         </div>
     `;
@@ -65546,6 +65550,53 @@ const LEARN_COURSES = [
     },
 ];
 
+// Companion YouTube tutorials, keyed by lesson id. We deliberately DON'T bundle
+// the video files into WolfStack — the player is an EXTERNAL iframe embed
+// (privacy-enhanced youtube-nocookie.com), so the binary stays small and the
+// videos update on the channel without shipping a WolfStack release. The same
+// URLs are listed in the AI knowledgebase (src/ai/wolfstack-kb.md) so the
+// assistant can point users at them. Only lessons with a clear matching video
+// appear here; others render text-only exactly as before.
+const LEARN_VIDEOS = {
+    '1-2': 'https://youtu.be/DyJxgP6MQng',   // A 2-minute tour → Home dashboard
+    '2-2': 'https://youtu.be/xH7hAq-N8qs',   // Adding another server → Multi-server clustering
+    '3-1': 'https://youtu.be/WXROyaA8Rqo',   // Install from the App Store
+    '4-3': 'https://youtu.be/ucX3BbcBT0w',   // Make an LXC container (every option explained)
+    '5-1': 'https://youtu.be/Bfl7OmImhEw',   // Open a shell → Browser web terminal
+    '5-2': 'https://youtu.be/Bfl7OmImhEw',   // Shell in a container → Browser web terminal
+    '6-1': 'https://youtu.be/nR-Q5liyP_o',   // Back something up → Back up & restore
+    '6-2': 'https://youtu.be/nR-Q5liyP_o',   // Automatic backups → Back up & restore
+    '6-3': 'https://youtu.be/nR-Q5liyP_o',   // Restore from a backup → Back up & restore
+    'sec-1': 'https://youtu.be/QbS0AXqi_rE', // Lock down your login → Security & passkeys
+    'sec-2': 'https://youtu.be/QbS0AXqi_rE', // Harden the server → Security & passkeys
+    '7-1': 'https://youtu.be/n2OyB0X7Kew',   // The Issues page → Issues scanner & health checks
+    '7-2': 'https://youtu.be/TioEKs3dkRU',   // Get alerts → Set up alerting
+    '7-3': 'https://youtu.be/-RnZQdUgogE',   // Put up a status page → Public status pages
+    'adv-1': 'https://youtu.be/lh3Y8338Wi4', // App on a real domain → Expose a service safely
+    'l2-2': 'https://youtu.be/azpxpBh2Gm4',  // Link servers with WolfNet → Networking & VLANs
+    'l2-3': 'https://youtu.be/Gv-zOuaCQt8',  // Run a full VM → Manage virtual machines
+    'l2-4': 'https://youtu.be/441fFeVer-Q',  // Storage that scales → Mount network storage
+    'l2-6': 'https://youtu.be/qWOTQ6sD5DA',  // Your AI co-pilot → WolfAgents
+    'l3-3': 'https://youtu.be/QbS0AXqi_rE',  // Catch malware and intruders → Security
+    'l3-5': 'https://youtu.be/h1fTK6IvD84',  // See attacks coming → Predictive Inbox
+};
+
+// Turn a youtu.be / watch / embed URL into a responsive, privacy-enhanced
+// YouTube embed. Returns '' for anything we can't parse so a stray/bad id can
+// never break a lesson render. 16:9, theme-aware border, lazy-loaded.
+function learnVideoEmbed(url, title) {
+    const m = String(url || '').match(/(?:youtu\.be\/|[?&]v=|\/embed\/)([\w-]{11})/);
+    if (!m) return '';
+    const id = m[1];
+    const t = escapeHtml((title || 'WolfStack tutorial') + ' — video tutorial');
+    return `<div class="learn-video" style="margin:0 0 20px;">`
+        + `<div style="position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;border:1px solid var(--border,#333);background:#000;box-shadow:0 8px 32px rgba(0,0,0,0.3);">`
+        + `<iframe src="https://www.youtube-nocookie.com/embed/${id}" title="${t}" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin" style="position:absolute;inset:0;width:100%;height:100%;border:0;"></iframe>`
+        + `</div>`
+        + `<div style="font-size:12px;color:var(--text-muted,#888);margin-top:6px;">&#9654; Watch this lesson as a video &mdash; <a href="https://youtu.be/${id}" target="_blank" rel="noopener">open on YouTube</a>.</div>`
+        + `</div>`;
+}
+
 const LEARN_PROGRESS_KEY = 'wolfstack_learn_progress';
 const LEARN_LAST_KEY = 'wolfstack_learn_last';
 const LEARN_COURSE_KEY = 'wolfstack_learn_course';
@@ -66049,7 +66100,8 @@ async function learnOpenLesson(id) {
             return;
         }
     }
-    content.innerHTML = learnMd(md);
+    const _lessonVideo = LEARN_VIDEOS[lesson.id];
+    content.innerHTML = (_lessonVideo ? learnVideoEmbed(_lessonVideo, lesson.title) : '') + learnMd(md);
     // "Still unsure? Ask the AI" — only when the AI agent is configured.
     learnAppendAiPrompt(content);
     learnUpdateNavButtons();
@@ -66237,6 +66289,7 @@ async function learnPrint(scope) {
             body += '<article class="lesson">'
                 + '<div class="kicker">' + escapeHtml(mod.title) + '</div>'
                 + learnMd(md)
+                + (LEARN_VIDEOS[l.id] ? '<p style="margin-top:10px;"><strong>&#9654; Watch this lesson:</strong> <a href="' + LEARN_VIDEOS[l.id] + '">' + LEARN_VIDEOS[l.id] + '</a></p>' : '')
                 + '</article>';
         });
     });
