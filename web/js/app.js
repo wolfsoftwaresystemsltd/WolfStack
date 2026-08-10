@@ -65957,6 +65957,47 @@ function openDocsForCurrentView() {
     window.open(url, '_blank', 'noopener');
 }
 
+// Top-bar "Follow & share" dropdown. The five per-network icons used to sit
+// inline in the top bar and pushed it past the viewport edge (the help "?" and
+// cluster identity fell off-screen). They now live in one button + dropdown.
+function closeSocialsMenu() {
+    const menu = document.getElementById('socials-menu');
+    const btn = document.getElementById('socials-menu-btn');
+    if (menu) menu.style.display = 'none';
+    if (btn) {
+        btn.setAttribute('aria-expanded', 'false');
+        btn.style.background = 'rgba(255,255,255,0.06)';
+        btn.style.color = 'var(--text-muted)';
+    }
+}
+function toggleSocialsMenu(e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById('socials-menu');
+    const btn = document.getElementById('socials-menu-btn');
+    if (!menu || !btn) return;
+    if (menu.style.display !== 'none') { closeSocialsMenu(); return; }
+    menu.style.display = 'block';
+    btn.setAttribute('aria-expanded', 'true');
+    btn.style.background = 'rgba(255,255,255,0.15)';
+    btn.style.color = '#fff';
+}
+// One document listener: close the socials menu on any outside click, and close
+// it after an inside link is chosen. The toggle button stops propagation, so its
+// own click never reaches here. Escape closes it too.
+document.addEventListener('click', function (ev) {
+    const menu = document.getElementById('socials-menu');
+    if (!menu || menu.style.display === 'none') return;
+    const wrap = menu.closest('.socials-menu-wrap');
+    if (wrap && wrap.contains(ev.target)) {
+        if (ev.target.closest('a')) closeSocialsMenu();
+        return;
+    }
+    closeSocialsMenu();
+});
+document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') closeSocialsMenu();
+});
+
 // "Ask AI about this lesson" — opens the floating AI chat and seeds the input
 // with the current lesson's context, so the user just types their question.
 // sendAiMessage already attaches the current view + node context to the
