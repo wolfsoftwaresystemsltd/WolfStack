@@ -16327,6 +16327,12 @@ function openNodeSettings(nodeId) {
                     <input type="text" class="form-control" id="node-settings-site" value="${node.site || ''}" placeholder="${autoSiteHint(node.address) || 'unset'}" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
                     <small style="color: var(--text-muted);">Physical location tag (e.g. <code>home</code>, <code>office-vlan10</code>, <code>hetzner-vps</code>). Nodes sharing a site are dialled at their LAN address; different sites go via public IP. Leave blank to auto-derive from address (currently <code>${autoSiteHint(node.address) || 'none'}</code>).</small>
                 </div>
+                ${isSelf ? '' : `
+                <div class="form-group">
+                    <label>Migration address <span style="color:var(--text-muted);font-weight:normal;">(optional)</span></label>
+                    <input type="text" class="form-control" id="node-settings-migration-address" value="${escapeAttr(node.migration_address || '')}" placeholder="${escapeAttr(node.address || '')}" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
+                    <small style="color: var(--text-muted);">Pin VM/LXC migration &amp; bulk transfers to a specific NIC by entering that interface's IP (e.g. a 2.5&nbsp;GbE link). Cluster/control traffic still uses <strong>Address</strong> above. Leave blank to use Address.</small>
+                </div>`}
                 ${isPve ? '' : `
                 <div class="form-group">
                     <label>Tier roles</label>
@@ -16692,6 +16698,17 @@ async function saveNodeSettings() {
         const oldSite = node ? (node.site || '') : '';
         const newSite = siteEl.value.trim();
         if (newSite !== oldSite) updates.site = newSite;
+    }
+
+    // Migration address override — empty string clears it (migration falls
+    // back to Address). Same empty-is-meaningful handling as Site. Hidden for
+    // the self node, so the element is absent there.
+    const migAddrEl = document.getElementById('node-settings-migration-address');
+    if (migAddrEl) {
+        const node = allNodes.find(n => n.id === nodeId);
+        const oldMig = node ? (node.migration_address || '') : '';
+        const newMig = migAddrEl.value.trim();
+        if (newMig !== oldMig) updates.migration_address = newMig;
     }
 
     // Tier roles — the checked boxes vs the node's current roles. Send the

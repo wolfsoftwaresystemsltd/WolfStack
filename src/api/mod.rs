@@ -5242,6 +5242,13 @@ pub struct UpdateNodeSettings {
     /// (general-purpose node); `None` (field absent) leaves them unchanged.
     #[serde(default)]
     pub roles: Option<Vec<crate::agent::NodeRole>>,
+    /// Migration/bulk-transfer address override — see
+    /// `agent::Node::migration_address`. Empty string clears it (migration
+    /// falls back to `address`); `None` (field absent) leaves it unchanged.
+    /// Frontend sends this from the "Migration address" field on the node
+    /// settings card so operators can pin migration onto a dedicated NIC.
+    #[serde(default)]
+    pub migration_address: Option<String>,
 }
 
 pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateNodeSettings>) -> HttpResponse {
@@ -5289,6 +5296,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         body.update_script.clone(),
         body.site.clone(),
         body.display_name.clone(),
+        body.migration_address.clone(),
     ) {
         // NOTE: this PATCH edits ONE node only. Changing `cluster_name` here
         // MOVES this single node to a (possibly new) cluster — it does NOT
@@ -5622,7 +5630,7 @@ pub async fn cluster_rename_handler(
     for node in members {
         state.cluster.update_node_settings(
             &node.id, None, None, None, None, None,
-            Some(new_name.clone()), None, None, None, None,
+            Some(new_name.clone()), None, None, None, None, None,
         );
         renamed += 1;
         if !node.is_self && node.node_type == "wolfstack" {
@@ -12235,6 +12243,7 @@ fn resolve_target_node(
     Some(crate::agent::Node {
         id: target_node_id.to_string(),
         address: addr.to_string(),
+        migration_address: None,
         port,
         hostname: addr.to_string(),
         is_self: false,
@@ -12489,13 +12498,15 @@ pub async fn lxc_migrate(
     }
 
     // Build the import endpoints up front (Proxmox nodes register their PVE
-    // port, but WolfStack listens on 8553/8552 there).
+    // port, but WolfStack listens on 8553/8552 there). The bulk transfer rides
+    // the migration NIC if the operator pinned one (migration_host).
+    let mig_host = node.migration_host();
     let import_urls = if node.node_type == "proxmox" {
-        let mut urls = build_node_urls(&node.address, 8553, "/api/containers/lxc/import");
-        urls.extend(build_node_urls(&node.address, 8552, "/api/containers/lxc/import"));
+        let mut urls = build_node_urls(mig_host, 8553, "/api/containers/lxc/import");
+        urls.extend(build_node_urls(mig_host, 8552, "/api/containers/lxc/import"));
         urls
     } else {
-        build_node_urls(&node.address, node.port, "/api/containers/lxc/import")
+        build_node_urls(mig_host, node.port, "/api/containers/lxc/import")
     };
     // Same endpoints, name-collision preflight route.
     let check_urls: Vec<String> = import_urls.iter()

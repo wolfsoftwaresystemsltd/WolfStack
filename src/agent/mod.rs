@@ -268,6 +268,15 @@ pub struct Node {
     pub hostname: String,
     pub address: String,
     pub port: u16,
+    /// Optional address to use for MIGRATION / bulk-transfer traffic to this
+    /// node, so an operator can pin VM/LXC migration uploads onto a dedicated
+    /// NIC (e.g. a 2.5GbE link) while control/cluster comms keep using
+    /// `address`. Local per-peer routing knowledge, exactly like `address` —
+    /// set via node settings, preserved across gossip polls (NOT self-reported
+    /// by the peer). `None`/blank ⇒ fall back to `address` (see
+    /// `migration_host`). Backward-compat: missing in older configs/peers.
+    #[serde(default)]
+    pub migration_address: Option<String>,
     pub last_seen: u64,     // unix timestamp
     pub metrics: Option<SystemMetrics>,
     pub components: Vec<ComponentStatus>,
@@ -368,6 +377,19 @@ pub struct Node {
     /// Backward-compat: missing for older configs and older peers → empty Vec.
     #[serde(default)]
     pub roles: Vec<NodeRole>,
+}
+
+impl Node {
+    /// Host to dial for MIGRATION / bulk data transfer to this node. Returns
+    /// the operator-set `migration_address` when present and non-blank,
+    /// otherwise falls back to `address`. Everything that is NOT migration
+    /// (cluster gossip, control-plane calls) keeps using `address` directly.
+    pub fn migration_host(&self) -> &str {
+        match self.migration_address.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => s,
+            _ => &self.address,
+        }
+    }
 }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
@@ -667,6 +689,7 @@ impl ClusterState {
             id: self.self_id.clone(),
             hostname: metrics.hostname.clone(),
             address: registry_address,
+            migration_address: None,
             port: self.port,
             last_seen: now,
             metrics: Some(metrics),
@@ -874,6 +897,7 @@ impl ClusterState {
             id: id.clone(),
             hostname: address.clone(),
             address,
+            migration_address: None,
             port,
             last_seen: now,
             metrics: None,
@@ -1297,12 +1321,19 @@ impl ClusterState {
 
     /// Update node settings (hostname, address, port, token, fingerprint, cluster name, site)
     #[allow(clippy::too_many_arguments)]
-    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>, site: Option<String>, display_name: Option<String>) -> bool {
+    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>, site: Option<String>, display_name: Option<String>, migration_address: Option<String>) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         if let Some(node) = nodes.get_mut(id) {
             if let Some(h) = hostname { node.hostname = h; }
             if let Some(a) = address { node.address = a; }
             if let Some(p) = port { node.port = p; }
+            if let Some(ma) = migration_address.as_ref() {
+                // Empty string clears the override → migration falls back to
+                // `address` (migration_host). Non-empty pins migration/bulk
+                // transfer to that host (e.g. a 2.5GbE NIC's IP). `None` (field
+                // absent) leaves it untouched — safe under gossip mirroring.
+                node.migration_address = if ma.trim().is_empty() { None } else { Some(ma.trim().to_string()) };
+            }
             if let Some(token) = pve_token { node.pve_token = Some(token); }
             if let Some(fp) = pve_fingerprint { node.pve_fingerprint = fp; }
             if let Some(disabled) = login_disabled { node.login_disabled = disabled; }
@@ -2123,6 +2154,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 hostname,
                                 address: node.address.clone(),
                                 port: node.port,
+                                // Local per-peer routing override — preserve it
+                                // across polls exactly like `address`; the peer
+                                // never self-reports this.
+                                migration_address: node.migration_address.clone(),
                                 last_seen: now,
                                 metrics: Some(metrics),
                                 components,
@@ -2398,6 +2433,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             // Mirror the gossiped display name (None = leave
                                             // untouched, so an older peer can't wipe it).
                                             eff_display,
+                                            None,  // migration_address is LOCAL per-peer; never set it via gossip
                                         );
                                     }
                                 } else {

@@ -455,6 +455,7 @@ Separate from commercial licences — donations fund development and grant in-ap
 - Cluster secret for inter-node authentication (default secret used if no custom-cluster-secret file — flagged by the secret audit)
 - Node proxy: /api/nodes/{id}/proxy/{path} forwards API calls to remote nodes
 - Join failures list EVERY URL tried with its error (not just the last fallback)
+- **Which NIC does cluster/migration traffic use?** A node is reached at its `address` (the IP/hostname you typed when adding it — set it to the interface you want, e.g. a 2.5GbE NIC's IP, and ALL WolfStack↔node traffic uses that link). To pin *only* migration/bulk transfer to a different NIC, set the optional **Migration address** in that node's settings (node settings card → "Migration address"): VM and LXC migration uploads then ride that host (`Node::migration_address` → `migration_host()`), while cluster/control traffic keeps using `address`. Blank = use `address`. It's local per-peer (set on the node initiating migrations), preserved across gossip polls, never self-reported. There is no separate "migration network" object beyond this per-node override.
 
 ### Server vs agent install mode (v22.6.9+)
 - Two install modes at setup.sh time: server (default) and agent (`--agent`)
