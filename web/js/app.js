@@ -5000,6 +5000,7 @@ function dashTeardownMap() {
     _mapInitRetryCount = 0;
     if (worldMap) { try { worldMap.remove(); } catch (_) {} }
     worldMap = null;
+    worldMapTiles = null;
     mapMarkers = {};
     mapNodePositions = {};
     mapClusterLines = [];
@@ -6955,7 +6956,18 @@ function drawSparkline(canvasId, data, stroke, fill) {
 }
 
 // ─── Map Logic ───
+// Themes whose surface is light (see applyTheme's logo swap) — these want the
+// light Carto basemap; every other theme is dark-surface and wants dark tiles.
+const LIGHT_SURFACE_THEMES = ['light', 'arctic', 'fruit'];
+
+// The active theme id. applyTheme() stores it as `data-theme` on <html> and
+// removes the attribute for the default 'dark' theme.
+function currentThemeId() {
+    return document.documentElement.getAttribute('data-theme') || 'dark';
+}
+
 let worldMap = null;
+let worldMapTiles = null;   // Leaflet tile layer, kept so we can swap light/dark
 let mapMarkers = {};
 let geoCache = {};
 let fetchingGeo = {};
@@ -7016,9 +7028,27 @@ function initMap() {
         zoomControl: false
     }).setView([20, 0], 2);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    worldMapTiles = L.tileLayer(mapTileUrlForTheme(), {
         maxZoom: 19
     }).addTo(worldMap);
+}
+
+// Carto basemap that matches the active theme's surface — light tiles on the
+// light-surface themes (see LIGHT_SURFACE_THEMES), dark tiles otherwise — so
+// the Infrastructure map doesn't sit as a dark slab on a light UI
+// (RutgerDiehard, 2026-08-10).
+function mapTileUrlForTheme() {
+    const style = LIGHT_SURFACE_THEMES.includes(currentThemeId()) ? 'light_all' : 'dark_all';
+    return `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`;
+}
+
+// Repaint the basemap for the current theme. Cheap no-op when the map isn't
+// built or the URL is unchanged; called from applyTheme() on every switch.
+function refreshMapTheme() {
+    if (!worldMapTiles) return;
+    const url = mapTileUrlForTheme();
+    if (worldMapTiles._url === url) return;
+    worldMapTiles.setUrl(url);
 }
 
 function updateMap(nodes) {
@@ -9013,17 +9043,9 @@ function renderVms(vms) {
                                    ? `<button class="btn btn-sm" style="${baseStyle}color:#22c55e;" onclick="vmAction('${vm.name}', 'resume', this)" title="Resume (unpause)"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>`
                                    : `<button class="btn btn-sm" style="${baseStyle}" onclick="vmAction('${vm.name}', 'pause', this)" title="Pause (suspend to RAM)"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>`}`
                             : `<button class="btn btn-sm" style="${baseStyle}color:#22c55e;" onclick="vmAction('${vm.name}', 'start', this)" title="Start"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>`;
-                        // Console / VNC — only meaningful when running.
-                        const vncBtn = vm.running
-                            ? (vm.vmid
-                                ? `<button class="btn btn-sm" style="${baseStyle}" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>`
-                                : ((vm.vnc_ws_port || vm.vnc_port)
-                                    ? `<button class="btn btn-sm" style="${baseStyle}" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>`
-                                    : ''))
-                            : '';
-                        const serialBtn = vm.running
-                            ? `<button class="btn btn-sm" style="${baseStyle}" onclick="openVmConsole('${vm.name}')" title="Serial terminal (guest must have serial console enabled)"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>`
-                            : '';
+                        // Console / VNC — shared with the card view via
+                        // vmConsoleButtonsHtml so the two never drift apart.
+                        const { vnc: vncBtn, serial: serialBtn } = vmConsoleButtonsHtml(vm, baseStyle);
                         // Stable order regardless of state so the same icon
                         // sits in the same column slot whether the VM is up
                         // or down — operator muscle memory survives a reboot.
@@ -27809,25 +27831,35 @@ function renderVmCards(vms) {
     grid.innerHTML = vms.map(vm => vmCardHtml(vm)).join('');
 }
 
+// VNC + serial console buttons for a VM, shared by the table (renderVms) and
+// the card (vmCardHtml) views so the two never drift apart. The card view
+// previously built only a native-libvirt VNC link and had NO branch for PVE
+// VMs (vm.vmid), so Proxmox VMs showed no way to console in card view while the
+// table did (masterpier, 2026-08-10). `styleBase` is the caller's per-view
+// button style. Returns { vnc, serial } HTML fragments ('' when not running /
+// unavailable) so each view can slot them into its own action row + order.
+function vmConsoleButtonsHtml(vm, styleBase) {
+    if (!vm.running) return { vnc: '', serial: '' };
+    // PVE (Proxmox) VMs console via the PVE vncproxy; native libvirt VMs via
+    // their exposed VNC websocket port. Both helpers handle remote-node routing.
+    const vnc = vm.vmid
+        ? `<button class="btn btn-sm" style="${styleBase}" onclick="openPveVmConsole('${vm.vmid}', '${vm.name}')" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>`
+        : ((vm.vnc_ws_port || vm.vnc_port)
+            ? `<button class="btn btn-sm" style="${styleBase}" onclick="openVmVnc('${vm.name}', ${vm.vnc_ws_port || vm.vnc_port})" title="VNC Console"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>`
+            : '');
+    const serial = `<button class="btn btn-sm" style="${styleBase}" onclick="openVmConsole('${vm.name}')" title="Serial terminal (guest must have serial console enabled)"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>`;
+    return { vnc, serial };
+}
+
 function vmCardHtml(vm) {
     const bs = 'margin:1px;font-size:16px;line-height:1;padding:3px 5px;background:none;border:1px solid var(--border);border-radius:4px;cursor:pointer;';
     const bd = bs + 'opacity:0.3;cursor:not-allowed;pointer-events:none;';
     const isRunning = vm.running;
     const isPaused = !!vm.paused;
     const borderColor = isPaused ? '#eab308' : (isRunning ? '#10b981' : '#6b7280');
-    let vncHost = window.location.hostname;
-    let vncNodeParam = '';
-    if (currentNodeId) {
-        const node = allNodes.find(n => n.id === currentNodeId);
-        if (node && !node.is_self) {
-            vncHost = node.address;
-            // Route the console through this node's remote-console bridge —
-            // the VM doesn't exist locally here (see vnc.html node param).
-            vncNodeParam = `&node=${encodeURIComponent(currentNodeId)}`;
-        }
-    }
-    const vncBridgePort2 = vm.vnc_ws_port || vm.vnc_port;
-    const vncLink = (vm.running && vncBridgePort2) ? `/vnc.html?name=${encodeURIComponent(vm.name)}&port=${vncBridgePort2}&host=${encodeURIComponent(vncHost)}${vncNodeParam}` : '';
+    // VNC + serial console — same logic as the table view (handles PVE VMs,
+    // which the card used to miss). Both helpers route to remote nodes.
+    const { vnc: vncBtn, serial: serialBtn } = vmConsoleButtonsHtml(vm, bs);
 
     return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${borderColor};border-radius:10px;overflow:hidden;">
         <div class="unit-actions" style="padding:6px 8px;background:var(--bg-secondary);border-bottom:1px solid var(--border);">
@@ -27838,8 +27870,7 @@ function vmCardHtml(vm) {
             ${isPaused
                 ? `<button class="btn btn-sm" style="${bs}color:#22c55e;" onclick="vmAction('${vm.name}','resume',this)" title="Resume (unpause)"><span class="ws-icon-clean-wrap" data-icon="play"></span></button>`
                 : `<button class="btn btn-sm" style="${isRunning ? bs : bd}" ${isRunning ? `onclick="vmAction('${vm.name}','pause',this)"` : 'disabled'} title="Pause (suspend to RAM)"><span class="ws-icon-clean-wrap" data-icon="snowflake"></span></button>`}
-            ${vncLink ? `<button class="btn btn-sm" style="${bs}" onclick="window.open('${vncLink}')" title="VNC"><span class="ws-icon-clean-wrap" data-icon="monitor"></span></button>` : ''}
-            <button class="btn btn-sm" style="${!isRunning ? bd : bs}" ${!isRunning ? 'disabled' : `onclick="openVmConsole('${vm.name}')"`} title="Serial terminal (guest must have serial console enabled)"><span class="ws-icon-clean-wrap" data-icon="terminal"></span></button>
+            ${vncBtn}${serialBtn}
             <button class="btn btn-sm" style="${bs}" onclick="showVmSettings('${vm.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
             <button class="btn btn-sm" style="${bs}" onclick="showVmLogs('${vm.name}')" title="Logs"><span class="ws-icon-clean-wrap" data-icon="logs"></span></button>
             <button class="btn btn-sm" style="${!isRunning ? bs : bd}color:#a855f7;" ${!isRunning ? `onclick="backupSingleVm('${vm.name}')"` : 'disabled'} title="${!isRunning ? 'Back up this VM now (portable tar.gz to local storage)' : 'Stop the VM first — backup of a running VM produces an inconsistent disk image'}"><span class="ws-icon-clean-wrap" data-icon="save"></span></button>
@@ -46816,12 +46847,15 @@ function applyTheme(themeId) {
     // Save preference
     savePref('wolfstack-theme', themeId);
 
-    // Swap logo for light/dark backgrounds. `light`, `arctic`, and
-    // `fruit` are the light-surface themes — they want the dark-ink
-    // logo so the wolf silhouette stays visible against white/cream.
-    const lightThemes = ['light', 'arctic', 'fruit'];
-    const logoSrc = lightThemes.includes(themeId) ? 'images/wolfstack-logo-dark.png' : 'images/wolfstack-logo.png';
+    // Swap logo for light/dark backgrounds. The light-surface themes
+    // (LIGHT_SURFACE_THEMES) want the dark-ink logo so the wolf silhouette
+    // stays visible against white/cream.
+    const logoSrc = LIGHT_SURFACE_THEMES.includes(themeId) ? 'images/wolfstack-logo-dark.png' : 'images/wolfstack-logo.png';
     document.querySelectorAll('img[alt="WolfStack"]').forEach(img => { img.src = logoSrc; });
+
+    // Repaint the Infrastructure basemap to match the new surface (dark tiles
+    // on a light theme looked like a dark slab — RutgerDiehard).
+    refreshMapTheme();
 
     // Update theme picker cards (highlight active)
     document.querySelectorAll('.theme-card').forEach(card => {
