@@ -13872,14 +13872,21 @@ async fn lxc_import_endpoint_inner(
                         "message": message,
                         "started": false,
                         "start_error": err,
+                        // Report what THIS node actually did with the identity —
+                        // an older destination that didn't parse preserve_identity
+                        // takes the clone path and this is false, so the migrate
+                        // orchestrator must not claim the address was kept from its
+                        // own request flag alone.
+                        "kept_address": preserve_identity,
                     }));
                 }
                 return HttpResponse::Ok().json(serde_json::json!({
                     "message": message,
                     "started": true,
+                    "kept_address": preserve_identity,
                 }));
             }
-            HttpResponse::Ok().json(serde_json::json!({"message": message}))
+            HttpResponse::Ok().json(serde_json::json!({"message": message, "kept_address": preserve_identity}))
         }
         Ok(Err(e)) => {
             let _ = std::fs::remove_file(&archive);
@@ -14239,10 +14246,16 @@ pub async fn lxc_migrate_external(
                         // Report the arrival state honestly: whether it kept
                         // its address, and whether it started (only when the
                         // operator asked it to).
-                        let id_note = if preserve_address {
-                            " It kept its source IP and MAC."
-                        } else {
-                            " It was given a fresh IP and MAC — update DNS if needed."
+                        // Trust the destination's report of what it actually did,
+                        // not our local request flag: an older node that ignores
+                        // preserve_identity assigns a fresh address but we still
+                        // asked for one. When the field is absent (pre-kept_address
+                        // node) we cannot confirm, so we hedge rather than assert.
+                        let id_note = match body.get("kept_address").and_then(|v| v.as_bool()) {
+                            Some(true) => " It kept its source IP and MAC.",
+                            Some(false) => " It was given a fresh IP and MAC — update DNS if needed.",
+                            None if preserve_address => " You asked to keep its IP and MAC — an older destination may have assigned a fresh one instead, so check it on the destination and update DNS if needed.",
+                            None => " It was given a fresh IP and MAC — update DNS if needed.",
                         };
                         let start_note = if start_after {
                             match body.get("started").and_then(|v| v.as_bool()) {

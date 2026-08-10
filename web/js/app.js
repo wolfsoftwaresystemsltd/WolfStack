@@ -65584,10 +65584,23 @@ const LEARN_VIDEOS = {
 // Turn a youtu.be / watch / embed URL into a responsive, privacy-enhanced
 // YouTube embed. Returns '' for anything we can't parse so a stray/bad id can
 // never break a lesson render. 16:9, theme-aware border, lazy-loaded.
-function learnVideoEmbed(url, title) {
+// Single source of truth for parsing a youtu.be/watch/embed URL to its 11-char
+// id. Both the in-lesson embed and the print-booklet link go through this so the
+// two can't drift (a11y/print review: the print path must not bypass the parser).
+function learnVideoId(url) {
     const m = String(url || '').match(/(?:youtu\.be\/|[?&]v=|\/embed\/)([\w-]{11})/);
-    if (!m) return '';
-    const id = m[1];
+    return m ? m[1] : '';
+}
+// Plain-text "Watch this lesson" link — used where an iframe can't render (the
+// printable booklet). Returns '' for an unparseable url so a bad id is inert.
+function learnVideoLinkHtml(url) {
+    const id = learnVideoId(url);
+    if (!id) return '';
+    return `<p style="margin-top:10px;"><strong>&#9654; Watch this lesson:</strong> <a href="https://youtu.be/${id}">https://youtu.be/${id}</a></p>`;
+}
+function learnVideoEmbed(url, title) {
+    const id = learnVideoId(url);
+    if (!id) return '';
     const t = escapeHtml((title || 'WolfStack tutorial') + ' — video tutorial');
     return `<div class="learn-video" style="margin:0 0 20px;">`
         + `<div style="position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;border:1px solid var(--border,#333);background:#000;box-shadow:0 8px 32px rgba(0,0,0,0.3);">`
@@ -65960,7 +65973,12 @@ function openDocsForCurrentView() {
 // Top-bar "Follow & share" dropdown. The five per-network icons used to sit
 // inline in the top bar and pushed it past the viewport edge (the help "?" and
 // cluster identity fell off-screen). They now live in one button + dropdown.
-function closeSocialsMenu() {
+// Treated as a disclosure widget, not an ARIA menu: it's a short list of links,
+// so it must not promise menu keyboard semantics it doesn't implement. Instead
+// we move focus INTO the first link on open (so keyboard/SR users land in it and
+// Tab through the links natively), and return focus to the toggle on close via
+// Escape — the two gaps a11y review flagged.
+function closeSocialsMenu(focusBtn) {
     const menu = document.getElementById('socials-menu');
     const btn = document.getElementById('socials-menu-btn');
     if (menu) menu.style.display = 'none';
@@ -65968,6 +65986,7 @@ function closeSocialsMenu() {
         btn.setAttribute('aria-expanded', 'false');
         btn.style.background = 'rgba(255,255,255,0.06)';
         btn.style.color = 'var(--text-muted)';
+        if (focusBtn) btn.focus();
     }
 }
 function toggleSocialsMenu(e) {
@@ -65975,11 +65994,15 @@ function toggleSocialsMenu(e) {
     const menu = document.getElementById('socials-menu');
     const btn = document.getElementById('socials-menu-btn');
     if (!menu || !btn) return;
-    if (menu.style.display !== 'none') { closeSocialsMenu(); return; }
+    if (menu.style.display !== 'none') { closeSocialsMenu(true); return; }
     menu.style.display = 'block';
     btn.setAttribute('aria-expanded', 'true');
     btn.style.background = 'rgba(255,255,255,0.15)';
     btn.style.color = '#fff';
+    // Move focus into the menu so keyboard/screen-reader users aren't stranded
+    // on the trigger with an open menu they can't reach.
+    const first = menu.querySelector('a');
+    if (first) first.focus();
 }
 // One document listener: close the socials menu on any outside click, and close
 // it after an inside link is chosen. The toggle button stops propagation, so its
@@ -65995,7 +66018,9 @@ document.addEventListener('click', function (ev) {
     closeSocialsMenu();
 });
 document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape') closeSocialsMenu();
+    if (ev.key !== 'Escape') return;
+    const menu = document.getElementById('socials-menu');
+    if (menu && menu.style.display !== 'none') closeSocialsMenu(true);
 });
 
 // "Ask AI about this lesson" — opens the floating AI chat and seeds the input
@@ -66330,7 +66355,7 @@ async function learnPrint(scope) {
             body += '<article class="lesson">'
                 + '<div class="kicker">' + escapeHtml(mod.title) + '</div>'
                 + learnMd(md)
-                + (LEARN_VIDEOS[l.id] ? '<p style="margin-top:10px;"><strong>&#9654; Watch this lesson:</strong> <a href="' + LEARN_VIDEOS[l.id] + '">' + LEARN_VIDEOS[l.id] + '</a></p>' : '')
+                + (LEARN_VIDEOS[l.id] ? learnVideoLinkHtml(LEARN_VIDEOS[l.id]) : '')
                 + '</article>';
         });
     });
