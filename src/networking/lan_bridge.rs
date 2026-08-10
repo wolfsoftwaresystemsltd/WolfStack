@@ -21,16 +21,24 @@
 //! brief window where the host's IP moves from the NIC to the bridge,
 //! and any mistake in the persistence config can mean the host comes
 //! up with no network after a reboot. wabil bricked a box once by
-//! hand-editing `/etc/network/interfaces`; we never touch the
-//! operator's primary config file. Instead:
+//! hand-editing `/etc/network/interfaces`, so every file we edit here is
+//! backed up first and automatically reversible:
 //!
 //! - We migrate the IP to the bridge **before** removing it from the
 //!   NIC, minimising the dead window.
+//! - The old stanza that still binds the NIC in the manager's on-disk
+//!   config (e.g. the `iface eno1 inet static` block in
+//!   `/etc/network/interfaces`) is commented out — otherwise the NIC
+//!   reclaims its old address on reboot and fights the bridge for the
+//!   port, and the host loses the LAN (RutgerDiehard, 2026-08-10). The
+//!   original file is copied to a `.wolfstack-bak` sidecar first and
+//!   restored on any revert.
 //! - For the management NIC we require explicit `accept_risk` and arm a
 //!   **commit-confirm** timer: if the operator doesn't confirm within
 //!   90 seconds (because they got locked out), we automatically revert
-//!   the runtime change *and* the persistence files. This is the same
-//!   pattern Cisco/MikroTik call "safe mode" / "commit confirmed".
+//!   the runtime change *and* every persistence file — including the
+//!   backed-up primary config. This is the same pattern Cisco/MikroTik
+//!   call "safe mode" / "commit confirmed".
 //!
 //! Persistence is implemented for all three auto-persist managers
 //! (NetworkManager, systemd-networkd, ifupdown). Unknown managers get a
@@ -557,9 +565,12 @@ fn runtime_revert(
 /// systemd-networkd config directory.
 const NETWORKD_DIR: &str = "/etc/systemd/network";
 
-/// Where the ifupdown drop-in for a given bridge lives. We NEVER touch
-/// `/etc/network/interfaces` itself — only this dedicated drop-in under
-/// the `interfaces.d` directory that Debian-derived systems source.
+/// Where the ifupdown drop-in for a given bridge lives — the bridge config
+/// itself goes in this dedicated file under the `interfaces.d` directory
+/// that Debian-derived systems source. The operator's primary
+/// `/etc/network/interfaces` is edited only to comment out the enslaved
+/// NIC's now-obsolete stanza (backed up + reverted — see
+/// `neutralize_primary_nic_stanza`).
 fn ifupdown_snippet_path(bridge: &str) -> String {
     format!("/etc/network/interfaces.d/wolfstack-lanbridge-{}.conf", bridge)
 }
@@ -826,10 +837,12 @@ fn interfaces_sources_dropins() -> bool {
 }
 
 /// ifupdown persistence: write a dedicated drop-in under
-/// `/etc/network/interfaces.d/`. The operator's primary
-/// `/etc/network/interfaces` is never edited. If that primary file
-/// still configures the NIC — or doesn't source `interfaces.d/*` at all —
-/// the bridge won't come up on reboot; we detect both and warn loudly.
+/// `/etc/network/interfaces.d/` for the bridge, and comment out any stanza
+/// in `/etc/network/interfaces` (or a sourced file) that still configures
+/// the enslaved NIC — each edited file is backed up and restored on revert
+/// — so the NIC does not reclaim its old address and fight the bridge on
+/// reboot. Still warns if `interfaces.d/*` isn't sourced (the drop-in would
+/// be inert at boot).
 fn persist_ifupdown(
     bridge: &str,
     nic: &str,
@@ -878,8 +891,8 @@ fn persist_ifupdown(
     }
     out.push('\n');
     // Declare the slave NIC as `manual` so ifup doesn't try to configure
-    // it independently and fight the bridge for it on boot. This lives in
-    // our own drop-in only — /etc/network/interfaces is never touched.
+    // it independently and fight the bridge for it on boot. The NIC's old
+    // stanza in /etc/network/interfaces is neutralized separately below.
     out.push_str(&format!("iface {} inet manual\n", nic));
 
     std::fs::write(&path, &out).map_err(|e| format!("write {}: {}", path, e))?;
@@ -891,7 +904,8 @@ fn persist_ifupdown(
     // (1) interfaces.d must actually be sourced, or the drop-in is inert at
     // boot — the silent 26.04 failure where the stanza looks identical to a
     // working Proxmox bridge but is never pulled in.
-    if !interfaces_sources_dropins() {
+    let sources_dropins = interfaces_sources_dropins();
+    if !sources_dropins {
         warns.push(format!(
             "/etc/network/interfaces does not source /etc/network/interfaces.d/* — \
              the bridge is live now but the persisted config at {} will NOT be \
@@ -900,25 +914,229 @@ fn persist_ifupdown(
             path
         ));
     }
-    // (2) the primary file must not still own the slave NIC.
-    if primary_interfaces_configures_nic(nic) {
-        warns.push(format!(
-            "Your /etc/network/interfaces still configures '{}'. Remove its \
-             'iface {}' / 'auto {}' stanza (we do NOT edit that file ourselves) \
-             or the bridge will not come up on reboot.",
-            nic, nic, nic
-        ));
-    }
+    // (2) The primary file (or a sourced file) must not still own the slave
+    // NIC. If it does, on reboot `ifup` brings the NIC up with its old static
+    // address and it fights the bridge for the port — the host loses the LAN
+    // (RutgerDiehard, 2026-08-10). Comment those stanzas out in place; each
+    // edited file is backed up and restored on any revert, so a locked-out
+    // operator's commit-confirm timeout puts the original config right back.
+    //
+    // Guard: only disable the NIC's own stanza once we KNOW the bridge drop-in
+    // will load on reboot (interfaces.d is sourced). If it is NOT sourced,
+    // disabling the NIC would leave the host with NEITHER the bridge NOR the
+    // NIC after a reboot — a worse lockout than the bug we're fixing — so we
+    // leave the NIC config untouched and let warning (1) stand: the operator
+    // adds the source line, and the bridge (with its slave stanza) takes over
+    // cleanly on the next boot.
+    let backups = if sources_dropins {
+        neutralize_primary_nic_stanza(nic, bridge)?
+    } else {
+        Vec::new()
+    };
+
     let warning = if warns.is_empty() { None } else { Some(warns.join("  ")) };
+
+    let note = if backups.is_empty() {
+        format!("Persisted via ifupdown ({}).", path)
+    } else {
+        let edited: Vec<&str> = backups.iter().map(|(f, _)| f.as_str()).collect();
+        format!(
+            "Persisted via ifupdown ({}). Commented out the old '{}' config in {} \
+             (backed up) so the bridge owns the port on reboot.",
+            path, nic, edited.join(", ")
+        )
+    };
 
     Ok(PersistResult {
         files: vec![path.clone()],
         nmcli_cons: Vec::new(),
-        backups: Vec::new(),
+        backups,
         nmcli_restore: Vec::new(),
         warning,
-        note: format!("Persisted via ifupdown ({}).", path),
+        note,
     })
+}
+
+/// First non-existing `<path>.wolfstack-bak[.N]` sidecar, so a leftover
+/// backup from an earlier run is never clobbered (which would lose the true
+/// original). Matches the `.wolfstack-bak` convention the networkd/netplan
+/// persisters already use.
+fn unique_backup_path(path: &str) -> String {
+    let base = format!("{}.wolfstack-bak", path);
+    if !std::path::Path::new(&base).exists() {
+        return base;
+    }
+    for n in 1..1000 {
+        let candidate = format!("{}.{}", base, n);
+        if !std::path::Path::new(&candidate).exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
+/// Comment out every `/etc/network/interfaces`(-sourced) stanza that
+/// configures `nic` so the physical NIC stops claiming its old address on
+/// the next boot and fighting the newly-created `bridge` for the port. Each
+/// edited file is copied to a `.wolfstack-bak` sidecar first; the returned
+/// `(original, backup)` pairs feed `PersistResult.backups`, so both revert
+/// paths (`revert_persistence`) restore the originals wholesale.
+///
+/// If editing one file fails, every file already edited in this call is
+/// restored before returning `Err`, so the caller's `runtime_revert` is
+/// never left racing a half-rewritten primary config.
+fn neutralize_primary_nic_stanza(nic: &str, bridge: &str) -> Result<Vec<(String, String)>, String> {
+    let mut backups: Vec<(String, String)> = Vec::new();
+    for file in files_configuring_nic(nic) {
+        let text = match std::fs::read_to_string(&file) {
+            // Read failed between the scan and now (race / permissions) —
+            // skip it; a file we can't read is one we won't half-rewrite.
+            Err(_) => continue,
+            Ok(t) => t,
+        };
+        let bak = unique_backup_path(&file);
+        let new_text = match comment_out_nic_stanzas(&text, nic, bridge, &bak) {
+            // No stanza after all (the scan is a superset guard) — nothing to do.
+            None => continue,
+            Some(t) => t,
+        };
+        // Back up the original, then write the neutralized version.
+        let step = std::fs::copy(&file, &bak)
+            .map_err(|e| format!("back up {} -> {}: {}", file, bak, e))
+            .and_then(|_| {
+                std::fs::write(&file, &new_text).map_err(|e| {
+                    // Undo just this file so the backup isn't orphaned.
+                    let _ = std::fs::rename(&bak, &file);
+                    format!("rewrite {}: {}", file, e)
+                })
+            });
+        match step {
+            Ok(()) => backups.push((file, bak)),
+            Err(e) => {
+                // Restore every file we already rewrote in this call, then
+                // fail so the caller reverts the runtime bridge too.
+                for (orig, b) in backups.iter().rev() {
+                    let _ = std::fs::rename(b, orig);
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(backups)
+}
+
+/// The first tokens that begin a new ifupdown stanza. While commenting out
+/// an `iface <nic>` block, hitting any of these at the start of a line ends
+/// the block — the option lines in between belong to the iface and get
+/// commented; the next stanza's keyword line does not. See interfaces(5).
+fn is_ifupdown_stanza_keyword(tok: &str) -> bool {
+    matches!(
+        tok,
+        "iface" | "auto" | "mapping" | "source" | "source-directory" | "rename"
+    ) || tok.starts_with("allow-")
+}
+
+/// Pure transform: comment out every stanza naming `nic` in the text of one
+/// ifupdown config file. Returns `Some(new_text)` if anything changed, or
+/// `None` if the file doesn't configure `nic` (leave it untouched). An
+/// explanatory banner citing the backup path is inserted before the first
+/// disabled stanza. Multi-interface `auto`/`allow-*` lines keep their other
+/// interfaces (only the `nic` token is dropped). Kept pure so it is
+/// unit-testable without touching the filesystem.
+fn comment_out_nic_stanzas(text: &str, nic: &str, bridge: &str, bak: &str) -> Option<String> {
+    let had_trailing_newline = text.ends_with('\n');
+    let banner = [
+        format!(
+            "# wolfstack-lanbridge: the '{}' config below was disabled — '{}' is now",
+            nic, nic
+        ),
+        format!("# enslaved by bridge '{}'. Original backed up at {}.", bridge, bak),
+        format!("# Remove bridge '{}' in WolfStack (or restore that backup) to undo.", bridge),
+    ];
+
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut banner_done = false;
+    let mut changed = false;
+    // True while we are inside an `iface <nic> ...` block we are commenting.
+    let mut in_nic_iface = false;
+
+    // Emit the banner exactly once, immediately before the first change.
+    let emit_banner = |out: &mut Vec<String>, done: &mut bool| {
+        if !*done {
+            out.extend(banner.iter().cloned());
+            *done = true;
+        }
+    };
+
+    for line in text.lines() {
+        let content = line.trim_start().trim_end();
+
+        // Blank / comment lines never change ifupdown parser state and carry
+        // no config — keep them verbatim, and stay inside any block.
+        if content.is_empty() || content.starts_with('#') {
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        let mut tok = content.split_whitespace();
+        let kw = tok.next().unwrap_or("");
+
+        // A new stanza keyword ends the block we were commenting.
+        if in_nic_iface && is_ifupdown_stanza_keyword(kw) {
+            in_nic_iface = false;
+        }
+
+        // Still inside the block → this is an option line; comment it.
+        if in_nic_iface {
+            emit_banner(&mut out_lines, &mut banner_done);
+            out_lines.push(format!("#{}", line));
+            changed = true;
+            continue;
+        }
+
+        if kw == "iface" {
+            // `iface <name> <family> <method>` — the name is the FIRST token.
+            if tok.next() == Some(nic) {
+                emit_banner(&mut out_lines, &mut banner_done);
+                out_lines.push(format!("#{}", line));
+                in_nic_iface = true;
+                changed = true;
+            } else {
+                out_lines.push(line.to_string());
+            }
+        } else if kw == "auto" || kw.starts_with("allow-") {
+            // `auto <if> [<if> ...]` / `allow-hotplug <if> ...` — list of
+            // interfaces. Drop just `nic`; if it was the only one, comment
+            // the whole line. Preserve original indentation.
+            let ifaces: Vec<&str> = content.split_whitespace().skip(1).collect();
+            if ifaces.iter().any(|&i| i == nic) {
+                let indent_len = line.len() - line.trim_start().len();
+                let indent = &line[..indent_len];
+                let remaining: Vec<&str> = ifaces.into_iter().filter(|&i| i != nic).collect();
+                emit_banner(&mut out_lines, &mut banner_done);
+                if remaining.is_empty() {
+                    out_lines.push(format!("#{}", line));
+                } else {
+                    out_lines.push(format!("{}{} {}", indent, kw, remaining.join(" ")));
+                }
+                changed = true;
+            } else {
+                out_lines.push(line.to_string());
+            }
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let mut result = out_lines.join("\n");
+    if had_trailing_newline {
+        result.push('\n');
+    }
+    Some(result)
 }
 
 /// Scan `/etc/network/interfaces` for an `iface`/`auto`/`allow-hotplug`
@@ -927,28 +1145,41 @@ fn persist_ifupdown(
 /// NIC configured in a sourced file is still detected. Skips our own
 /// drop-in. Read-only; never edits. Excludes our own
 /// `wolfstack-lanbridge-*` file (which legitimately mentions the NIC).
-fn primary_interfaces_configures_nic(nic: &str) -> bool {
-    primary_interfaces_scan("/etc/network/interfaces", nic, 0)
+/// Every ifupdown config file — starting at `/etc/network/interfaces` and
+/// following `source` / `source-directory` — that has an `iface`/`auto`/
+/// `allow-*` stanza naming `nic`. De-duplicated (a file appears once even
+/// if it names the NIC in several stanzas), and our own
+/// `wolfstack-lanbridge-*` drop-ins are excluded (they name the NIC
+/// legitimately, as the bridge slave). Read-only; drives the in-place
+/// neutralization in `neutralize_primary_nic_stanza`.
+fn files_configuring_nic(nic: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    collect_nic_stanza_files("/etc/network/interfaces", nic, 0, &mut out);
+    out
 }
 
-/// Recursive helper for `primary_interfaces_configures_nic`. `depth`
-/// guards against pathological `source` loops.
-fn primary_interfaces_scan(path: &str, nic: &str, depth: u8) -> bool {
-    if depth > 8 {
-        return false;
-    }
-    // Never count our own drop-in — it intentionally names the NIC.
-    if path.contains("wolfstack-lanbridge-") {
-        return false;
+/// Recursive helper for `files_configuring_nic`. `depth` guards against
+/// pathological `source` loops. Pushes `path` (once) when it finds a stanza
+/// naming `nic`, and always recurses into sourced files.
+fn collect_nic_stanza_files(path: &str, nic: &str, depth: u8, out: &mut Vec<String>) {
+    if depth > 8 || path.contains("wolfstack-lanbridge-") {
+        return;
     }
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(_) => return false,
+        Err(_) => return,
     };
     let base_dir = std::path::Path::new(path)
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
+    let mut already_added = false;
+    let note_hit = |out: &mut Vec<String>, added: &mut bool| {
+        if !*added {
+            out.push(path.to_string());
+            *added = true;
+        }
+    };
     for line in text.lines() {
         let l = line.trim();
         if l.starts_with('#') {
@@ -956,9 +1187,23 @@ fn primary_interfaces_scan(path: &str, nic: &str, depth: u8) -> bool {
         }
         let mut tok = l.split_whitespace();
         match tok.next() {
-            Some("iface") | Some("auto") | Some("allow-hotplug") => {
+            // `iface <name> <family> <method>` — the interface name is the
+            // FIRST token only (the rest is inet/static/etc.).
+            Some("iface") => {
                 if tok.next() == Some(nic) {
-                    return true;
+                    note_hit(out, &mut already_added);
+                }
+            }
+            // `auto`/`allow-*` list one or more interfaces — check them all
+            // (`auto lo eno1` names eno1 in a non-leading position).
+            Some("auto") => {
+                if tok.any(|t| t == nic) {
+                    note_hit(out, &mut already_added);
+                }
+            }
+            Some(kw) if kw.starts_with("allow-") => {
+                if tok.any(|t| t == nic) {
+                    note_hit(out, &mut already_added);
                 }
             }
             Some("source") => {
@@ -972,9 +1217,7 @@ fn primary_interfaces_scan(path: &str, nic: &str, depth: u8) -> bool {
                         base_dir.join(pat).to_string_lossy().to_string()
                     };
                     for resolved in expand_source_pattern(&full) {
-                        if primary_interfaces_scan(&resolved, nic, depth + 1) {
-                            return true;
-                        }
+                        collect_nic_stanza_files(&resolved, nic, depth + 1, out);
                     }
                 }
             }
@@ -987,9 +1230,7 @@ fn primary_interfaces_scan(path: &str, nic: &str, depth: u8) -> bool {
                     };
                     if let Ok(read) = std::fs::read_dir(&full) {
                         for e in read.flatten() {
-                            if primary_interfaces_scan(&e.path().to_string_lossy(), nic, depth + 1) {
-                                return true;
-                            }
+                            collect_nic_stanza_files(&e.path().to_string_lossy(), nic, depth + 1, out);
                         }
                     }
                 }
@@ -997,7 +1238,6 @@ fn primary_interfaces_scan(path: &str, nic: &str, depth: u8) -> bool {
             _ => {}
         }
     }
-    false
 }
 
 /// Expand an ifupdown `source` pattern into concrete file paths. Handles
@@ -1222,7 +1462,7 @@ fn other_netplan_configures_nic(nic: &str, our_path: &str) -> bool {
         // this bridge's file AND any other `wolfstack-lanbridge-*` drop-in:
         // those name the NIC legitimately (they configure it as a slave),
         // so counting them would fire a false-positive conflict warning —
-        // same exclusion the ifupdown scanner makes (primary_interfaces_scan).
+        // same exclusion the ifupdown scanner makes (collect_nic_stanza_files).
         if p.extension().and_then(|x| x.to_str()) != Some("yaml") {
             continue;
         }
@@ -1654,5 +1894,99 @@ mod tests {
         );
         assert!(yaml.contains("        - \"10.0.0.5/8\""));
         assert!(!yaml.contains("routes:"));
+    }
+
+    #[test]
+    fn comment_out_static_stanza_with_auto() {
+        let text = "auto lo\n\
+                    iface lo inet loopback\n\
+                    \n\
+                    auto eno1\n\
+                    iface eno1 inet static\n\
+                    \x20   address 192.168.1.10\n\
+                    \x20   netmask 255.255.255.0\n\
+                    \x20   gateway 192.168.1.1\n";
+        let out = comment_out_nic_stanzas(text, "eno1", "br0", "/etc/network/interfaces.wolfstack-bak")
+            .expect("eno1 is configured, so a change is expected");
+        // The loopback stanza is untouched.
+        assert!(out.contains("auto lo\n"));
+        assert!(out.contains("iface lo inet loopback"));
+        // Every eno1 line is commented out.
+        assert!(out.contains("#auto eno1"));
+        assert!(out.contains("#iface eno1 inet static"));
+        assert!(out.contains("#    address 192.168.1.10"));
+        assert!(out.contains("#    netmask 255.255.255.0"));
+        assert!(out.contains("#    gateway 192.168.1.1"));
+        // No live (uncommented) eno1 stanza remains.
+        assert!(!out.lines().any(|l| l.trim_start() == "auto eno1"));
+        assert!(!out.lines().any(|l| l.trim_start().starts_with("address 192.168.1.10")));
+        // Banner citing the backup is present.
+        assert!(out.contains("Original backed up at /etc/network/interfaces.wolfstack-bak"));
+        // Re-running on the neutralized text is a no-op (idempotent).
+        assert!(comment_out_nic_stanzas(&out, "eno1", "br0", "x").is_none());
+    }
+
+    #[test]
+    fn multi_interface_auto_line_keeps_the_others() {
+        let text = "auto lo eno1 eth1\n\
+                    iface eno1 inet dhcp\n";
+        let out = comment_out_nic_stanzas(text, "eno1", "br0", "bak").expect("configured");
+        // `auto lo eno1 eth1` keeps lo + eth1, drops eno1 — NOT commented whole.
+        assert!(out.lines().any(|l| l == "auto lo eth1"));
+        assert!(!out.contains("#auto lo eno1 eth1"));
+        // The iface line for eno1 is commented.
+        assert!(out.contains("#iface eno1 inet dhcp"));
+    }
+
+    #[test]
+    fn allow_hotplug_and_options_commented_next_iface_preserved() {
+        let text = "allow-hotplug eno1\n\
+                    iface eno1 inet static\n\
+                    \x20   address 10.0.0.5\n\
+                    \x20   netmask 255.0.0.0\n\
+                    \n\
+                    auto eth2\n\
+                    iface eth2 inet dhcp\n";
+        let out = comment_out_nic_stanzas(text, "eno1", "br0", "bak").expect("configured");
+        assert!(out.contains("#allow-hotplug eno1"));
+        assert!(out.contains("#iface eno1 inet static"));
+        assert!(out.contains("#    address 10.0.0.5"));
+        assert!(out.contains("#    netmask 255.0.0.0"));
+        // The following, unrelated interface is fully preserved and live.
+        assert!(out.lines().any(|l| l == "auto eth2"));
+        assert!(out.lines().any(|l| l == "iface eth2 inet dhcp"));
+    }
+
+    #[test]
+    fn unconfigured_nic_yields_no_change() {
+        let text = "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n";
+        assert!(comment_out_nic_stanzas(text, "eno1", "br0", "bak").is_none());
+    }
+
+    #[test]
+    fn similarly_named_nic_is_not_matched() {
+        // eno1 must NOT match eno10 (word-token equality, not substring).
+        let text = "auto eno10\niface eno10 inet static\n    address 172.16.0.9\n";
+        assert!(comment_out_nic_stanzas(text, "eno1", "br0", "bak").is_none());
+    }
+
+    #[test]
+    fn trailing_newline_preserved_both_ways() {
+        let with_nl = "auto eno1\niface eno1 inet dhcp\n";
+        assert!(comment_out_nic_stanzas(with_nl, "eno1", "br0", "b").unwrap().ends_with('\n'));
+        let without_nl = "auto eno1\niface eno1 inet dhcp";
+        assert!(!comment_out_nic_stanzas(without_nl, "eno1", "br0", "b").unwrap().ends_with('\n'));
+    }
+
+    #[test]
+    fn stanza_keyword_detection() {
+        assert!(is_ifupdown_stanza_keyword("iface"));
+        assert!(is_ifupdown_stanza_keyword("auto"));
+        assert!(is_ifupdown_stanza_keyword("allow-hotplug"));
+        assert!(is_ifupdown_stanza_keyword("allow-auto"));
+        assert!(is_ifupdown_stanza_keyword("source"));
+        assert!(is_ifupdown_stanza_keyword("source-directory"));
+        assert!(!is_ifupdown_stanza_keyword("address"));
+        assert!(!is_ifupdown_stanza_keyword("gateway"));
     }
 }
