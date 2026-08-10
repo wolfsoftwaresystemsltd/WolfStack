@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.8: top-bar CTA sells licenses, not sponsorship** _(2026-08-10 — [`95f48c52`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/95f48c52cb2f6f4a846992085181a18a30dce184))_
+- **v25.11.7: code-review fixes — honest migrate address note, accessible socials dropdown, DRY lesson video, sponsor CTA target** _(2026-08-10 — [`68d84846`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/68d848468a7ec487f82cb4488b5f6ca49fd04f9c))_
 - **v25.11.6: top-bar tidy — "Pricing" badge → "Sponsor"; Reddit folded into the socials dropdown** _(2026-08-10 — [`4cc13d99`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4cc13d9957315d048694c7ef83f2b88ea3bfac2e))_
 - **v25.11.5: top bar no longer overflows — five social icons collapse into one "Follow & share" dropdown** _(2026-08-10 — [`2d0c094b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d0c094bf8f41e46da6f94590a284395f4708243))_
 - **v25.11.4: migrate dialog scrolls with a sticky footer; video tutorials in the Learn course + AI knowledgebase** _(2026-08-10 — [`65645ddf`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65645ddf730fa6550558d2d21ccc0a8dd33faacc))_
