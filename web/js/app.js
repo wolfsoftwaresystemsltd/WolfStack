@@ -62306,42 +62306,11 @@ const wfActionIcons = {
 // — no auth fork.
 
 async function loadClusterBrowser() {
-    // Show cached results first so the page is never blank, then kick
-    // off a fresh sweep in the background — discovery is on-demand
-    // (no periodic loop), so each page visit refreshes the list.
+    // No automatic scanning. A cluster-wide port scan (every WolfNet IP × 24
+    // ports) on every page visit pegged CPU on a large estate (RutgerDiehard,
+    // 2026-08-10). Services are added by the user via "+ Add custom URL" and
+    // shown from the cached/pinned list — the page never triggers a scan.
     await Promise.all([loadClusterBrowserSessions(), loadClusterServices()]);
-    triggerClusterServicesSweep({ silent: true });
-}
-
-/// Run a discovery sweep without blocking the UI. Shows a small "scanning"
-/// note above the services grid so the user knows something's happening.
-/// Pass { silent: true } from auto-triggers to suppress the toast.
-async function triggerClusterServicesSweep({ silent = false } = {}) {
-    const grid = document.getElementById('cluster-services-grid');
-    if (grid) {
-        // Inject a small live banner so the user knows a scan is in flight.
-        // Cheap to re-add on every call; removed when we re-render.
-        const banner = document.createElement('div');
-        banner.id = 'cluster-services-sweep-banner';
-        banner.style.cssText = 'background:rgba(59, 130, 246,0.10);border:1px solid rgba(59, 130, 246,0.3);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#93c5fd;display:flex;align-items:center;gap:10px;';
-        banner.innerHTML = `<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(59, 130, 246,0.25);border-top-color:#60a5fa;border-radius:50%;animation:spin 0.7s linear infinite;"></span> Scanning the cluster for web services…`;
-        const old = document.getElementById('cluster-services-sweep-banner');
-        if (old) old.remove();
-        grid.parentElement?.insertBefore(banner, grid);
-    }
-    if (!silent) showToast('Scanning the cluster for web services…', 'info', 4000);
-    try {
-        const resp = await fetch(apiUrl('/api/cluster-services/sweep'), { method: 'POST' });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        const count = (data.services || []).length;
-        renderClusterServices(data.grouped || []);
-        if (!silent) showToast(`Scan complete — ${count} services found`, 'success', 4000);
-    } catch (e) {
-        if (!silent) showToast('Sweep failed: ' + e.message, 'error');
-    } finally {
-        document.getElementById('cluster-services-sweep-banner')?.remove();
-    }
 }
 
 async function loadClusterBrowserSessions() {
@@ -62578,15 +62547,21 @@ async function clusterBrowserStop(id) {
     }
 }
 
+// Renders the cached (already-discovered + pinned) services and returns how
+// many there are, so loadClusterBrowser can decide whether a first-time
+// auto-sweep is warranted. Returns 0 on error (the manual button still works).
 async function loadClusterServices() {
     const grid = document.getElementById('cluster-services-grid');
-    if (!grid) return;
+    if (!grid) return 0;
     try {
         const resp = await fetch(apiUrl('/api/cluster-services'));
         const data = resp.ok ? await resp.json() : { grouped: [] };
         renderClusterServices(data.grouped || []);
+        return Array.isArray(data.services) ? data.services.length
+             : (data.grouped || []).reduce((n, g) => n + ((g.services || g[1] || []).length || 0), 0);
     } catch (e) {
         grid.innerHTML = `<div style="color:#ef4444;font-size:13px;">Failed to load services: ${escapeHtml(e.message)}</div>`;
+        return 0;
     }
 }
 
@@ -62596,8 +62571,8 @@ function renderClusterServices(grouped) {
     if (grouped.length === 0) {
         grid.innerHTML = renderEmptyState({
             icon: '',
-            title: 'No services discovered yet',
-            body: 'WolfStack sweeps the cluster every 5 minutes for HTTP/SSH services. Trigger an immediate pass or pin one manually.',
+            title: 'No services added yet',
+            body: 'Use "+ Add custom URL" to pin a web service here. Pinned services appear on the homepage of every Cluster Browser session.',
         });
         return;
     }
@@ -62620,13 +62595,6 @@ function renderClusterServices(grouped) {
             </div>
         </div>
     `).join('');
-}
-
-async function clusterServicesSweep() {
-    const btn = event?.target;
-    if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
-    await triggerClusterServicesSweep({ silent: false });
-    if (btn) { btn.disabled = false; btn.textContent = 'Rescan services'; }
 }
 
 async function clusterServiceDelete(id) {
