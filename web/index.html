@@ -2904,7 +2904,6 @@
                         <p style="margin:6px 0 0;color:var(--text-muted);font-size:13px;">A real Firefox running on a cluster node. From your browser, log into WolfStack from anywhere &mdash; click open and you're inside the cluster network. No VPN, no per-app proxy, no DNS work.</p>
                     </div>
                     <div style="display:flex;gap:8px;">
-                        <button class="btn" onclick="clusterServicesSweep()" title="Re-scan WolfNet IPs for web services"><span class="ws-icon-clean-wrap" data-icon="refresh"></span> Rescan services</button>
                         <button class="btn btn-primary" onclick="clusterBrowserStart()"><span class="ws-icon-clean-wrap" data-icon="rocket"></span> Start browser session</button>
                     </div>
                 </div>
@@ -2925,7 +2924,7 @@
                         <h3 style="margin:0;">Discovered web services</h3>
                         <button class="btn btn-sm" onclick="openAddManualServiceDialog()">+ Add custom URL</button>
                     </div>
-                    <p style="color:var(--text-muted);font-size:12px;margin:0 0 12px;">Auto-detected from a periodic scan of WolfNet IPs. These also appear on the homepage of every Cluster Browser session.</p>
+                    <p style="color:var(--text-muted);font-size:12px;margin:0 0 12px;">Add the web services you want quick access to. They appear on the homepage of every Cluster Browser session.</p>
                     <div id="cluster-services-grid"><div style="color:var(--text-muted);font-size:13px;">Loading…</div></div>
                 </div>
             </div>

@@ -541,9 +541,9 @@ This is the answer to "how do I connect from my office / phone / laptop to my Wo
 - Scale/delete workloads from the UI; per-pod resource usage; join tokens cluster-secret-auth'd
 
 ## Cluster Browser (unified web UI for every cluster-internal service)
-- Scans all nodes for running web services (common ports 80/443/3000/8080/…)
-- One pane: "Jellyfin on node-A", "AdGuard on node-B" — click through, WolfStack reverse-proxies it
-- Discovery every 60 seconds; config /etc/wolfstack/cluster-services-discovered.json
+- A real Firefox running on a cluster node; log in from anywhere and you're inside the cluster network — no VPN, no per-app proxy
+- Services are added manually via "+ Add custom URL" (pinned per-user); WolfStack does NOT auto-scan the cluster — an automatic port scan on every page visit could peg CPU on a large estate, so it was removed
+- Pinned services appear on the homepage of every Cluster Browser session; config /etc/wolfstack/cluster-services-by-user/<user>.json
 
 ## Control Panel (cluster-wide workload view)
 - Single view of every VM/LXC/Docker container across all nodes; group by Node/Type/Status/Cluster or drag-drop **Custom groups**
@@ -629,8 +629,8 @@ Any operation that can brick the node's UI registers a rollback closure with a T
 - Each failing check pairs with a distro-aware one-click "Fix" (apt/dnf/pacman/apk/zypper)
 
 ## Services Discovery
-- Background reconciler scans nodes for well-known services; populates Cluster Browser + app-update badges
-- Definitions at /etc/wolfstack/cluster-services.json; tombstoning prevents re-discovery of deleted services
+- Cluster Browser services are added manually by the user ("+ Add custom URL", pinned per-user). WolfStack does NOT auto-scan nodes for them — an automatic cluster-wide port scan on page load could peg CPU, so it was removed
+- Pinned definitions at /etc/wolfstack/cluster-services-by-user/<user>.json (auto-discovered cache, if ever populated: /etc/wolfstack/cluster-services-discovered.json)
 
 ## Components page
 - Installs/monitors the Wolf ecosystem components on each node: **WolfNet** (mesh VPN), **WolfProxy** (reverse proxy + firewall; counted as running when PIDs listen on :80/:443 even if its unit reads inactive — it daemonizes), **WolfServe** (web server), **WolfDisk** (distributed FS), **WolfScale**, **MariaDB**, **PostgreSQL**, **Certbot**
