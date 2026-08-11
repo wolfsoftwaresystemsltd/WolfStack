@@ -26,6 +26,8 @@
 //! - Unraid's UI likes to redirect to hashed `*.myunraid.net` hostnames;
 //!   operators should register the LAN IP/hostname directly.
 
+pub mod shares;
+
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use std::time::Duration;

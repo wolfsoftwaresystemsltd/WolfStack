@@ -4154,9 +4154,60 @@ function nodeName(node) {
     return dn || node.hostname || node.id || '';
 }
 
+// ─── Host-agent hint (docker install ↔ host agent) ───
+// When this dashboard runs inside a Docker container and a WolfStack
+// agent answers on the docker host's bridge address, offer to add it —
+// the two installs otherwise never learn about each other (klas,
+// 2026-08-11). Checks once per session; the join still goes through the
+// normal Add Server flow (token + admin credentials), nothing is silent.
+let _hostAgentHintChecked = false;
+async function maybeShowHostAgentHint() {
+    if (_hostAgentHintChecked || sessionStorage.getItem('host-agent-hint-dismissed')) return;
+    _hostAgentHintChecked = true;
+    let hint;
+    try {
+        const r = await fetch(apiUrl('/api/cluster/host-agent-hint'));
+        hint = await r.json();
+    } catch (_) { return; }
+    if (!hint || !hint.detected) return;
+    const tree = document.getElementById('server-tree');
+    if (!tree || !tree.parentElement || document.getElementById('host-agent-hint-banner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'host-agent-hint-banner';
+    banner.setAttribute('role', 'status');
+    banner.style.cssText = 'margin:8px;padding:10px 12px;border:1px solid var(--info,#3b82f6);'
+        + 'border-radius:8px;background:var(--info-bg,rgba(59,130,246,0.1));font-size:12px;'
+        + 'color:var(--text-primary);display:flex;align-items:center;gap:10px;flex-wrap:wrap;';
+    const msg = document.createElement('span');
+    msg.style.cssText = 'flex:1;min-width:180px;';
+    msg.textContent = 'A WolfStack agent is running on this Docker host ('
+        + hint.address + (hint.version ? ', v' + hint.version : '') + ') but is not in this cluster.';
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn btn-sm';
+    addBtn.textContent = 'Add it';
+    addBtn.onclick = () => {
+        openAddServerModal();
+        const addr = document.getElementById('new-server-address');
+        const port = document.getElementById('new-server-port');
+        if (addr) addr.value = hint.address;
+        if (port) port.value = hint.port || 8553;
+    };
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.setAttribute('aria-label', 'Dismiss host agent suggestion');
+    dismissBtn.onclick = () => {
+        sessionStorage.setItem('host-agent-hint-dismissed', '1');
+        banner.remove();
+    };
+    banner.append(msg, addBtn, dismissBtn);
+    tree.parentElement.insertBefore(banner, tree);
+}
+
 // ─── Server Tree ───
 function buildServerTree(nodes) {
     allNodes = nodes;
+    maybeShowHostAgentHint();
     // Keep the top-bar cluster/node switcher in sync with the fleet on every
     // node-list refresh (appears once a 2nd node joins; the signature guard
     // makes this a no-op when nothing changed). Safe before the tree exists.
@@ -10463,6 +10514,91 @@ async function loadStorageMounts() {
         document.getElementById('storage-mounts-table').innerHTML = '';
         document.getElementById('storage-empty').style.display = 'block';
     }
+    loadUnraidSharesCard();
+}
+
+// ─── Unraid user shares (klas, 2026-08-11) ───
+// Fan out to every cluster node's zero-config /api/unraid/local-shares
+// (agents running natively on Unraid read emhttp state directly) and
+// list each Unraid box's user shares — SMB-enabled ones get a one-click
+// "Mount here" that prefills the normal Add Mount flow for the node
+// whose Storage page is open. Credentials stay operator-supplied.
+async function loadUnraidSharesCard() {
+    const holder = document.getElementById('unraid-shares-card');
+    if (!holder) return;
+    const results = [];
+    await Promise.all((allNodes || []).map(async n => {
+        const path = n.is_self ? '/api/unraid/local-shares'
+            : `/api/nodes/${n.id}/proxy/unraid/local-shares`;
+        try {
+            const r = await fetch(path);
+            const d = await r.json();
+            if (d && d.supported && Array.isArray(d.shares) && d.shares.length) {
+                results.push({ node: n, shares: d.shares });
+            }
+        } catch (_) { /* node unreachable — skip quietly */ }
+    }));
+    if (!results.length) { holder.innerHTML = ''; return; }
+
+    let html = '';
+    for (const { node, shares } of results) {
+        const host = node.address || node.hostname;
+        const rows = shares.map(s => {
+            const smbBadge = s.smb_enabled
+                ? `<span class="badge" style="background:var(--success-bg,rgba(16,185,129,0.1)); color:var(--success,#10b981); font-size:10px;">SMB${s.smb_hidden ? ' (hidden)' : ''}</span>`
+                : '<span class="badge" style="background:var(--bg-tertiary); color:var(--text-muted); font-size:10px;">SMB off</span>';
+            // data-attributes + a bound listener, NOT an inline
+            // onclick('${...}') — entity-escaped quotes decode back to
+            // live quotes before the JS engine parses an inline
+            // handler, so a share name containing ' would break out of
+            // the string. dataset round-trips any characters safely.
+            const mountBtn = s.smb_enabled
+                ? `<button class="btn btn-sm unraid-share-mount-btn" style="font-size:11px; padding:2px 8px;" data-host="${escapeAttr(host)}" data-share="${escapeAttr(s.name)}">Mount here…</button>`
+                : '';
+            return `
+                <tr>
+                    <td style="padding:4px 10px;">${escapeHtml(s.name)}</td>
+                    <td style="padding:4px 10px;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--text-muted);">${escapeHtml(s.path)}</td>
+                    <td style="padding:4px 10px;font-size:11px;color:var(--text-muted);">${escapeHtml(s.comment || '')}</td>
+                    <td style="padding:4px 10px;">${smbBadge}</td>
+                    <td style="padding:4px 10px;">${mountBtn}</td>
+                </tr>`;
+        }).join('');
+        html += `
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header"><h3 style="margin:0;font-size:14px;">Unraid Shares — ${escapeHtml(nodeName(node))}</h3></div>
+                <div class="card-body">
+                    <table class="data-table" style="font-size:12px;">
+                        <thead><tr style="text-align:left;color:var(--text-muted);">
+                            <th style="padding:6px 10px;">Share</th><th style="padding:6px 10px;">Path</th>
+                            <th style="padding:6px 10px;">Comment</th><th style="padding:6px 10px;">Network</th>
+                            <th style="padding:6px 10px;"></th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                    <p style="font-size:11px;color:var(--text-muted);margin:8px 0 0;">
+                        "Mount here" prefills an SMB mount of the share onto the node whose Storage page you're
+                        viewing. Enable SMB for a share in Unraid under Shares → (share) → SMB Security Settings.
+                    </p>
+                </div>
+            </div>`;
+    }
+    holder.innerHTML = html;
+    holder.querySelectorAll('.unraid-share-mount-btn').forEach(b => {
+        b.onclick = () => unraidShareMountHere(b.dataset.host, b.dataset.share);
+    });
+}
+
+function unraidShareMountHere(host, share) {
+    showCreateMountModal();
+    const type = document.getElementById('mount-type');
+    if (type) { type.value = 'smb'; onMountTypeChange(); }
+    const src = document.getElementById('smb-source');
+    if (src) src.value = `//${host}/${share}`;
+    const name = document.getElementById('mount-name');
+    if (name && !name.value) name.value = share;
+    const point = document.getElementById('mount-point');
+    if (point && !point.value) point.value = `/mnt/${share}`;
 }
 
 function renderStorageMounts(mounts) {
@@ -78610,7 +78746,7 @@ function arrayRowHtml(a) {
             <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${a.sync_progress}%${a.sync_speed_kbs ? ` · ${(a.sync_speed_kbs/1024).toFixed(1)} MiB/s` : ''}</div>` : '';
     const disksHtml = (a.disks || []).map(d => {
         const stateColor = d.state === 'faulty' ? '#ef4444'
-            : d.state === 'spare' ? '#94a3b8'
+            : d.state === 'spare' || d.state === 'empty' ? '#94a3b8'
             : d.state === 'in_sync' || d.state === 'active' ? '#22c55e' : '#f59e0b';
         const smartColor = d.smart_status === 'PASSED' ? '#22c55e'
             : d.smart_status === 'FAILED' ? '#ef4444' : '#94a3b8';
@@ -78632,7 +78768,15 @@ function arrayRowHtml(a) {
         <div class="card" style="${isFederated ? 'border-left:3px solid #3b82f6;' : ''}">
             <div class="card-body" style="padding:14px 18px;">
                 <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-                    <strong style="font-size:15px;">/dev/${escapeHtml(a.name)}</strong>
+                    <strong style="font-size:15px;">${
+                        // The flat-format backends model ONE array per host whose
+                        // "name" is the block-device class ("nmd"/"md") — showing
+                        // that as "/dev/nmd" read as a broken device path (klas,
+                        // 2026-08-11). Name the product instead; mdadm/ceph keep
+                        // their real /dev/mdN device names.
+                        a.backend === 'nonraid' ? 'NoNRAID array'
+                        : a.backend === 'unraid' ? 'Unraid array'
+                        : '/dev/' + escapeHtml(a.name)}</strong>
                     <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(a.level)}</span>
                     ${arrayStateBadge(a.state)}
                     ${remoteBadge}

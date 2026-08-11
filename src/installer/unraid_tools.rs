@@ -37,10 +37,30 @@ const TOOLS: &[(&str, &str)] = &[
 const RELEASE_BASE: &str =
     "https://github.com/wolfsoftwaresystemsltd/WolfStack/releases/download/unraid-tools-v1";
 
+/// WolfNet ships its own prebuilt static binaries on the WolfNet repo's
+/// latest release — the same assets setup.sh downloads on every other
+/// distro (setup.sh: `PREBUILT_URL=".../releases/latest/download"`,
+/// assets `wolfnet-x86_64` / `wolfnetctl-x86_64`). Unraid can't run
+/// setup.sh (Slackware — no apt/dnf/pacman, and its /etc is RAM), so
+/// the agent bundles WolfNet the same way it bundles the other tools
+/// (klas, 2026-08-11: "wolfnet could be bundled into the agent").
+const WOLFNET_RELEASE_BASE: &str =
+    "https://github.com/wolfsoftwaresystemsltd/WolfNet/releases/latest/download";
+const WOLFNET_TOOLS: &[(&str, &str)] = &[
+    ("wolfnet", "wolfnet-x86_64"),
+    ("wolfnetctl", "wolfnetctl-x86_64"),
+];
+
 /// Same array-backed appdata dir setup.sh installs the agent into — /etc and
 /// /usr/local/bin are RAM, this survives reboots.
 const TOOLS_DIR: &str = "/mnt/user/appdata/wolfstack/tools";
 const LINK_DIR: &str = "/usr/local/bin";
+
+/// WolfNet state that must survive reboots: config.toml + private.key.
+/// `/etc/wolfnet` (the path every wolfnet default and every WolfStack
+/// networking feature uses) becomes a symlink to this dir.
+const WOLFNET_ETC: &str = "/etc/wolfnet";
+const WOLFNET_APPDATA: &str = "/mnt/user/appdata/wolfstack/wolfnet";
 
 pub fn is_unraid() -> bool {
     Path::new("/etc/unraid-version").exists()
@@ -58,11 +78,147 @@ pub fn ensure_unraid_tools() {
         return;
     }
     for (bin, asset) in TOOLS {
-        ensure_tool(bin, asset);
+        ensure_tool(bin, asset, RELEASE_BASE);
+    }
+    ensure_unraid_wolfnet();
+    // Supervision tick: Unraid has no systemd, so the agent keeps the
+    // wolfnet daemon alive. 60s matches how fast a mesh outage becomes
+    // operator-visible without burning cycles — each pass is a `which`
+    // + symlink stat + pgrep unless something actually needs doing.
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        ensure_unraid_wolfnet();
+    });
+}
+
+/// Bundle WolfNet on Unraid: binaries persisted + linked like every
+/// other tool, `/etc/wolfnet` symlinked onto the array so the identity
+/// key survives reboots, and the daemon started when a config exists.
+/// Also called from the supervision tick (see `supervise_forever`) so
+/// a crashed daemon comes back within a minute.
+pub fn ensure_unraid_wolfnet() {
+    if !is_unraid() || std::env::consts::ARCH != "x86_64" {
+        return;
+    }
+    for (bin, asset) in WOLFNET_TOOLS {
+        ensure_tool(bin, asset, WOLFNET_RELEASE_BASE);
+    }
+    persist_wolfnet_etc();
+    start_wolfnet_if_configured();
+}
+
+/// Make `/etc/wolfnet` a symlink to the array-backed appdata dir.
+/// A real directory left by a manual install is migrated (copied) into
+/// appdata first so an existing identity key is never lost — the
+/// private key IS the node's mesh identity; losing it would orphan the
+/// node from every peer.
+fn persist_wolfnet_etc() {
+    let etc = Path::new(WOLFNET_ETC);
+    if let Err(e) = std::fs::create_dir_all(WOLFNET_APPDATA) {
+        warn!("unraid wolfnet: cannot create {}: {}", WOLFNET_APPDATA, e);
+        return;
+    }
+    // Already the symlink we want? (symlink_metadata: never follow.)
+    if let Ok(meta) = std::fs::symlink_metadata(etc) {
+        if meta.file_type().is_symlink() {
+            return;
+        }
+        // Real dir from a manual install this boot — migrate contents
+        // that appdata doesn't already have (never overwrite: appdata
+        // is the durable copy, RAM /etc is the transient one). The dir
+        // is only replaced when EVERY entry migrated cleanly — a
+        // failed or skipped copy followed by remove_dir_all would
+        // destroy the one copy of the node's mesh identity key.
+        if meta.is_dir() {
+            let mut migration_clean = true;
+            match std::fs::read_dir(etc) {
+                Ok(entries) => {
+                    for ent in entries.flatten() {
+                        let src = ent.path();
+                        if src.is_dir() {
+                            // wolfnet keeps a flat config dir; anything
+                            // deeper is operator-made — don't guess,
+                            // don't delete.
+                            warn!("unraid wolfnet: {} contains a subdirectory ({:?}) — leaving /etc/wolfnet as-is; move it into {} manually", WOLFNET_ETC, ent.file_name(), WOLFNET_APPDATA);
+                            migration_clean = false;
+                            continue;
+                        }
+                        let dest = Path::new(WOLFNET_APPDATA).join(ent.file_name());
+                        if !dest.exists() {
+                            if let Err(e) = std::fs::copy(&src, &dest) {
+                                warn!("unraid wolfnet: migrating {:?}: {}", ent.file_name(), e);
+                                migration_clean = false;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("unraid wolfnet: cannot read {}: {}", WOLFNET_ETC, e);
+                    migration_clean = false;
+                }
+            }
+            if !migration_clean {
+                return; // retry next supervision tick; never delete unmigrated state
+            }
+            if let Err(e) = std::fs::remove_dir_all(etc) {
+                warn!("unraid wolfnet: cannot replace {} with symlink: {}", WOLFNET_ETC, e);
+                return;
+            }
+        } else if std::fs::remove_file(etc).is_err() {
+            return;
+        }
+    }
+    match std::os::unix::fs::symlink(WOLFNET_APPDATA, etc) {
+        Ok(()) => info!("unraid wolfnet: {} → {}", WOLFNET_ETC, WOLFNET_APPDATA),
+        Err(e) => warn!("unraid wolfnet: symlink {}: {}", WOLFNET_ETC, e),
     }
 }
 
-fn ensure_tool(bin: &str, asset: &str) {
+/// Start the wolfnet daemon when a config exists and it isn't already
+/// running. Unraid has no systemd — the agent is the supervisor. The
+/// invocation matches setup.sh's systemd unit verbatim
+/// (`ExecStart=/usr/local/bin/wolfnet --config /etc/wolfnet/config.toml`);
+/// pgrep is the same liveness check src/networking uses for reloads.
+fn start_wolfnet_if_configured() {
+    if !Path::new(WOLFNET_APPDATA).join("config.toml").exists() {
+        return; // not configured — nothing to run
+    }
+    let running = Command::new("pgrep").args(["-x", "wolfnet"]).output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if running {
+        return;
+    }
+    let log = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open(format!("{}/wolfnet.log", WOLFNET_APPDATA));
+    let Ok(log) = log else {
+        warn!("unraid wolfnet: cannot open wolfnet.log — not starting");
+        return;
+    };
+    let err = match log.try_clone() {
+        Ok(c) => c,
+        Err(_) => { warn!("unraid wolfnet: cannot clone log handle — not starting"); return; }
+    };
+    match Command::new(format!("{}/wolfnet", LINK_DIR))
+        .args(["--config", "/etc/wolfnet/config.toml"])
+        .stdin(std::process::Stdio::null())
+        .stdout(log)
+        .stderr(err)
+        .spawn()
+    {
+        Ok(mut child) => {
+            info!("unraid wolfnet: daemon started (pid {})", child.id());
+            // Reap on exit — a dropped Child is never waited on, so a
+            // crashed daemon would otherwise sit as a zombie until the
+            // agent restarts. The supervision tick restarts it.
+            std::thread::spawn(move || { let _ = child.wait(); });
+        }
+        Err(e) => warn!("unraid wolfnet: failed to start daemon: {}", e),
+    }
+}
+
+fn ensure_tool(bin: &str, asset: &str, base: &str) {
     // Already runnable (native Unraid tool, or our link from a prior pass)?
     // `which` is present on Unraid (busybox/coreutils both ship it).
     let on_path = Command::new("which").arg(bin).output()
@@ -74,7 +230,7 @@ fn ensure_tool(bin: &str, asset: &str) {
 
     let persisted = format!("{}/{}", TOOLS_DIR, bin);
     if !Path::new(&persisted).exists() {
-        if let Err(e) = download_tool(asset, &persisted) {
+        if let Err(e) = download_tool(base, asset, &persisted) {
             warn!("unraid tools: could not fetch {}: {} — the feature needing it will report it missing", bin, e);
             return;
         }
@@ -94,11 +250,11 @@ fn ensure_tool(bin: &str, asset: &str) {
 /// itself arrives through it). Temp-file + rename so a cut connection never
 /// leaves a half-written binary where a feature might exec it. Bounded:
 /// 15s connect, 10min total (assets are up to ~20MB, lines can be slow).
-fn download_tool(asset: &str, dest: &str) -> Result<(), String> {
+fn download_tool(base: &str, asset: &str, dest: &str) -> Result<(), String> {
     if let Some(dir) = Path::new(dest).parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
     }
-    let url = format!("{}/{}", RELEASE_BASE, asset);
+    let url = format!("{}/{}", base, asset);
     let tmp = format!("{}.download", dest);
     let out = Command::new("curl")
         .args(["-fSL", "--connect-timeout", "15", "--max-time", "600", "-o", &tmp, &url])
@@ -131,7 +287,7 @@ mod tests {
     fn manifest_assets_are_x86_64_suffixed() {
         // The release only carries x86_64 assets (Unraid is x86_64-only);
         // a manifest entry without the suffix would 404 on every node.
-        for (bin, asset) in TOOLS {
+        for (bin, asset) in TOOLS.iter().chain(WOLFNET_TOOLS) {
             assert!(asset.ends_with("-x86_64"), "{} asset {} lacks arch suffix", bin, asset);
             assert!(!bin.contains('/'), "{} must be a bare binary name", bin);
         }
