@@ -782,8 +782,14 @@ async fn sync_one_replica_inner(
     // settings changes must reach standbys without waiting for a file to
     // change, and last_delta_at must keep advancing on an IDLE container
     // or the auto-failover freshness gate would wrongly refuse it.
-    let archive_bytes: Vec<u8> = if changed.is_empty() && deletions.is_empty() {
-        Vec::new()
+    //
+    // The archive stays ON DISK and is streamed from there — the old
+    // read-into-RAM + clone-per-attempt shipped the whole delta through
+    // memory, which for a big container's first delta round was an OOM
+    // risk on the primary (legolas/wolfstack-3, 2026-08-11 — same round
+    // as the seed fix in api::wolfha_enable).
+    let archive_on_disk: Option<String> = if changed.is_empty() && deletions.is_empty() {
+        None
     } else {
         // 3. Tar the changed paths.
         let stage_dir = "/var/lib/wolfstack/wolfha";
@@ -804,12 +810,16 @@ async fn sync_one_replica_inner(
             .await
             .map_err(|e| format!("tar task: {}", e));
         let _ = std::fs::remove_file(&list_file);
-        tar_res??;
-        let bytes = std::fs::read(&archive).map_err(|e| format!("read delta: {}", e))?;
-        let _ = std::fs::remove_file(&archive);
-        bytes
+        if let Err(e) = tar_res.and_then(|r| r) {
+            let _ = std::fs::remove_file(&archive);
+            return Err(e);
+        }
+        Some(archive)
     };
-    let bytes_len = archive_bytes.len() as u64;
+    let bytes_len = archive_on_disk.as_deref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
     let config = std::fs::read_to_string(&config_path).unwrap_or_default();
 
     // 4. Ship it — settings metadata rides along so standbys always
@@ -827,9 +837,16 @@ async fn sync_one_replica_inner(
             .text("deletions", deletions_json.clone())
             .text("config", config.clone())
             .text("ha_meta", ha_meta_json.clone());
-        if !archive_bytes.is_empty() {
-            form = form.part("archive", reqwest::multipart::Part::bytes(archive_bytes.clone())
-                .file_name("delta.tar.gz"));
+        if let Some(path) = archive_on_disk.as_deref() {
+            // Fresh streaming part per attempt — a stream can't be
+            // cloned the way the old in-RAM bytes could.
+            match stream_archive_part(path).await {
+                Ok(part) => form = form.part("archive", part.file_name("delta.tar.gz")),
+                Err(e) => {
+                    let _ = std::fs::remove_file(path);
+                    return Err(e);
+                }
+            }
         }
         match client.post(url)
             .header("X-WolfStack-Secret", secret.to_string())
@@ -838,6 +855,7 @@ async fn sync_one_replica_inner(
             .send().await
         {
             Ok(r) if r.status().is_success() => {
+                if let Some(p) = archive_on_disk.as_deref() { let _ = std::fs::remove_file(p); }
                 return Ok((changed.len() as u64, bytes_len));
             }
             Ok(r) => {
@@ -848,7 +866,24 @@ async fn sync_one_replica_inner(
             Err(e) => { last_err = format!("{}: {}", url, e); }
         }
     }
+    if let Some(p) = archive_on_disk.as_deref() { let _ = std::fs::remove_file(p); }
     Err(format!("delta upload failed: {}", last_err))
+}
+
+/// Build a streaming multipart part from a staged archive — the file is
+/// read from disk as it uploads instead of being loaded into memory
+/// (a 43 GB rootfs seed read into RAM is how wolfstack-3 nearly went
+/// down on 2026-08-11). `stream_with_length` so the request carries
+/// Content-Length — the receiver's progress and limits see a size, not
+/// chunked-unknown.
+pub async fn stream_archive_part(path: &str) -> Result<reqwest::multipart::Part, String> {
+    let file = tokio::fs::File::open(path).await
+        .map_err(|e| format!("open archive {}: {}", path, e))?;
+    let len = file.metadata().await
+        .map_err(|e| format!("archive metadata {}: {}", path, e))?
+        .len();
+    let stream = tokio_util::io::ReaderStream::new(file);
+    Ok(reqwest::multipart::Part::stream_with_length(reqwest::Body::wrap_stream(stream), len))
 }
 
 /// Run a sync round for one primary entry: every replica, sequentially
