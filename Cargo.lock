@@ -5842,7 +5842,7 @@ dependencies = [
 
 [[package]]
 name = "wolfstack"
-version = "25.11.15"
+version = "25.11.16"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -5892,6 +5892,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-tungstenite",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",

@@ -17574,6 +17574,15 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
         // reachable even though the container itself doesn't.
         maxHeight: 'calc(100vh - 40px)', overflowY: 'auto'
     });
+    // A repeated id means UPDATE, not append: pollers (WolfHA task
+    // status every 1.5s, upload progress) pass a stable id expecting
+    // one live toast. Appending instead flooded the screen with an
+    // endless stream of identical "creating live rootfs snapshot"
+    // toasts for the whole seed (Paul, 2026-08-11). Replace-in-place:
+    // the old element is removed and the new one takes its slot, so
+    // position is stable; the old toast's pending timers act on a
+    // detached node, which is harmless.
+    const existing = id ? document.getElementById(id) : null;
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     // Failures must interrupt assistive tech, not wait politely behind the
@@ -17671,14 +17680,23 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     dismissBtn.textContent = '×';
     dismissBtn.onclick = dismissToast;
     toast.replaceChildren(iconSpan, msgSpan, dismissBtn);
-    container.appendChild(toast);
-    // Trigger slide-in via transition (not @keyframes — works without stylesheet)
-    requestAnimationFrame(() => {
+    if (existing && existing.parentElement === container) {
+        // Update path: take the old toast's slot and skip the slide-in
+        // (a re-animation every poll tick would make the toast shimmer).
+        container.replaceChild(toast, existing);
+        toast.style.transform = 'translateX(0)';
+        toast.style.opacity = '1';
+    } else {
+        if (existing) existing.remove(); // stale copy in a torn-down container
+        container.appendChild(toast);
+        // Trigger slide-in via transition (not @keyframes — works without stylesheet)
         requestAnimationFrame(() => {
-            toast.style.transform = 'translateX(0)';
-            toast.style.opacity = '1';
+            requestAnimationFrame(() => {
+                toast.style.transform = 'translateX(0)';
+                toast.style.opacity = '1';
+            });
         });
-    });
+    }
     if (duration > 0) {
         setTimeout(() => {
             toast.style.opacity = '0';
@@ -81642,23 +81660,28 @@ async function loadWolfHa() {
         const primary = copies.find(c => c.role === 'primary' && !c.stale);
         const rows = copies.map(c => {
             const nodeName = c._node.hostname || c._node.id;
+            // Theme tokens, not hardcoded hexes: the original pale-on-alpha
+            // palette (#93c5fd on #3b82f622 etc.) was designed on the dark
+            // theme and became unreadable washes on light/arctic/fruit
+            // (Paul, 2026-08-11). Every theme defines the severity tokens
+            // with contrast for its own surfaces.
             const roleBadge = c.role === 'primary' && !c.stale
-                ? '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:#22c55e22;color:#22c55e;border:1px solid #22c55e44;">PRIMARY</span>'
+                ? '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--success-bg);color:var(--success);border:1px solid var(--success);">PRIMARY</span>'
                 : c.stale
-                    ? '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b44;" title="This copy missed changes while a takeover happened — it catches up automatically from the active node.">STALE</span>'
-                    : '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:#3b82f622;color:#93c5fd;border:1px solid #3b82f644;">STANDBY</span>';
+                    ? '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--warning-bg);color:var(--warning);border:1px solid var(--warning);" title="This copy missed changes while a takeover happened — it catches up automatically from the active node.">STALE</span>'
+                    : '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--info-bg);color:var(--info);border:1px solid var(--info);">STANDBY</span>';
             const state = c.active
-                ? '<span style="color:#22c55e;">running</span>'
+                ? '<span style="color:var(--success);">running</span>'
                 : '<span style="color:var(--text-muted);">stopped</span>';
             const autoBadge = c.auto_failover
-                ? `<span title="Automatic failover on — witness ${vlanEsc(c.witness || '?')}, promotes after ${c.failover_after_secs || 90}s" style="font-size:10px;padding:1px 6px;border-radius:3px;background:#a855f722;color:#c084fc;border:1px solid #a855f744;">AUTO</span>`
+                ? `<span title="Automatic failover on — witness ${vlanEsc(c.witness || '?')}, promotes after ${c.failover_after_secs || 90}s" style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--accent-glow);color:var(--accent);border:1px solid var(--accent);">AUTO</span>`
                 : '';
             let detail = '';
             if (c.role === 'primary' && !c.stale) {
                 const syncs = (c.replicas || []).map(r => {
                     const s = (c.last_sync || {})[r.node_id];
                     if (!s) return `${vlanEsc(r.node_id)}: <span style="color:var(--text-muted);">not synced yet</span>`;
-                    const col = s.ok ? '#22c55e' : '#ef4444';
+                    const col = s.ok ? 'var(--success)' : 'var(--danger)';
                     return `${vlanEsc(r.node_id)}: <span style="color:${col};" title="${vlanEsc(s.message)}">${s.ok ? wolfHaAge(s.at) : 'FAILED — ' + vlanEsc(s.message)}</span>`;
                 });
                 detail = `sync every ${c.interval_minutes} min · ${syncs.join(' · ') || 'no replicas'}`;
@@ -81672,7 +81695,7 @@ async function loadWolfHa() {
                     <button class="btn btn-sm btn-danger" style="font-size:11px;padding:2px 8px;" onclick="wolfHaDisable('${vlanEsc(c._node.id)}', '${vlanEsc(name)}')">Disable HA</button>`;
             } else {
                 const label = primary ? 'Promote (failover)' : 'Promote — primary is gone';
-                actions = `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:#f59e0b;color:#111;border-color:#f59e0b;" onclick="wolfHaPromote('${vlanEsc(c._node.id)}', '${vlanEsc(name)}', ${primary ? 'true' : 'false'})">${label}</button>`;
+                actions = `<button class="btn btn-sm" style="font-size:11px;padding:2px 8px;background:var(--warning);color:#111;border-color:var(--warning);" onclick="wolfHaPromote('${vlanEsc(c._node.id)}', '${vlanEsc(name)}', ${primary ? 'true' : 'false'})">${label}</button>`;
             }
             return `<div style="display:flex;align-items:center;gap:10px;padding:6px 10px;background:var(--bg-tertiary);border-radius:6px;margin-top:4px;font-size:12px;flex-wrap:wrap;">
                 <strong style="min-width:120px;">${vlanEsc(nodeName)}</strong>
@@ -81683,7 +81706,7 @@ async function loadWolfHa() {
             </div>`;
         }).join('');
         const warn = primary ? '' :
-            '<div style="margin-top:6px;font-size:11px;color:#f59e0b;">No active primary is reachable for this container — promote the freshest standby to bring it back.</div>';
+            '<div style="margin-top:6px;font-size:11px;color:var(--warning);">No active primary is reachable for this container — promote the freshest standby to bring it back.</div>';
         return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:var(--bg-secondary);">
             <div style="display:flex;align-items:center;gap:8px;">
                 <span style="font-weight:700;">${vlanEsc(name)}</span>
@@ -81853,7 +81876,7 @@ function wolfHaOpenProtectModal() {
                     ${nodes.map(n => `<option value="${vlanEsc(n.id)}">${vlanEsc(n.hostname || n.id)}</option>`).join('')}
                 </select></div>
             <div><label style="font-size:13px;color:var(--text-muted);">Container (native LXC)</label>
-                <select id="wolfha-container" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
+                <select id="wolfha-container" onchange="wolfHaSuggestWitness()" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
                     <option value="">— select node first —</option>
                 </select></div>
             <div><label style="font-size:13px;color:var(--text-muted);">Replica nodes <span style="font-size:11px;">(tick order = failover priority)</span></label>
@@ -81870,8 +81893,15 @@ function wolfHaOpenProtectModal() {
                     <strong>Automatic failover</strong>
                 </label>
                 <div id="wolfha-auto-fields" style="display:none;margin-top:8px;">
-                    <label style="font-size:12px;color:var(--text-muted);">Witness IP (usually your gateway)</label>
-                    <input id="wolfha-witness" type="text" placeholder="e.g. 10.0.40.1" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin:4px 0 8px;">
+                    <label style="font-size:12px;color:var(--text-muted);">Witness IP</label>
+                    <div style="font-size:11px;color:var(--text-muted);margin:2px 0 4px;">
+                        A steady address OUTSIDE the cluster that every node can ping — normally the
+                        LAN gateway (router) the container itself uses. It's the tie-breaker in a
+                        network split: a node that can't reach the witness assumes it's the isolated
+                        one and holds still instead of promoting.
+                    </div>
+                    <input id="wolfha-witness" type="text" placeholder="e.g. 10.0.40.1" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin:4px 0 2px;">
+                    <div id="wolfha-witness-hint" style="font-size:11px;color:var(--text-muted);margin:0 0 8px;"></div>
                     <label style="font-size:12px;color:var(--text-muted);">Promote after primary unreachable for (seconds)</label>
                     <input id="wolfha-after" type="number" min="30" value="90" style="width:100%;padding:6px 10px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
                     <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">A node only acts while it can ping the witness: an isolated node holds still, and the primary stops its own copy at half this time — so a network split never runs two copies. Standbys also refuse to promote while the container's IP still answers on the bridge.</div>
@@ -81884,6 +81914,28 @@ function wolfHaOpenProtectModal() {
         </div>
     </div>`;
     document.body.appendChild(modal);
+}
+
+// Fetch a witness suggestion for the selected container — its own
+// configured gateway when it has one, else the node's default gateway.
+// Fills the field only while it's empty (never stomp an operator's
+// typed value); the hint line always shows what was derived and why.
+async function wolfHaSuggestWitness() {
+    const nodeId = document.getElementById('wolfha-node')?.value;
+    const container = document.getElementById('wolfha-container')?.value;
+    const hintEl = document.getElementById('wolfha-witness-hint');
+    const input = document.getElementById('wolfha-witness');
+    if (!hintEl || !input || !nodeId || !container) { if (hintEl) hintEl.textContent = ''; return; }
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, `/api/wolfha/witness-hint?container=${encodeURIComponent(container)}`));
+        const d = resp.ok ? await resp.json() : {};
+        if (d && d.suggestion) {
+            if (!input.value.trim()) input.value = d.suggestion;
+            hintEl.textContent = `Suggested ${d.suggestion} (${d.source}) — edit it if your setup pings a different steady address.`;
+        } else {
+            hintEl.textContent = '';
+        }
+    } catch (_) { hintEl.textContent = ''; }
 }
 
 async function wolfHaLoadContainers() {

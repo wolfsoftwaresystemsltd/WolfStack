@@ -13130,6 +13130,70 @@ fn wolfha_validate_auto(
     Ok((witness, after))
 }
 
+/// GET /api/wolfha/witness-hint?container=NAME — suggest a witness IP
+/// for the auto-failover setting, derived from the container being
+/// protected: its own configured gateway (`lxc.net.0.ipv4.gateway`)
+/// when it has a static one, else this host's default gateway — the
+/// same router the container's traffic already depends on, which is
+/// exactly what a witness should be (Paul, 2026-08-11: "you should be
+/// able to work it out from the container we're protecting").
+pub async fn wolfha_witness_hint(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let container = query.get("container").map(|s| s.trim()).unwrap_or("");
+    if !container.is_empty() && crate::auth::is_safe_name(container) {
+        let config_path = format!("{}/{}/config", containers::lxc_base_dir(container), container);
+        if let Ok(cfg) = std::fs::read_to_string(&config_path) {
+            for line in cfg.lines() {
+                let Some((k, v)) = line.split_once('=') else { continue };
+                if k.trim() == "lxc.net.0.ipv4.gateway" {
+                    let v = v.trim();
+                    // "auto" = borrow the bridge address at start — not
+                    // a pingable address to suggest.
+                    if !v.is_empty() && v != "auto" {
+                        return HttpResponse::Ok().json(serde_json::json!({
+                            "suggestion": v,
+                            "source": "container gateway",
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    match default_gateway_ip() {
+        Some(gw) => HttpResponse::Ok().json(serde_json::json!({
+            "suggestion": gw.to_string(),
+            "source": "this node's gateway",
+        })),
+        None => HttpResponse::Ok().json(serde_json::json!({ "suggestion": null })),
+    }
+}
+
+/// Containers with a protect (seed) currently running on this node.
+/// The HaStore entry only appears AFTER a successful seed, so without
+/// this a second Protect click during the (long) rootfs tar started a
+/// second parallel snapshot of the same container — two 43 GB tars on
+/// legolas/wolfstack-3, 2026-08-11.
+static WOLFHA_ENABLE_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Removes its container from [`WOLFHA_ENABLE_INFLIGHT`] on drop, so
+/// every exit path of the seed task — success, failure, panic —
+/// releases the slot.
+struct WolfHaInflightGuard(String);
+impl Drop for WolfHaInflightGuard {
+    fn drop(&mut self) {
+        let mut set = match WOLFHA_ENABLE_INFLIGHT.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        set.remove(&self.0);
+    }
+}
+
 /// POST /api/wolfha/enable — protect a container: seed every chosen
 /// replica node, take over the autostart flag, record the entry.
 /// Runs on the node hosting the container (UI proxies to it).
@@ -13164,6 +13228,20 @@ pub async fn wolfha_enable(
     if body.replica_node_ids.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "pick at least one replica node"}));
     }
+    // Claim the in-flight slot BEFORE spawning; the guard travels into
+    // the task and releases on any exit.
+    {
+        let mut inflight = match WOLFHA_ENABLE_INFLIGHT.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if !inflight.insert(container.clone()) {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!("a protect of '{}' is already running on this node — watch its progress toast, or wait for it to finish", container)
+            }));
+        }
+    }
+    let inflight_guard = WolfHaInflightGuard(container.clone());
     let self_peer = match wolfha_self_peer(&state) {
         Ok(p) => p,
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
@@ -13201,6 +13279,9 @@ pub async fn wolfha_enable(
     let secret = state.cluster_secret.clone();
 
     tokio::spawn(async move {
+        // Holds the per-container protect slot for the life of this
+        // task — released by Drop on every exit path.
+        let _inflight_guard = inflight_guard;
         // One live full tar of the rootfs, shipped to every replica. The
         // container keeps running — the copy is crash-consistent and the
         // first delta rounds true it up.
@@ -13218,16 +13299,12 @@ pub async fn wolfha_enable(
             migration_fail(&tasks, &tid, &format!("Seed snapshot failed: {}", e));
             return;
         }
-        let archive_bytes = match std::fs::read(&archive) {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = std::fs::remove_file(&archive);
-                migration_fail(&tasks, &tid, &format!("Read seed archive: {}", e));
-                return;
-            }
-        };
-        let _ = std::fs::remove_file(&archive);
-        let size_mb = archive_bytes.len() / (1024 * 1024);
+        // The archive stays on disk and streams from there per attempt.
+        // The old code read the whole thing into RAM and cloned it per
+        // URL — a 43 GB rootfs produced a >15 GB allocation on a
+        // production node with 20 GB free (legolas/wolfstack-3,
+        // 2026-08-11). Never buffer a rootfs archive in memory.
+        let size_mb = std::fs::metadata(&archive).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
         let config = std::fs::read_to_string(format!("{}/config", container_dir)).unwrap_or_default();
         let wolfnet_ip = containers::lxc_get_wolfnet_ip(&container).unwrap_or_default();
         let primary_json = serde_json::to_string(&self_peer).unwrap_or_default();
@@ -13248,14 +13325,23 @@ pub async fn wolfha_enable(
             let mut last_err = String::new();
             let mut ok = false;
             for url in &urls {
+                // Fresh streaming part per attempt — the archive is read
+                // from disk as it uploads, never buffered.
+                let part = match crate::wolfha::stream_archive_part(&archive).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&archive);
+                        migration_fail(&tasks, &tid, &format!("Seed archive vanished mid-send: {}", e));
+                        return;
+                    }
+                };
                 let form = reqwest::multipart::Form::new()
                     .text("container", container.clone())
                     .text("config", config.clone())
                     .text("primary", primary_json.clone())
                     .text("wolfnet_ip", wolfnet_ip.clone())
                     .text("ha_meta", ha_meta_json.clone())
-                    .part("archive", reqwest::multipart::Part::bytes(archive_bytes.clone())
-                        .file_name("seed.tar.gz"));
+                    .part("archive", part.file_name("seed.tar.gz"));
                 match client.post(url)
                     .header("X-WolfStack-Secret", secret.clone())
                     .timeout(std::time::Duration::from_secs(3600))
@@ -13272,12 +13358,15 @@ pub async fn wolfha_enable(
                 }
             }
             if !ok {
+                let _ = std::fs::remove_file(&archive);
                 migration_fail(&tasks, &tid, &format!(
                     "Seeding replica on {} failed: {}. No HA entry was created — fix the node and enable again.",
                     peer.node_id, last_err));
                 return;
             }
         }
+        // Every replica seeded — the staged archive is done with.
+        let _ = std::fs::remove_file(&archive);
 
         // Take over the boot: WolfHA starts this container after the
         // takeover check, so lxc-autostart must not see the flag.
@@ -44696,6 +44785,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfha/apply-delta", web::post().to(wolfha_apply_delta))
         .route("/api/wolfha/receive-seed", web::post().to(wolfha_receive_seed))
         .route("/api/wolfha/enable", web::post().to(wolfha_enable))
+        .route("/api/wolfha/witness-hint", web::get().to(wolfha_witness_hint))
         .route("/api/wolfha/update", web::post().to(wolfha_update))
         .route("/api/wolfha/sync", web::post().to(wolfha_sync_now))
         .route("/api/wolfha/promote", web::post().to(wolfha_promote))
