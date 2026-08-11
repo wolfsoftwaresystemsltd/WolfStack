@@ -55,9 +55,9 @@ pub const BUNDLE_FILES: &[&str] = &[
     // Operator-curated feature config that drives dashboard panels.
     "statuspage.json",
     "statuspage-uptime.json",
-    "alerting.json",
+    "alerts.json",
     "reverse-proxy.json",
-    "backup-config.json",
+    "backups.json",
     "storage.json",
     "arrays.json",
     "ceph.json",

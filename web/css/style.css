@@ -3271,7 +3271,7 @@ body.sidebar-collapsed #task-log-footer {
     gap: 10px;
     font-size: 14px;
     font-weight: 500;
-    color: #fff;
+    color: var(--toast-text, #fff);
     min-width: 280px;
     max-width: 440px;
     /* A failed `docker compose pull` puts the entire docker output in the
@@ -3301,23 +3301,50 @@ body.sidebar-collapsed #task-log-footer {
 }
 
 .toast.success {
-    background: linear-gradient(135deg, #1a3a2a, #162b22);
-    border-left-color: #34d399;
+    background: var(--toast-bg-success, linear-gradient(135deg, #1a3a2a, #162b22));
+    border-left-color: var(--toast-border-success, #34d399);
 }
 
 .toast.error {
-    background: linear-gradient(135deg, #3b1111, #2d0e0e);
-    border-left-color: #f87171;
+    background: var(--toast-bg-error, linear-gradient(135deg, #3b1111, #2d0e0e));
+    border-left-color: var(--toast-border-error, #f87171);
 }
 
 .toast.warning {
-    background: linear-gradient(135deg, #3b2e0e, #2d2408);
-    border-left-color: #fbbf24;
+    background: var(--toast-bg-warning, linear-gradient(135deg, #3b2e0e, #2d2408));
+    border-left-color: var(--toast-border-warning, #fbbf24);
 }
 
 .toast.info {
-    background: linear-gradient(135deg, #1a2a3f, #141f30);
-    border-left-color: #60a5fa;
+    background: var(--toast-bg-info, linear-gradient(135deg, #1a2a3f, #141f30));
+    border-left-color: var(--toast-border-info, #60a5fa);
+}
+
+/* Toasts are dark panels with white text — hardcoded both here and as
+   inline styles in showToast() (deliberately, so toasts survive pages
+   that load app.js without this stylesheet). On the light-surface themes
+   that made every toast a black slab floating over a white UI
+   (RutgerDiehard 2026-08-11: file-upload progress toast). These vars are
+   the override hook the inline styles resolve through, built entirely
+   from the theme's OWN tokens: each severity wash is the theme's
+   translucent --*-bg tint layered over its opaque --bg-card surface
+   (toasts float over arbitrary content, so the background must be
+   opaque), text is the theme's --text-primary, and the severity bar is
+   the theme's solid severity colour. Dark themes never define these, so
+   the var() fallbacks keep the original look. Same trio of themes as
+   the --bg-tertiary / --text alias notes at the top of this file. */
+[data-theme="light"],
+[data-theme="arctic"],
+[data-theme="fruit"] {
+    --toast-text: var(--text-primary);
+    --toast-bg-success: linear-gradient(var(--success-bg), var(--success-bg)), var(--bg-card);
+    --toast-bg-error: linear-gradient(var(--danger-bg), var(--danger-bg)), var(--bg-card);
+    --toast-bg-warning: linear-gradient(var(--warning-bg), var(--warning-bg)), var(--bg-card);
+    --toast-bg-info: linear-gradient(var(--info-bg), var(--info-bg)), var(--bg-card);
+    --toast-border-success: var(--success);
+    --toast-border-error: var(--danger);
+    --toast-border-warning: var(--warning);
+    --toast-border-info: var(--info);
 }
 
 @keyframes toastSlideIn {
