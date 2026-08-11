@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.19: the protect progress toast is one steady element — no more flashing, ever** _(2026-08-11 — [`447bd820`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/447bd820692c6a7eb83a99408ecab82ddfb89067))_
 - **v25.11.18: the WolfHA page finally looks like it belongs — house header and real margins** _(2026-08-11 — [`af02807c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af02807c87dbdc3fdc22e74269376533ca50a80f))_
 - **v25.11.17: a protect shows up in the WolfHA list the moment it starts — stage by stage, and failures stay visible** _(2026-08-11 — [`8cd19aab`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8cd19aab874b0581e32ac9f0961f34a3ded9ce58))_
 - **v25.11.16: protecting a big container no longer floods the screen, buffers the rootfs in RAM, or double-snapshots** _(2026-08-11 — [`15ee1b04`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/15ee1b045a8d18dc691bc4193800c267f52a441a))_
