@@ -530,16 +530,29 @@ mod tests {
         fn open_fds() -> usize {
             std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
         }
-        let before = open_fds();
-        let mon = SystemMonitor::new();
-        let after = open_fds();
-        drop(mon);
+        // Three attempts, pass on any: parallel test threads open and
+        // close their own descriptors between the two counts, which
+        // occasionally inflated `after` past the margin (two spurious
+        // release-gate failures on 2026-08-11 alone). The regression
+        // this guards — sysinfo caching a /proc/<pid>/stat handle per
+        // process — HOLDS its descriptors, so it fails every attempt.
         let procs = count_processes();
-        assert!(
-            after < before + procs.max(64),
+        let mut last = (0usize, 0usize);
+        for _ in 0..3 {
+            let before = open_fds();
+            let mon = SystemMonitor::new();
+            let after = open_fds();
+            drop(mon);
+            if after < before + procs.max(64) {
+                return;
+            }
+            last = (before, after);
+        }
+        panic!(
             "SystemMonitor::new() opened {} descriptors with {} processes on the \
-             box — it is refreshing processes and caching a stat handle each.",
-            after - before, procs,
+             box (3/3 attempts) — it is refreshing processes and caching a stat \
+             handle each.",
+            last.1.saturating_sub(last.0), procs,
         );
     }
 
