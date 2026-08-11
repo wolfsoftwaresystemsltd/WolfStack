@@ -16,6 +16,7 @@ use std::process::Command;
 use tracing::{info, warn};
 
 pub mod lan_bridge;
+pub mod nic_addr;
 pub mod router;
 pub mod vlan;
 pub mod vlan_attach;
@@ -2316,24 +2317,29 @@ pub fn get_wolfnet_status_full() -> serde_json::Value {
     })
 }
 
-/// Add an IP address to an interface
+/// Add an IP address to an interface — runtime AND persisted. The old
+/// bare `ip addr add` stored nothing: the address evaporated on reboot,
+/// yet squatted on the NIC so a hand-written ifupdown stanza failed
+/// `ifup` with "already assigned" (RutgerDiehard, 2026-08-11). The full
+/// behaviour — cross-interface conflict naming, idempotent re-add,
+/// tri-manager persistence with honest fallbacks — lives in
+/// [`nic_addr`].
 pub fn add_ip(interface: &str, address: &str, prefix: u32) -> Result<String, String> {
-    let cidr = format!("{}/{}", address, prefix);
-    let output = Command::new("ip")
-        .args(["addr", "add", &cidr, "dev", interface])
-        .output()
-        .map_err(|e| format!("Failed to run ip addr add: {}", e))?;
-
-    if output.status.success() {
-
-        Ok(format!("Added {} to {}", cidr, interface))
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+    nic_addr::add_ip(interface, address, prefix)
 }
 
-/// Remove an IP address from an interface
+/// Remove an IP address from an interface — runtime AND persisted; also
+/// clears WolfStack's persisted record when the runtime address is
+/// already gone, and names the actual holder when the address lives on
+/// a different NIC. See [`nic_addr`].
 pub fn remove_ip(interface: &str, address: &str, prefix: u32) -> Result<String, String> {
+    nic_addr::remove_ip(interface, address, prefix)
+}
+
+/// Runtime-only removal, kept for internal callers that manage their
+/// own persistence.
+#[allow(dead_code)]
+pub fn remove_ip_runtime_only(interface: &str, address: &str, prefix: u32) -> Result<String, String> {
     let cidr = format!("{}/{}", address, prefix);
     let output = Command::new("ip")
         .args(["addr", "del", &cidr, "dev", interface])
