@@ -12875,8 +12875,44 @@ pub async fn wolfha_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
         enriched
     }).await;
     match blk {
-        Ok(entries) => HttpResponse::Ok().json(serde_json::json!({ "entries": entries })),
+        Ok(entries) => {
+            // Ride the in-flight / failed protect attempts along so the
+            // page shows a container from the moment Protect is clicked
+            // — not only after the seed succeeds.
+            let protecting: Vec<serde_json::Value> = wolfha_attempts_lock().iter()
+                .map(|(container, a)| serde_json::json!({
+                    "container": container,
+                    "message": a.message,
+                    "error": a.error,
+                    "updated_at": a.updated_at,
+                }))
+                .collect();
+            HttpResponse::Ok().json(serde_json::json!({ "entries": entries, "protecting": protecting }))
+        }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/wolfha/protect-dismiss — clear a FAILED protect attempt
+/// from the list (an in-flight one stays; dismissing it would hide a
+/// task that is still running).
+pub async fn wolfha_protect_dismiss(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<WolfHaContainerReq>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let container = body.container.trim().to_string();
+    let mut attempts = wolfha_attempts_lock();
+    match attempts.get(&container) {
+        Some(a) if a.error.is_some() => {
+            attempts.remove(&container);
+            HttpResponse::Ok().json(serde_json::json!({ "message": "dismissed" }))
+        }
+        Some(_) => HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "that protect is still running — it can't be dismissed"
+        })),
+        None => HttpResponse::Ok().json(serde_json::json!({ "message": "nothing to dismiss" })),
     }
 }
 
@@ -13180,6 +13216,56 @@ pub async fn wolfha_witness_hint(
 static WOLFHA_ENABLE_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
+/// Live + failed protect attempts, keyed by container — what the
+/// WolfHA list shows for a container that has no HaStore entry yet.
+/// A protect used to be invisible until it succeeded (the entry is
+/// only written after seeding) and a failure was just a 10-second
+/// toast — Paul went back to the list mid-seed and found "nothing in
+/// the list" (2026-08-11). In-memory on purpose: a daemon restart
+/// aborts the seed anyway, and stale "seeding" rows that outlive
+/// their task would be worse than a clean slate.
+static WOLFHA_PROTECT_ATTEMPTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, WolfHaProtectAttempt>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[derive(Clone, Serialize)]
+struct WolfHaProtectAttempt {
+    /// Latest human-readable stage ("Creating live rootfs snapshot…",
+    /// "Seeding replica 1/2 on …").
+    message: String,
+    /// Set when the attempt failed — the row persists (until dismissed
+    /// or retried) so the operator finds out even after the toast is
+    /// long gone.
+    error: Option<String>,
+    updated_at: u64,
+}
+
+fn wolfha_attempts_lock() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, WolfHaProtectAttempt>> {
+    match WOLFHA_PROTECT_ATTEMPTS.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+fn wolfha_protect_note(container: &str, message: &str) {
+    wolfha_attempts_lock().insert(container.to_string(), WolfHaProtectAttempt {
+        message: message.to_string(),
+        error: None,
+        updated_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    });
+}
+
+fn wolfha_protect_fail(container: &str, error: &str) {
+    wolfha_attempts_lock().insert(container.to_string(), WolfHaProtectAttempt {
+        message: "Protect failed".into(),
+        error: Some(error.to_string()),
+        updated_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    });
+}
+
+fn wolfha_protect_clear(container: &str) {
+    wolfha_attempts_lock().remove(container);
+}
+
 /// Removes its container from [`WOLFHA_ENABLE_INFLIGHT`] on drop, so
 /// every exit path of the seed task — success, failure, panic —
 /// releases the slot.
@@ -13275,6 +13361,7 @@ pub async fn wolfha_enable(
     let tasks = state.migration_tasks.clone();
     let task_id = migration_create(&tasks);
     migration_update(&tasks, &task_id, "seed", "Preparing initial replica seed…");
+    wolfha_protect_note(&container, "Preparing initial replica seed…");
     let tid = task_id.clone();
     let secret = state.cluster_secret.clone();
 
@@ -13287,15 +13374,18 @@ pub async fn wolfha_enable(
         // first delta rounds true it up.
         let stage_dir = "/var/lib/wolfstack/wolfha";
         if let Err(e) = std::fs::create_dir_all(stage_dir) {
+            wolfha_protect_fail(&container, &format!("staging dir: {}", e));
             migration_fail(&tasks, &tid, &format!("staging dir: {}", e));
             return;
         }
         let archive = format!("{}/seed-{}.tar.gz", stage_dir, uuid::Uuid::new_v4());
         migration_update(&tasks, &tid, "seed", "Creating live rootfs snapshot…");
+        wolfha_protect_note(&container, "Creating live rootfs snapshot…");
         let (rootfs_c, archive_c) = (rootfs.clone(), archive.clone());
         let tar_res = tokio::task::spawn_blocking(move || crate::wolfha::tar_full_rootfs(&rootfs_c, &archive_c)).await;
         if let Err(e) = tar_res.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e)) {
             let _ = std::fs::remove_file(&archive);
+            wolfha_protect_fail(&container, &format!("Seed snapshot failed: {}", e));
             migration_fail(&tasks, &tid, &format!("Seed snapshot failed: {}", e));
             return;
         }
@@ -13321,6 +13411,8 @@ pub async fn wolfha_enable(
         for (i, peer) in peers.iter().enumerate() {
             migration_update(&tasks, &tid, "seed",
                 &format!("Seeding replica {}/{} on {} ({} MB)…", i + 1, peers.len(), peer.node_id, size_mb));
+            wolfha_protect_note(&container,
+                &format!("Seeding replica {}/{} on {} ({} MB)…", i + 1, peers.len(), peer.node_id, size_mb));
             let urls = build_node_urls(&peer.address, peer.port, "/api/wolfha/receive-seed");
             let mut last_err = String::new();
             let mut ok = false;
@@ -13331,6 +13423,7 @@ pub async fn wolfha_enable(
                     Ok(p) => p,
                     Err(e) => {
                         let _ = std::fs::remove_file(&archive);
+                        wolfha_protect_fail(&container, &format!("Seed archive vanished mid-send: {}", e));
                         migration_fail(&tasks, &tid, &format!("Seed archive vanished mid-send: {}", e));
                         return;
                     }
@@ -13359,6 +13452,9 @@ pub async fn wolfha_enable(
             }
             if !ok {
                 let _ = std::fs::remove_file(&archive);
+                wolfha_protect_fail(&container, &format!(
+                    "Seeding replica on {} failed: {}. No HA entry was created — fix the node and try again.",
+                    peer.node_id, last_err));
                 migration_fail(&tasks, &tid, &format!(
                     "Seeding replica on {} failed: {}. No HA entry was created — fix the node and enable again.",
                     peer.node_id, last_err));
@@ -13395,9 +13491,12 @@ pub async fn wolfha_enable(
             self_identity: Some(self_peer.clone()),
         });
         if let Err(e) = store.save() {
+            wolfha_protect_fail(&container, &format!("Replicas seeded but saving the HA entry failed: {}", e));
             migration_fail(&tasks, &tid, &format!("Replicas seeded but saving the HA entry failed: {}", e));
             return;
         }
+        // The real HaStore entry exists now — the attempt row hands over.
+        wolfha_protect_clear(&container);
         migration_done(&tasks, &tid, &format!(
             "'{}' is protected — {} replica(s) seeded, delta sync every {} min.",
             container, peers.len(), interval));
@@ -44786,6 +44885,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfha/receive-seed", web::post().to(wolfha_receive_seed))
         .route("/api/wolfha/enable", web::post().to(wolfha_enable))
         .route("/api/wolfha/witness-hint", web::get().to(wolfha_witness_hint))
+        .route("/api/wolfha/protect-dismiss", web::post().to(wolfha_protect_dismiss))
         .route("/api/wolfha/update", web::post().to(wolfha_update))
         .route("/api/wolfha/sync", web::post().to(wolfha_sync_now))
         .route("/api/wolfha/promote", web::post().to(wolfha_promote))
