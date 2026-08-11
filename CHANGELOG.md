@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.17: a protect shows up in the WolfHA list the moment it starts — stage by stage, and failures stay visible** _(2026-08-11 — [`8cd19aab`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8cd19aab874b0581e32ac9f0961f34a3ded9ce58))_
 - **v25.11.16: protecting a big container no longer floods the screen, buffers the rootfs in RAM, or double-snapshots** _(2026-08-11 — [`15ee1b04`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/15ee1b045a8d18dc691bc4193800c267f52a441a))_
 - **v25.11.15: Unraid agents get a truthful array view, bundled WolfNet, share publishing, and a docker-to-host handshake** _(2026-08-11 — [`a9a73dbb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a9a73dbb8d5315e197c985555ecb553b19065d2e))_
 - **v25.11.14: dashboard sync ships alert+backup config at last, the plaintext-credential audit fires, and toasts follow light themes** _(2026-08-11 — [`4d2dd835`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4d2dd835b1773345f88c1875a77afa5755f6645d))_
