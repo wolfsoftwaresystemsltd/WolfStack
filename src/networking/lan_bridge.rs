@@ -354,14 +354,14 @@ fn default_gateway_via(nic: &str) -> Option<String> {
 
 /// Convert a CIDR prefix length (0..=32) to a dotted IPv4 netmask.
 /// Local replica of the same helper in `vlan.rs` (which is private).
-fn cidr_to_netmask_v4(prefix: u8) -> String {
+pub(crate) fn cidr_to_netmask_v4(prefix: u8) -> String {
     let mask: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
     let octets = mask.to_be_bytes();
     format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3])
 }
 
 /// Split a CIDR into (address, prefix).
-fn split_cidr(cidr: &str) -> Option<(String, u8)> {
+pub(crate) fn split_cidr(cidr: &str) -> Option<(String, u8)> {
     let (addr, p) = cidr.split_once('/')?;
     let prefix: u8 = p.parse().ok()?;
     Some((addr.to_string(), prefix))
@@ -599,7 +599,7 @@ struct PersistResult {
 /// Find the active NetworkManager connection name bound to a device, if
 /// any. Used so we can deactivate (and later restore) the NIC's existing
 /// connection rather than fight it. Returns None if NM isn't tracking it.
-fn nm_active_connection_for_device(dev: &str) -> Option<String> {
+pub(crate) fn nm_active_connection_for_device(dev: &str) -> Option<String> {
     let out = Command::new("nmcli")
         .args(["-t", "-f", "DEVICE,CONNECTION", "device", "status"])
         .output()
@@ -824,7 +824,7 @@ fn persist_systemd_networkd(
 /// omit it, so the drop-in looks identical to a working Proxmox bridge yet is
 /// never loaded. Unreadable file → assume sourced (don't nag odd setups; the
 /// manager-detection layer already vets ifupdown before we get here).
-fn interfaces_sources_dropins() -> bool {
+pub(crate) fn interfaces_sources_dropins() -> bool {
     match std::fs::read_to_string("/etc/network/interfaces") {
         Ok(main) => main.lines().any(|l| {
             let t = l.trim();
