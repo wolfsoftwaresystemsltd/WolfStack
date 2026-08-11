@@ -2388,6 +2388,14 @@ body.sidebar-collapsed #task-log-footer {
     padding: 8px 16px 16px;
 }
 
+/* WolfHA reads as a full-page surface (stacked cards, no tab bar), so
+   the shared 16px gutter left it looking flush-to-the-edges ("no
+   margins" — Paul, 2026-08-11). Deliberate breathing room; id-selector
+   specificity beats the shared rule above. */
+#page-wolfha {
+    padding: 16px 28px 28px;
+}
+
 /* ─── Time Range Selector ─── */
 .time-range-btn {
     padding: 4px 12px;
