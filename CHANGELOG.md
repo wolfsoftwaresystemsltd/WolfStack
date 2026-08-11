@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.16: protecting a big container no longer floods the screen, buffers the rootfs in RAM, or double-snapshots** _(2026-08-11 — [`15ee1b04`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/15ee1b045a8d18dc691bc4193800c267f52a441a))_
+- **v25.11.15: Unraid agents get a truthful array view, bundled WolfNet, share publishing, and a docker-to-host handshake** _(2026-08-11 — [`a9a73dbb`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a9a73dbb8d5315e197c985555ecb553b19065d2e))_
 - **v25.11.14: dashboard sync ships alert+backup config at last, the plaintext-credential audit fires, and toasts follow light themes** _(2026-08-11 — [`4d2dd835`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4d2dd835b1773345f88c1875a77afa5755f6645d))_
 - **v25.11.13: migration-address override actually takes effect — UI forwards the target's pinned NIC** _(2026-08-10 — [`4bd71efa`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4bd71efacf74850936a96b77aa44e30cf31c43b0))_
 - **v25.11.12: per-node migration-address override — pin VM/LXC migration to a dedicated NIC** _(2026-08-10 — [`77b09974`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/77b099748495f57fc03fffc53f4d9af82e5a0ea4))_
