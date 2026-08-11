@@ -364,7 +364,7 @@ Security features live on the per-node Security page and a cross-cluster **Fleet
 - Serves a decoy nginx-branded login page. Toggle: Security page "NMAP Protection" checkbox; `/api/security/gandalf`
 
 ### Secret audit & rotation
-- Read-only secret auditor feeds System Check + the licence heartbeat count: flags default cluster secret (Compromise severity, red banner), legacy XOR-obfuscated credential stores (auto-clears once migrated to AES), and plaintext backup credentials in backup-config.json (deliberately not auto-migrated)
+- Read-only secret auditor feeds System Check + the licence heartbeat count: flags default cluster secret (Compromise severity, red banner), legacy XOR-obfuscated credential stores (auto-clears once migrated to AES), and plaintext backup credentials in backups.json (deliberately not auto-migrated)
 - **Coordinated cluster-secret rotation** (Settings → Security): 5-step operator-driven protocol — Preflight (reachability) → Propose (new 32-byte secret shown once) → Receive (pushed to peers' `.pending` under the current secret, SHA-256 ACK) → Commit (atomic promote, timestamped backups, **restart required** — no live swap) → Rollback. Audit log `/var/log/wolfstack/secret-rotation.log`; concurrent rotations rejected with 409
 - Credential stores (DNS providers, cloud providers, XO tokens, TrueNAS/Unraid keys, SQL passwords, integrations vault) are **AES-256-GCM encrypted at rest**, key HKDF-derived from the cluster secret with per-store purpose labels; legacy XOR values keep decrypting forever. Rotation re-encrypts loss-free. Threat model: leaked backup tarballs, not on-host root
 

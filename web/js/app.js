@@ -11887,11 +11887,20 @@ async function uploadFiles(files) {
     let bar;
     if (toastEl) {
         const barWrap = document.createElement('div');
-        barWrap.style.cssText = 'width:100%;height:6px;background:rgba(255,255,255,0.15);border-radius:3px;margin-top:6px;overflow:hidden;';
+        // Mid-grey alpha, not white alpha: the track must stay visible on the
+        // light themes' pale toast backgrounds as well as the dark gradients.
+        barWrap.style.cssText = 'width:100%;height:6px;background:rgba(127,127,127,0.25);border-radius:3px;margin-top:6px;overflow:hidden;';
         bar = document.createElement('div');
         bar.style.cssText = 'width:0%;height:100%;background:#22c55e;border-radius:3px;transition:width 0.2s;';
         barWrap.appendChild(bar);
-        toastEl.querySelector('.toast-message, span')?.after(barWrap) || toastEl.appendChild(barWrap);
+        // The bar must live INSIDE the flex:1 message span, not as a direct
+        // child of the toast: `.after(barWrap)` returns undefined, so the
+        // `|| appendChild` fallback ALWAYS also ran, moving the width:100%
+        // bar into the toast's flex ROW — which crushed the message span to
+        // zero width and ballooned the toast into a tall empty box with only
+        // the bar visible (RutgerDiehard 2026-08-11).
+        const msgEl = toastEl.querySelector('.toast-message');
+        (msgEl || toastEl).appendChild(barWrap);
     }
 
     const xhr = new XMLHttpRequest();
@@ -17440,8 +17449,16 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     // the same glyph as a routine notice, which is exactly backwards for the
     // one type the operator must not miss.
     const icons = { success: '✅', error: '⛔', warning: '⚠️', info: 'ℹ️' };
-    const bgColors = { success: 'linear-gradient(135deg, #1a3a2a, #162b22)', error: 'linear-gradient(135deg, #3b1111, #2d0e0e)', warning: 'linear-gradient(135deg, #3b2e0e, #2d2408)', info: 'linear-gradient(135deg, #1a2a3f, #141f30)' };
-    const borderColors = { success: '#34d399', error: '#f87171', warning: '#fbbf24', info: '#60a5fa' };
+    // Dark panels with white text, expressed as var() fallbacks so the
+    // light-surface themes (light/arctic/fruit) restyle them from their own
+    // theme tokens in style.css — the same alias pattern as var(--text, #fff).
+    // Without the override hook these inline styles beat every stylesheet
+    // rule, so toasts stayed a black slab floating over the white UI
+    // (RutgerDiehard 2026-08-11: file-upload progress toast). The hardcoded
+    // fallbacks keep toasts working on pages that load app.js without
+    // style.css.
+    const bgColors = { success: 'var(--toast-bg-success, linear-gradient(135deg, #1a3a2a, #162b22))', error: 'var(--toast-bg-error, linear-gradient(135deg, #3b1111, #2d0e0e))', warning: 'var(--toast-bg-warning, linear-gradient(135deg, #3b2e0e, #2d2408))', info: 'var(--toast-bg-info, linear-gradient(135deg, #1a2a3f, #141f30))' };
+    const borderColors = { success: 'var(--toast-border-success, #34d399)', error: 'var(--toast-border-error, #f87171)', warning: 'var(--toast-border-warning, #fbbf24)', info: 'var(--toast-border-info, #60a5fa)' };
     Object.assign(toast.style, {
         padding: '14px 20px', background: bgColors[type] || bgColors.info,
         borderLeft: '4px solid ' + (borderColors[type] || borderColors.info),
@@ -17450,7 +17467,7 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
         // the toast, so on a tall one it lands below the fold and cannot be
         // clicked. Pinned to the top it is always the first thing on screen.
         display: 'flex', alignItems: 'flex-start', gap: '10px',
-        fontSize: '14px', fontWeight: '500', color: '#fff',
+        fontSize: '14px', fontWeight: '500', color: 'var(--toast-text, #fff)',
         minWidth: '280px', maxWidth: '440px', pointerEvents: 'auto',
         // Belt-and-braces cap. The height is really governed by the message's
         // own max-height below — capping only the toast does NOT work, because

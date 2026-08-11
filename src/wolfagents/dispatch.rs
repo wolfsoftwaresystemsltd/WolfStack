@@ -2186,22 +2186,16 @@ pub(crate) fn collect_search_corpus(sources: &[&str]) -> Vec<SearchDoc> {
         }
     }
     if sources.contains(&"alerts") {
-        // Alerting state lives in /etc/wolfstack/alerting.json — walk
-        // the raw file so this stays consistent even if the in-memory
-        // state structure evolves.
-        if let Ok(text) = std::fs::read_to_string("/etc/wolfstack/alerting.json") {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(events) = v.get("events").and_then(|x| x.as_array()) {
-                    for (i, ev) in events.iter().enumerate() {
-                        let blob = serde_json::to_string(ev).unwrap_or_default();
-                        out.push(SearchDoc {
-                            source: "alerts".into(),
-                            path: format!("alerting.json:{}", i + 1),
-                            text: blob,
-                        });
-                    }
-                }
-            }
+        // Alert history lives in memory (alerting::ALERT_HISTORY),
+        // not on disk — snapshot it the same way the
+        // /api/alerts/history endpoint does.
+        for (i, row) in crate::alerting::history_snapshot().iter().enumerate() {
+            let blob = serde_json::to_string(row).unwrap_or_default();
+            out.push(SearchDoc {
+                source: "alerts".into(),
+                path: format!("alert-history:{}", i + 1),
+                text: blob,
+            });
         }
     }
     out

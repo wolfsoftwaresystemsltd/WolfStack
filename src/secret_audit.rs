@@ -172,21 +172,21 @@ fn check_xor_cloud_creds(out: &mut Vec<Finding>) {
 }
 
 fn check_plaintext_backup_creds(out: &mut Vec<Finding>) {
-    // Round-2 audit finding: backup-config.json holds S3 access_key /
+    // Round-2 audit finding: the backup config holds S3 access_key /
     // secret_key, PBS user/token/password, SMB user/password as
     // plaintext serde fields. Worse than the XOR-protected stores
-    // because there's no obfuscation at all — `cat
-    // /etc/wolfstack/backup-config.json` reveals everything. Surfaced
-    // here so operators know; not migrated automatically because
-    // backup credentials are the operator's last line of disaster
-    // recovery and a format-change bug would block restores.
+    // because there's no obfuscation at all — `cat` on the file
+    // reveals everything. Surfaced here so operators know; not
+    // migrated automatically because backup credentials are the
+    // operator's last line of disaster recovery and a format-change
+    // bug would block restores.
     //
     // W3 fix: only fire if the file actually contains populated
     // credential fields. An operator with the file but no
     // destinations configured shouldn't see a finding they can't fix.
-    let path = "/etc/wolfstack/backup-config.json";
-    if !Path::new(path).exists() { return; }
-    let raw = match std::fs::read_to_string(path) { Ok(s) => s, Err(_) => return };
+    let path = crate::paths::get().backup_config;
+    if !Path::new(&path).exists() { return; }
+    let raw = match std::fs::read_to_string(&path) { Ok(s) => s, Err(_) => return };
     let has_populated_cred = ["access_key", "secret_key", "pbs_password",
                               "pbs_token_secret", "smb_password"]
         .iter()
@@ -206,13 +206,14 @@ fn check_plaintext_backup_creds(out: &mut Vec<Finding>) {
         id: "backup-creds-plaintext",
         severity: Severity::High,
         title: "Backup storage credentials stored as plaintext".into(),
-        detail: "Backup destination credentials (S3 access/secret keys, \
+        detail: format!(
+                "Backup destination credentials (S3 access/secret keys, \
                  PBS user/token/password, SMB user/password) at \
-                 /etc/wolfstack/backup-config.json are stored as \
+                 {} are stored as \
                  plaintext serde fields with no encryption or \
                  obfuscation. Any read access to the file — backup \
                  leaks, misconfigured rsync, stolen disk image, \
-                 path-traversal bugs — exposes the full credential.".into(),
+                 path-traversal bugs — exposes the full credential.", path),
         remediation: "Mitigation today: (1) confirm /etc/wolfstack/ is \
                       mode 0700 owned by root and the file is mode 0600; \
                       (2) prefer scoped credentials (IAM roles, PBS API \
