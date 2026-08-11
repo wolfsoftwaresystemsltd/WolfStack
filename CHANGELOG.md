@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.14: dashboard sync ships alert+backup config at last, the plaintext-credential audit fires, and toasts follow light themes** _(2026-08-11 — [`4d2dd835`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4d2dd835b1773345f88c1875a77afa5755f6645d))_
 - **v25.11.13: migration-address override actually takes effect — UI forwards the target's pinned NIC** _(2026-08-10 — [`4bd71efa`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4bd71efacf74850936a96b77aa44e30cf31c43b0))_
 - **v25.11.12: per-node migration-address override — pin VM/LXC migration to a dedicated NIC** _(2026-08-10 — [`77b09974`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/77b099748495f57fc03fffc53f4d9af82e5a0ea4))_
 - **v25.11.11: Cluster Browser no longer auto-scans the cluster — manual add only** _(2026-08-10 — [`5f49e9a4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5f49e9a482d69bd4132e22ab2ac48669940b73ae))_
