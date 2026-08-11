@@ -81598,6 +81598,7 @@ async function probeEditSave(i) {
 
 let wolfHaCurrentCluster = null;
 let _wolfHaRefreshTimer = null;
+let _wolfHaFastPollTimer = null;
 
 function showWolfHaPage(clusterName) {
     closeSidebarMobile();
@@ -81637,25 +81638,68 @@ async function loadWolfHa() {
         const resp = await fetch(nodeApiUrl(node.id, '/api/wolfha/list'));
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        return { node, entries: data.entries || [] };
+        return { node, entries: data.entries || [], protecting: data.protecting || [] };
     }));
 
     // Group by container: one card per protected container, rows per copy.
     const byContainer = {};
+    const attempts = [];
     results.forEach(r => {
         if (r.status !== 'fulfilled') return;
         r.value.entries.forEach(e => {
             (byContainer[e.container] = byContainer[e.container] || []).push({ ...e, _node: r.value.node });
         });
+        r.value.protecting.forEach(a => attempts.push({ ...a, _node: r.value.node }));
     });
 
+    // In-flight / failed protect attempts render as their own cards so
+    // a protect is visible in this list from the moment it's clicked —
+    // it used to appear only after the seed succeeded, which read as
+    // "nothing in the list" during a long seed (Paul, 2026-08-11).
+    // Skip attempts whose container already has a real entry (handover).
+    const attemptCards = attempts
+        .filter(a => !byContainer[a.container])
+        .sort((x, y) => x.container.localeCompare(y.container))
+        .map(a => {
+            const nodeName = a._node.hostname || a._node.id;
+            const badge = a.error
+                ? '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger);">PROTECT FAILED</span>'
+                : '<span style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--info-bg);color:var(--info);border:1px solid var(--info);">PROTECTING…</span>';
+            const detail = a.error
+                ? `<div style="margin-top:6px;font-size:12px;color:var(--danger);">${vlanEsc(a.error)}</div>`
+                : `<div style="margin-top:6px;font-size:12px;color:var(--text-muted);">${vlanEsc(a.message)} <span style="font-size:10px;">(${wolfHaAge(a.updated_at)})</span></div>`;
+            const actions = a.error
+                ? `<div style="margin-top:8px;display:flex;gap:6px;">
+                       <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;" onclick="wolfHaOpenProtectModal()">Try again</button>
+                       <button class="btn btn-sm" style="font-size:11px;padding:2px 8px;" onclick="wolfHaDismissAttempt('${vlanEsc(a._node.id)}','${vlanEsc(a.container)}')">Dismiss</button>
+                   </div>`
+                : '';
+            return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:var(--bg-secondary);">
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-weight:700;">${vlanEsc(a.container)}</span>
+                    ${badge}
+                    <span style="font-size:10px;color:var(--text-muted);">on ${vlanEsc(nodeName)}</span>
+                </div>
+                ${detail}${actions}
+            </div>`;
+        }).join('');
+
+    // While a seed is live, poll faster than the 30s page timer so the
+    // stage line actually moves. One-shot, guarded, page-scoped.
+    clearTimeout(_wolfHaFastPollTimer);
+    if (attempts.some(a => !a.error)) {
+        _wolfHaFastPollTimer = setTimeout(() => {
+            if (currentPage === 'wolfha') loadWolfHa();
+        }, 5000);
+    }
+
     const names = Object.keys(byContainer).sort();
-    if (names.length === 0) {
+    if (names.length === 0 && !attemptCards) {
         listEl.innerHTML = '<p style="color:var(--text-muted); font-size:13px;">No protected containers yet. Click <strong>+ Protect a container</strong> to replicate an LXC container to standby nodes.</p>';
         return;
     }
 
-    listEl.innerHTML = names.map(name => {
+    listEl.innerHTML = attemptCards + names.map(name => {
         const copies = byContainer[name];
         const primary = copies.find(c => c.role === 'primary' && !c.stale);
         const rows = copies.map(c => {
@@ -81730,6 +81774,20 @@ async function wolfHaPollTask(nodeId, taskId, label) {
             if (s.completed) { loadWolfHa(); return; }
         } catch (e) { /* transient — keep polling */ }
     }
+}
+
+// Clear a FAILED protect attempt from the list (in-flight ones can't
+// be dismissed — the backend refuses, since the task is still running).
+async function wolfHaDismissAttempt(nodeId, container) {
+    try {
+        const resp = await fetch(nodeApiUrl(nodeId, '/api/wolfha/protect-dismiss'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ container }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) { showToast(data.error || 'Could not dismiss', 'error'); return; }
+        loadWolfHa();
+    } catch (e) { showToast(`Dismiss failed: ${e.message}`, 'error'); }
 }
 
 async function wolfHaSyncNow(nodeId, container) {
