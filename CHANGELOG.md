@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.20: an IP set in the UI survives reboots — and stops squatting in ifup's way** _(2026-08-11 — [`0ee3f299`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0ee3f2991e28a9c9dded7c92ad0b0c7cd00a9a79))_
 - **v25.11.19: the protect progress toast is one steady element — no more flashing, ever** _(2026-08-11 — [`447bd820`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/447bd820692c6a7eb83a99408ecab82ddfb89067))_
 - **v25.11.18: the WolfHA page finally looks like it belongs — house header and real margins** _(2026-08-11 — [`af02807c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af02807c87dbdc3fdc22e74269376533ca50a80f))_
 - **v25.11.17: a protect shows up in the WolfHA list the moment it starts — stage by stage, and failures stay visible** _(2026-08-11 — [`8cd19aab`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8cd19aab874b0581e32ac9f0961f34a3ded9ce58))_
