@@ -27706,6 +27706,85 @@ pub async fn ready() -> HttpResponse {
     }))
 }
 
+/// GET /api/cluster/host-agent-hint — when this server runs inside a
+/// Docker container, detect a WolfStack agent listening on the Docker
+/// host (klas, 2026-08-11: docker install and the host agent "don't
+/// talk to each other"). Probes the container's default gateway — the
+/// host's address on the docker bridge — for the unauthenticated
+/// `/api/ready` identity endpoint. Detection only: joining still goes
+/// through the normal Add Server flow with the host's join token +
+/// admin credentials; nothing is auto-added.
+pub async fn cluster_host_agent_hint(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let not_detected = || HttpResponse::Ok().json(serde_json::json!({ "detected": false }));
+
+    if crate::certbot::detect_container_kind() != crate::certbot::ContainerKind::Docker {
+        return not_detected();
+    }
+    let Some(gw) = default_gateway_ip() else { return not_detected(); };
+    // Host already in the cluster (under any of its addresses)? Then
+    // there's nothing to hint — the banner would nag forever. Exact
+    // address (or address:port) match — substring containment would
+    // let a node at 110.0.0.10 suppress a hint for gateway 10.0.0.1.
+    let gw_str = gw.to_string();
+    let gw_matches = |addr: &str| {
+        addr == gw_str
+            || addr.strip_prefix(gw_str.as_str())
+                .is_some_and(|rest| rest.starts_with(':'))
+    };
+    if state.cluster.get_all_nodes().iter().any(|n| gw_matches(&n.address)) {
+        return not_detected();
+    }
+    // Probe the host for WolfStack. Self-signed TLS is the norm for
+    // agent nodes (same posture as inter-node polling).
+    let client = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return not_detected(),
+    };
+    for scheme in ["https", "http"] {
+        let url = format!("{}://{}:8553/api/ready", scheme, gw_str);
+        let Ok(resp) = client.get(&url).send().await else { continue };
+        let Ok(v) = resp.json::<serde_json::Value>().await else { continue };
+        if v.get("ready").and_then(|r| r.as_bool()) == Some(true) {
+            return HttpResponse::Ok().json(serde_json::json!({
+                "detected": true,
+                "address": gw_str,
+                "port": 8553,
+                "version": v.get("version").and_then(|s| s.as_str()).unwrap_or(""),
+            }));
+        }
+    }
+    not_detected()
+}
+
+/// The container's default IPv4 gateway from /proc/net/route — inside
+/// a bridged Docker container this is the host's bridge address
+/// (172.17.0.1 on the default bridge). Format per route(8)/procfs:
+/// whitespace-separated columns, Destination and Gateway as
+/// little-endian hex (00000000 destination = the default route).
+fn default_gateway_ip() -> Option<std::net::Ipv4Addr> {
+    parse_default_gateway(&std::fs::read_to_string("/proc/net/route").ok()?)
+}
+
+/// Pure parser half of [`default_gateway_ip`] — unit-tested because
+/// the little-endian hex encoding is an endianness footgun.
+fn parse_default_gateway(content: &str) -> Option<std::net::Ipv4Addr> {
+    for line in content.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 3 || cols[1] != "00000000" { continue; }
+        let Ok(gw) = u32::from_str_radix(cols[2], 16) else { continue };
+        if gw == 0 { continue; }
+        // /proc/net/route stores the address little-endian.
+        return Some(std::net::Ipv4Addr::from(gw.swap_bytes().to_be_bytes()));
+    }
+    None
+}
+
 // ─── Home-dashboard widget fetch proxy ───
 
 /// Pooled client for the home-dashboard widget fetch proxy (RSS feeds,
@@ -41170,6 +41249,7 @@ pub async fn array_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRes
         "backend": match crate::array::detect_backend() {
             crate::array::Backend::Mdadm => "mdadm",
             crate::array::Backend::Nonraid => "nonraid",
+            crate::array::Backend::Unraid => "unraid",
         },
         "arrays": arrays,
     }))
@@ -41293,6 +41373,7 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
     let self_backend = match crate::array::detect_backend() {
         crate::array::Backend::Mdadm => "mdadm",
         crate::array::Backend::Nonraid => "nonraid",
+        crate::array::Backend::Unraid => "unraid",
     };
     let nodes_snapshot = state.cluster.get_all_nodes();
     let self_node = nodes_snapshot.iter().find(|n| n.is_self).cloned();
@@ -42266,6 +42347,26 @@ pub struct UnraidUpdateRequest {
     #[serde(default = "tn_default_ttl")] pub cache_ttl_secs: u64,
     /// Blank/absent = keep the stored key.
     #[serde(default)] pub api_key: Option<String>,
+}
+
+/// GET /api/unraid/local-shares — user shares of THIS host when it is
+/// an Unraid box (agent nodes), read from emhttp's runtime state — no
+/// API key or registered instance needed, unlike the GraphQL routes
+/// below. `supported:false` on non-Unraid hosts so the cluster-wide
+/// fan-out can skip them cheaply.
+pub async fn unraid_local_shares(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let shares = tokio::task::spawn_blocking(crate::unraid::shares::list_local_shares)
+        .await
+        .unwrap_or(None);
+    match shares {
+        Some(list) => HttpResponse::Ok().json(serde_json::json!({
+            "supported": true,
+            "hostname": hostname::get().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
+            "shares": list,
+        })),
+        None => HttpResponse::Ok().json(serde_json::json!({ "supported": false })),
+    }
 }
 
 /// GET /api/unraid/instances — registered Unraid servers (keys redacted).
@@ -45100,6 +45201,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // no session yet, and /api/ping's 401 cannot be told apart from
         // a server that is still coming up.
         .route("/api/ready", web::get().to(ready))
+        .route("/api/cluster/host-agent-hint", web::get().to(cluster_host_agent_hint))
         // Home-dashboard widget fetch proxy (RSS / weather — no CORS upstream)
         .route("/api/dashboard/fetch-proxy", web::get().to(dashboard_fetch_proxy))
         // Per-user interface lock (idle lock + PIN)
@@ -45473,6 +45575,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/truenas/instances/{id}/snapshots", web::get().to(truenas_snapshots))
         .route("/api/truenas/instances/{id}/snapshots", web::post().to(truenas_snapshot_create))
         .route("/api/truenas/instances/{id}/snapshots", web::delete().to(truenas_snapshot_delete))
+        .route("/api/unraid/local-shares", web::get().to(unraid_local_shares))
         .route("/api/unraid/instances", web::get().to(unraid_list))
         .route("/api/unraid/instances", web::post().to(unraid_register))
         .route("/api/unraid/instances/{id}", web::put().to(unraid_update))
@@ -47308,6 +47411,38 @@ mod autofix_command_tests {
         assert!(!AUTOFIX_FINDING_TYPES.contains(&"tamper_detection"));
         assert!(!AUTOFIX_FINDING_TYPES.contains(&"disk_fill_eta"));
         assert_eq!(AUTOFIX_FINDING_TYPES.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod gateway_parse_tests {
+    use super::parse_default_gateway;
+
+    #[test]
+    fn parses_little_endian_gateway_from_proc_net_route() {
+        // Real /proc/net/route shape: header line, then per-route rows.
+        // Gateway 0101A8C0 little-endian = 192.168.1.1; the docker
+        // default bridge case 0100A8C0 wouldn't exercise all four
+        // bytes, so use distinct octets: 010011AC = 172.17.0.1.
+        let content = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0
+eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0
+";
+        assert_eq!(
+            parse_default_gateway(content),
+            Some(std::net::Ipv4Addr::new(172, 17, 0, 1)),
+        );
+    }
+
+    #[test]
+    fn no_default_route_yields_none() {
+        // Only an on-link route (non-zero destination, zero gateway).
+        let content = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0
+";
+        assert_eq!(parse_default_gateway(content), None);
     }
 }
 

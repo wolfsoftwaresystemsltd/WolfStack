@@ -33,8 +33,14 @@ use std::process::Command;
 
 /// Which control plane to use for array ops. Detected once per call;
 /// cheap (just checks for binary presence).
+///
+/// `Unraid` = a commercial Unraid host: its patched md driver emits the
+/// same flat key=value status as NoNRAID (the NoNRAID fork is
+/// rebrand-only — qvr/nonraid README "Driver implementation
+/// differences": md→nmd, /proc/mdstat→/proc/nmdstat, mdcmd→nmdcmd) but
+/// at `/proc/mdstat`, with `mdcmd` as the control tool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backend { Mdadm, Nonraid }
+pub enum Backend { Mdadm, Nonraid, Unraid }
 
 pub fn detect_backend() -> Backend {
     // Escape hatch: operator can force mdadm even when NoNRAID
@@ -46,6 +52,13 @@ pub fn detect_backend() -> Backend {
     if env_truthy("WOLFSTACK_ARRAY_DISABLE_NONRAID") {
         return Backend::Mdadm;
     }
+    // Commercial Unraid host — /etc/unraid-version is the product's
+    // own identity file (same signal installer::unraid_tools uses).
+    // Must be checked BEFORE the mdcmd fallback below: Unraid ships
+    // `mdcmd`, and classifying it as Nonraid made list_arrays read
+    // /proc/nmdstat (which only the NoNRAID fork registers) instead
+    // of Unraid's own flat-format /proc/mdstat.
+    if crate::installer::unraid_tools::is_unraid() { return Backend::Unraid; }
     // Strongest signal: the NoNRAID-specific procfs file. Created by
     // the md_nonraid kernel module at register time
     // (md_nonraid/6.12/md_unraid.c:2229) and exists for the lifetime
@@ -275,6 +288,7 @@ impl ArrayConfig {
 pub fn list_arrays() -> Vec<Array> {
     match detect_backend() {
         Backend::Nonraid => list_arrays_nonraid(),
+        Backend::Unraid => list_arrays_unraid(),
         Backend::Mdadm => list_arrays_mdadm(),
     }
 }
@@ -310,6 +324,42 @@ fn list_arrays_nonraid() -> Vec<Array> {
         Err(_) => return Vec::new(),
     };
     let mut arrays = parse_nmdstat(&content);
+    fill_array_mounts(&mut arrays);
+    arrays
+}
+
+/// Commercial-Unraid path — the patched md driver writes the same flat
+/// key=value status as NoNRAID, but at `/proc/mdstat` with `md`-named
+/// devices (`/dev/mdXp1`). Devices come from the file content, so the
+/// shared parser produces the right paths without translation. The
+/// `/proc/nmdstat` fallback covers a hypothetical future Unraid that
+/// adopts the fork's split-module naming — content-sniffed either way,
+/// so a host with neither yields no arrays rather than a phantom.
+fn list_arrays_unraid() -> Vec<Array> {
+    for path in ["/proc/mdstat", "/proc/nmdstat"] {
+        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        if !content.contains("mdState=") { continue; }
+        let mut arrays = parse_nmdstat(&content);
+        for a in arrays.iter_mut() {
+            a.backend = "unraid".into();
+            if path == "/proc/mdstat" {
+                // The commercial driver registers block major "md",
+                // not the fork's "nmd" (the rename is the fork's own
+                // patch — qvr/nonraid README).
+                a.name = "md".into();
+            }
+        }
+        fill_array_mounts(&mut arrays);
+        return arrays;
+    }
+    Vec::new()
+}
+
+/// Fill per-data-disk mountpoint + used bytes from /proc/mounts.
+/// Shared by the NoNRAID and Unraid list paths — both mount
+/// filesystems on the md-layer virtual device (`/dev/nmdXp1` /
+/// `/dev/mdXp1`), whatever prefix the operator mounts them under.
+fn fill_array_mounts(arrays: &mut [Array]) {
     let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
     let mount_map = parse_proc_mounts(&mounts);
 
@@ -338,7 +388,6 @@ fn list_arrays_nonraid() -> Vec<Array> {
         }
         a.used_bytes = total_used;
     }
-    arrays
 }
 
 /// Parse `/proc/mounts` into a `device → mountpoint` map. Octal
@@ -633,8 +682,18 @@ pub fn parse_nmdstat(content: &str) -> Vec<Array> {
         let raw_status = kv.get(&format!("rdevStatus.{}", slot)).map(|s| s.as_str()).unwrap_or("");
         let state = match raw_status {
             "DISK_OK"          => "in_sync",
-            "DISK_NP"
-            | "DISK_NP_MISSING"
+            // DISK_NP = "no disk present, no disk configured"
+            // (md_unraid.c:400) — an EMPTY SLOT, not a lost disk. The
+            // real driver prints ALL 30 slots (md_status loops
+            // 0..MD_SB_DISKS), so every unused slot arrives as
+            // DISK_NP. Mapping it to "missing" rendered phantom
+            // missing-disk rows and flagged healthy arrays as
+            // degraded (klas, ninni 2026-08-11). The reference mock
+            // the fixtures were lifted from omits empty slots, which
+            // is why the tests never caught it. DISK_NP_MISSING
+            // ("enabled, but missing") is the real missing-disk state.
+            "DISK_NP"          => "empty",
+            "DISK_NP_MISSING"
             | "DISK_NP_DSBL"   => "missing",
             "DISK_INVALID"
             | "DISK_WRONG"
@@ -661,11 +720,15 @@ pub fn parse_nmdstat(content: &str) -> Vec<Array> {
             _ => "unknown",
         }.to_string();
 
-        // Skip slots where the data is entirely empty (no device, no
-        // size, no status — happens for the Q-parity placeholder on
-        // single-parity arrays — fixture shows `diskSize.29=0` with
-        // no rdevName.29).
-        if device.is_empty() && size_bytes == 0 && raw_status.is_empty() {
+        // Skip slots with nothing to show: no device, no size, and a
+        // status that's either absent (the mock's Q-parity
+        // placeholder: `diskSize.29=0` with no rdevName.29) or
+        // DISK_NP (the real driver prints every one of the 30 slots,
+        // so all unused slots arrive as sized-0 DISK_NP). A DISK_NP
+        // slot that somehow carries a size or device is kept and shown
+        // as "empty" rather than silently dropped.
+        if device.is_empty() && size_bytes == 0
+            && (raw_status.is_empty() || raw_status == "DISK_NP") {
             continue;
         }
 
@@ -746,6 +809,16 @@ pub fn parse_nmdstat(content: &str) -> Vec<Array> {
     let sync_speed_kbs: Option<u64> = if resync_active && resync_dt > 0 {
         Some(resync_db / resync_dt)
     } else { None };
+
+    // A module with no populated slots at all (fresh load, superblock
+    // never imported, or stopped with an empty config) is "no array",
+    // not an array of ghosts — returning a disk-less entry is what
+    // rendered klas's stub card. The diagnostics panel covers the
+    // "module loaded but nothing imported" case with an actionable
+    // hint, which is strictly more useful than a phantom row.
+    if disks.is_empty() {
+        return Vec::new();
+    }
 
     // Single-array model — register the array under the block device
     // class name "nmd" (verified against md_unraid.c:2217 register_blkdev
@@ -868,7 +941,10 @@ pub fn stop_array(name: &str) -> Result<String, ArrayError> {
         return Err(ArrayError::NoSuchArray(name.into()));
     }
     match detect_backend() {
-        Backend::Nonraid => nonraid_action(&["stop"]),
+        // Unraid shares the Nonraid path: nonraid_action falls back to
+        // `mdcmd` (with subcommand translation) when nmdctl is absent,
+        // which is exactly the commercial-Unraid control surface.
+        Backend::Nonraid | Backend::Unraid => nonraid_action(&["stop"]),
         Backend::Mdadm   => run_capturing("mdadm", &["--stop", &format!("/dev/{}", name)], "mdadm"),
     }
 }
@@ -879,7 +955,7 @@ pub fn stop_array(name: &str) -> Result<String, ArrayError> {
 /// - mdadm: `mdadm --assemble /dev/mdN`.
 pub fn start_array(name: &str) -> Result<String, ArrayError> {
     match detect_backend() {
-        Backend::Nonraid => nonraid_action(&["start"]),
+        Backend::Nonraid | Backend::Unraid => nonraid_action(&["start"]),
         Backend::Mdadm   => run_capturing("mdadm", &["--assemble", &format!("/dev/{}", name)], "mdadm"),
     }
 }
@@ -899,7 +975,7 @@ pub fn parity_check(name: &str, action: &str) -> Result<String, ArrayError> {
         )));
     }
     match detect_backend() {
-        Backend::Nonraid => {
+        Backend::Nonraid | Backend::Unraid => {
             let mode = if action == "repair" { "CORRECT" } else { "NOCORRECT" };
             nonraid_action(&["check", mode])
         }
@@ -924,7 +1000,7 @@ pub fn parity_check(name: &str, action: &str) -> Result<String, ArrayError> {
 /// a fallback for commercial Unraid.
 pub fn parity_cancel(name: &str) -> Result<String, ArrayError> {
     match detect_backend() {
-        Backend::Nonraid => nonraid_action(&["check", "CANCEL"]),
+        Backend::Nonraid | Backend::Unraid => nonraid_action(&["check", "CANCEL"]),
         Backend::Mdadm => {
             let path = format!("/sys/block/{}/md/sync_action", name);
             std::fs::write(&path, b"idle")
@@ -1956,6 +2032,7 @@ pub fn diagnose() -> ArrayDiagnostics {
     let backend = match detect_backend() {
         Backend::Mdadm => "mdadm",
         Backend::Nonraid => "nonraid",
+        Backend::Unraid => "unraid",
     }.to_string();
 
     let nonraid_disabled = env_truthy("WOLFSTACK_ARRAY_DISABLE_NONRAID");
@@ -1980,6 +2057,14 @@ pub fn diagnose() -> ArrayDiagnostics {
              reported. The superblock may not be imported. Run `sudo nmdctl import` (then \
              `sudo nmdctl start` to bring it online). If this is a fresh install, see \
              https://github.com/qvr/nonraid for the create-array walkthrough.".into(),
+        );
+    }
+    if backend == "unraid" && parsed_count == 0 {
+        hints.push(
+            "This is an Unraid host but no array is reported. If the array is stopped, start \
+             it from the Unraid webGui (Main → Start). If it's running and still not shown \
+             here, the /proc/mdstat snapshot below is what WolfStack parsed — send it to \
+             support.".into(),
         );
     }
     if backend == "nonraid" && !nmdstat_present {
@@ -2299,6 +2384,136 @@ sbSynced2=1700000000
 sbSyncErrs=0
 sbSyncExit=0
 "
+    }
+
+    /// Fixture shaped like the REAL driver's output: md_status() loops
+    /// 0..MD_SB_DISKS and prints every slot (md_unraid.c:1872-1877),
+    /// so unused slots arrive as `rdevStatus.N=DISK_NP` with size 0
+    /// and empty names — they are NOT omitted the way the nmdctl mock
+    /// omits them. 1 parity + 2 data populated, slots 3..=29 empty.
+    fn nmdstat_fixture_real_driver_started() -> String {
+        let mut s = String::from(
+            "\
+sbName=/boot/config/super.dat
+sbNumDisks=3
+mdVersion=2.9.5
+mdState=STARTED
+mdNumDisks=3
+mdNumMissing=0
+mdResync=0
+mdResyncPos=0
+mdResyncSize=0
+diskNumber.0=0
+diskName.0=
+diskSize.0=2000000
+diskId.0=REAL_PARITY
+rdevStatus.0=DISK_OK
+rdevName.0=sdb
+rdevSize.0=2000000
+diskNumber.1=1
+diskName.1=nmd1p1
+diskSize.1=1000000
+diskId.1=REAL_DATA_1
+rdevStatus.1=DISK_OK
+rdevName.1=sdc
+rdevSize.1=1000000
+diskNumber.2=2
+diskName.2=nmd2p1
+diskSize.2=1000000
+diskId.2=REAL_DATA_2
+rdevStatus.2=DISK_OK
+rdevName.2=sdd
+rdevSize.2=1000000
+",
+        );
+        for n in 3..=29 {
+            s.push_str(&format!(
+                "diskNumber.{n}={n}\ndiskName.{n}=\ndiskSize.{n}=0\ndiskId.{n}=\n\
+                 rdevStatus.{n}=DISK_NP\nrdevName.{n}=\nrdevSize.{n}=0\n"
+            ));
+        }
+        s
+    }
+
+    #[test]
+    fn parse_nmdstat_real_driver_output_skips_empty_slots_and_is_not_degraded() {
+        // The klas bug (ninni, 2026-08-11): DISK_NP slots rendered as
+        // phantom "missing" rows and any_missing forced a healthy
+        // STARTED array to report "degraded".
+        let arrs = parse_nmdstat(&nmdstat_fixture_real_driver_started());
+        assert_eq!(arrs.len(), 1);
+        let a = &arrs[0];
+        assert_eq!(a.disks.len(), 3, "the 27 DISK_NP empty slots must not render as rows");
+        assert_eq!(a.state, "active", "DISK_NP empty slots must not count as missing/degraded");
+    }
+
+    #[test]
+    fn parse_nmdstat_stopped_empty_module_yields_no_arrays() {
+        // Module loaded, superblock never imported: every slot is
+        // DISK_NP / size 0, mdState=STOPPED. This must be "no arrays"
+        // (the UI's empty state has the diagnose flow), not a stub
+        // card of missing disks.
+        let mut s = String::from("sbName=\nsbNumDisks=0\nmdState=STOPPED\nmdNumDisks=0\nmdResync=0\n");
+        for n in 0..=29 {
+            s.push_str(&format!(
+                "diskNumber.{n}={n}\ndiskName.{n}=\ndiskSize.{n}=0\ndiskId.{n}=\n\
+                 rdevStatus.{n}=DISK_NP\nrdevName.{n}=\nrdevSize.{n}=0\n"
+            ));
+        }
+        assert!(parse_nmdstat(&s).is_empty(), "empty stopped module must yield zero arrays");
+    }
+
+    #[test]
+    fn parse_nmdstat_started_array_with_truly_missing_disk_is_degraded() {
+        // DISK_NP_MISSING ("enabled, but missing" — md_unraid.c:402)
+        // is the REAL missing-disk state and must still degrade the
+        // array — the DISK_NP fix must not swallow it.
+        let fixture = "\
+mdState=STARTED
+sbNumDisks=3
+mdNumMissing=1
+mdResync=0
+diskSize.0=2000000
+rdevStatus.0=DISK_OK
+rdevName.0=sdb
+diskSize.1=1000000
+diskId.1=GONE_DISK
+rdevStatus.1=DISK_NP_MISSING
+rdevName.1=
+diskSize.2=1000000
+rdevStatus.2=DISK_OK
+rdevName.2=sdd
+";
+        let arrs = parse_nmdstat(fixture);
+        assert_eq!(arrs.len(), 1);
+        assert_eq!(arrs[0].state, "degraded");
+        let missing: Vec<_> = arrs[0].disks.iter().filter(|d| d.state == "missing").collect();
+        assert_eq!(missing.len(), 1, "exactly the DISK_NP_MISSING slot is missing");
+        assert_eq!(missing[0].slot, Some(1));
+    }
+
+    #[test]
+    fn parse_nmdstat_commercial_unraid_content_keeps_md_device_names() {
+        // Commercial Unraid's driver prints diskName.N=md<N>p1 (the
+        // fork's nmd naming is the fork's own rebrand patch). Virtual
+        // device paths must come from the content, not a hardcoded
+        // class prefix.
+        let fixture = "\
+mdState=STARTED
+sbNumDisks=2
+mdResync=0
+diskSize.0=2000000
+rdevStatus.0=DISK_OK
+rdevName.0=sdb
+diskSize.1=1000000
+diskName.1=md1p1
+rdevStatus.1=DISK_OK
+rdevName.1=sdc
+";
+        let arrs = parse_nmdstat(fixture);
+        assert_eq!(arrs.len(), 1);
+        let data = arrs[0].disks.iter().find(|d| d.slot == Some(1)).unwrap();
+        assert_eq!(data.virtual_device.as_deref(), Some("/dev/md1p1"));
     }
 
     #[test]
