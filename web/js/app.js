@@ -17574,15 +17574,21 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
         // reachable even though the container itself doesn't.
         maxHeight: 'calc(100vh - 40px)', overflowY: 'auto'
     });
-    // A repeated id means UPDATE, not append: pollers (WolfHA task
-    // status every 1.5s, upload progress) pass a stable id expecting
-    // one live toast. Appending instead flooded the screen with an
-    // endless stream of identical "creating live rootfs snapshot"
-    // toasts for the whole seed (Paul, 2026-08-11). Replace-in-place:
-    // the old element is removed and the new one takes its slot, so
-    // position is stable; the old toast's pending timers act on a
-    // detached node, which is harmless.
+    // A repeated id means UPDATE IN PLACE, not append and not replace:
+    // pollers (WolfHA task status every 1.5s, upload progress) pass a
+    // stable id expecting one live toast. Appending flooded the screen;
+    // the next attempt (element replacement) still flashed, because
+    // every replacement armed its own auto-dismiss — on a node busy
+    // with a 43 GB seed the polls stretch past the 4s lifetime, so the
+    // live toast slid out and the next poll slid a new one in, forever
+    // (Paul, 2026-08-11, twice). Mutating the ONE element's text and
+    // resetting ITS timer cannot animate and cannot lapse mid-poll.
     const existing = id ? document.getElementById(id) : null;
+    if (existing && typeof existing._wsUpdate === 'function') {
+        existing._wsUpdate(message, type, duration);
+        return;
+    }
+    if (existing) existing.remove(); // pre-update-support relic — rebuild it
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     // Failures must interrupt assistive tech, not wait politely behind the
@@ -17680,25 +17686,41 @@ function showToast(message, type = 'info', duration = 5000, id = null) {
     dismissBtn.textContent = '×';
     dismissBtn.onclick = dismissToast;
     toast.replaceChildren(iconSpan, msgSpan, dismissBtn);
-    if (existing && existing.parentElement === container) {
-        // Update path: take the old toast's slot and skip the slide-in
-        // (a re-animation every poll tick would make the toast shimmer).
-        container.replaceChild(toast, existing);
+    // In-place updater for repeated-id calls: new text/type/lifetime on
+    // the SAME element. No DOM churn → nothing to re-animate; the
+    // dismiss timer is cancelled and re-armed so a slow poll can never
+    // let the toast lapse between updates.
+    toast._wsUpdate = (newMessage, newType, newDuration) => {
+        msgSpan.textContent = String(newMessage ?? '');
+        iconSpan.textContent = icons[newType] || 'ℹ️';
+        toast.className = `toast ${newType}`;
+        toast.style.background = bgColors[newType] || bgColors.info;
+        toast.style.borderLeft = '4px solid ' + (borderColors[newType] || borderColors.info);
+        if (newType === 'error' || newType === 'warning') toast.setAttribute('role', 'alert');
+        // Un-lapse: if the old lifetime expired mid-poll the toast is
+        // mid-slide-out — bring it straight back without re-animating
+        // from off-screen.
         toast.style.transform = 'translateX(0)';
         toast.style.opacity = '1';
-    } else {
-        if (existing) existing.remove(); // stale copy in a torn-down container
-        container.appendChild(toast);
-        // Trigger slide-in via transition (not @keyframes — works without stylesheet)
+        clearTimeout(toast._wsDismissTimer);
+        if (newDuration > 0) {
+            toast._wsDismissTimer = setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(120%)';
+                setTimeout(dismissToast, 350);
+            }, newDuration);
+        }
+    };
+    container.appendChild(toast);
+    // Trigger slide-in via transition (not @keyframes — works without stylesheet)
+    requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                toast.style.transform = 'translateX(0)';
-                toast.style.opacity = '1';
-            });
+            toast.style.transform = 'translateX(0)';
+            toast.style.opacity = '1';
         });
-    }
+    });
     if (duration > 0) {
-        setTimeout(() => {
+        toast._wsDismissTimer = setTimeout(() => {
             toast.style.opacity = '0';
             toast.style.transform = 'translateX(120%)';
             // dismissToast, not toast.remove — one teardown path, so a future
@@ -81764,15 +81786,45 @@ async function loadWolfHa() {
 // Poll a migration-style task on a SPECIFIC node (WolfHA tasks live in
 // the memory of whichever node runs the operation).
 async function wolfHaPollTask(nodeId, taskId, label) {
+    // Give up on a task the server no longer knows (404 = daemon
+    // restarted or task expired) and after ~45s of solid failures —
+    // these loops used to run for up to 3 HOURS of 404s, and every
+    // Protect click left another one alive churning its own toast
+    // until the operator relogged (Paul, 2026-08-11).
+    let failures = 0;
     for (let i = 0; i < 7200; i++) {
         await new Promise(r => setTimeout(r, 1500));
         try {
             const resp = await fetch(nodeApiUrl(nodeId, `/api/migration/${taskId}/status`));
-            if (!resp.ok) continue;
+            if (resp.status === 404) {
+                showToast(`${label}: the server no longer reports this task — check the WolfHA page for its outcome`, 'warning', 8000, `wolfha-${taskId}`);
+                loadWolfHa();
+                return;
+            }
+            if (!resp.ok) {
+                if (++failures >= 30) return;
+                continue;
+            }
+            failures = 0;
             const s = await resp.json();
-            showToast(`${label}: ${s.message}`, s.completed ? (s.error ? 'error' : 'success') : 'info', s.completed ? 10000 : 4000, `wolfha-${taskId}`);
+            // In-progress = duration 0 (sticky): on a node busy with a
+            // 40+ GB seed the polls stretch, and any finite lifetime
+            // eventually lapses between updates — the toast slid out
+            // and back in, over and over (Paul, 2026-08-11). The final
+            // completed/failed update arms a normal auto-dismiss.
+            // An operator who dismissed the sticky toast (× / Escape)
+            // has opted out of progress — don't resurrect it every
+            // poll; the WolfHA list still shows the stage, and the
+            // final result toast is still delivered.
+            const dismissed = !document.getElementById(`wolfha-${taskId}`);
+            if (s.completed || !dismissed) {
+                showToast(`${label}: ${s.message}`, s.completed ? (s.error ? 'error' : 'success') : 'info', s.completed ? 10000 : 0, `wolfha-${taskId}`);
+            }
             if (s.completed) { loadWolfHa(); return; }
-        } catch (e) { /* transient — keep polling */ }
+        } catch (e) {
+            // transient network error — keep polling, but not forever
+            if (++failures >= 30) return;
+        }
     }
 }
 
@@ -82049,7 +82101,7 @@ async function wolfHaSubmitProtect() {
             showToast(data.error || 'Could not start protection', 'error');
             return;
         }
-        showToast(`Seeding replicas of '${container}'…`, 'info', 4000, `wolfha-${data.task_id}`);
+        showToast(`Seeding replicas of '${container}'…`, 'info', 0, `wolfha-${data.task_id}`);
         wolfHaPollTask(nodeId, data.task_id, `Protect '${container}'`);
     } catch (e) { showToast(`Protection failed: ${e.message}`, 'error'); }
 }
