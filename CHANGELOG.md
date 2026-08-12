@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.25: a task's full outcome text outlives its popup** _(2026-08-12 — [`96bee4d1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/96bee4d19ee7678908b859fcbb6a207cbf248cf3))_
+- **v25.11.24: container logs get Refresh and auto-refresh — and stop rendering log lines as HTML** _(2026-08-12 — [`39b1cc74`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/39b1cc742cc68e2e442a125f2a5648ff59466c76))_
 - **v25.11.23: WolfRun names the server a service runs on instead of a truncated node id** _(2026-08-12 — [`19085394`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/190853948afba12e7ecc219fd1836fdc6612cca0))_
 - **v25.11.22: build fix — drop the now-unused running count left by v25.11.21** _(2026-08-12 — [`8032240a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8032240ae40e9e8de569bb78fb8defb4786d4bfa))_
 - **v25.11.21: WolfRun stops cloning a service forever when a container is crash-looping** _(2026-08-12 — [`d7ca131c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d7ca131c6de9c318e9af619d16d458c3c5ac83b7))_
