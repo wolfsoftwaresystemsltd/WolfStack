@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.12.2: WolfStack stops running a command inside every container every 30 seconds** _(2026-08-12 — [`2d0e7cde`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d0e7cded82810f2f7a1faf5a012bf37023dd337))_
 - **v25.12.1: the WolfRun load-balancer stops re-listing the whole nat table for every rule it deletes** _(2026-08-12 — [`c4875972`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c487597248dfae4de84f4c30e3c51064e54ff92e))_
 - **v25.12.0: a peer that answers with an error no longer leaks a socket on every poll** _(2026-08-12 — [`4069a080`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/4069a080d2ea3029bc18d9aa28b7ce9409ed69ce))_
 - **v25.11.30: WolfRun stops force-restarting a crash-looping container every 15 seconds** _(2026-08-12 — [`f9fe58d2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f9fe58d2afe4c4567315a35134c74e72dd67f770))_
