@@ -1212,20 +1212,49 @@ pub async fn reconcile(
 
         // 2. Count instances for scaling decisions
         // Exclude standby instances — they don't count toward active replicas.
-        // Count ALL existing non-standby instances (running + stopped + offline) — they
-        // should NOT trigger creating yet another clone. Only truly "lost" instances
-        // (container vanished from an ONLINE node) should be replaced.
+        //
+        // DENYLIST, not allowlist: count every known instance that still
+        // exists in ANY state; only "lost" (container vanished from an
+        // ONLINE node) means it's really gone and needs replacing. The old
+        // allowlist named six states and silently omitted the rest —
+        // Docker alone also has `restarting`, `paused`, `removing` and
+        // `dead`, and LXC adds STARTING/STOPPING/FREEZING/ABORTING. An
+        // omitted state reads as "missing", so the reconciler cloned
+        // ANOTHER instance every tick while never counting the ones it
+        // made: a crash-looping image sits in `restarting` forever, and
+        // one service became ~100 containers on a single node
+        // (klas, 2026-08-12). Erring toward "it exists" can only ever
+        // under-create, which is visible and safe; the reverse fills a
+        // disk.
         let existing = live_instances.iter()
-            .filter(|i| !i.standby)
-            .filter(|i| i.status == "running" || i.status == "stopped" || i.status == "pending" || i.status == "offline" || i.status == "created" || i.status == "exited")
+            .filter(|i| !i.standby && i.status != "lost")
             .count() as u32;
         let running = live_instances.iter().filter(|i| i.status == "running" && !i.standby).count() as u32;
         let desired = service.replicas;
 
         // 3. Scale up if under-provisioned (based on EXISTING count, not running)
         if existing < desired {
-            let needed = desired - existing;
-
+            // Two independent brakes, so no future counting bug can ever
+            // run away like this again:
+            //  * the service's own max_replicas ceiling is absolute — the
+            //    reconciler may never create past it, whatever the
+            //    arithmetic says;
+            //  * at most MAX_CREATES_PER_TICK per pass, so even a stuck
+            //    count converges in a few visible ticks instead of
+            //    spawning a container every cycle forever. A deliberate
+            //    scale to 10 still completes in well under two minutes.
+            const MAX_CREATES_PER_TICK: u32 = 2;
+            let ceiling = service.max_replicas.max(desired);
+            let room = ceiling.saturating_sub(existing);
+            let needed = (desired - existing).min(room).min(MAX_CREATES_PER_TICK);
+            if room == 0 {
+                warn!(
+                    "WolfRun: service '{}' wants {} replicas but already has {} instances \
+                     (ceiling {}) — not creating more. Check for instances stuck in a \
+                     restart loop.",
+                    service.name, desired, existing, ceiling
+                );
+            }
 
             for i in 0..needed {
                 let current = wolfrun.get(&service.id).unwrap_or(service.clone());
@@ -1446,27 +1475,41 @@ pub async fn reconcile(
         }
 
         // 4. Scale down if over-provisioned
-        if running > desired {
-            let excess = running - desired;
-
+        //
+        // Measured on EXISTING, not just running — the old check only ever
+        // saw `running`, so instances stuck in another state (the
+        // `restarting` crash-loop above) were invisible here too: never
+        // counted, therefore never cleaned up, and the service list grew
+        // without bound (klas, 2026-08-12). Non-running instances are
+        // released FIRST: they're the junk, and un-managing a healthy
+        // serving container while a crash-looping one stays on the books
+        // would be exactly backwards.
+        if existing > desired {
+            let excess = existing - desired;
 
             let mut instance_counts: HashMap<String, usize> = HashMap::new();
             for inst in &live_instances {
-                if inst.status == "running" && !inst.standby {
+                if !inst.standby && inst.status != "lost" {
                     *instance_counts.entry(inst.node_id.clone()).or_insert(0) += 1;
                 }
             }
 
-            let mut running_instances: Vec<_> = live_instances.iter()
-                .filter(|i| i.status == "running" && !i.standby)
+            let mut candidates: Vec<_> = live_instances.iter()
+                .filter(|i| !i.standby && i.status != "lost")
                 .collect();
-            running_instances.sort_by(|a, b| {
-                let a_count = instance_counts.get(&a.node_id).unwrap_or(&0);
-                let b_count = instance_counts.get(&b.node_id).unwrap_or(&0);
-                b_count.cmp(a_count)
+            candidates.sort_by(|a, b| {
+                // Non-running before running; then the most crowded node
+                // first, so releasing rebalances instead of concentrating.
+                let a_running = a.status == "running";
+                let b_running = b.status == "running";
+                a_running.cmp(&b_running).then_with(|| {
+                    let a_count = instance_counts.get(&a.node_id).unwrap_or(&0);
+                    let b_count = instance_counts.get(&b.node_id).unwrap_or(&0);
+                    b_count.cmp(a_count)
+                })
             });
 
-            for inst in running_instances.iter().take(excess as usize) {
+            for inst in candidates.iter().take(excess as usize) {
                 // Just un-manage — don't destroy the container. User can always stop it manually.
 
                 wolfrun.remove_instance(&service.id, &inst.container_name);
@@ -2465,5 +2508,81 @@ mod node_id_match_tests {
         let s = node("ws-self", None);
         assert!(node_matches_id(&s, "ws-self"));
         assert!(!node_matches_id(&s, "node-self"));
+    }
+}
+
+#[cfg(test)]
+mod replica_count_tests {
+    use super::ServiceInstance;
+
+    fn inst(name: &str, status: &str, standby: bool) -> ServiceInstance {
+        ServiceInstance {
+            node_id: "node-549".into(),
+            container_name: name.into(),
+            wolfnet_ip: None,
+            status: status.into(),
+            last_seen: 0,
+            standby,
+        }
+    }
+
+    /// Mirror of the reconciler's `existing` predicate. Kept in lockstep
+    /// with the filter in `reconcile()` — the whole bug was that this
+    /// count disagreed with reality.
+    fn existing_count(instances: &[ServiceInstance]) -> u32 {
+        instances.iter().filter(|i| !i.standby && i.status != "lost").count() as u32
+    }
+
+    #[test]
+    fn a_crash_looping_instance_still_counts_as_existing() {
+        // THE klas BUG (2026-08-12): a Docker container whose image
+        // crash-loops sits in `restarting` forever. The old allowlist
+        // (running/stopped/pending/offline/created/exited) did not name
+        // that state, so the reconciler saw zero instances, cloned
+        // another one every tick, and never counted what it made —
+        // ~100 containers of one service on one node.
+        let live = vec![inst("pocket-id-wolfrun-1a2b", "restarting", false)];
+        assert_eq!(existing_count(&live), 1, "a restarting container exists — do not clone another");
+    }
+
+    #[test]
+    fn every_runtime_state_except_lost_counts_as_existing() {
+        // Docker: created/restarting/running/removing/paused/exited/dead.
+        // LXC: starting/running/stopping/stopped/freezing/frozen/aborting.
+        // Any state the runtimes add later must default to "exists" too —
+        // that direction under-creates (visible, safe); the other fills a disk.
+        for state in ["created", "restarting", "running", "removing", "paused",
+                      "exited", "dead", "starting", "stopping", "stopped",
+                      "freezing", "frozen", "aborting", "pending", "offline",
+                      "some-future-state"] {
+            let live = vec![inst("c", state, false)];
+            assert_eq!(existing_count(&live), 1, "state {:?} must count as existing", state);
+        }
+        // Only a container that vanished from an ONLINE node is replaceable.
+        assert_eq!(existing_count(&[inst("c", "lost", false)]), 0);
+        // Standby instances never count toward active replicas.
+        assert_eq!(existing_count(&[inst("c", "running", true)]), 0);
+    }
+
+    #[test]
+    fn creation_is_bounded_by_ceiling_and_per_tick_cap() {
+        // Mirror of the scale-up arithmetic: whatever the counting says,
+        // max_replicas is absolute and a single tick creates at most 2.
+        const MAX_CREATES_PER_TICK: u32 = 2;
+        let plan = |desired: u32, existing: u32, max_replicas: u32| -> u32 {
+            if existing >= desired { return 0; }
+            let ceiling = max_replicas.max(desired);
+            let room = ceiling.saturating_sub(existing);
+            (desired - existing).min(room).min(MAX_CREATES_PER_TICK)
+        };
+        // Normal scale-up: paced, not instant.
+        assert_eq!(plan(10, 0, 10), 2);
+        assert_eq!(plan(3, 2, 10), 1);
+        // Already at or over the ceiling: never create, even if a bug
+        // claims more are needed.
+        assert_eq!(plan(10, 10, 10), 0);
+        assert_eq!(plan(10, 99, 10), 0, "over-ceiling must never create — this is the runaway brake");
+        // Ceiling below desired (mis-set config) still honours desired.
+        assert_eq!(plan(5, 4, 1), 1);
     }
 }
