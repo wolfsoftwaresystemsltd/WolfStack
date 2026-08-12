@@ -526,7 +526,43 @@ static SERVICES_PROBE_CACHE: ProbeCache<Vec<ContainerService>> =
 static DISK_USAGE_CACHE: ProbeCache<PathDiskUsage> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-const PROBE_CACHE_TTL_SECS: u64 = 30;
+const PROBE_CACHE_TTL_SECS: u64 = 300;
+
+// Service detection execs INTO a container and walks its /proc. That is
+// two processes per container per probe (coreutils `timeout` + `docker
+// exec`) plus a container-namespace entry — by far the most expensive
+// thing an enumeration does, and the resulting `services` field is never
+// read by any Rust code: it exists purely to be rendered in the UI's
+// container list.
+//
+// So it must not run for the enumerations nobody is looking at. Every
+// background caller — WolfRun reconcile, the notify poller, the four
+// predictive scanners, statuspage, exposure, the router, galera — walks
+// the same `*_list_all_cached()` helpers as the UI does, so the caller
+// cannot be told apart by function. This flag distinguishes them: the two
+// API handlers that serve the list to a browser set it for the duration of
+// their call, and nothing else does.
+//
+// Measured on klas's node (2026-08-12): ~100 running containers probed on
+// a 30s cycle held ~10 process spawns/sec, which at ~1,000 syscalls per
+// spawn accounted for the 8,214 syscalls/sec and 61% system time behind a
+// sustained 354% CPU.
+thread_local! {
+    static PROBE_ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with in-container service probing enabled for this thread.
+/// Only the UI list handlers should use this.
+pub fn with_service_probing<T>(f: impl FnOnce() -> T) -> T {
+    PROBE_ALLOWED.with(|p| p.set(true));
+    let out = f();
+    PROBE_ALLOWED.with(|p| p.set(false));
+    out
+}
+
+fn probing_allowed() -> bool {
+    PROBE_ALLOWED.with(|p| p.get())
+}
 /// Entry cap for the per-container probe caches — far above any real
 /// container count; keeps a name-churning fleet from growing the maps
 /// without bound. On overflow, expired entries are dropped.
@@ -4532,6 +4568,18 @@ fn detect_container_services(runtime: &str, name: &str) -> Vec<ContainerService>
         {
             return val.clone();
         }
+    }
+    // Cache miss. Only a UI-facing enumeration may pay for a fresh probe;
+    // a background caller serves whatever is already known (a stale entry
+    // if we have one, otherwise nothing) rather than spawning subprocesses
+    // for a field it will never read. See the PROBE_ALLOWED docs above.
+    if !probing_allowed() {
+        return SERVICES_PROBE_CACHE
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|(val, _)| val.clone())
+            .unwrap_or_default();
     }
     let val = probe_container_services(runtime, name);
     let mut cache = SERVICES_PROBE_CACHE.lock().unwrap();
