@@ -8327,7 +8327,11 @@ pub async fn docker_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
     // miss. Running that directly in the async handler blocked an actix request
     // worker; under the page-load burst that starved the worker pool and the
     // list came up blank for 10-20s (KO4BSR/wabil). Offload to the blocking pool.
-    match web::block(containers::docker_list_all_cached).await {
+    // This is a human looking at the container list, so it is the one caller
+    // allowed to pay for in-container service detection (see
+    // containers::with_service_probing). Background enumerations reuse the
+    // same helper and must not exec into every container.
+    match web::block(|| containers::with_service_probing(containers::docker_list_all_cached)).await {
         Ok(containers) => HttpResponse::Ok().json(containers),
         // A non-OK (not an empty 200) so the frontend keeps the current list
         // instead of blanking it on a rare blocking-pool error.
@@ -12080,7 +12084,8 @@ pub async fn lxc_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRespo
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     // Offload the blocking lxc-ls/lxc-info subprocesses (on a cache miss) to the
     // blocking pool — see docker_list for why running it inline blanked the list.
-    match web::block(containers::lxc_list_all_cached).await {
+    // UI-facing list — the one caller permitted to probe inside containers.
+    match web::block(|| containers::with_service_probing(containers::lxc_list_all_cached)).await {
         Ok(containers) => HttpResponse::Ok().json(containers),
         Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "lxc list unavailable"})),
     }
