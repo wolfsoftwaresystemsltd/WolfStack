@@ -238,11 +238,33 @@ fn default_lb_policy() -> String { "round_robin".to_string() }
 fn services_dir() -> String { crate::paths::get().wolfrun_dir }
 fn services_file() -> String { crate::paths::get().wolfrun_services }
 fn failover_events_file() -> String { crate::paths::get().wolfrun_failover_events }
+fn tombstones_file() -> String { format!("{}/deleted.json", services_dir()) }
+
+/// How long a deletion tombstone is remembered. Long enough that any
+/// node that was offline across the deletion (an update, an outage)
+/// still hits the tombstone when it comes back with its stale
+/// services.json; short enough the file can't grow forever.
+const TOMBSTONE_RETENTION_SECS: u64 = 30 * 24 * 3600;
+/// Hard cap on remembered tombstones — oldest are dropped first.
+const TOMBSTONE_MAX: usize = 500;
 
 /// Shared WolfRun state
 pub struct WolfRunState {
     services: RwLock<Vec<WolfRunService>>,
     failover_events: RwLock<Vec<FailoverEvent>>,
+    /// Deletion tombstones: service id → unix time it was deleted.
+    ///
+    /// Why these exist: a deleted service used to resurrect. The
+    /// services-list broadcast skips entirely when the local list is
+    /// empty, and merge_from_peer only replaces clusters PRESENT in an
+    /// incoming payload — so "the last service of a cluster was
+    /// deleted" was unrepresentable on the wire. Any peer still holding
+    /// the service (or a node restarting with a stale services.json
+    /// after an update) gossiped it straight back, and the leader
+    /// dutifully recreated its containers (klas, 2026-08-12).
+    /// Tombstones make deletion explicit: merges drop tombstoned ids,
+    /// and the sync reply tells the stale sender to clean up too.
+    deleted: RwLock<HashMap<String, u64>>,
 }
 
 /// True if registry node `n` is the node referenced by `id`, matching EITHER its
@@ -263,9 +285,11 @@ impl WolfRunState {
         let state = Self {
             services: RwLock::new(Vec::new()),
             failover_events: RwLock::new(Vec::new()),
+            deleted: RwLock::new(HashMap::new()),
         };
         state.load();
         state.load_failover_events();
+        state.load_tombstones();
         state
     }
 
@@ -310,6 +334,61 @@ impl WolfRunState {
                 warn!("WolfRun: failed to save failover events: {}", e);
             }
         }
+    }
+
+    /// Load deletion tombstones from disk
+    fn load_tombstones(&self) {
+        if let Ok(data) = std::fs::read_to_string(tombstones_file())
+            && let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&data)
+        {
+            let mut del = self.deleted.write().unwrap();
+            *del = map;
+            Self::prune_tombstones(&mut del);
+        }
+    }
+
+    /// Save deletion tombstones to disk
+    fn save_tombstones(&self) {
+        let del = self.deleted.read().unwrap();
+        if let Ok(json) = serde_json::to_string_pretty(&*del) {
+            let _ = std::fs::create_dir_all(services_dir());
+            if let Err(e) = std::fs::write(tombstones_file(), json) {
+                warn!("WolfRun: failed to save deletion tombstones: {}", e);
+            }
+        }
+    }
+
+    /// Drop tombstones past retention, and oldest-first past the cap.
+    fn prune_tombstones(del: &mut HashMap<String, u64>) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        del.retain(|_, ts| now.saturating_sub(*ts) < TOMBSTONE_RETENTION_SECS);
+        while del.len() > TOMBSTONE_MAX {
+            if let Some(oldest) = del.iter().min_by_key(|(_, ts)| **ts).map(|(id, _)| id.clone()) {
+                del.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Remember that `service_id` was deleted so peer gossip can never
+    /// resurrect it. Idempotent.
+    pub fn record_tombstone(&self, service_id: &str) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let mut del = self.deleted.write().unwrap();
+        del.insert(service_id.to_string(), now);
+        Self::prune_tombstones(&mut del);
+        drop(del);
+        self.save_tombstones();
+    }
+
+    /// True if this service id was deleted here (or a deletion was
+    /// learned from a peer) within the tombstone retention window.
+    /// Production code never asks — the merge does its own filtering
+    /// under one lock — so this is a test-only observation point.
+    #[cfg(test)]
+    pub fn is_tombstoned(&self, service_id: &str) -> bool {
+        self.deleted.read().unwrap().contains_key(service_id)
     }
 
     /// Record a failover event
@@ -437,7 +516,8 @@ impl WolfRunState {
         svc
     }
 
-    /// Delete a service by ID — returns the removed service (caller should stop instances)
+    /// Delete a service by ID — returns the removed service (caller should stop instances).
+    /// Records a tombstone so peer gossip can't resurrect the service.
     pub fn delete(&self, id: &str) -> Option<WolfRunService> {
         let mut svcs = self.services.write().unwrap();
         let idx = svcs.iter().position(|s| s.id == id);
@@ -445,7 +525,7 @@ impl WolfRunState {
         drop(svcs);
         if removed.is_some() {
             self.save();
-
+            self.record_tombstone(id);
         }
         removed
     }
@@ -620,7 +700,6 @@ impl WolfRunState {
     /// used by the UI to warn users before they delete a container
     /// that will just be reconciled back into existence by this
     /// service. Returns the list of (service_id, service_name) pairs.
-    #[allow(dead_code)]
     pub fn services_managing(&self, container_name: &str) -> Vec<(String, String)> {
         self.services.read().unwrap().iter()
             .filter(|s| s.instances.iter().any(|i| i.container_name == container_name))
@@ -634,29 +713,45 @@ impl WolfRunState {
     /// local services for that cluster with the peer's versions. Services for
     /// clusters NOT in the incoming data are preserved unchanged.
     /// This ensures stale/junk entries don't accumulate.
-    pub fn merge_from_peer(&self, peer_services: Vec<WolfRunService>) {
-        if peer_services.is_empty() { return; }
+    ///
+    /// Tombstoned services are NEVER accepted — a peer that missed the
+    /// deletion (offline, mid-update, stale services.json) would otherwise
+    /// resurrect the service here. Returns the ids that were rejected so
+    /// the sync endpoint can tell the sender to delete them too.
+    pub fn merge_from_peer(&self, peer_services: Vec<WolfRunService>) -> Vec<String> {
+        if peer_services.is_empty() { return Vec::new(); }
 
-        // Identify which clusters the peer is sending data for
+        // Identify which clusters the peer is sending data for — from the
+        // FULL payload, before tombstone filtering: if the peer's whole view
+        // of a cluster is one tombstoned service, the truthful merged view
+        // of that cluster is "empty", not "unchanged".
         let peer_clusters: std::collections::HashSet<String> = peer_services.iter()
             .map(|s| s.cluster_name.clone())
             .collect();
+
+        let (rejected, accepted): (Vec<WolfRunService>, Vec<WolfRunService>) = {
+            let del = self.deleted.read().unwrap();
+            peer_services.into_iter().partition(|s| del.contains_key(&s.id))
+        };
+        let rejected_ids: Vec<String> = rejected.into_iter().map(|s| s.id).collect();
 
         let mut svcs = self.services.write().unwrap();
 
         // Remove all local services for the incoming clusters
         svcs.retain(|s| !peer_clusters.contains(&s.cluster_name));
 
-        // Add all peer services
-        svcs.extend(peer_services);
+        // Add the peer services that survived the tombstone filter
+        svcs.extend(accepted);
 
         drop(svcs);
         self.save();
+        rejected_ids
     }
 
-    /// Mark a service as deleted by removing it from our list (called when peer broadcasts a deletion).
-    /// This is the same as delete() but without returning the service.
-    #[allow(dead_code)]
+    /// Mark a service as deleted by removing it from our list (called when a
+    /// peer broadcasts a deletion via /api/wolfrun/sync-delete). Always
+    /// records the tombstone — even when the service isn't present locally —
+    /// so later gossip carrying it is rejected too.
     pub fn remove_if_exists(&self, service_id: &str) -> bool {
         let mut svcs = self.services.write().unwrap();
         let before = svcs.len();
@@ -666,6 +761,7 @@ impl WolfRunState {
         if removed {
             self.save();
         }
+        self.record_tombstone(service_id);
         removed
     }
 
@@ -705,6 +801,19 @@ pub async fn broadcast_to_cluster(
     // that was the primary cause of CLOSE_WAIT accumulation to peers.
     let client = &*RPC_CLIENT_SHORT;
 
+    // A peer that already knows a service was deleted answers the sync
+    // with the tombstoned ids it refused. That is how a STALE node —
+    // one that slept through the deletion and is now re-broadcasting
+    // the ghost service — learns the truth: it destroys the containers
+    // it recreated and drops the service. Without this reply channel a
+    // stale leader would resurrect the service forever.
+    #[derive(Deserialize)]
+    struct SyncReply {
+        #[serde(default)]
+        deleted_ids: Vec<String>,
+    }
+    let mut peer_deleted: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Send to all online same-cluster peers (not self)
     for node in &nodes {
         if node.is_self || !node.online {
@@ -717,18 +826,121 @@ pub async fn broadcast_to_cluster(
 
         let urls = crate::api::build_node_urls(&node.address, node.port, "/api/wolfrun/sync");
         for url in &urls {
-            // send_and_drain reads the body so the connection returns
-            // to the pool. `Ok(_)` previously dropped the Response
-            // unconsumed, which was the leak source.
-            if send_and_drain(
-                client.post(url)
-                    .header("X-WolfStack-Secret", cluster_secret)
-                    .json(&services)
-            ).await.is_some() {
-                break;  // Success (or HTTP error) — move to next node
+            // The body is always consumed (json() or bytes()) so the
+            // connection returns to the pool. `Ok(_)` previously dropped
+            // the Response unconsumed, which was the leak source.
+            match client.post(url)
+                .header("X-WolfStack-Secret", cluster_secret)
+                .json(&services)
+                .send().await
+            {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        // Old peers reply {"synced":true} with no
+                        // deleted_ids — serde default gives an empty list.
+                        if let Ok(reply) = resp.json::<SyncReply>().await {
+                            peer_deleted.extend(reply.deleted_ids);
+                        }
+                    } else {
+                        let _ = resp.bytes().await;
+                    }
+                    break;  // Success (or HTTP error) — move to next node
+                }
+                Err(_) => continue,
             }
         }
     }
+
+    // Act on deletions we learned about: destroy the instances this stale
+    // copy re-created, then drop the service (delete() records the
+    // tombstone, so our next broadcast no longer carries the ghost).
+    for id in peer_deleted {
+        if let Some(svc) = wolfrun.get(&id) {
+            tracing::info!(
+                "WolfRun: peer reports service '{}' ({}) was deleted elsewhere — removing local copy and its instances",
+                svc.name, id
+            );
+            if let Some(vip) = svc.service_ip.clone() {
+                let _ = tokio::task::spawn_blocking(move || remove_lb_rules_for_vip(&vip)).await;
+            }
+            destroy_service_instances(&svc, cluster, cluster_secret).await;
+            wolfrun.delete(&id);
+        } else {
+            // Nothing local to clean up — just remember the deletion.
+            wolfrun.record_tombstone(&id);
+        }
+    }
+}
+
+/// Tell every online same-cluster peer that `service_id` was deleted.
+/// Runs on the node where the operator deleted the service. This is
+/// deliberately NOT part of the services-list broadcast: that broadcast
+/// skips when the list is empty and replaces per-cluster, so "this
+/// service is gone" was unrepresentable — the bug that resurrected
+/// deleted services from peers (klas, 2026-08-12).
+pub async fn broadcast_delete(
+    cluster: &ClusterState,
+    cluster_secret: &str,
+    service_id: &str,
+) {
+    let nodes = cluster.get_all_nodes();
+    let self_cluster = nodes.iter()
+        .find(|n| n.is_self)
+        .and_then(|n| n.cluster_name.clone())
+        .unwrap_or_else(|| "WolfStack".to_string());
+    let client = &*RPC_CLIENT_SHORT;
+    let payload = serde_json::json!({ "service_id": service_id });
+
+    for node in &nodes {
+        if node.is_self || !node.online {
+            continue;
+        }
+        if node.cluster_name.as_deref().unwrap_or("WolfStack") != self_cluster {
+            continue;
+        }
+        let urls = crate::api::build_node_urls(&node.address, node.port, "/api/wolfrun/sync-delete");
+        for url in &urls {
+            if send_and_drain(
+                client.post(url)
+                    .header("X-WolfStack-Secret", cluster_secret)
+                    .json(&payload)
+            ).await.is_some() {
+                break;
+            }
+        }
+    }
+}
+
+/// Stop and destroy a service's instances everywhere, honouring the
+/// delete-time keep rule: clones (names containing "wolfrun") and
+/// standby instances are destroyed; an adopted original template
+/// container is kept. Returns (destroyed, kept) container names.
+/// Shared by the API delete handler and the stale-copy cleanup in
+/// broadcast_to_cluster.
+pub async fn destroy_service_instances(
+    svc: &WolfRunService,
+    cluster: &ClusterState,
+    cluster_secret: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut destroyed: Vec<String> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
+    // Long-timeout client: a remote stop waits for the container's
+    // grace period before the reply comes back.
+    let client = &*RPC_CLIENT_LONG;
+
+    for inst in &svc.instances {
+        // Destroy clones and standby instances, leave the original template
+        if !inst.container_name.contains("wolfrun") && !inst.standby {
+            kept.push(inst.container_name.clone());
+            continue;
+        }
+        if let Some(node) = cluster.get_node(&inst.node_id)
+            && stop_and_remove(client, cluster_secret, &node, &inst.container_name, &svc.runtime).await
+        {
+            destroyed.push(inst.container_name.clone());
+        }
+    }
+    (destroyed, kept)
 }
 
 /// Check if this node is the WolfRun leader for its cluster.
@@ -834,6 +1046,74 @@ mod leader_election_tests {
         nodes.iter_mut().find(|n| n.self_id.as_deref() == Some("ws-a"))
             .unwrap().online = false;
         assert!(is_leader_among(&nodes, "ws-b"));
+    }
+}
+
+#[cfg(test)]
+mod tombstone_tests {
+    use super::*;
+
+    // Build a service from a compact JSON spec — most fields carry serde
+    // defaults, so only the always-present ones are needed.
+    fn svc(id: &str, cluster: &str) -> WolfRunService {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "image": "nginx", "replicas": 1u32,
+            "cluster_name": cluster, "created_at": 0u64, "updated_at": 0u64,
+        })).expect("valid test service")
+    }
+
+    // ONE test fn on purpose: paths::set_for_test mutates process-global
+    // state and cargo runs tests in parallel — a second test in this
+    // module could race another module's set_for_test.
+    #[test]
+    fn deleted_services_stay_deleted() {
+        let tmp = std::env::temp_dir()
+            .join(format!("wolfrun-tombstone-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp wolfrun dir");
+        let mut locs = crate::paths::FileLocations::default();
+        locs.wolfrun_dir = tmp.to_string_lossy().into_owned();
+        locs.wolfrun_services = tmp.join("services.json").to_string_lossy().into_owned();
+        locs.wolfrun_failover_events =
+            tmp.join("failover-events.json").to_string_lossy().into_owned();
+        crate::paths::set_for_test(locs);
+
+        let state = WolfRunState::new();
+
+        // A peer pushes two services; both merge in cleanly.
+        let rejected = state.merge_from_peer(vec![svc("svc-aaaa", "c1"), svc("svc-bbbb", "c1")]);
+        assert!(rejected.is_empty());
+        assert_eq!(state.list_all().len(), 2);
+
+        // Local delete records a tombstone.
+        assert!(state.delete("svc-aaaa").is_some());
+        assert!(state.is_tombstoned("svc-aaaa"));
+        assert_eq!(state.list_all().len(), 1);
+
+        // The stale peer gossips the deleted service back — the exact
+        // resurrection klas hit. It must be rejected AND reported, and the
+        // live service from the same payload must still merge.
+        let rejected = state.merge_from_peer(vec![svc("svc-aaaa", "c1"), svc("svc-bbbb", "c1")]);
+        assert_eq!(rejected, vec!["svc-aaaa".to_string()]);
+        let ids: Vec<String> = state.list_all().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["svc-bbbb".to_string()]);
+
+        // A peer-broadcast deletion (sync-delete path) tombstones even a
+        // service we never held, so later gossip can't introduce it.
+        assert!(!state.remove_if_exists("svc-cccc"));
+        assert!(state.is_tombstoned("svc-cccc"));
+        let rejected = state.merge_from_peer(vec![svc("svc-cccc", "c2")]);
+        assert_eq!(rejected, vec!["svc-cccc".to_string()]);
+        assert_eq!(state.list_all().len(), 1);
+
+        // Tombstones survive a restart (the after-update case).
+        let reloaded = WolfRunState::new();
+        assert!(reloaded.is_tombstoned("svc-aaaa"));
+        assert!(reloaded.is_tombstoned("svc-cccc"));
+        let rejected = reloaded.merge_from_peer(vec![svc("svc-aaaa", "c1")]);
+        assert_eq!(rejected, vec!["svc-aaaa".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 
@@ -1637,7 +1917,9 @@ pub async fn reconcile(
                             Runtime::Docker => "remove",
                             Runtime::Lxc => "destroy",
                         };
-                        let rm_payload = serde_json::json!({ "action": rm_action });
+                        // force: WolfRun destroying its own standby — must not
+                        // be bounced by the peer's managed-container guard.
+                        let rm_payload = serde_json::json!({ "action": rm_action, "force": true });
                         for url in &urls {
                             if send_and_drain(
                                 client.post(url)
@@ -1858,28 +2140,35 @@ async fn deploy_lxc(
     }
 }
 
-/// Stop and remove a container (Docker or LXC)
-#[allow(dead_code)]
+/// Stop and remove a container (Docker or LXC). Returns true when the
+/// remove/destroy step reported success.
 async fn stop_and_remove(
     client: &reqwest::Client,
     cluster_secret: &str,
     node: &crate::agent::Node,
     container_name: &str,
     runtime: &Runtime,
-) {
+) -> bool {
     if node.is_self {
-        match runtime {
-            Runtime::Docker => {
-                let _ = crate::containers::docker_stop(container_name);
-                // Permanent teardown — release any vSwitch allocation too, matching
-                // the live orphan-cleanup path (do NOT use plain docker_remove here).
-                let _ = crate::containers::docker_remove_permanent(container_name);
+        // Subprocess-backed container commands are blocking — keep them
+        // off the async runtime (this runs from both API handlers and
+        // the reconcile loop).
+        let name = container_name.to_string();
+        let rt = runtime.clone();
+        tokio::task::spawn_blocking(move || {
+            match rt {
+                Runtime::Docker => {
+                    let _ = crate::containers::docker_stop(&name);
+                    // Permanent teardown — release any vSwitch allocation too, matching
+                    // the live orphan-cleanup path (do NOT use plain docker_remove here).
+                    crate::containers::docker_remove_permanent(&name).is_ok()
+                }
+                Runtime::Lxc => {
+                    let _ = crate::containers::lxc_stop(&name);
+                    crate::containers::lxc_destroy(&name).is_ok()
+                }
             }
-            Runtime::Lxc => {
-                let _ = crate::containers::lxc_stop(container_name);
-                let _ = crate::containers::lxc_destroy(container_name);
-            }
-        }
+        }).await.unwrap_or(false)
     } else {
         let urls = crate::api::build_node_urls(
             &node.address, node.port,
@@ -1899,29 +2188,22 @@ async fn stop_and_remove(
             Runtime::Docker => "remove",
             Runtime::Lxc => "destroy",
         };
-        let rm_payload = serde_json::json!({ "action": rm_action });
+        // force: this removal is WolfRun tearing down its OWN instance —
+        // the managed-container guard on the peer's action endpoint must
+        // not bounce it back with "managed by WolfRun".
+        let rm_payload = serde_json::json!({ "action": rm_action, "force": true });
         for url in &urls {
-            if send_and_drain(
+            match send_and_drain(
                 client.post(url)
                     .header("X-WolfStack-Secret", cluster_secret)
                     .json(&rm_payload)
-            ).await.is_some() {
-                break;
+            ).await {
+                Some(ok) => return ok,
+                None => continue,
             }
         }
+        false
     }
-}
-
-/// Public wrapper for stop_and_remove — used by the API delete handler
-#[allow(dead_code)]
-pub async fn stop_and_remove_pub(
-    client: &reqwest::Client,
-    cluster_secret: &str,
-    node: &crate::agent::Node,
-    container_name: &str,
-    runtime: &Runtime,
-) {
-    stop_and_remove(client, cluster_secret, node, container_name, runtime).await;
 }
 
 // ─── Failover ───
