@@ -8,6 +8,9 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.23: WolfRun names the server a service runs on instead of a truncated node id** _(2026-08-12 — [`19085394`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/190853948afba12e7ecc219fd1836fdc6612cca0))_
+- **v25.11.22: build fix — drop the now-unused running count left by v25.11.21** _(2026-08-12 — [`8032240a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/8032240ae40e9e8de569bb78fb8defb4786d4bfa))_
+- **v25.11.21: WolfRun stops cloning a service forever when a container is crash-looping** _(2026-08-12 — [`d7ca131c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/d7ca131c6de9c318e9af619d16d458c3c5ac83b7))_
 - **v25.11.20: an IP set in the UI survives reboots — and stops squatting in ifup's way** _(2026-08-11 — [`0ee3f299`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0ee3f2991e28a9c9dded7c92ad0b0c7cd00a9a79))_
 - **v25.11.19: the protect progress toast is one steady element — no more flashing, ever** _(2026-08-11 — [`447bd820`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/447bd820692c6a7eb83a99408ecab82ddfb89067))_
 - **v25.11.18: the WolfHA page finally looks like it belongs — house header and real margins** _(2026-08-11 — [`af02807c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/af02807c87dbdc3fdc22e74269376533ca50a80f))_
