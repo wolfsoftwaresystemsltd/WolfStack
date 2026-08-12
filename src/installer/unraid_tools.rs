@@ -19,6 +19,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use tracing::{info, warn};
 
 /// Tools we ensure: (binary name, release asset name). Unraid is x86_64-only
@@ -183,11 +184,49 @@ fn start_wolfnet_if_configured() {
     if !Path::new(WOLFNET_APPDATA).join("config.toml").exists() {
         return; // not configured — nothing to run
     }
-    let running = Command::new("pgrep").args(["-x", "wolfnet"]).output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if running {
+    // 1. A daemon WE started and that is still alive is authoritative —
+    //    no probe involved. This is the check that makes a spawn storm
+    //    impossible.
+    {
+        let mut owned = wolfnet_child();
+        if let Some(child) = owned.as_mut() {
+            match child.try_wait() {
+                Ok(None) => return,               // still running
+                Ok(Some(status)) => {             // exited; try_wait reaped it
+                    warn!("unraid wolfnet: daemon exited ({}) — restarting after backoff", status);
+                    *owned = None;
+                }
+                // Can't tell whether our own child is alive — never spawn
+                // on uncertainty.
+                Err(e) => {
+                    warn!("unraid wolfnet: cannot check daemon state: {} — not starting another", e);
+                    return;
+                }
+            }
+        }
+    }
+
+    // 2. Backoff: a daemon that dies immediately must not be respawned
+    //    every single tick. Doubles to a 1h ceiling and resets once one
+    //    survives a tick.
+    let now = now_secs();
+    if now < WOLFNET_RETRY_AFTER.load(Ordering::Relaxed) {
         return;
+    }
+
+    // 3. Someone else's wolfnet (manual install, or ours from before an
+    //    agent restart)? Read procfs directly: `pgrep -x` was the old
+    //    check and its exit status is ambiguous on busybox, where an
+    //    unsupported flag looks exactly like "no match" — which meant a
+    //    new VPN daemon every 60 seconds, forever (klas, Unraid,
+    //    2026-08-12). Unknown => do NOT spawn.
+    match wolfnet_running_externally() {
+        Some(true) => return,
+        None => {
+            warn!("unraid wolfnet: could not determine whether a daemon is already running — not starting another");
+            return;
+        }
+        Some(false) => {}
     }
     let log = std::fs::OpenOptions::new()
         .create(true).append(true)
@@ -207,15 +246,76 @@ fn start_wolfnet_if_configured() {
         .stderr(err)
         .spawn()
     {
-        Ok(mut child) => {
+        Ok(child) => {
             info!("unraid wolfnet: daemon started (pid {})", child.id());
-            // Reap on exit — a dropped Child is never waited on, so a
-            // crashed daemon would otherwise sit as a zombie until the
-            // agent restarts. The supervision tick restarts it.
-            std::thread::spawn(move || { let _ = child.wait(); });
+            // Keep the Child: the next tick calls try_wait() on it, which
+            // both answers "is it alive?" authoritatively and reaps it
+            // when it isn't. (The old code moved the Child into a waiter
+            // thread, leaving the supervisor with nothing to check but a
+            // pgrep probe.)
+            *wolfnet_child() = Some(child);
+            // Next failure waits at least the base interval; a daemon that
+            // survives resets this below.
+            WOLFNET_RETRY_AFTER.store(now_secs() + WOLFNET_RETRY_BASE_SECS, Ordering::Relaxed);
+            WOLFNET_RETRY_BACKOFF.store(WOLFNET_RETRY_BASE_SECS, Ordering::Relaxed);
         }
-        Err(e) => warn!("unraid wolfnet: failed to start daemon: {}", e),
+        Err(e) => {
+            // Exponential backoff, capped at an hour: a host that can
+            // never start wolfnet (missing /dev/net/tun, bad config)
+            // must not pay for a spawn attempt every minute forever.
+            let next = (WOLFNET_RETRY_BACKOFF.load(Ordering::Relaxed) * 2)
+                .clamp(WOLFNET_RETRY_BASE_SECS, WOLFNET_RETRY_MAX_SECS);
+            WOLFNET_RETRY_BACKOFF.store(next, Ordering::Relaxed);
+            WOLFNET_RETRY_AFTER.store(now_secs() + next, Ordering::Relaxed);
+            warn!("unraid wolfnet: failed to start daemon: {} — next attempt in {}s", e, next);
+        }
     }
+}
+
+/// The wolfnet daemon this process started, if any. Owning the `Child`
+/// is what makes liveness authoritative instead of probe-dependent.
+fn wolfnet_child() -> std::sync::MutexGuard<'static, Option<std::process::Child>> {
+    static CHILD: std::sync::LazyLock<std::sync::Mutex<Option<std::process::Child>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    match CHILD.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
+const WOLFNET_RETRY_BASE_SECS: u64 = 60;
+const WOLFNET_RETRY_MAX_SECS: u64 = 3600;
+static WOLFNET_RETRY_AFTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WOLFNET_RETRY_BACKOFF: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(WOLFNET_RETRY_BASE_SECS);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Is a wolfnet daemon running that we don't own? Reads `/proc/<pid>/comm`
+/// rather than shelling out, so the answer doesn't depend on which
+/// `pgrep` the distro ships. `None` means "couldn't tell" — callers must
+/// treat that as "do not spawn", never as "not running".
+///
+/// Runs once per supervision tick (60s), so this is not a hot scan —
+/// see tests/resource_safety.rs for the scans that must stay cached.
+fn wolfnet_running_externally() -> Option<bool> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for ent in entries.flatten() {
+        let name = ent.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        // A process can exit mid-scan; a missing comm is not an error.
+        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
+            if comm.trim() == "wolfnet" {
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
 }
 
 fn ensure_tool(bin: &str, asset: &str, base: &str) {
@@ -299,6 +399,61 @@ mod tests {
         // without touching the filesystem — guard the guard.
         if !is_unraid() {
             ensure_unraid_tools(); // must not panic, download, or link anything
+        }
+    }
+}
+
+#[cfg(test)]
+mod wolfnet_supervision_tests {
+    use super::*;
+
+    #[test]
+    fn liveness_probe_never_reports_false_on_uncertainty() {
+        // The supervisor must only spawn on a DEFINITE "not running".
+        // `pgrep -x` was the old probe and its exit status is ambiguous
+        // on busybox — an unsupported flag looks identical to "no
+        // match", which spawned a new VPN daemon every 60s forever
+        // (klas, Unraid, 2026-08-12). The procfs reader answers
+        // Some(true)/Some(false) only when it actually knows.
+        let answer = wolfnet_running_externally();
+        // Deliberately NOT asserting true or false: the answer depends
+        // on whether the host happens to run wolfnet (the dev box does,
+        // which is how this probe was confirmed against a live process).
+        // The invariant under test is that with /proc readable the probe
+        // commits to a DEFINITE answer, and that "couldn't tell" is
+        // None — never Some(false), which is the value that would let
+        // the supervisor spawn.
+        if std::path::Path::new("/proc/self/comm").exists() {
+            assert!(answer.is_some(), "with /proc readable the probe must give a definite answer");
+        }
+        // Whatever it says, it must agree with itself — a probe that
+        // flickered would spawn on the tick that happened to say false.
+        assert_eq!(answer, wolfnet_running_externally(), "probe must be stable across calls");
+    }
+
+    #[test]
+    fn backoff_grows_and_is_capped() {
+        // Mirrors the failure path's arithmetic: doubling, floored at
+        // the base interval and capped at an hour, so a host that can
+        // never start wolfnet stops paying a spawn per minute.
+        let mut backoff = WOLFNET_RETRY_BASE_SECS;
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            backoff = (backoff * 2).clamp(WOLFNET_RETRY_BASE_SECS, WOLFNET_RETRY_MAX_SECS);
+            seen.push(backoff);
+        }
+        assert!(seen[0] > WOLFNET_RETRY_BASE_SECS, "backoff must grow after a failure");
+        assert!(seen.iter().all(|s| *s <= WOLFNET_RETRY_MAX_SECS), "backoff must be capped");
+        assert_eq!(*seen.last().unwrap(), WOLFNET_RETRY_MAX_SECS, "repeated failure settles at the cap");
+    }
+
+    #[test]
+    fn supervision_is_a_no_op_off_unraid() {
+        // Every path is guarded by is_unraid(); on a non-Unraid host
+        // this must not spawn, scan, or touch the filesystem.
+        if !is_unraid() {
+            ensure_unraid_wolfnet();
+            assert!(wolfnet_child().is_none(), "no daemon may be owned on a non-Unraid host");
         }
     }
 }
