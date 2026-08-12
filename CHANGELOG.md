@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.29: a deleted WolfRun service stays deleted, and removing a managed container warns instead of silently losing** _(2026-08-12 — [`23704d43`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/23704d434c05f499298d1c805fbe12ed94500e89))_
 - **v25.11.28: a container restart loop no longer re-reads the rules file thousands of times a second** _(2026-08-12 — [`b430e43f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b430e43f321208e0500f199ec426b93141f734ea))_
 - **v25.11.27: the Unraid wolfnet supervisor can no longer spawn a daemon every minute** _(2026-08-12 — [`dd5e0eb4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dd5e0eb4678212e70433fae072438043a3893eb6))_
 - **v25.11.26: WolfRun stops re-enumerating a node's containers once per instance** _(2026-08-12 — [`f2d61397`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f2d61397d4c44462313db97e7d7d36e20ad2627a))_
