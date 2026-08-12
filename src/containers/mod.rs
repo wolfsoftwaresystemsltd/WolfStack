@@ -4569,16 +4569,29 @@ fi
 fi
 done"#;
 
+    // BOUNDED. This probe execs INTO the container and walks /proc there,
+    // so it inherits the container's health: one that is dying, wedged, or
+    // mid-restart can hang the exec indefinitely, and `.output()` waits
+    // forever. Every such hang permanently holds the child's pipe
+    // descriptors and pins the calling worker thread — accumulate enough
+    // and the process runs out of file descriptors, at which point
+    // actix_server can no longer accept and the node drops off the
+    // cluster (klas, klnet-12gb, 2026-08-12: repeated
+    // "error accepting connection" at actix's 500ms EMFILE backoff).
+    // A crash-looping service is exactly the supply of dying containers
+    // that triggers it. Matches the coreutils-`timeout` pattern used by
+    // every other probe in this file; 5s is far beyond a healthy walk.
+    const PROBE_TIMEOUT_SECS: &str = "5";
     let output = match runtime {
-        "docker" => Command::new("docker")
-            .args(["exec", name, "sh", "-c", script])
+        "docker" => Command::new("timeout")
+            .args([PROBE_TIMEOUT_SECS, "docker", "exec", name, "sh", "-c", script])
             .output(),
         "lxc" => {
             let base = lxc_base_dir(name);
-            let mut args: Vec<&str> = Vec::new();
+            let mut args: Vec<&str> = vec![PROBE_TIMEOUT_SECS, "lxc-attach"];
             if base != LXC_DEFAULT_PATH { args.extend_from_slice(&["-P", &base]); }
             args.extend_from_slice(&["-n", name, "--", "sh", "-c", script]);
-            Command::new("lxc-attach").args(&args).output()
+            Command::new("timeout").args(&args).output()
         }
         _ => return vec![],
     };
@@ -6237,13 +6250,30 @@ pub fn docker_remove_image(image: &str) -> Result<String, String> {
 }
 
 fn run_docker_cmd(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("docker")
-        .args(args)
+    // BOUNDED, for the same reason as the service probe above: an
+    // unbounded `.output()` on a wedged daemon or a container stuck in
+    // teardown holds its pipe descriptors and its worker thread forever,
+    // and enough of those exhaust the fd table until actix can no longer
+    // accept connections. Every caller here is a short lifecycle verb
+    // (start / stop / restart / pause / unpause / rm / rmi), so 120s is
+    // well clear of even a long `--stop-timeout` grace period while still
+    // turning a permanent hang into a reported error.
+    const LIFECYCLE_TIMEOUT_SECS: &str = "120";
+    let mut argv: Vec<&str> = vec![LIFECYCLE_TIMEOUT_SECS, "docker"];
+    argv.extend_from_slice(args);
+    let output = Command::new("timeout")
+        .args(&argv)
         .output()
         .map_err(|e| format!("Failed to run docker: {}", e))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else if output.status.code() == Some(124) {
+        // coreutils `timeout` exit code for "killed on timeout".
+        Err(format!(
+            "docker {} timed out after {}s",
+            args.first().copied().unwrap_or("command"), LIFECYCLE_TIMEOUT_SECS,
+        ))
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
