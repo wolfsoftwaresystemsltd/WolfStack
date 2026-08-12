@@ -1119,6 +1119,137 @@ mod tombstone_tests {
 
 // ─── Scheduler ───
 
+// ─── Restart backoff ───
+//
+// Per-container failure history for the restart-policy path. A container
+// that keeps dying gets progressively longer gaps between restart
+// attempts, then stops being retried at all. Keyed by container name;
+// entries are dropped once the container is seen running (recovered) or
+// leaves the service (see `prune_restart_backoff`).
+struct RestartRecord {
+    /// Consecutive restart attempts since the container was last seen running.
+    attempts: u32,
+    /// Unix time of the most recent attempt.
+    last_attempt: u64,
+    /// True once we've given up and logged it, so the warning fires once.
+    gave_up: bool,
+}
+
+static RESTART_BACKOFF: std::sync::LazyLock<std::sync::Mutex<HashMap<String, RestartRecord>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Stop retrying after this many consecutive failures. Docker's own
+/// `--restart` policy (if the operator set one) keeps working — WolfRun
+/// just stops fighting it.
+const MAX_RESTART_ATTEMPTS: u32 = 8;
+/// First retry waits this long; each subsequent attempt doubles it.
+const RESTART_BACKOFF_BASE_SECS: u64 = 15;
+/// Ceiling on the doubling, so a long-dead container is still retried
+/// occasionally rather than never.
+const RESTART_BACKOFF_MAX_SECS: u64 = 600;
+
+/// Delay required before attempt number `attempts` (1-based).
+fn restart_backoff_delay(attempts: u32) -> u64 {
+    // attempts == 1 is the first retry after a failure: base delay.
+    RESTART_BACKOFF_BASE_SECS
+        .saturating_mul(1u64 << attempts.saturating_sub(1).min(31))
+        .min(RESTART_BACKOFF_MAX_SECS)
+}
+
+/// True if `container` is due a restart attempt now. Records the attempt
+/// when it returns true.
+fn should_attempt_restart(container: &str) -> bool {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let mut map = RESTART_BACKOFF.lock().unwrap();
+    let rec = map.entry(container.to_string()).or_insert(RestartRecord {
+        attempts: 0,
+        last_attempt: 0,
+        gave_up: false,
+    });
+
+    if rec.attempts >= MAX_RESTART_ATTEMPTS {
+        if !rec.gave_up {
+            rec.gave_up = true;
+            warn!(
+                "WolfRun: '{}' failed to stay running after {} restart attempts — \
+                 no longer restarting it. Fix the container (check its logs) or \
+                 delete the service; the reconciler will resume automatically \
+                 once it is seen running again.",
+                container, MAX_RESTART_ATTEMPTS
+            );
+        }
+        return false;
+    }
+
+    // First-ever attempt for this container fires immediately; later ones
+    // wait out the doubling delay.
+    if rec.attempts > 0 && now.saturating_sub(rec.last_attempt) < restart_backoff_delay(rec.attempts) {
+        return false;
+    }
+
+    rec.attempts += 1;
+    rec.last_attempt = now;
+    true
+}
+
+/// Forget a container's failure history — it is running again.
+fn clear_restart_backoff(container: &str) {
+    RESTART_BACKOFF.lock().unwrap().remove(container);
+}
+
+/// Drop history for containers no longer managed by any service, so the
+/// map can't grow without bound across a long uptime.
+fn prune_restart_backoff(live: &std::collections::HashSet<String>) {
+    RESTART_BACKOFF.lock().unwrap().retain(|name, _| live.contains(name));
+}
+
+#[cfg(test)]
+mod restart_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_then_caps_and_gives_up() {
+        // Delay schedule: 15, 30, 60, 120, 240, 480, then capped at 600.
+        assert_eq!(restart_backoff_delay(1), 15);
+        assert_eq!(restart_backoff_delay(2), 30);
+        assert_eq!(restart_backoff_delay(3), 60);
+        assert_eq!(restart_backoff_delay(6), 480);
+        assert_eq!(restart_backoff_delay(7), RESTART_BACKOFF_MAX_SECS);
+        // Never overflows, however long a container has been broken.
+        assert_eq!(restart_backoff_delay(u32::MAX), RESTART_BACKOFF_MAX_SECS);
+
+        let name = "wolfrun-backoff-unit-test";
+        clear_restart_backoff(name);
+
+        // First attempt is immediate; the next is gated by the delay.
+        assert!(should_attempt_restart(name), "first attempt must fire at once");
+        assert!(!should_attempt_restart(name), "second attempt must wait out the backoff");
+
+        // Drive it to the give-up threshold — the exact behaviour that
+        // stops the 100-restarts-per-tick storm.
+        for _ in 0..MAX_RESTART_ATTEMPTS {
+            let mut map = RESTART_BACKOFF.lock().unwrap();
+            let rec = map.get_mut(name).unwrap();
+            rec.last_attempt = 0; // pretend the delay elapsed
+            drop(map);
+            should_attempt_restart(name);
+        }
+        {
+            let mut map = RESTART_BACKOFF.lock().unwrap();
+            map.get_mut(name).unwrap().last_attempt = 0;
+        }
+        assert!(!should_attempt_restart(name), "must give up past the attempt cap");
+
+        // Recovery wipes the history so a later stop restarts immediately.
+        clear_restart_backoff(name);
+        assert!(should_attempt_restart(name), "a recovered container restarts at once");
+
+        // Pruning drops containers no longer in any service.
+        prune_restart_backoff(&std::collections::HashSet::new());
+        assert!(!RESTART_BACKOFF.lock().unwrap().contains_key(name));
+    }
+}
+
 /// Score a node for scheduling (lower = better)
 fn node_score(node: &crate::agent::Node) -> f32 {
     let m = match &node.metrics {
@@ -1279,7 +1410,20 @@ pub async fn reconcile(
             .unwrap_or_else(|| "WolfStack".to_string())
     };
     let services = wolfrun.list(Some(&self_cluster));
-    if services.is_empty() { return; }
+    if services.is_empty() {
+        // No services left to manage — drop every restart record rather
+        // than stranding them for the process lifetime.
+        prune_restart_backoff(&std::collections::HashSet::new());
+        return;
+    }
+
+    // Forget restart history for containers no longer in any service
+    // (deleted, scaled down, un-managed), so the map tracks live work only.
+    prune_restart_backoff(
+        &services.iter()
+            .flat_map(|s| s.instances.iter().map(|i| i.container_name.clone()))
+            .collect(),
+    );
 
     // Shared long-timeout client — see RPC_CLIENT_LONG docs at top of
     // file. Building a new client here every 15s was leaking connection
@@ -1336,11 +1480,17 @@ pub async fn reconcile(
                         continue;
                     }
                     // Local node — query containers directly (avoids HTTP self-call
-                    // issues). Once per pass, not once per instance.
-                    let containers = local_lists.entry(rt_key).or_insert_with(|| match service.runtime {
-                        Runtime::Docker => crate::containers::docker_list_all(),
-                        Runtime::Lxc => crate::containers::lxc_list_all(),
-                    });
+                    // issues). Once per pass, not once per instance, and on the
+                    // blocking pool: the enumeration shells out to docker/lxc.
+                    if !local_lists.contains_key(rt_key) {
+                        let rt = service.runtime.clone();
+                        let fetched = tokio::task::spawn_blocking(move || match rt {
+                            Runtime::Docker => crate::containers::docker_list_all(),
+                            Runtime::Lxc => crate::containers::lxc_list_all(),
+                        }).await.unwrap_or_default();
+                        local_lists.insert(rt_key, fetched);
+                    }
+                    let containers = &local_lists[rt_key];
                     let found = containers.iter().find(|c| c.name == inst.container_name);
                     if let Some(c) = found {
                         // Extract wolfnet IP from ip_address field (format: "x.x.x.5 (wolfnet)" or "192.168.1.1, x.x.x.5 (wolfnet)")
@@ -1634,38 +1784,41 @@ pub async fn reconcile(
                         let cloned = if same_node {
                             // Same node: simple local or remote clone
                             if node.is_self {
-                                // Both source and target are this node
-                                let _ = crate::containers::lxc_stop(&template_name);
-                                let result = crate::containers::lxc_clone(&template_name, &clone_name);
-                                let _ = crate::containers::lxc_start(&template_name);
-                                match result {
-                                    Ok(_msg) => {
-
-                                        // lxc_clone_local already called lxc_clone_fixup_ip
-                                        // (unique bridge IP + MAC + wolfnet marker removal)
-                                        // Start the clone
-                                        match crate::containers::lxc_start(&clone_name) {
-                                            Ok(_) => {}
-                                            Err(ref e) => {
-                                                warn!("WolfRun: lxc_start failed for {}: {}", clone_name, e);
+                                // Both source and target are this node. A full
+                                // rootfs clone runs for minutes and the retry
+                                // path sleeps 2s — all of it goes on the
+                                // blocking pool, never the async runtime.
+                                let tmpl = template_name.clone();
+                                let clone = clone_name.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    let _ = crate::containers::lxc_stop(&tmpl);
+                                    let result = crate::containers::lxc_clone(&tmpl, &clone);
+                                    let _ = crate::containers::lxc_start(&tmpl);
+                                    match result {
+                                        Ok(_msg) => {
+                                            // lxc_clone_local already called lxc_clone_fixup_ip
+                                            // (unique bridge IP + MAC + wolfnet marker removal)
+                                            // Start the clone
+                                            if let Err(ref e) = crate::containers::lxc_start(&clone) {
+                                                warn!("WolfRun: lxc_start failed for {}: {}", clone, e);
                                                 // Retry once after delay
                                                 std::thread::sleep(std::time::Duration::from_secs(2));
-                                                if let Err(e2) = crate::containers::lxc_start(&clone_name) {
-                                                    warn!("WolfRun: lxc_start retry also failed for {}: {}", clone_name, e2);
+                                                if let Err(e2) = crate::containers::lxc_start(&clone) {
+                                                    warn!("WolfRun: lxc_start retry also failed for {}: {}", clone, e2);
                                                 }
                                             }
+                                            // Allocate a fresh wolfnet IP for the clone
+                                            if let Some(ip) = crate::containers::next_available_wolfnet_ip() {
+                                                let _ = crate::containers::lxc_attach_wolfnet(&clone, &ip);
+                                            }
+                                            true
                                         }
-                                        // Allocate a fresh wolfnet IP for the clone
-                                        if let Some(ip) = crate::containers::next_available_wolfnet_ip() {
-                                            let _ = crate::containers::lxc_attach_wolfnet(&clone_name, &ip);
+                                        Err(e) => {
+                                            warn!("WolfRun: local clone failed: {}", e);
+                                            false
                                         }
-                                        true
                                     }
-                                    Err(e) => {
-                                        warn!("WolfRun: local clone failed: {}", e);
-                                        false
-                                    }
-                                }
+                                }).await.unwrap_or(false)
                             } else if let Some(ref sn) = source_node {
                                 // Both source and target on same remote node
                                 let clone_path = format!("/api/containers/lxc/{}/clone", template_name);
@@ -1835,19 +1988,43 @@ pub async fn reconcile(
         if matches!(service.restart_policy, RestartPolicy::Always) {
             for inst in &live_instances {
                 if inst.standby { continue; }
+                // A container we can see running has recovered — forget its
+                // failure history so a later genuine stop restarts instantly.
+                if inst.status == "running" {
+                    clear_restart_backoff(&inst.container_name);
+                    continue;
+                }
                 if inst.status == "exited" || inst.status == "dead" || inst.status == "stopped" || inst.status == "created" {
                     let node = match cluster.get_node(&inst.node_id) {
                         Some(n) => n,
                         None => continue,
                     };
 
-
+                    // Back off on a container that keeps dying. Without this
+                    // the reconciler force-started EVERY non-running instance
+                    // on EVERY tick, forever: ~100 crash-looping containers
+                    // meant ~100 `docker start` per 15s pass, each of which
+                    // can sleep a second re-attaching WolfNet *and* calls
+                    // invalidate_docker_list_cache() — so the 5s list cache
+                    // never survived and every other poller (notify,
+                    // predictive, exposure, router…) re-enumerated every
+                    // time. The restarts also fight Docker's own
+                    // exponential restart backoff instead of letting it
+                    // settle. That compounding loop is what kept klas's node
+                    // pegged even after the v25.11.26/.28 fixes (2026-08-12).
+                    if !should_attempt_restart(&inst.container_name) {
+                        continue;
+                    }
 
                     if node.is_self {
-                        match service.runtime {
-                            Runtime::Docker => { let _ = crate::containers::docker_start(&inst.container_name); }
-                            Runtime::Lxc => { let _ = crate::containers::lxc_start(&inst.container_name); }
-                        }
+                        let name = inst.container_name.clone();
+                        let rt = service.runtime.clone();
+                        // Subprocess + a possible 1s WolfNet re-attach sleep —
+                        // never on the async runtime.
+                        let _ = tokio::task::spawn_blocking(move || match rt {
+                            Runtime::Docker => { let _ = crate::containers::docker_start(&name); }
+                            Runtime::Lxc => { let _ = crate::containers::lxc_start(&name); }
+                        }).await;
                     } else {
                         let urls = crate::api::build_node_urls(
                             &node.address, node.port,
@@ -1892,16 +2069,19 @@ pub async fn reconcile(
                 let node = all_nodes.iter().find(|n| node_matches_id(n, &inst.node_id));
                 if let Some(n) = node {
                     if n.is_self {
-                        match service.runtime {
+                        let name = inst.container_name.clone();
+                        let rt = service.runtime.clone();
+                        // Subprocess teardown — off the async runtime.
+                        let _ = tokio::task::spawn_blocking(move || match rt {
                             Runtime::Docker => {
-                                let _ = crate::containers::docker_stop(&inst.container_name);
-                                let _ = crate::containers::docker_remove_permanent(&inst.container_name);
+                                let _ = crate::containers::docker_stop(&name);
+                                let _ = crate::containers::docker_remove_permanent(&name);
                             }
                             Runtime::Lxc => {
-                                let _ = crate::containers::lxc_stop(&inst.container_name);
-                                let _ = crate::containers::lxc_destroy(&inst.container_name);
+                                let _ = crate::containers::lxc_stop(&name);
+                                let _ = crate::containers::lxc_destroy(&name);
                             }
-                        }
+                        }).await;
                     } else if n.online {
                         let action_path = container_action_path(&service.runtime, &inst.container_name);
                         let urls = crate::api::build_node_urls(&n.address, n.port, &action_path);
@@ -1957,14 +2137,27 @@ async fn deploy_docker(
     });
 
     if node.is_self {
-        let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
-        match crate::containers::docker_create(
-            container_name, &service.image, &service.ports, env,
-            wolfnet_ip.as_deref(), None, None, None, &service.volumes,
-        ) {
-            Ok(_) => {
-                let _ = crate::containers::docker_start(container_name);
+        // Image pull + create + start are subprocess work that can run for
+        // minutes — never on the async runtime.
+        let name = container_name.to_string();
+        let image = service.image.clone();
+        let ports = service.ports.clone();
+        let volumes = service.volumes.clone();
+        let env_owned = env.to_vec();
+        let (wolfnet_ip, created) = tokio::task::spawn_blocking(move || {
+            let wolfnet_ip = crate::containers::next_available_wolfnet_ip();
+            let created = crate::containers::docker_create(
+                &name, &image, &ports, &env_owned,
+                wolfnet_ip.as_deref(), None, None, None, &volumes,
+            );
+            if created.is_ok() {
+                let _ = crate::containers::docker_start(&name);
+            }
+            (wolfnet_ip, created)
+        }).await.unwrap_or_else(|e| (None, Err(format!("deploy task panicked: {}", e))));
 
+        match created {
+            Ok(_) => {
                 wolfrun.add_instance(&service.id, ServiceInstance {
                     node_id: node_id.to_string(),
                     container_name: container_name.to_string(),
@@ -2070,12 +2263,23 @@ async fn deploy_lxc(
     let lxc = service.lxc_config.clone().unwrap_or_default();
 
     if node.is_self {
-        match crate::containers::lxc_create(
-            container_name, &lxc.distribution, &lxc.release, &lxc.architecture, None, None,
-        ) {
-            Ok(_) => {
-                let _ = crate::containers::lxc_start(container_name);
+        // Template download + rootfs create can run for minutes — off the
+        // async runtime, like the Docker deploy path.
+        let name = container_name.to_string();
+        let (distro, release, arch) =
+            (lxc.distribution.clone(), lxc.release.clone(), lxc.architecture.clone());
+        let created = tokio::task::spawn_blocking(move || {
+            let created = crate::containers::lxc_create(
+                &name, &distro, &release, &arch, None, None,
+            );
+            if created.is_ok() {
+                let _ = crate::containers::lxc_start(&name);
+            }
+            created
+        }).await.unwrap_or_else(|e| Err(format!("deploy task panicked: {}", e)));
 
+        match created {
+            Ok(_) => {
                 wolfrun.add_instance(&service.id, ServiceInstance {
                     node_id: node_id.to_string(),
                     container_name: container_name.to_string(),
@@ -2472,16 +2676,20 @@ pub async fn check_failover(
 
             // Start the standby container
             let started = if standby_node.is_self {
-                match service.runtime {
-                    Runtime::Docker => crate::containers::docker_start(&standby.container_name).is_ok(),
+                let name = standby.container_name.clone();
+                let rt = service.runtime.clone();
+                let wn_ip = standby.wolfnet_ip.clone();
+                // Subprocess + WolfNet attach — off the async runtime.
+                tokio::task::spawn_blocking(move || match rt {
+                    Runtime::Docker => crate::containers::docker_start(&name).is_ok(),
                     Runtime::Lxc => {
                         // Attach wolfnet with the pre-allocated IP before starting
-                        if let Some(ref ip) = standby.wolfnet_ip {
-                            let _ = crate::containers::lxc_attach_wolfnet(&standby.container_name, ip);
+                        if let Some(ref ip) = wn_ip {
+                            let _ = crate::containers::lxc_attach_wolfnet(&name, ip);
                         }
-                        crate::containers::lxc_start(&standby.container_name).is_ok()
+                        crate::containers::lxc_start(&name).is_ok()
                     }
-                }
+                }).await.unwrap_or(false)
             } else {
                 let action_path = container_action_path(&service.runtime, &standby.container_name);
                 let urls = crate::api::build_node_urls(&standby_node.address, standby_node.port, &action_path);
