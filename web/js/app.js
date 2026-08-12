@@ -53535,6 +53535,29 @@ function wolfrunApiUrl(path) {
     return `/api/nodes/${clusterNode.id}/proxy/${cleanPath}`;
 }
 
+// Resolve a WolfRun instance's node_id to the cluster node it names.
+// A node is known under TWO id forms — the local registry key
+// (`node-…`) and the peer's own self_id (`ws-…`) — and an instance may
+// have been recorded under either. Matching only `id` (what this page
+// used to do) missed half the cases and fell through to an 8-character
+// truncation of the raw id, which is how "node-549" ended up on screen
+// where a server name belongs (klas, 2026-08-12). Mirrors the backend's
+// node_matches_id.
+function wolfRunFindNode(nodeId) {
+    if (!nodeId) return null;
+    const nodes = window.allNodes || [];
+    return nodes.find(n => n.id === nodeId || n.self_id === nodeId) || null;
+}
+
+// Display name for a node_id: the operator's label, else the hostname,
+// else the FULL id. Never a truncation — a partial id identifies
+// nothing, which was the whole complaint.
+function wolfRunNodeName(nodeId) {
+    const n = wolfRunFindNode(nodeId);
+    if (n) return nodeName(n);
+    return nodeId || 'unknown node';
+}
+
 async function loadWolfRunServices() {
     try {
         // Fire-and-forget reconcile — the background loop already runs every 15s,
@@ -53630,12 +53653,9 @@ function renderWolfRunServices(services) {
         const runtimeIcon = svc.runtime === 'Lxc' ? '' : '';
         const runtimeLabel = svc.runtime === 'Lxc' ? 'LXC' : 'Docker';
 
-        // Nodes — find hostnames from allNodes
+        // Nodes — resolve to server names (see wolfRunNodeName)
         const nodeIds = [...new Set(svc.instances.map(i => i.node_id))];
-        const nodeNames = nodeIds.map(nid => {
-            const n = allNodes ? (window.allNodes || []).find(n => n.id === nid) : null;
-            return n ? n.hostname : nid.substring(0, 8);
-        });
+        const nodeNames = nodeIds.map(wolfRunNodeName);
         const nodeHtml = nodeNames.length > 0
             ? nodeNames.map(h => `<span style="padding:2px 8px;border-radius:6px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);white-space:nowrap;">${h}</span>`).join(' ')
             : '<span style="color:var(--text-muted);font-size:12px;">—</span>';
@@ -53662,8 +53682,8 @@ function renderWolfRunServices(services) {
 
         // Instance detail rows (container name, node, IP, status)
         const instanceRows = svc.instances.map(inst => {
-            const instNode = (window.allNodes || []).find(n => n.id === inst.node_id);
-            const instHostname = instNode ? instNode.hostname : inst.node_id.substring(0, 12);
+            const instNode = wolfRunFindNode(inst.node_id);
+            const instHostname = wolfRunNodeName(inst.node_id);
             const isStandby = inst.standby;
             const statusColor = isStandby ? '#3b82f6' : (inst.status === 'running' ? '#10b981' : (inst.status === 'pending' ? '#eab308' : '#ef4444'));
             const statusLabel = isStandby ? 'standby' : inst.status;
@@ -54087,8 +54107,7 @@ async function showScaleProgress(serviceId, targetReplicas) {
                 for (const inst of instances) {
                     if (!seenInstances.has(inst.container_name)) {
                         seenInstances.add(inst.container_name);
-                        const nodeName = (window.allNodes || []).find(n => n.id === inst.node_id);
-                        const hostname = nodeName ? nodeName.hostname : inst.node_id.substring(0, 12);
+                        const hostname = wolfRunNodeName(inst.node_id);
                         const statusIcon = inst.status === 'running' ? '' : '';
                         const div = document.createElement('div');
                         div.id = `scale-inst-${inst.container_name}`;
