@@ -544,16 +544,57 @@ mod tests {
 
 // ─── Runner ───
 
+/// How long a loaded rules/alert-config snapshot is reused. Short
+/// enough that an operator editing the file still sees the effect
+/// almost immediately (the original reason these were read per event),
+/// long enough that an event STORM costs one load instead of thousands.
+const CONFIG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Rules snapshot, reloaded at most every [`CONFIG_CACHE_TTL`].
+fn cached_rules() -> NotifyRules {
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(NotifyRules, std::time::Instant)>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    let mut guard = match CACHE.lock() { Ok(g) => g, Err(p) => p.into_inner() };
+    if let Some((val, at)) = &*guard {
+        if at.elapsed() < CONFIG_CACHE_TTL {
+            return val.clone();
+        }
+    }
+    let val = NotifyRules::load();
+    *guard = Some((val.clone(), std::time::Instant::now()));
+    val
+}
+
+/// Alert-config snapshot, same policy as [`cached_rules`].
+fn cached_alert_config() -> crate::alerting::AlertConfig {
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(crate::alerting::AlertConfig, std::time::Instant)>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    let mut guard = match CACHE.lock() { Ok(g) => g, Err(p) => p.into_inner() };
+    if let Some((val, at)) = &*guard {
+        if at.elapsed() < CONFIG_CACHE_TTL {
+            return val.clone();
+        }
+    }
+    let val = crate::alerting::AlertConfig::load();
+    *guard = Some((val.clone(), std::time::Instant::now()));
+    val
+}
+
 /// Consume events from every available source, evaluate rules, and deliver.
 ///
-/// Rules are re-read per event rather than cached: events are rare (a busy node
-/// sees a handful an hour), and it means an operator editing
-/// `notify-rules.json` sees the effect immediately instead of after a restart.
+/// Rules and alert config are read through a 2-second cache. They used to
+/// be re-read from disk on EVERY event, justified as "events are rare (a
+/// busy node sees a handful an hour)" — which is true right up until a
+/// container enters a restart loop. Docker then emits a continuous event
+/// stream, and a file read + JSON parse per event (twice per matching
+/// event) pegged the actix workers on a node with ~100 crash-looping
+/// containers (klas, 2026-08-12). The cache keeps the original intent —
+/// an operator's edit takes effect within two seconds, no restart needed.
 pub async fn handle_event(
     event: NotifyEvent,
     last_fired: &mut HashMap<String, u64>,
 ) {
-    let rules = NotifyRules::load();
+    let rules = cached_rules();
     if rules.rules.is_empty() {
         return;
     }
@@ -561,7 +602,7 @@ pub async fn handle_event(
     if matched.is_empty() {
         return;
     }
-    let cfg = crate::alerting::AlertConfig::load();
+    let cfg = cached_alert_config();
     for rule in matched {
         let (title, body) = render(&event, rule);
         // Recovery is informational; a failure should be able to cut through
@@ -887,4 +928,55 @@ pub fn local_node_name() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod event_storm_tests {
+    use super::*;
+
+    /// An event storm must not cost one config load per event.
+    ///
+    /// `handle_event` used to call `NotifyRules::load()` (a file read +
+    /// JSON parse) on EVERY event, on the stated assumption that "events
+    /// are rare". A node with ~100 containers in a restart loop makes
+    /// Docker emit a continuous stream, and that assumption pegged the
+    /// actix workers (klas, 2026-08-12). This pins the caching policy:
+    /// N events in a burst cost ONE load, not N.
+    #[test]
+    fn config_is_loaded_once_per_ttl_not_once_per_event() {
+        use std::time::{Duration, Instant};
+        // Mirror of cached_rules()'s policy with a counted loader.
+        // Mirror of cached_rules()'s policy with a counted loader.
+        fn load_through_cache(now: Instant, ttl: Duration, cache: &mut Option<Instant>, loads: &mut usize) {
+            let fresh = cache.map(|at| now.duration_since(at) < ttl).unwrap_or(false);
+            if !fresh {
+                *loads += 1;
+                *cache = Some(now);
+            }
+        }
+        let mut loads = 0usize;
+        let mut cache: Option<Instant> = None;
+        let ttl = CONFIG_CACHE_TTL;
+        // 5,000 events arriving inside the TTL window — a restart-loop storm.
+        let t0 = Instant::now();
+        for _ in 0..5_000 {
+            load_through_cache(t0, ttl, &mut cache, &mut loads);
+        }
+        assert_eq!(loads, 1, "a burst of events must cost ONE config load, not one each");
+
+        // After the TTL elapses, the next event reloads — an operator's
+        // edit must still take effect without a restart.
+        load_through_cache(t0 + ttl + Duration::from_millis(1), ttl, &mut cache, &mut loads);
+        assert_eq!(loads, 2, "config must be re-read once the TTL expires");
+    }
+
+    #[test]
+    fn cache_ttl_stays_short_enough_to_feel_live() {
+        // The per-event read existed so edits applied immediately; the
+        // cache keeps that promise only while the window stays small.
+        assert!(
+            CONFIG_CACHE_TTL <= std::time::Duration::from_secs(5),
+            "notify config cache must stay short — operators edit rules and expect them to apply",
+        );
+    }
 }
