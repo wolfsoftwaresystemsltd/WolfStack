@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.11.28: a container restart loop no longer re-reads the rules file thousands of times a second** _(2026-08-12 — [`b430e43f`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b430e43f321208e0500f199ec426b93141f734ea))_
+- **v25.11.27: the Unraid wolfnet supervisor can no longer spawn a daemon every minute** _(2026-08-12 — [`dd5e0eb4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dd5e0eb4678212e70433fae072438043a3893eb6))_
 - **v25.11.26: WolfRun stops re-enumerating a node's containers once per instance** _(2026-08-12 — [`f2d61397`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f2d61397d4c44462313db97e7d7d36e20ad2627a))_
 - **v25.11.25: a task's full outcome text outlives its popup** _(2026-08-12 — [`96bee4d1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/96bee4d19ee7678908b859fcbb6a207cbf248cf3))_
 - **v25.11.24: container logs get Refresh and auto-refresh — and stop rendering log lines as HTML** _(2026-08-12 — [`39b1cc74`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/39b1cc742cc68e2e442a125f2a5648ff59466c76))_
