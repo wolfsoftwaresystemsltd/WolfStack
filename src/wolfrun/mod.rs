@@ -1229,7 +1229,6 @@ pub async fn reconcile(
         let existing = live_instances.iter()
             .filter(|i| !i.standby && i.status != "lost")
             .count() as u32;
-        let running = live_instances.iter().filter(|i| i.status == "running" && !i.standby).count() as u32;
         let desired = service.replicas;
 
         // 3. Scale up if under-provisioned (based on EXISTING count, not running)
