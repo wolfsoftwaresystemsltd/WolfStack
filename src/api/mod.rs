@@ -11884,7 +11884,11 @@ pub(crate) async fn wolfnet_ip_active_elsewhere(state: &web::Data<AppState>, ip:
                     .header("X-WolfStack-Secret", &secret)
                     .send().await
                 else { continue };
-                if !resp.status().is_success() { continue; }
+                // Drain before leaving — a bare `continue` strands the socket
+                // in CLOSE-WAIT (see drain_response). This runs on every
+                // container start, against every peer, so a peer answering
+                // non-2xx leaks steadily under any start-heavy workload.
+                if !resp.status().is_success() { drain_response(resp).await; continue; }
                 let Ok(ips) = resp.json::<Vec<String>>().await else { continue };
                 if ips.iter().any(|a| a == &ip) { return Some(label); }
                 break 'ports; // definitive answer; this node doesn't hold it
@@ -43629,6 +43633,7 @@ pub async fn install_setup_sh(_req: HttpRequest) -> HttpResponse {
     };
     if !resp.status().is_success() {
         let status = resp.status();
+        drain_response(resp).await;
         return HttpResponse::BadGateway()
             .insert_header(("X-WolfStack-Install-Cache", "upstream-error"))
             .body(format!("# Upstream returned HTTP {}.\n# Cloud-init's GitHub fallback should now run.\nexit 1\n", status));

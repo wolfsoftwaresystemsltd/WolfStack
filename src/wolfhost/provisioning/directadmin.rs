@@ -366,7 +366,9 @@ impl DaClient {
             .map_err(|e| format!("DA request failed: {}", e))?;
 
         if !resp.status().is_success() {
-            return Err(format!("DA returned HTTP {}", resp.status()));
+            let status = resp.status();
+            let _ = resp.bytes().await; // drain so the socket is released
+            return Err(format!("DA returned HTTP {}", status));
         }
 
         let body = resp.text().await.map_err(|e| format!("DA response read error: {}", e))?;
@@ -1339,7 +1341,9 @@ impl DaClient {
             .send().await
             .map_err(|e| format!("Backup download request failed: {}", e))?;
         if !resp.status().is_success() {
-            return Err(format!("DA returned HTTP {} for backup download", resp.status()));
+            let status = resp.status();
+            let _ = resp.bytes().await; // drain so the socket is released
+            return Err(format!("DA returned HTTP {} for backup download", status));
         }
         let bytes = resp.bytes().await
             .map_err(|e| format!("Backup body read failed: {}", e))?;

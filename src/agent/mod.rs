@@ -2127,6 +2127,25 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                     // intermittent container/VM WolfNet IP unreachability
                     // from the VPS while peer-to-peer ping kept working.
                     if !resp.status().is_success() {
+                        // DRAIN BEFORE LEAVING. reqwest cannot release the
+                        // socket until the body is consumed, so a bare
+                        // `continue` here strands the connection: the peer
+                        // FINs after its error response and our side never
+                        // closes, parking the socket in CLOSE-WAIT forever.
+                        //
+                        // This is the highest-frequency dial in the product
+                        // — every peer, every 10s — so against a peer that
+                        // answers non-2xx it leaks ~8,640 sockets per day.
+                        // klas's hemulen reached 18,122 CLOSE-WAIT across two
+                        // such peers and exhausted the 65,535 fd table, at
+                        // which point actix_server could no longer accept
+                        // ("No file descriptors available (os error 24)") and
+                        // the node dropped off the cluster (2026-08-12).
+                        //
+                        // A healthy peer answers 200 and is drained by
+                        // `resp.json()` below, which is why this never
+                        // surfaced on a fleet whose peers are all well.
+                        let _ = resp.bytes().await;
                         continue;
                     }
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
