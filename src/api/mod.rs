@@ -14235,6 +14235,28 @@ pub fn migration_create(tasks: &MigrationTasks) -> String {
         .unwrap_or_default()
         .as_secs();
     if let Ok(mut map) = tasks.write() {
+        // Evict old finished tasks. The map had no eviction at all, so
+        // every migration/protect/backup task ever started stayed in
+        // memory for the process lifetime. Finished tasks are kept for a
+        // day so the operator can still read the full outcome text
+        // afterwards (RutgerDiehard, 2026-08-08: "where can I find this
+        // full text?"), then the newest MAX_KEPT survive regardless of
+        // age. Unfinished tasks are never evicted — something is still
+        // polling them.
+        const KEEP_FINISHED_SECS: u64 = 24 * 3600;
+        const MAX_KEPT: usize = 200;
+        map.retain(|_, t| !t.completed || now.saturating_sub(t.started_at) < KEEP_FINISHED_SECS);
+        if map.len() > MAX_KEPT {
+            let mut finished: Vec<(String, u64)> = map.iter()
+                .filter(|(_, t)| t.completed)
+                .map(|(k, t)| (k.clone(), t.started_at))
+                .collect();
+            finished.sort_by_key(|(_, at)| *at); // oldest first
+            let excess = map.len() - MAX_KEPT;
+            for (k, _) in finished.into_iter().take(excess) {
+                map.remove(&k);
+            }
+        }
         map.insert(id.clone(), MigrationTask {
             id: id.clone(),
             stage: "preflight".to_string(),
@@ -14264,6 +14286,28 @@ pub async fn migration_status(
         }
     }
     HttpResponse::NotFound().json(serde_json::json!({"error": "Task not found"}))
+}
+
+/// GET /api/migration/tasks — recent tasks on this node, newest first,
+/// with their FULL final message and error text.
+///
+/// Every task's outcome used to be readable only through
+/// `/api/migration/{id}/status`, which needs an id the operator no
+/// longer has once the popup is gone — so a migration that succeeded
+/// "but said it couldn't copy a file" left nowhere to read the detail
+/// (RutgerDiehard, 2026-08-08). Tasks are kept for 24h (see
+/// `migration_create`), so this is the record that outlives the toast.
+pub async fn migration_tasks_list(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut tasks: Vec<MigrationTask> = match state.migration_tasks.read() {
+        Ok(map) => map.values().cloned().collect(),
+        Err(_) => Vec::new(),
+    };
+    tasks.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    HttpResponse::Ok().json(serde_json::json!({ "tasks": tasks }))
 }
 
 /// POST /api/containers/lxc/{name}/migrate-external — migrate to external cluster (background task)
@@ -44917,6 +44961,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/lxc/{name}/disk/resize", web::post().to(lxc_disk_resize))
         .route("/api/containers/lxc/{name}/disk/migrate", web::post().to(lxc_disk_migrate))
         .route("/api/containers/lxc/{name}/migrate-external", web::post().to(lxc_migrate_external))
+        // Registered BEFORE the {id} route: actix matches in order, and
+        // "tasks" would otherwise be swallowed as a task id.
+        .route("/api/migration/tasks", web::get().to(migration_tasks_list))
         .route("/api/migration/{id}/status", web::get().to(migration_status))
         // Network Conflicts
         .route("/api/network/conflicts", web::get().to(network_conflicts))
@@ -47689,5 +47736,87 @@ mod operator_auth_tests {
         // their node proxied it, stamping both headers.
         assert!(actor_is_operator(true, Some("paul")));
         assert!(actor_is_operator(true, Some("admin@example.com")));
+    }
+}
+
+#[cfg(test)]
+mod migration_task_retention_tests {
+    use super::MigrationTask;
+    use std::collections::HashMap;
+
+    fn task(id: &str, completed: bool, started_at: u64) -> MigrationTask {
+        MigrationTask {
+            id: id.into(),
+            stage: if completed { "done".into() } else { "upload".into() },
+            message: "…".into(),
+            completed,
+            error: None,
+            started_at,
+            percent: None,
+            bytes_done: None,
+            bytes_total: None,
+        }
+    }
+
+    /// Mirror of the eviction in `migration_create`. Kept in lockstep
+    /// with it — the map previously had NO eviction at all and grew for
+    /// the process lifetime.
+    fn evict(map: &mut HashMap<String, MigrationTask>, now: u64) {
+        const KEEP_FINISHED_SECS: u64 = 24 * 3600;
+        const MAX_KEPT: usize = 200;
+        map.retain(|_, t| !t.completed || now.saturating_sub(t.started_at) < KEEP_FINISHED_SECS);
+        if map.len() > MAX_KEPT {
+            let mut finished: Vec<(String, u64)> = map.iter()
+                .filter(|(_, t)| t.completed)
+                .map(|(k, t)| (k.clone(), t.started_at))
+                .collect();
+            finished.sort_by_key(|(_, at)| *at);
+            let excess = map.len() - MAX_KEPT;
+            for (k, _) in finished.into_iter().take(excess) {
+                map.remove(&k);
+            }
+        }
+    }
+
+    #[test]
+    fn finished_tasks_survive_a_day_so_their_full_text_is_still_readable() {
+        // The whole point of retention: the operator reads the outcome
+        // AFTER the popup is gone (RutgerDiehard, 2026-08-08).
+        let now = 1_000_000u64;
+        let mut map = HashMap::new();
+        map.insert("recent".into(), task("recent", true, now - 3600));       // 1h old
+        map.insert("yesterday".into(), task("yesterday", true, now - 90_000)); // >24h
+        evict(&mut map, now);
+        assert!(map.contains_key("recent"), "a task finished an hour ago must still be readable");
+        assert!(!map.contains_key("yesterday"), "day-old finished tasks are evicted");
+    }
+
+    #[test]
+    fn running_tasks_are_never_evicted() {
+        // Something is still polling them; dropping one would make a
+        // live migration un-followable.
+        let now = 1_000_000u64;
+        let mut map = HashMap::new();
+        map.insert("ancient-but-running".into(), task("ancient-but-running", false, 0));
+        for i in 0..500 {
+            map.insert(format!("done-{}", i), task("d", true, now - i));
+        }
+        evict(&mut map, now);
+        assert!(map.contains_key("ancient-but-running"), "an unfinished task must never be evicted");
+    }
+
+    #[test]
+    fn the_map_is_bounded_and_drops_the_oldest_finished_first() {
+        let now = 1_000_000u64;
+        let mut map = HashMap::new();
+        // 300 finished tasks, all within the retention window.
+        for i in 0..300u64 {
+            map.insert(format!("t{:03}", i), task("t", true, now - (300 - i)));
+        }
+        evict(&mut map, now);
+        assert_eq!(map.len(), 200, "map must be bounded — it previously grew forever");
+        // The newest survive: t299 is newest (started_at closest to now).
+        assert!(map.contains_key("t299"), "newest finished task must survive");
+        assert!(!map.contains_key("t000"), "oldest finished task is dropped first");
     }
 }

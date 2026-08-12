@@ -31745,10 +31745,22 @@ async function doMigrateLxc(name) {
             const finishMsg = result.ok ? (result.message || 'Migration complete') : (result.error || 'Migration failed');
             vmMigrateProgressFinish(steps, result.ok, finishMsg, result.failedStage);
             if (result.ok) {
-                updateTaskLogEntry(logTaskId, { status: 'completed', description: `Migrate LXC '${name}' → ${lxcTargetLabel}: ${result.message || 'Done'}` });
+                // Full server text kept as an expandable detail line: a
+                // migration can succeed and still report something the
+                // operator needs (a file it couldn't copy), and that text
+                // used to live only in the popup (RutgerDiehard).
+                updateTaskLogEntry(logTaskId, {
+                    status: 'completed',
+                    description: `Migrate LXC '${name}' → ${lxcTargetLabel}: ${result.message || 'Done'}`,
+                    logLines: [result.message || 'Done'],
+                });
                 setTimeout(loadLxcContainers, 500);
             } else {
-                updateTaskLogEntry(logTaskId, { status: 'failed', description: `Migrate LXC '${name}': ${result.error || 'Failed'}` });
+                updateTaskLogEntry(logTaskId, {
+                    status: 'failed',
+                    description: `Migrate LXC '${name}': ${result.error || 'Failed'}`,
+                    logLines: [result.error || 'Failed'],
+                });
             }
         } catch (e) {
             clearInterval(elapsedTimer);
@@ -32118,11 +32130,19 @@ async function doMigrateVm(name) {
         }
         if (final.ok) {
             vmMigrateProgressFinish(steps, true, final.message || 'VM migrated successfully');
-            updateTaskLogEntry(logTaskId, { status: 'completed', description: `Migrated VM '${name}' to ${targetLabel}` });
+            updateTaskLogEntry(logTaskId, {
+                status: 'completed',
+                description: `Migrated VM '${name}' to ${targetLabel}`,
+                logLines: [final.message || 'VM migrated successfully'],
+            });
             setTimeout(loadVms, 500);
         } else {
             vmMigrateProgressFinish(steps, false, final.error || 'Unknown error', final.failedStage);
-            updateTaskLogEntry(logTaskId, { status: 'failed', description: `Migrate VM '${name}': ${final.error || 'Unknown error'}` });
+            updateTaskLogEntry(logTaskId, {
+                status: 'failed',
+                description: `Migrate VM '${name}': ${final.error || 'Unknown error'}`,
+                logLines: [final.error || 'Unknown error'],
+            });
         }
     } catch (e) {
         clearInterval(elapsedTimer);
@@ -32439,11 +32459,19 @@ async function doMigrateVmDiskStorage(name, btn) {
         clearInterval(elapsedTimer);
         if (final.ok) {
             vmMigrateProgressFinish(steps, true, final.message || 'Disk migration complete');
-            updateTaskLogEntry(logTaskId, { status: 'completed', description: final.message || `Migrated '${name}' disks to ${target}` });
+            updateTaskLogEntry(logTaskId, {
+                status: 'completed',
+                description: final.message || `Migrated '${name}' disks to ${target}`,
+                logLines: [final.message || 'Disk migration complete'],
+            });
             if (typeof loadVms === 'function') loadVms();
         } else {
             vmMigrateProgressFinish(steps, false, final.error || 'Unknown error', final.failedStage);
-            updateTaskLogEntry(logTaskId, { status: 'failed', description: `VM '${name}' disk migrate: ${final.error || 'Unknown error'}` });
+            updateTaskLogEntry(logTaskId, {
+                status: 'failed',
+                description: `VM '${name}' disk migrate: ${final.error || 'Unknown error'}`,
+                logLines: [final.error || 'Unknown error'],
+            });
         }
     } catch (e) {
         clearInterval(elapsedTimer);
