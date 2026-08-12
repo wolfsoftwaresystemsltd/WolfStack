@@ -330,3 +330,92 @@ fn websocket_bridges_do_not_swallow_stream_errors() {
         violations.join("\n  "),
     );
 }
+
+/// A `reqwest::Response` that leaves scope without its body being read never
+/// releases its socket. On an error path that exits early — `continue`,
+/// `break`, `return` — that is a per-call leak, and the callers that check
+/// `.status()` are almost always the ones on a timer dialling every peer.
+#[test]
+fn non_success_response_is_drained_before_early_exit() {
+    const NEEDLE: &str = "status().is_success()";
+
+    let mut violations = Vec::new();
+
+    for path in source_files() {
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        let src = strip_line_comments(&raw);
+        let display = path.display().to_string();
+
+        let mut idx = 0;
+        while let Some(rel) = src[idx..].find(NEEDLE) {
+            let at = idx + rel;
+            idx = at + NEEDLE.len();
+
+            // Only the negated form (`if !resp.status().is_success()`) guards
+            // an early exit; the positive form falls through to real work.
+            let back = at.saturating_sub(40);
+            if !src[back..at].contains("if !") {
+                continue;
+            }
+
+            // Walk the guard body from its `{` to the matching `}`.
+            let Some(open_rel) = src[at..].find('{') else { continue };
+            let open = at + open_rel;
+            let mut depth = 0usize;
+            let mut close = None;
+            for (i, c) in src[open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 { close = Some(open + i); break; }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else { continue };
+            let body = &src[open..=close];
+
+            // A long body is doing real work (building an error, logging
+            // context) rather than bailing out — out of scope for this rule.
+            if body.matches('\n').count() > 6 {
+                continue;
+            }
+
+            let exits = body.contains("continue")
+                || body.contains("break")
+                || body.contains("return");
+            let drains = body.contains(".bytes()")
+                || body.contains(".json()")
+                || body.contains(".text()")
+                || body.contains("drain_response")
+                || body.contains("send_and_drain");
+
+            if exits && !drains {
+                let line = src[..at].matches('\n').count() + 1;
+                violations.push(format!("{}:{}", display, line));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "\n\n\
+         ═══ RESOURCE SAFETY VIOLATION: response dropped undrained on an early exit ═══\n\n\
+         {} site(s):\n  {}\n\n\
+         reqwest cannot release a connection until the response body is\n\
+         consumed. A guard that inspects only `.status()` and then exits\n\
+         leaves the socket alive; when the peer has already sent FIN it parks\n\
+         in CLOSE-WAIT and never leaves.\n\n\
+         Measured on a user's node 2026-08-12: the cluster poller (every peer,\n\
+         every 10s) hit two peers answering non-2xx and leaked ~8,640 sockets\n\
+         per peer per day — 18,122 in CLOSE-WAIT, fd table exhausted at 65,535,\n\
+         actix_server failing accept() with 'No file descriptors available'.\n\
+         It never reproduced in-house because a healthy peer answers 200 and\n\
+         is drained by the `.json()` on the success path.\n\n\
+         FIX: drain before leaving — `drain_response(resp).await;` where that\n\
+         helper is in scope, otherwise `let _ = resp.bytes().await;`.\n",
+        violations.len(),
+        violations.join("\n  "),
+    );
+}

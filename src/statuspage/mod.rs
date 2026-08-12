@@ -1054,7 +1054,9 @@ async fn remote_container_running_fallback(
     let client = &*SP_RPC_CLIENT;
     for url in &urls {
         if let Ok(resp) = client.get(url).header("X-WolfStack-Secret", cluster_secret).send().await {
-            if !resp.status().is_success() { continue; }
+            // Drain before leaving — a bare `continue` strands the socket
+            // in CLOSE-WAIT (see the drain_response doc comment above).
+            if !resp.status().is_success() { drain_response(resp).await; continue; }
             if let Ok(list) = resp.json::<Vec<serde_json::Value>>().await {
                 let running = list.iter().any(|c| {
                     c.get("runtime").and_then(|r| r.as_str()) == Some(runtime)

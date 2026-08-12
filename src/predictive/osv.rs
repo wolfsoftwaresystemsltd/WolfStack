@@ -1599,7 +1599,9 @@ fn osv_query_batch(
             .send()
             .map_err(|e| format!("OSV batch POST failed: {}", e))?;
         if !resp.status().is_success() {
-            return Err(format!("OSV batch returned HTTP {}", resp.status()));
+            let status = resp.status();
+            let _ = resp.bytes(); // drain so the socket is released
+            return Err(format!("OSV batch returned HTTP {}", status));
         }
         let parsed: OsvBatchResponse = resp.json()
             .map_err(|e| format!("OSV batch parse: {}", e))?;
@@ -1633,7 +1635,9 @@ fn osv_fetch_vuln(
         .send()
         .map_err(|e| format!("OSV vuln GET {}: {}", id, e))?;
     if !resp.status().is_success() {
-        return Err(format!("OSV vuln {} returned HTTP {}", id, resp.status()));
+        let status = resp.status();
+        let _ = resp.bytes(); // drain so the socket is released
+        return Err(format!("OSV vuln {} returned HTTP {}", id, status));
     }
     let full: OsvFullVuln = resp.json()
         .map_err(|e| format!("OSV vuln {} parse: {}", id, e))?;
