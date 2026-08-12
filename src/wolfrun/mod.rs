@@ -1006,10 +1006,33 @@ pub async fn reconcile(
     // pools; we now use one for the lifetime of the process.
     let client = &*RPC_CLIENT_LONG;
 
+    // A container list is a per-NODE fact, not a per-instance one, but
+    // this loop fetched it INSIDE the per-instance loop: a service with
+    // N instances on a node enumerated that node's containers N times,
+    // every tick, forever. Locally that is N full docker/lxc
+    // enumerations (the `_cached` helpers exist precisely to "avoid
+    // spawning dozens of subprocesses per API request" and were being
+    // bypassed); remotely it is N HTTP round-trips fetching the same
+    // list. It is quadratic in (instances × containers), so klas's node
+    // — ~100 instances from the crash-loop runaway, 100+ containers —
+    // burned 4h48m of CPU in 40 minutes of wall clock with a 10 GB
+    // memory peak, mostly system time (2026-08-12).
+    //
+    // Fetched at most once per node per pass now. A pass is also the
+    // right consistency boundary: every instance on a node is judged
+    // against ONE snapshot, so a flaky node can't report a container
+    // present for one instance and missing for the next.
+    let mut local_lists: HashMap<&'static str, Vec<crate::containers::ContainerInfo>> = HashMap::new();
+    let mut remote_lists: HashMap<(String, &'static str), Option<Vec<serde_json::Value>>> = HashMap::new();
+
     for service in &services {
         // 1. Check actual state — query each instance's node for its container status
         let mut live_instances: Vec<ServiceInstance> = Vec::new();
         let all_nodes = cluster.get_all_nodes();
+        let rt_key: &'static str = match service.runtime {
+            Runtime::Docker => "docker",
+            Runtime::Lxc => "lxc",
+        };
 
         for inst in &service.instances {
             let node = all_nodes.iter().find(|n| node_matches_id(n, &inst.node_id));
@@ -1032,11 +1055,12 @@ pub async fn reconcile(
                         }
                         continue;
                     }
-                    // Local node — query containers directly (avoids HTTP self-call issues)
-                    let containers = match service.runtime {
+                    // Local node — query containers directly (avoids HTTP self-call
+                    // issues). Once per pass, not once per instance.
+                    let containers = local_lists.entry(rt_key).or_insert_with(|| match service.runtime {
                         Runtime::Docker => crate::containers::docker_list_all(),
                         Runtime::Lxc => crate::containers::lxc_list_all(),
-                    };
+                    });
                     let found = containers.iter().find(|c| c.name == inst.container_name);
                     if let Some(c) = found {
                         // Extract wolfnet IP from ip_address field (format: "x.x.x.5 (wolfnet)" or "192.168.1.1, x.x.x.5 (wolfnet)")
@@ -1075,29 +1099,45 @@ pub async fn reconcile(
                     }
                 }
                 Some(n) if n.online => {
-                    let urls = crate::api::build_node_urls(
-                        &n.address, n.port,
-                        container_list_path(&service.runtime),
-                    );
-                    let mut found = false;
-                    let mut got_container_list = false; // true if we successfully fetched & parsed the list
-                    for url in &urls {
-                        match client.get(url)
-                            .header("X-WolfStack-Secret", cluster_secret)
-                            .send().await
-                        {
-                            Ok(resp) => {
-                                if !resp.status().is_success() {
-                                    // HTTP error (401, 403, 500, etc.) — can't verify
-                                    // container state. Drain the body before breaking so
-                                    // reqwest can return the socket to the pool; dropping
-                                    // the Response unconsumed was a CLOSE_WAIT leak.
-                                    let _ = resp.bytes().await;
+                    // One fetch per (node, runtime) per pass — see the
+                    // cache note above the service loop.
+                    let cache_key = (n.id.clone(), rt_key);
+                    if !remote_lists.contains_key(&cache_key) {
+                        let urls = crate::api::build_node_urls(
+                            &n.address, n.port,
+                            container_list_path(&service.runtime),
+                        );
+                        let mut fetched: Option<Vec<serde_json::Value>> = None;
+                        for url in &urls {
+                            match client.get(url)
+                                .header("X-WolfStack-Secret", cluster_secret)
+                                .send().await
+                            {
+                                Ok(resp) => {
+                                    if !resp.status().is_success() {
+                                        // HTTP error (401, 403, 500, etc.) — can't verify
+                                        // container state. Drain the body before breaking so
+                                        // reqwest can return the socket to the pool; dropping
+                                        // the Response unconsumed was a CLOSE_WAIT leak.
+                                        let _ = resp.bytes().await;
+                                        break;
+                                    }
+                                    if let Ok(list) = resp.json::<Vec<serde_json::Value>>().await {
+                                        fetched = Some(list);
+                                    }
                                     break;
                                 }
-                                if let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
-                                    got_container_list = true;
-                                    for c in &containers {
+                                Err(_) => continue,
+                            }
+                        }
+                        remote_lists.insert(cache_key.clone(), fetched);
+                    }
+                    let listing = remote_lists.get(&cache_key).and_then(|o| o.as_ref());
+                    // true if we successfully fetched & parsed the list
+                    let got_container_list = listing.is_some();
+                    let mut found = false;
+                    if let Some(containers) = listing {
+                                    for c in containers {
                                         let name = c["name"].as_str().unwrap_or("");
                                         if name == inst.container_name {
                                             let state = c["state"].as_str()
@@ -1127,11 +1167,6 @@ pub async fn reconcile(
                                             break;
                                         }
                                     }
-                                }
-                                break;
-                            }
-                            Err(_) => continue,
-                        }
                     }
                     if !found {
                         if inst.status == "pending" {
@@ -2583,5 +2618,44 @@ mod replica_count_tests {
         assert_eq!(plan(10, 99, 10), 0, "over-ceiling must never create — this is the runaway brake");
         // Ceiling below desired (mis-set config) still honours desired.
         assert_eq!(plan(5, 4, 1), 1);
+    }
+}
+
+#[cfg(test)]
+mod reconcile_list_fetch_tests {
+    use std::collections::HashMap;
+
+    /// Mirrors the reconcile pass's list-fetch policy: a container list
+    /// is fetched at most once per (node, runtime) per pass, however
+    /// many instances live on that node. The old code fetched inside
+    /// the per-instance loop, which is quadratic in
+    /// (instances × containers) — 4h48m of CPU in 40 minutes of wall
+    /// clock on a node with ~100 instances (klas, 2026-08-12).
+    fn fetches_for(instances_per_node: &[(&str, usize)]) -> usize {
+        let mut cache: HashMap<(String, &'static str), usize> = HashMap::new();
+        let mut fetches = 0;
+        for (node, count) in instances_per_node {
+            for _inst in 0..*count {
+                let key = (node.to_string(), "docker");
+                if !cache.contains_key(&key) {
+                    fetches += 1; // the expensive part: enumerate the node
+                    cache.insert(key, 1);
+                }
+            }
+        }
+        fetches
+    }
+
+    #[test]
+    fn one_list_fetch_per_node_regardless_of_instance_count() {
+        // klas's shape: ~100 instances across two nodes.
+        assert_eq!(fetches_for(&[("node-549", 99), ("node-473", 1)]), 2,
+            "two nodes must cost two fetches — this was 100 before");
+        // Degenerate and ordinary shapes.
+        assert_eq!(fetches_for(&[("node-549", 1)]), 1);
+        assert_eq!(fetches_for(&[]), 0);
+        // Growth in instances must NOT grow fetches.
+        assert_eq!(fetches_for(&[("a", 1000)]), 1,
+            "instance count must not drive enumeration count");
     }
 }
