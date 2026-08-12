@@ -11811,6 +11811,11 @@ pub async fn docker_logs(req: HttpRequest, state: web::Data<AppState>, path: web
 #[derive(Deserialize)]
 pub struct ContainerActionRequest {
     pub action: String,  // start, stop, restart, remove, pause, unpause
+    /// Skip the managed-container guard on remove/destroy. Set by the UI
+    /// after the operator explicitly confirms force-removal, and by
+    /// WolfRun itself when tearing down its own instances.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// POST /api/containers/docker/{id}/action — control Docker container
@@ -11906,6 +11911,24 @@ pub async fn docker_action(
         return HttpResponse::Conflict().json(serde_json::json!({
             "error": format!("WolfNet IP already in use: {} (active on {})", ip.trim(), holder)
         }));
+    }
+    // Removing a WolfRun-managed container is futile — the reconciler
+    // recreates it within seconds — and users read the reappearance as
+    // "delete is broken" (klas, 2026-08-12). Refuse unless forced; the
+    // UI turns this 409 into an explanation plus a force-remove confirm.
+    if body.action == "remove" && !body.force {
+        let managers = state.wolfrun.services_managing(&id);
+        if !managers.is_empty() {
+            let names: Vec<String> = managers.into_iter().map(|(_, name)| name).collect();
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!(
+                    "'{}' is managed by WolfRun service '{}' — WolfRun will recreate it within seconds. Delete the service on the WolfRun page to remove it for good.",
+                    id, names.join("', '")
+                ),
+                "wolfrun_managed": true,
+                "services": names,
+            }));
+        }
     }
     let result = match body.action.as_str() {
         "start" => containers::docker_start(&id),
@@ -12162,6 +12185,23 @@ pub async fn lxc_action(
                 name
             )
         }));
+    }
+    // Destroying a WolfRun-managed container is futile — the reconciler
+    // recreates it within seconds (klas, 2026-08-12). Refuse unless
+    // forced; mirrors the Docker guard in docker_action.
+    if body.action == "destroy" && !body.force {
+        let managers = state.wolfrun.services_managing(&name);
+        if !managers.is_empty() {
+            let names: Vec<String> = managers.into_iter().map(|(_, svc_name)| svc_name).collect();
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!(
+                    "'{}' is managed by WolfRun service '{}' — WolfRun will recreate it within seconds. Delete the service on the WolfRun page to remove it for good.",
+                    name, names.join("', '")
+                ),
+                "wolfrun_managed": true,
+                "services": names,
+            }));
+        }
     }
     let result = match body.action.as_str() {
         "start" => containers::lxc_start(&name),
@@ -35725,93 +35765,30 @@ pub async fn wolfrun_delete(req: HttpRequest, state: web::Data<AppState>, path: 
 
     // Clean up cloned containers (names containing "wolfrun") but keep the original template
     if let Some(svc) = state.wolfrun.get(&id) {
-        // Clean up LB iptables rules
-        if let Some(ref vip) = svc.service_ip {
-            crate::wolfrun::remove_lb_rules_for_vip(vip);
+        // Clean up LB iptables rules (subprocess-backed — blocking pool)
+        if let Some(vip) = svc.service_ip.clone() {
+            let _ = web::block(move || crate::wolfrun::remove_lb_rules_for_vip(&vip)).await;
         }
-
-        let client = &*API_HTTP_CLIENT;
-
-        for inst in &svc.instances {
-            // Destroy clones (contain "wolfrun" in name) and standby instances, leave original template
-            if !inst.container_name.contains("wolfrun") && !inst.standby {
-                kept.push(inst.container_name.clone());
-                continue;
-            }
-
-            if let Some(node) = state.cluster.get_node(&inst.node_id) {
-                if node.is_self {
-                    match svc.runtime {
-                        crate::wolfrun::Runtime::Docker => {
-                            let _ = crate::containers::docker_stop(&inst.container_name);
-                            let _ = crate::containers::docker_remove_permanent(&inst.container_name);
-                        }
-                        crate::wolfrun::Runtime::Lxc => {
-                            let _ = crate::containers::lxc_stop(&inst.container_name);
-                            let _ = crate::containers::lxc_destroy(&inst.container_name);
-                        }
-                    }
-                    destroyed.push(inst.container_name.clone());
-                } else {
-                    // Remote node: use the action API to stop then remove
-                    let action_path = match svc.runtime {
-                        crate::wolfrun::Runtime::Docker => format!("/api/containers/docker/{}/action", inst.container_name),
-                        crate::wolfrun::Runtime::Lxc => format!("/api/containers/lxc/{}/action", inst.container_name),
-                    };
-                    let action_urls = build_node_urls(&node.address, node.port, &action_path);
-
-                    // Stop the container first
-                    for url in &action_urls {
-                        match client.post(url)
-                            .timeout(std::time::Duration::from_secs(30))
-                            .header("X-WolfStack-Secret", &state.cluster_secret)
-                            .header("Content-Type", "application/json")
-                            .body(r#"{"action":"stop"}"#)
-                            .send().await
-                        {
-                            Ok(resp) => { let _ = resp.bytes().await; break; }
-                            Err(_) => continue,
-                        }
-                    }
-
-                    // Small delay for container to stop
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                    // Now remove/destroy the container
-                    let remove_action = match svc.runtime {
-                        crate::wolfrun::Runtime::Docker => r#"{"action":"remove"}"#,
-                        crate::wolfrun::Runtime::Lxc => r#"{"action":"destroy"}"#,
-                    };
-                    for url in &action_urls {
-                        match client.post(url)
-                            .timeout(std::time::Duration::from_secs(30))
-                            .header("X-WolfStack-Secret", &state.cluster_secret)
-                            .header("Content-Type", "application/json")
-                            .body(remove_action)
-                            .send().await
-                        {
-                            Ok(resp) => {
-                                if resp.status().is_success() {
-                                    destroyed.push(inst.container_name.clone());
-                                }
-                                let _ = resp.bytes().await;
-                                break;
-                            }
-                            Err(_) => continue,
-                        }
-                    }
-                }
-            }
-        }
+        let (d, k) = crate::wolfrun::destroy_service_instances(
+            &svc, &state.cluster, &state.cluster_secret,
+        ).await;
+        destroyed = d;
+        kept = k;
     }
 
     match state.wolfrun.delete(&id) {
         Some(_) => {
-            // Broadcast deletion to cluster peers
+            // Tell peers about the deletion FIRST (explicit tombstone —
+            // the services-list broadcast cannot express "gone": it skips
+            // entirely when the list is empty and merges per-cluster, which
+            // is how deleted services kept resurrecting), then broadcast
+            // the updated list.
             let wolfrun = Arc::clone(&state.wolfrun);
             let cluster = Arc::clone(&state.cluster);
             let secret = state.cluster_secret.clone();
+            let deleted_id = id.clone();
             actix_web::rt::spawn(async move {
+                crate::wolfrun::broadcast_delete(&cluster, &secret, &deleted_id).await;
                 crate::wolfrun::broadcast_to_cluster(&wolfrun, &cluster, &secret).await;
             });
             HttpResponse::Ok().json(serde_json::json!({
@@ -36173,8 +36150,43 @@ pub async fn wolfrun_sync(req: HttpRequest, state: web::Data<AppState>, body: we
     }
 
     let peer_services = body.into_inner();
-    state.wolfrun.merge_from_peer(peer_services);
-    HttpResponse::Ok().json(serde_json::json!({ "synced": true }))
+    // Tombstoned ids are rejected by the merge and reported back so the
+    // sender — a node that slept through the deletion — deletes its stale
+    // copy and destroys any containers it recreated, instead of gossiping
+    // the ghost service back forever.
+    let deleted_ids = state.wolfrun.merge_from_peer(peer_services);
+    HttpResponse::Ok().json(serde_json::json!({ "synced": true, "deleted_ids": deleted_ids }))
+}
+
+#[derive(Deserialize)]
+pub struct WolfRunSyncDeleteRequest {
+    pub service_id: String,
+}
+
+/// POST /api/wolfrun/sync-delete — a cluster peer tells us a WolfRun
+/// service was deleted. Record the tombstone (even if we never held the
+/// service) and drop our copy. Containers are destroyed by the deleting
+/// node via the container action API, not here.
+pub async fn wolfrun_sync_delete(req: HttpRequest, state: web::Data<AppState>, body: web::Json<WolfRunSyncDeleteRequest>) -> HttpResponse {
+    let secret = req.headers().get("X-WolfStack-Secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req))
+        && let Err(resp) = require_auth(&req, &state)
+    {
+        return resp;
+    }
+
+    let id = body.into_inner().service_id;
+    // Tear down this node's LB rules for the service VIP — reconcile
+    // installs them on whichever node was leader, which may be us.
+    if let Some(svc) = state.wolfrun.get(&id)
+        && let Some(vip) = svc.service_ip
+    {
+        let _ = web::block(move || crate::wolfrun::remove_lb_rules_for_vip(&vip)).await;
+    }
+    let removed = state.wolfrun.remove_if_exists(&id);
+    HttpResponse::Ok().json(serde_json::json!({ "removed": removed }))
 }
 
 /// POST /api/wolfrun/reconcile — trigger an immediate reconcile + broadcast
@@ -45725,6 +45737,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfrun/services", web::post().to(wolfrun_create))
         .route("/api/wolfrun/services/adopt", web::post().to(wolfrun_adopt))
         .route("/api/wolfrun/sync", web::post().to(wolfrun_sync))
+        .route("/api/wolfrun/sync-delete", web::post().to(wolfrun_sync_delete))
         .route("/api/wolfrun/failover-events", web::get().to(wolfrun_failover_events))
         .route("/api/wolfrun/reconcile", web::post().to(wolfrun_reconcile))
         .route("/api/wolfrun/services/{id}", web::get().to(wolfrun_get))

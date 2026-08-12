@@ -505,6 +505,39 @@ static LXC_STATS_CACHE: Mutex<Option<(Vec<ContainerStats>, Instant)>> = Mutex::n
 const LIST_CACHE_TTL_SECS: u64 = 5;
 const IMAGES_CACHE_TTL_SECS: u64 = 60;
 
+// ─── Per-container probe caches ───
+// docker_list/lxc list spawn TWO subprocesses per container on every
+// UNCACHED enumeration: detect_container_services shells INTO the
+// container (docker exec / lxc-attach + a /proc walk) and
+// get_path_disk_usage runs `df` on its rootfs. The list itself was
+// batched down to 2 subprocesses (v20.x), but these two stayed N+1 —
+// on a node with ~100 containers each enumeration spawned ~200
+// processes, and the WolfRun reconcile + UI poll + notify/predictive
+// pollers each trigger enumerations. This was a big slice of the
+// sustained ~70% CPU (mostly system time) klas reported (2026-08-12).
+// Both facts change slowly; 30s staleness is invisible in the UI.
+/// (used_bytes, total_bytes, fs_type) as returned by get_path_disk_usage.
+type PathDiskUsage = (Option<u64>, Option<u64>, Option<String>);
+
+type ProbeCache<V> = std::sync::LazyLock<Mutex<std::collections::HashMap<String, (V, Instant)>>>;
+
+static SERVICES_PROBE_CACHE: ProbeCache<Vec<ContainerService>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static DISK_USAGE_CACHE: ProbeCache<PathDiskUsage> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+const PROBE_CACHE_TTL_SECS: u64 = 30;
+/// Entry cap for the per-container probe caches — far above any real
+/// container count; keeps a name-churning fleet from growing the maps
+/// without bound. On overflow, expired entries are dropped.
+const PROBE_CACHE_MAX: usize = 1024;
+
+fn probe_cache_prune<V>(map: &mut std::collections::HashMap<String, (V, Instant)>) {
+    if map.len() > PROBE_CACHE_MAX {
+        map.retain(|_, (_, ts)| ts.elapsed().as_secs() < PROBE_CACHE_TTL_SECS);
+    }
+}
+
 /// Cached docker_list_all — reuses result for 5 seconds.
 pub fn docker_list_all_cached() -> Vec<ContainerInfo> {
     {
@@ -4487,7 +4520,27 @@ pub struct RuntimeStatus {
 
 /// Detect Wolf ecosystem services (and web servers) running inside a container.
 /// Returns a list of services found with their running status.
+/// Cached front-end for probe_container_services — one exec per container
+/// per PROBE_CACHE_TTL_SECS instead of one per enumeration (see the
+/// per-container probe cache docs above).
 fn detect_container_services(runtime: &str, name: &str) -> Vec<ContainerService> {
+    let key = format!("{}:{}", runtime, name);
+    {
+        let cache = SERVICES_PROBE_CACHE.lock().unwrap();
+        if let Some((val, ts)) = cache.get(&key)
+            && ts.elapsed().as_secs() < PROBE_CACHE_TTL_SECS
+        {
+            return val.clone();
+        }
+    }
+    let val = probe_container_services(runtime, name);
+    let mut cache = SERVICES_PROBE_CACHE.lock().unwrap();
+    cache.insert(key, (val.clone(), Instant::now()));
+    probe_cache_prune(&mut cache);
+    val
+}
+
+fn probe_container_services(runtime: &str, name: &str) -> Vec<ContainerService> {
     // Running-check must work on MINIMAL images too. Many app containers
     // (e.g. aonsoku: Alpine/BusyBox running nginx as PID 1 with `daemon off`)
     // have neither systemd nor pgrep, so a `systemctl is-active || pgrep`
@@ -6800,7 +6853,26 @@ fn lxc_read_os_version(rootfs_path: &str) -> Option<String> {
 }
 
 /// Get disk usage for a path using df (returns used_bytes, total_bytes)
-fn get_path_disk_usage(path: &str) -> (Option<u64>, Option<u64>, Option<String>) {
+/// Cached front-end for probe_path_disk_usage — one `df` per path per
+/// PROBE_CACHE_TTL_SECS instead of one per container per enumeration
+/// (see the per-container probe cache docs near the other caches).
+fn get_path_disk_usage(path: &str) -> PathDiskUsage {
+    {
+        let cache = DISK_USAGE_CACHE.lock().unwrap();
+        if let Some((val, ts)) = cache.get(path)
+            && ts.elapsed().as_secs() < PROBE_CACHE_TTL_SECS
+        {
+            return val.clone();
+        }
+    }
+    let val = probe_path_disk_usage(path);
+    let mut cache = DISK_USAGE_CACHE.lock().unwrap();
+    cache.insert(path.to_string(), (val.clone(), Instant::now()));
+    probe_cache_prune(&mut cache);
+    val
+}
+
+fn probe_path_disk_usage(path: &str) -> PathDiskUsage {
     // df -T --block-size=1 outputs: Filesystem Type 1B-blocks Used Available Use% Mounted
     if let Ok(out) = Command::new("df").args(["-T", "--block-size=1", path]).output() {
         let text = String::from_utf8_lossy(&out.stdout);

@@ -28688,8 +28688,8 @@ async function deleteDockerImage(id, name) {
 }
 
 
-async function dockerAction(container, action, btn) {
-    if (action === 'remove' && !(await showConfirm(`Remove container '${container}'? This cannot be undone.`))) return;
+async function dockerAction(container, action, btn, force) {
+    if (!force && action === 'remove' && !(await showConfirm(`Remove container '${container}'? This cannot be undone.`))) return;
 
     activityStart();
     const row = btn?.closest('tr');
@@ -28701,12 +28701,20 @@ async function dockerAction(container, action, btn) {
         const resp = await fetch(apiUrl(`/api/containers/docker/${container}/action`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action }),
+            body: JSON.stringify({ action, force: !!force }),
         });
         const data = await resp.json();
         if (resp.ok) {
             showToast(`${action} ${container}: OK`, 'success');
             taskLog('Docker ' + action + ': ' + container);
+            setTimeout(loadDockerContainers, 500);
+        } else if (data && data.wolfrun_managed) {
+            // A WolfRun service owns this container — removing it here just
+            // makes the reconciler recreate it. Explain, then offer force.
+            buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+            if (await showConfirm(data.error + '\n\nForce-remove it anyway?', 'Managed by WolfRun')) {
+                return dockerAction(container, action, btn, true);
+            }
             setTimeout(loadDockerContainers, 500);
         } else {
             showToast(data.error || `Failed to ${action}`, 'error');
@@ -29448,8 +29456,8 @@ async function reclaimLxcCache(container, btn) {
     }
 }
 
-async function lxcAction(container, action, btn) {
-    if (action === 'destroy' && !(await showConfirm(`Destroy LXC container '${container}'? This cannot be undone.`))) return;
+async function lxcAction(container, action, btn, force) {
+    if (!force && action === 'destroy' && !(await showConfirm(`Destroy LXC container '${container}'? This cannot be undone.`))) return;
     if (action === 'freeze' && !(await showConfirm(
         `Freeze LXC container '${container}'?\n\nFreezing pauses every process inside the container. Network connections, DB writes, and anything holding a lock will stall until you Unfreeze. Click Confirm only if that's what you intended.`,
         'Freeze container'))) return;
@@ -29464,12 +29472,20 @@ async function lxcAction(container, action, btn) {
         const resp = await fetch(apiUrl(`/api/containers/lxc/${container}/action`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action }),
+            body: JSON.stringify({ action, force: !!force }),
         });
         const data = await resp.json();
         if (resp.ok) {
             showToast(`${action} ${container}: OK`, 'success');
             taskLog('LXC ' + action + ': ' + container);
+            setTimeout(loadLxcContainers, 500);
+        } else if (data && data.wolfrun_managed) {
+            // A WolfRun service owns this container — destroying it here just
+            // makes the reconciler recreate it. Explain, then offer force.
+            buttons.forEach(b => { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+            if (await showConfirm(data.error + '\n\nForce-destroy it anyway?', 'Managed by WolfRun')) {
+                return lxcAction(container, action, btn, true);
+            }
             setTimeout(loadLxcContainers, 500);
         } else {
             showToast(data.error || `Failed to ${action}`, 'error');
@@ -45044,8 +45060,8 @@ async function fleetDeleteVm(nodeId, name) {
     }
 }
 
-async function fleetAction(nodeId, runtime, container, action, btn) {
-    if ((action === 'remove' || action === 'destroy') && !(await showConfirm((runtime === 'docker' ? 'Remove' : 'Destroy') + " '" + container + "'? This cannot be undone."))) return;
+async function fleetAction(nodeId, runtime, container, action, btn, force) {
+    if (!force && (action === 'remove' || action === 'destroy') && !(await showConfirm((runtime === 'docker' ? 'Remove' : 'Destroy') + " '" + container + "'? This cannot be undone."))) return;
     if (runtime === 'lxc' && action === 'freeze' && !(await showConfirm(
         "Freeze LXC container '" + container + "'?\n\nFreezing pauses every process inside the container. Network connections, DB writes, and anything holding a lock will stall until you Unfreeze. Click Confirm only if that's what you intended.",
         'Freeze container'))) return;
@@ -45059,10 +45075,18 @@ async function fleetAction(nodeId, runtime, container, action, btn) {
     if (btn) btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span>';
 
     try {
-        var resp = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ action: action }) });
+        var resp = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ action: action, force: !!force }) });
         var data = await resp.json();
         if (resp.ok) {
             showToast(action + ' ' + container + ': OK', 'success');
+            setTimeout(loadFleetContainers, 1000);
+        } else if (data && data.wolfrun_managed) {
+            // A WolfRun service owns this container — removing it here just
+            // makes the reconciler recreate it. Explain, then offer force.
+            buttons.forEach(function (b) { b.disabled = false; b.style.opacity = ''; b.style.pointerEvents = ''; });
+            if (await showConfirm(data.error + '\n\nForce-remove it anyway?', 'Managed by WolfRun')) {
+                return fleetAction(nodeId, runtime, container, action, btn, true);
+            }
             setTimeout(loadFleetContainers, 1000);
         } else {
             showToast(data.error || 'Failed to ' + action, 'error');
