@@ -1648,10 +1648,19 @@ pub async fn reconcile(
 
         // Rebuild load balancer rules for this service's VIP (only if backends changed)
         if let Some(ref vip) = service.service_ip {
-            let backend_ips: Vec<String> = live_instances.iter()
+            // SORTED. The cache below compares this Vec to the previous
+            // pass's, and a Vec comparison is order-sensitive — so any
+            // reordering of `instances` (a peer's copy arriving via
+            // merge_from_peer, an add/remove shuffling the vec) read as
+            // "backends changed" and triggered a full iptables rebuild
+            // even though the same containers were serving. Sorting makes
+            // the comparison set-wise, which is what was always meant.
+            let mut backend_ips: Vec<String> = live_instances.iter()
                 .filter(|i| i.status == "running" && !i.standby)
                 .filter_map(|i| i.wolfnet_ip.clone())
                 .collect();
+            backend_ips.sort();
+            backend_ips.dedup();
 
             // Skip rebuild if backends haven't changed since last cycle
             use std::sync::Mutex;
@@ -1670,8 +1679,17 @@ pub async fn reconcile(
             };
 
             if changed {
-
-                rebuild_lb_rules(vip, &backend_ips, &service.ports, &service.lb_policy);
+                // OFF THE ASYNC RUNTIME. A rebuild is dozens-to-hundreds of
+                // iptables invocations, each taking the global netfilter
+                // lock; running it inline blocked a tokio worker for the
+                // whole rebuild and starved actix.
+                let vip_owned = vip.clone();
+                let backends = backend_ips.clone();
+                let ports = service.ports.clone();
+                let policy = service.lb_policy.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    rebuild_lb_rules(&vip_owned, &backends, &ports, &policy);
+                }).await;
             }
         }
 
@@ -2958,40 +2976,44 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
 pub fn remove_lb_rules_for_vip(vip: &str) {
     let comment = format!("wolfrun-lb-{}", vip);
 
-    // Remove from nat PREROUTING and POSTROUTING
+    // Remove from nat PREROUTING, POSTROUTING and OUTPUT.
+    //
+    // ONE listing per chain, then delete by descending line number.
+    //
+    // This loop used to re-run `iptables -L <chain>` before EVERY single
+    // delete, because deleting a rule renumbers the ones after it. That
+    // made removal 2N subprocesses per chain, N of them full nat-table
+    // listings that take the global netfilter lock — and a rebuild calls
+    // this first, so it ran on every reconcile tick whose backends had
+    // changed. On a node running WolfRun with flapping backends that was
+    // a large share of the 61% system time klas measured at 354% CPU
+    // (2026-08-12).
+    //
+    // Deleting in DESCENDING order removes the need to re-list at all:
+    // removing a higher-numbered rule never shifts a lower-numbered one,
+    // so every number collected from the single listing stays valid.
     for chain in &["PREROUTING", "POSTROUTING", "OUTPUT"] {
-        // List rules, find matching ones, remove in reverse order
-        loop {
-            let output = std::process::Command::new("iptables")
-                .args(["-t", "nat", "-L", chain, "--line-numbers", "-n"])
+        let output = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-L", chain, "--line-numbers", "-n"])
+            .output();
+
+        let lines = match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => continue,
+        };
+
+        let mut nums: Vec<u32> = lines
+            .lines()
+            .filter(|l| l.contains(&comment))
+            .filter_map(|l| l.split_whitespace().next())
+            .filter_map(|n| n.parse::<u32>().ok())
+            .collect();
+        nums.sort_unstable();
+
+        for num in nums.into_iter().rev() {
+            let _ = std::process::Command::new("iptables")
+                .args(["-t", "nat", "-D", chain, &num.to_string()])
                 .output();
-
-            let lines = match output {
-                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-                _ => break,
-            };
-
-            // Find the first rule with our comment
-            let mut found_num: Option<String> = None;
-            for line in lines.lines() {
-                if line.contains(&comment) {
-                    if let Some(num) = line.split_whitespace().next() {
-                        if num.parse::<u32>().is_ok() {
-                            found_num = Some(num.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            match found_num {
-                Some(num) => {
-                    let _ = std::process::Command::new("iptables")
-                        .args(["-t", "nat", "-D", chain, &num])
-                        .output();
-                }
-                None => break, // No more rules for this VIP
-            }
         }
     }
 
