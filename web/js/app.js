@@ -29487,31 +29487,87 @@ async function lxcAction(container, action, btn) {
 
 // ─── Shared Container Functions ───
 
+// ─── Container log viewer ───
+// Refresh + auto-refresh, because the common case is watching for
+// something that hasn't happened yet and re-opening the modal to see it
+// is silly (klas, 2026-08-12).
+let _containerLogTimer = null;
+let _containerLogCtx = null;
+
+function stopContainerLogAutoRefresh() {
+    if (_containerLogTimer) {
+        clearInterval(_containerLogTimer);
+        _containerLogTimer = null;
+    }
+}
+
 async function viewContainerLogs(runtime, container) {
     const modal = document.getElementById('container-detail-modal');
     const title = document.getElementById('container-detail-title');
     const body = document.getElementById('container-detail-body');
 
+    stopContainerLogAutoRefresh();
+    _containerLogCtx = { runtime, container };
     title.textContent = `${container} — Logs`;
-    body.innerHTML = renderBlockSkeleton({lines:3});
+    // Shell is built ONCE; refreshes only rewrite the <pre>, so the
+    // auto-refresh checkbox and the operator's scroll position survive
+    // every tick.
+    body.innerHTML = `
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;">
+            <button class="btn btn-sm" id="container-log-refresh">Refresh</button>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);cursor:pointer;">
+                <input type="checkbox" id="container-log-auto"> Auto-refresh every 3s
+            </label>
+            <span id="container-log-stamp" style="font-size:11px;color:var(--text-muted);margin-left:auto;"></span>
+        </div>
+        <pre id="container-log-pre" style="background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+            font-family: 'JetBrains Mono', monospace; font-size: 12px; max-height: 400px; overflow-y: auto;
+            color: var(--text-primary); white-space: pre-wrap; word-break: break-all;">Loading…</pre>
+    `;
     modal.classList.add('active');
+    document.getElementById('container-log-refresh').onclick = () => refreshContainerLogs();
+    document.getElementById('container-log-auto').onchange = (e) => {
+        stopContainerLogAutoRefresh();
+        if (e.target.checked) _containerLogTimer = setInterval(refreshContainerLogs, 3000);
+    };
+    await refreshContainerLogs();
+}
 
+async function refreshContainerLogs() {
+    const modal = document.getElementById('container-detail-modal');
+    const pre = document.getElementById('container-log-pre');
+    // Self-healing stop: the modal can be dismissed by Escape, the
+    // overlay, or closeModal() — none of which run closeContainerDetail.
+    // A timer left running against a hidden modal would poll forever.
+    if (!pre || !_containerLogCtx || !modal || !modal.classList.contains('active')) {
+        stopContainerLogAutoRefresh();
+        return;
+    }
+    const { runtime, container } = _containerLogCtx;
+    // Measure BEFORE replacing: keep a reader who scrolled up where they
+    // are, and keep a reader at the tail pinned to the tail (the whole
+    // point when you're waiting for a line to appear).
+    const pinned = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
     try {
-        const resp = await fetch(apiUrl(`/api/containers/${runtime}/${container}/logs`));
+        const resp = await fetch(apiUrl(`/api/containers/${runtime}/${encodeURIComponent(container)}/logs`));
         const data = await resp.json();
         const logs = data.logs || [];
-
-        body.innerHTML = `
-            <pre style="background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
-                font-family: 'JetBrains Mono', monospace; font-size: 12px; max-height: 400px; overflow-y: auto;
-                color: var(--text-primary); white-space: pre-wrap; word-break: break-all;">${logs.length > 0 ? logs.join('\n') : 'No logs available'}</pre>
-        `;
+        // textContent, not innerHTML: log lines are container-controlled
+        // and were being parsed as markup — a logged `<img onerror=…>`
+        // executed in the operator's session. The fleet log viewer already
+        // escaped; this one didn't.
+        pre.textContent = logs.length > 0 ? logs.join('\n') : 'No logs available';
+        const stamp = document.getElementById('container-log-stamp');
+        if (stamp) stamp.textContent = 'updated ' + new Date().toLocaleTimeString();
+        if (pinned) pre.scrollTop = pre.scrollHeight;
     } catch (e) {
-        body.innerHTML = `<p style="color:#ef4444;">Failed to load logs: ${e.message}</p>`;
+        pre.textContent = 'Failed to load logs: ' + e.message;
     }
 }
 
 function closeContainerDetail() {
+    stopContainerLogAutoRefresh();
+    stopFleetLogAutoRefresh();
     document.getElementById('container-detail-modal').classList.remove('active');
 }
 
@@ -44862,22 +44918,61 @@ function fleetOpenVnc(nodeId, name, wsPort) {
         'vnc_' + name, 'width=1024,height=768,menubar=no,toolbar=no');
 }
 
-// Fleet logs viewer — fetches logs via node proxy
+// Fleet logs viewer — fetches logs via node proxy. Same refresh /
+// auto-refresh shell as the local viewer (klas, 2026-08-12); the fetch
+// differs only in going through the node proxy.
+let _fleetLogTimer = null;
+let _fleetLogCtx = null;
+
+function stopFleetLogAutoRefresh() {
+    if (_fleetLogTimer) {
+        clearInterval(_fleetLogTimer);
+        _fleetLogTimer = null;
+    }
+}
+
 async function fleetViewLogs(nodeId, runtime, name) {
     var modal = document.getElementById('container-detail-modal');
     var title = document.getElementById('container-detail-title');
     var body = document.getElementById('container-detail-body');
     if (!modal) return;
+    stopFleetLogAutoRefresh();
+    _fleetLogCtx = { nodeId: nodeId, runtime: runtime, name: name };
     title.textContent = name + ' — Logs';
-    body.innerHTML = renderBlockSkeleton({lines:3});
+    body.innerHTML = '<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;">'
+        + '<button class="btn btn-sm" id="fleet-log-refresh">Refresh</button>'
+        + '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);cursor:pointer;">'
+        + '<input type="checkbox" id="fleet-log-auto"> Auto-refresh every 3s</label>'
+        + '<span id="fleet-log-stamp" style="font-size:11px;color:var(--text-muted);margin-left:auto;"></span></div>'
+        + '<pre id="fleet-log-pre" style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;max-height:400px;overflow-y:auto;color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">Loading…</pre>';
     modal.classList.add('active');
+    document.getElementById('fleet-log-refresh').onclick = function () { refreshFleetLogs(); };
+    document.getElementById('fleet-log-auto').onchange = function (e) {
+        stopFleetLogAutoRefresh();
+        if (e.target.checked) _fleetLogTimer = setInterval(refreshFleetLogs, 3000);
+    };
+    await refreshFleetLogs();
+}
+
+async function refreshFleetLogs() {
+    var modal = document.getElementById('container-detail-modal');
+    var pre = document.getElementById('fleet-log-pre');
+    if (!pre || !_fleetLogCtx || !modal || !modal.classList.contains('active')) {
+        stopFleetLogAutoRefresh();
+        return;
+    }
+    var ctx = _fleetLogCtx;
+    var pinned = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
     try {
-        var resp = await fetch(fleetApiUrl(nodeId, '/api/containers/' + runtime + '/' + encodeURIComponent(name) + '/logs'), { credentials: 'include' });
+        var resp = await fetch(fleetApiUrl(ctx.nodeId, '/api/containers/' + ctx.runtime + '/' + encodeURIComponent(ctx.name) + '/logs'), { credentials: 'include' });
         var data = await resp.json();
         var logs = data.logs || [];
-        body.innerHTML = '<pre style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;max-height:400px;overflow-y:auto;color:var(--text-primary);white-space:pre-wrap;word-break:break-all;">' + (logs.length > 0 ? escapeHtml(logs.join('\n')) : 'No logs available') + '</pre>';
+        pre.textContent = logs.length > 0 ? logs.join('\n') : 'No logs available';
+        var stamp = document.getElementById('fleet-log-stamp');
+        if (stamp) stamp.textContent = 'updated ' + new Date().toLocaleTimeString();
+        if (pinned) pre.scrollTop = pre.scrollHeight;
     } catch (e) {
-        body.innerHTML = '<p style="color:#ef4444;">Failed to load logs: ' + escapeHtml(e.message) + '</p>';
+        pre.textContent = 'Failed to load logs: ' + e.message;
     }
 }
 
