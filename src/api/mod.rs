@@ -52,19 +52,6 @@ pub(crate) static API_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
             .unwrap_or_else(|_| reqwest::Client::new())
     });
 
-/// Idle keep-alive sockets retained per peer by clients built through
-/// [`ipv4_only_client_builder`]. reqwest's default is `usize::MAX`
-/// (reqwest-0.12.28 src/async_impl/client.rs:302) — unbounded, so a busy
-/// node accumulates pooled sockets against every peer until something
-/// else breaks. Eight is ample for keep-alive reuse and makes the
-/// process-wide socket table O(peers) instead of O(request concurrency).
-const POOL_MAX_IDLE_PER_HOST: usize = 8;
-
-/// Reap idle pooled sockets after this long. reqwest's default is 90s
-/// (client.rs:301); a peer that closes its end first leaves ours in
-/// CLOSE-WAIT for the remainder of that window.
-const POOL_IDLE_TIMEOUT_SECS: u64 = 15;
-
 /// DNS resolver that discards AAAA results and returns only IPv4 addresses.
 ///
 /// Wolfstacks run on mixed-stack hosts where AAAA records exist but the
@@ -113,19 +100,32 @@ impl reqwest::dns::Resolve for Ipv4OnlyResolver {
 pub(crate) fn ipv4_only_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .dns_resolver(std::sync::Arc::new(Ipv4OnlyResolver))
-        // SAFE DEFAULT for every client built through this factory.
+        // DELIBERATELY NOT BOUNDING THE IDLE POOL HERE. Read this before
+        // "fixing" the unbounded default — it has already cost a user two
+        // dead nodes.
         //
-        // An unbounded idle pool turns request concurrency into a
-        // permanent socket population. Beyond the descriptor cost, a large
-        // socket table makes every subsequent `bind()`/`connect()` more
-        // expensive in the kernel, so this is what stops one busy
-        // subsystem degrading the whole process.
+        // v25.12.3 set `pool_max_idle_per_host(8)` and
+        // `pool_idle_timeout(15s)`, reasoning that reqwest's `usize::MAX`
+        // default lets request concurrency become a permanent socket
+        // population. That reasoning is sound in isolation and the change
+        // was catastrophic in practice.
         //
-        // Callers wanting no pooling at all override with
-        // `pool_max_idle_per_host(0)`; overrides applied after this call
-        // win. Enforced by tests/resource_safety.rs.
-        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
-        .pool_idle_timeout(std::time::Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
+        // Once the pool holds its cap of idle connections for a peer, every
+        // further returned connection is dropped at once, and a shorter idle
+        // timeout reaps the rest six times more often. Both mean the CLIENT
+        // closes first. WolfStack's own server has a separate, older bug
+        // where an inbound connection is not closed after the peer's FIN, so
+        // each of those closes becomes a permanent CLOSE-WAIT on the peer.
+        //
+        // Measured on one user's node, same machine, same cluster, across
+        // the upgrade: inbound CLOSE-WAIT grew at 2.3/min on v25.12.2 and
+        // 326/min on v25.12.3 — 140x — and took the node from "degraded" to
+        // "exhausts 65,535 descriptors and stops accepting connections".
+        //
+        // Bounding the pool is only safe once the server closes its side
+        // properly. Until then a bound just converts a slow leak into a
+        // fast one. See tests/resource_safety.rs.
+        //
         // SAFE DEFAULT for every client built through this factory.
         //
         // A total `.timeout()` does not bound a connection that never

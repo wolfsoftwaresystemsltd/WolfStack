@@ -484,52 +484,69 @@ fn no_http_client_pins_a_source_address() {
     );
 }
 
-/// The shared client factory is the only thing standing between 40-odd
-/// callers and reqwest's unbounded default idle pool
-/// (`pool_max_idle_per_host: usize::MAX`, reqwest-0.12.28
-/// src/async_impl/client.rs:302). Every previous fix for socket growth was
-/// applied to one caller at a time, so the next caller started unsafe again.
+/// The shared client factory MUST NOT bound its idle connection pool, and
+/// this test exists to stop the "obvious" fix being re-applied.
+///
+/// v25.12.3 added `pool_max_idle_per_host(8)` + `pool_idle_timeout(15s)`
+/// because reqwest's `usize::MAX` default (reqwest-0.12.28
+/// src/async_impl/client.rs:302) lets request concurrency become a
+/// permanent socket population. Correct in isolation; catastrophic here.
+///
+/// Once the pool is at its cap for a peer, every further returned
+/// connection is dropped immediately, and a short idle timeout reaps the
+/// rest far more often. Both make the CLIENT close first — and WolfStack's
+/// server has a separate, older defect where an inbound connection is not
+/// closed after the peer's FIN. Every client-side close therefore becomes a
+/// permanent CLOSE-WAIT on the peer.
+///
+/// Measured on a user's node, same machine and cluster, across the upgrade:
+/// inbound CLOSE-WAIT grew 2.3/min on v25.12.2 and 326/min on v25.12.3 —
+/// 140x — taking it from degraded to descriptor-exhausted in minutes.
+///
+/// Re-bound the pool ONLY after the server-side close is fixed and proven.
 #[test]
-fn shared_client_factory_bounds_its_pool() {
+fn shared_client_factory_does_not_bound_its_pool() {
     let src = fs::read_to_string("src/api/mod.rs")
         .expect("src/api/mod.rs must exist — the shared client factory lives there");
 
     let start = src
         .find("pub(crate) fn ipv4_only_client_builder()")
         .expect("ipv4_only_client_builder() must exist — it is the shared client factory");
-    // The factory is short; cap the window so a later function's settings
-    // cannot satisfy this assertion by accident.
     let end = src[start..]
         .find("\n}")
         .map(|e| start + e)
         .unwrap_or(src.len());
-    let body = &src[start..end];
+    let body = strip_line_comments(&src[start..end]);
 
-    let mut missing = Vec::new();
-    if !body.contains(".pool_max_idle_per_host(") {
-        missing.push(".pool_max_idle_per_host(..)");
+    let mut reintroduced = Vec::new();
+    if body.contains(".pool_max_idle_per_host(") {
+        reintroduced.push(".pool_max_idle_per_host(..)");
     }
-    if !body.contains(".pool_idle_timeout(") {
-        missing.push(".pool_idle_timeout(..)");
-    }
-    if !body.contains(".connect_timeout(") {
-        missing.push(".connect_timeout(..)");
+    if body.contains(".pool_idle_timeout(") {
+        reintroduced.push(".pool_idle_timeout(..)");
     }
 
     assert!(
-        missing.is_empty(),
+        reintroduced.is_empty(),
         "\n\n\
-         ═══ RESOURCE SAFETY VIOLATION: shared client factory lost a bound ═══\n\n\
-         ipv4_only_client_builder() is missing: {}\n\n\
-         reqwest defaults `pool_max_idle_per_host` to usize::MAX and\n\
-         `pool_idle_timeout` to 90s. Unbounded pooling converts request\n\
-         concurrency into a permanent socket population, and a large socket\n\
-         table then makes every subsequent bind()/connect() more expensive\n\
-         in the kernel — one busy subsystem degrades the whole process.\n\n\
-         Measured on a user's node 2026-08-13: 15,296 sockets — 6,932 ESTAB,\n\
-         5,839 CLOSE-WAIT, 2,821 SYN-SENT — against six peers.\n\n\
-         These are the defaults ~40 call sites inherit. Restore them rather\n\
-         than patching the one caller that happens to be hurting today.\n",
-        missing.join(", "),
+         ═══ RESOURCE SAFETY VIOLATION: idle pool bounded on the shared factory ═══\n\n\
+         Reintroduced: {}\n\n\
+         This looks like a fix and is a regression until the server-side\n\
+         close bug is fixed. Bounding the pool makes OUR side close first;\n\
+         the peer then holds the socket in CLOSE-WAIT forever because it\n\
+         does not close after our FIN.\n\n\
+         Measured on a user's node across exactly this change: inbound\n\
+         CLOSE-WAIT went from 2.3/min to 326/min (140x) on the same machine,\n\
+         and the node exhausted all 65,535 descriptors within the hour.\n\n\
+         An individual caller may still opt out with\n\
+         `pool_max_idle_per_host(0)` — this gate covers the shared factory\n\
+         that ~40 call sites inherit, not those deliberate choices.\n",
+        reintroduced.join(", "),
+    );
+
+    // The connect bound is still mandatory and unrelated to pooling.
+    assert!(
+        body.contains(".connect_timeout("),
+        "ipv4_only_client_builder() must keep .connect_timeout(..)"
     );
 }

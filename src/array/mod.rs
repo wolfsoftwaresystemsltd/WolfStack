@@ -1220,8 +1220,36 @@ pub fn ensure_smartmontools() -> bool {
     installed
 }
 
+/// Whether a whole-disk device has real hardware behind it.
+///
+/// `/sys/block/<name>/device` is the driver-model link to the backing
+/// device. SCSI/SATA, NVMe, virtio, MMC and Xen disks all have one;
+/// purely virtual block devices — zram above all — do not. That link is
+/// therefore the kernel's own answer to "could this thing possibly have
+/// SMART data", which is exactly the question being asked.
+///
+/// Name matching was rejected: it needs extending for every new virtual
+/// driver, and gets it wrong on platforms whose real disks use an
+/// unexpected prefix.
+fn disk_has_backing_hardware(dev_path: &str) -> bool {
+    let name = dev_path.strip_prefix("/dev/").unwrap_or(dev_path);
+    std::path::Path::new(&format!("/sys/block/{name}/device")).exists()
+}
+
 /// List whole physical disk device paths (`/dev/sda`, `/dev/nvme0n1`, …) —
-/// lsblk type=disk only, so partitions, loop and rom devices are excluded.
+/// lsblk type=disk only, so partitions, loop and rom devices are excluded,
+/// and then only those with real hardware behind them.
+///
+/// The hardware check is not cosmetic. `lsblk` reports **zram devices as
+/// type `disk`**, and a host with zram enabled (the default on Ubuntu,
+/// Fedora and most desktop distros — commonly one per CPU, so 16+ on a
+/// large box) had every one of them treated as a physical drive. Each got
+/// `timeout 10 smartctl …` and then a `-d sat` retry, so 16 zram devices
+/// cost 64 pointless processes on every scan, forever, on a device that
+/// cannot have SMART data by construction.
+///
+/// Observed on a user's node 2026-08-13: smartctl running against
+/// `/dev/zram0` and `/dev/zram1` in the process trace.
 pub fn list_physical_disks() -> Vec<String> {
     let out = match Command::new("lsblk").args(["-dnpo", "NAME,TYPE"]).output() {
         Ok(o) if o.status.success() => o.stdout,
@@ -1235,6 +1263,7 @@ pub fn list_physical_disks() -> Vec<String> {
             let typ = it.next()?;
             if typ == "disk" { Some(name.to_string()) } else { None }
         })
+        .filter(|dev| disk_has_backing_hardware(dev))
         .collect()
 }
 
@@ -3031,5 +3060,74 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
         // All-None (e.g. a disk we couldn't read attributes for) must NOT alert.
         let s = DiskSmart::default();
         assert!(!failing(&s));
+    }
+}
+
+#[cfg(test)]
+mod virtual_disk_filter_tests {
+    use super::*;
+
+    /// zram is the case that actually bit us: `lsblk -dnpo NAME,TYPE`
+    /// reports it as type `disk`, so the old type-only filter handed it
+    /// straight to smartctl. Conditional on the host actually having zram
+    /// — skipping is honest, a fabricated pass is not.
+    #[test]
+    fn zram_is_not_treated_as_a_physical_disk() {
+        if !std::path::Path::new("/sys/block/zram0").exists() {
+            eprintln!("skipped: no zram device on this host");
+            return;
+        }
+        assert!(
+            !disk_has_backing_hardware("/dev/zram0"),
+            "zram0 has no /sys/block/zram0/device link and must not be treated as hardware"
+        );
+        assert!(
+            !list_physical_disks().iter().any(|d| d.contains("zram")),
+            "list_physical_disks() must not return zram devices: {:?}",
+            list_physical_disks()
+        );
+    }
+
+    /// The filter must not throw the real disks out with the virtual ones.
+    /// Every device the kernel exposes with a `device` link is hardware we
+    /// genuinely want SMART data for.
+    #[test]
+    fn real_disks_survive_the_filter() {
+        let Ok(entries) = std::fs::read_dir("/sys/block") else {
+            eprintln!("skipped: /sys/block unreadable");
+            return;
+        };
+        let mut hardware_backed = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if e.path().join("device").exists() {
+                hardware_backed.push(name);
+            }
+        }
+        if hardware_backed.is_empty() {
+            eprintln!("skipped: no hardware-backed block devices visible");
+            return;
+        }
+        for name in &hardware_backed {
+            assert!(
+                disk_has_backing_hardware(&format!("/dev/{name}")),
+                "{name} is hardware-backed in /sys but the filter rejected it"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_bare_names_and_dev_paths_alike() {
+        // Callers pass /dev/-prefixed paths; the sysfs lookup needs the bare
+        // name. Both spellings must agree or the filter silently drops disks.
+        let Ok(entries) = std::fs::read_dir("/sys/block") else { return };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            assert_eq!(
+                disk_has_backing_hardware(&name),
+                disk_has_backing_hardware(&format!("/dev/{name}")),
+                "bare vs /dev/ disagreement for {name}"
+            );
+        }
     }
 }
