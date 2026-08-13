@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.12.7: a client that gives up mid-request no longer parks a file descriptor, and icon packs stop stalling the API** _(2026-08-13 — [`dfcc964e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dfcc964efc5c930577c58620abf62efa98c2b79b))_
 - **v25.12.6: fix the startup stampede that exhausted file descriptors** _(2026-08-13 — [`65a204a6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65a204a670c7ec1f33d722adcc9975372848527c))_
 - **v25.12.5: undo the connection-pool bound that made socket exhaustion 140x worse** _(2026-08-13 — [`b427faa4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b427faa40ad00f42529713b62f3822e5a7680691))_
 - **v25.12.4: Settings > Diagnostics — one button for the numbers support actually needs** _(2026-08-13 — [`e760439b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e760439b4b0246efd3cca5a5306494d7006359b9))_
