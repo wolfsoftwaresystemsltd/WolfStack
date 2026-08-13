@@ -48084,6 +48084,220 @@ function checkBrowserPopupBlocker() {
     return { blocked: false };
 }
 
+// ═══════════════════════════════════════════════
+// ─── Diagnostics (Settings → Diagnostics) ───
+// ═══════════════════════════════════════════════
+
+// Last completed run. Holds the text bundle exactly as the server rendered
+// it, so Download hands over the same snapshot that is on screen — running
+// the collection twice would produce two different ones.
+var diagnosticsLastRun = null;
+
+function diagnosticsShowError(message) {
+    const box = document.getElementById('diagnostics-error');
+    if (!box) return;
+    // role="alert" and no auto-dismiss: a failure here is something the
+    // operator needs to be able to read and copy.
+    box.textContent = message;
+    box.style.display = 'block';
+}
+
+function diagnosticsClearError() {
+    const box = document.getElementById('diagnostics-error');
+    if (!box) return;
+    box.textContent = '';
+    box.style.display = 'none';
+}
+
+async function runDiagnostics() {
+    const btn = document.getElementById('diagnostics-run-btn');
+    const dlBtn = document.getElementById('diagnostics-download-btn');
+    const status = document.getElementById('diagnostics-status');
+    const out = document.getElementById('diagnostics-results');
+    if (!btn || !out) return;
+
+    diagnosticsClearError();
+    btn.disabled = true;
+    btn.textContent = '⏳ Collecting…';
+    // The CPU sample alone is ~1.5s; say so rather than looking hung.
+    if (status) status.textContent = 'Sampling CPU and reading socket state — about 2 seconds…';
+
+    try {
+        const resp = await fetch('/api/diagnostics');
+        if (!resp.ok) {
+            let detail = 'HTTP ' + resp.status;
+            try {
+                const body = await resp.json();
+                if (body && body.error) detail = body.error;
+            } catch (_) { /* non-JSON error body — keep the status line */ }
+            throw new Error(detail);
+        }
+        const data = await resp.json();
+        diagnosticsLastRun = data;
+        renderDiagnostics(data.report);
+        if (dlBtn) dlBtn.disabled = false;
+        if (status) status.textContent = 'Collected ' + (data.report?.generated_at || '');
+        showToast('Diagnostic collected', 'success');
+    } catch (e) {
+        diagnosticsLastRun = null;
+        if (dlBtn) dlBtn.disabled = true;
+        if (status) status.textContent = '';
+        out.innerHTML = '';
+        diagnosticsShowError('Diagnostic collection failed: ' + (e.message || String(e)));
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Diagnostic';
+    }
+}
+
+// Render a label/count histogram as a compact table.
+function diagnosticsCountTable(rows, labelHeading) {
+    if (!rows || !rows.length) {
+        return '<p style="font-size:13px; color:var(--text-muted); margin:0;">None.</p>';
+    }
+    const body = rows.map(r =>
+        '<tr><td style="padding:3px 12px 3px 0; text-align:right; font-variant-numeric:tabular-nums;">' +
+        escapeHtml(r.count) +
+        '</td><td style="padding:3px 0;">' + escapeHtml(r.label) + '</td></tr>'
+    ).join('');
+    return '<table style="font-size:13px; border-collapse:collapse;">' +
+        '<thead><tr>' +
+        '<th style="text-align:right; padding:0 12px 4px 0; color:var(--text-muted); font-weight:600;">Count</th>' +
+        '<th style="text-align:left; padding:0 0 4px 0; color:var(--text-muted); font-weight:600;">' +
+        escapeHtml(labelHeading) + '</th>' +
+        '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+function diagnosticsCard(title, inner) {
+    return '<div style="border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:14px;">' +
+        '<h5 style="margin:0 0 10px 0; font-size:14px; font-weight:600;">' + escapeHtml(title) + '</h5>' +
+        inner + '</div>';
+}
+
+function renderDiagnostics(report) {
+    const out = document.getElementById('diagnostics-results');
+    if (!out || !report) return;
+
+    const c = report.context || {};
+    const fdLine = (c.fd_limit != null)
+        ? escapeHtml(c.fd_count) + ' of ' + escapeHtml(c.fd_limit)
+        : escapeHtml(c.fd_count);
+
+    // Descriptor pressure is the single number most worth flagging — it is
+    // what turns a slow node into an offline one.
+    let fdWarning = '';
+    if (c.fd_limit && c.fd_count / c.fd_limit > 0.5) {
+        const pct = Math.round((c.fd_count / c.fd_limit) * 100);
+        fdWarning = ' <strong style="color:var(--danger,#ef4444);">(' + pct + '% of the limit)</strong>';
+    }
+
+    const ctxRows = [
+        ['Host', c.hostname], ['WolfStack version', c.wolfstack_version],
+        ['Kernel', c.kernel], ['Load average', c.load_average],
+        ['Uptime', (c.uptime_secs != null ? Math.floor(c.uptime_secs / 3600) + 'h' : '')],
+        ['PID', c.pid], ['Threads', c.thread_count],
+        ['Memory (RSS)', (c.rss_kb != null ? Math.round(c.rss_kb / 1024) + ' MB' : '')],
+        ['Docker containers', c.docker_total + ' (' + c.docker_running + ' running)'],
+        ['LXC containers', c.lxc_total + ' (' + c.lxc_running + ' running)'],
+    ].map(p =>
+        '<tr><td style="padding:3px 16px 3px 0; color:var(--text-muted);">' + escapeHtml(p[0]) +
+        '</td><td style="padding:3px 0;">' + escapeHtml(p[1]) + '</td></tr>'
+    ).join('');
+
+    const ctxTable =
+        '<table style="font-size:13px; border-collapse:collapse;"><tbody>' + ctxRows +
+        '<tr><td style="padding:3px 16px 3px 0; color:var(--text-muted);">File descriptors</td>' +
+        '<td style="padding:3px 0;">' + fdLine + fdWarning + '</td></tr>' +
+        '</tbody></table>';
+
+    let threadTable;
+    if (!report.threads || !report.threads.length) {
+        threadTable = '<p style="font-size:13px; color:var(--text-muted); margin:0;">No thread used measurable CPU during the sample — the process is idle.</p>';
+    } else {
+        const rows = report.threads.slice(0, 25).map(t =>
+            '<tr>' +
+            '<td style="padding:3px 12px 3px 0; font-variant-numeric:tabular-nums;">' + escapeHtml(t.tid) + '</td>' +
+            '<td style="padding:3px 12px 3px 0;">' + escapeHtml(t.name) + '</td>' +
+            '<td style="padding:3px 12px 3px 0; text-align:right; font-variant-numeric:tabular-nums;">' + escapeHtml(t.user_pct.toFixed(1)) + '</td>' +
+            '<td style="padding:3px 12px 3px 0; text-align:right; font-variant-numeric:tabular-nums;">' + escapeHtml(t.system_pct.toFixed(1)) + '</td>' +
+            '<td style="padding:3px 0; text-align:right; font-variant-numeric:tabular-nums; font-weight:600;">' + escapeHtml(t.total_pct.toFixed(1)) + '</td>' +
+            '</tr>'
+        ).join('');
+        const hidden = report.threads.length > 25
+            ? '<p style="font-size:12px; color:var(--text-muted); margin:8px 0 0 0;">Showing the busiest 25 of ' +
+              escapeHtml(report.threads.length) + '. The downloaded bundle has them all.</p>'
+            : '';
+        threadTable =
+            '<p style="font-size:12px; color:var(--text-muted); margin:0 0 8px 0;">Percent of one CPU core. High system time with low user time means syscall cost, not computation.</p>' +
+            '<table style="font-size:13px; border-collapse:collapse;"><thead><tr>' +
+            ['TID', 'Thread', 'User %', 'System %', 'Total %'].map((h, i) =>
+                '<th style="text-align:' + (i >= 2 ? 'right' : 'left') +
+                '; padding:0 12px 4px 0; color:var(--text-muted); font-weight:600;">' + h + '</th>'
+            ).join('') +
+            '</tr></thead><tbody>' + rows + '</tbody></table>' + hidden;
+    }
+
+    const sockets = report.sockets || {};
+    const socketInner =
+        '<p style="font-size:12px; color:var(--text-muted); margin:0 0 10px 0;">' +
+        escapeHtml(sockets.total || 0) + ' sockets held by this process. ' +
+        'A large CLOSE-WAIT count means sockets are not being closed; a large SYN-SENT count means connections are being attempted somewhere that never answers.' +
+        '</p>' +
+        '<div style="display:flex; gap:32px; flex-wrap:wrap;">' +
+        '<div>' + diagnosticsCountTable(sockets.states, 'Connection state') + '</div>' +
+        '<div>' + diagnosticsCountTable(sockets.peers, 'Peer') + '</div>' +
+        '</div>';
+
+    let html = '';
+    html += diagnosticsCard('System', ctxTable);
+    html += diagnosticsCard('Threads using CPU', threadTable);
+    html += diagnosticsCard('Network sockets', socketInner);
+    html += diagnosticsCard('File descriptors (' + escapeHtml(report.fd_total || 0) + ' total)',
+        diagnosticsCountTable(report.fd_kinds, 'Kind'));
+    html += diagnosticsCard('Threads by name', diagnosticsCountTable(report.thread_names, 'Thread name'));
+
+    if (report.notes && report.notes.length) {
+        html += diagnosticsCard('Collection notes',
+            '<ul style="margin:0; padding-left:18px; font-size:13px;">' +
+            report.notes.map(n => '<li>' + escapeHtml(n) + '</li>').join('') +
+            '</ul>');
+    }
+
+    const journal = (report.journal && report.journal.length)
+        ? report.journal.join('\n')
+        : 'Unavailable — see collection notes.';
+    html += '<details style="border:1px solid var(--border); border-radius:8px; padding:14px 16px;">' +
+        '<summary style="cursor:pointer; font-size:14px; font-weight:600;">Recent log (' +
+        escapeHtml((report.journal || []).length) + ' lines)</summary>' +
+        '<pre style="margin:10px 0 0 0; max-height:420px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-word;">' +
+        escapeHtml(journal) + '</pre></details>';
+
+    out.innerHTML = html;
+}
+
+function downloadDiagnosticBundle() {
+    if (!diagnosticsLastRun || !diagnosticsLastRun.text) {
+        diagnosticsShowError('Nothing to download yet — run the diagnostic first.');
+        return;
+    }
+    try {
+        const blob = new Blob([diagnosticsLastRun.text], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = diagnosticsLastRun.filename || 'wolfstack-diagnostic.txt';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Revoke on the next tick — revoking synchronously can cancel the
+        // download in some browsers before it has started reading.
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showToast('Diagnostic bundle downloaded', 'success');
+    } catch (e) {
+        diagnosticsShowError('Could not save the bundle: ' + (e.message || String(e)));
+    }
+}
+
 async function runSystemCheck() {
     const out = document.getElementById('systemcheck-results');
     const btn = document.getElementById('systemcheck-run-btn');
