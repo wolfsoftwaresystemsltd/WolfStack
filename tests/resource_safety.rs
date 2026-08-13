@@ -419,3 +419,117 @@ fn non_success_response_is_drained_before_early_exit() {
         violations.join("\n  "),
     );
 }
+
+/// `local_address()` costs a `bind()` syscall on EVERY outbound connection,
+/// and it is almost always reached for by someone who only wants IPv4.
+///
+/// hyper-util binds the socket whenever a source address is set
+/// (`bind_local_address`, client/legacy/connect/http.rs:800-803). The bind
+/// is to port 0, so the kernel runs `inet_csk_find_open_port` — a scan of
+/// the host's bind table, taken under a spinlock. It is invisible on an
+/// idle node and catastrophic on a busy one, because the cost scales with
+/// the number of sockets the process already holds.
+///
+/// Use `ipv4_only_client_builder()`, which filters address families in the
+/// DNS resolver instead and issues no bind at all.
+#[test]
+fn no_http_client_pins_a_source_address() {
+    // Reason required for each entry. Binding a source address is legitimate
+    // when the operator has genuinely asked to egress from a specific
+    // interface — that is a routing requirement, not an address-family one.
+    const ALLOWED: &[(&str, &str)] = &[
+        // (path fragment, why)
+    ];
+
+    let mut violations = Vec::new();
+
+    for path in source_files() {
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        let src = strip_line_comments(&raw);
+        let display = path.display().to_string();
+
+        if ALLOWED.iter().any(|(frag, _)| display.contains(frag)) {
+            continue;
+        }
+
+        let mut idx = 0;
+        while let Some(rel) = src[idx..].find(".local_address(") {
+            let start = idx + rel;
+            let line = src[..start].matches('\n').count() + 1;
+            violations.push(format!("{}:{}", display, line));
+            idx = start + 1;
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "\n\n\
+         ═══ RESOURCE SAFETY VIOLATION: HTTP client pins a source address ═══\n\n\
+         {} site(s):\n  {}\n\n\
+         Setting `.local_address(..)` makes hyper-util `bind()` the socket on\n\
+         every outbound connection (bind_local_address, hyper-util\n\
+         client/legacy/connect/http.rs:800-803). Binding to port 0 sends the\n\
+         kernel into `inet_csk_find_open_port`, which scans the bind table\n\
+         under a spinlock — cost proportional to the sockets already open.\n\n\
+         Measured on a user's node 2026-08-13: 77.7% of ALL process CPU was in\n\
+         `bind`, across 14 actix workers colliding in\n\
+         `native_queued_spin_lock_slowpath`, with 15,296 sockets in the table.\n\
+         The node had been carrying it for days as unexplained ~350% CPU.\n\n\
+         FIX: if you wanted IPv4-only, use `api::ipv4_only_client_builder()` —\n\
+         it filters address families in the DNS resolver and issues no bind.\n\
+         If you genuinely need to egress from a specific interface, add the\n\
+         file to ALLOWED in tests/resource_safety.rs WITH a reason.\n",
+        violations.len(),
+        violations.join("\n  "),
+    );
+}
+
+/// The shared client factory is the only thing standing between 40-odd
+/// callers and reqwest's unbounded default idle pool
+/// (`pool_max_idle_per_host: usize::MAX`, reqwest-0.12.28
+/// src/async_impl/client.rs:302). Every previous fix for socket growth was
+/// applied to one caller at a time, so the next caller started unsafe again.
+#[test]
+fn shared_client_factory_bounds_its_pool() {
+    let src = fs::read_to_string("src/api/mod.rs")
+        .expect("src/api/mod.rs must exist — the shared client factory lives there");
+
+    let start = src
+        .find("pub(crate) fn ipv4_only_client_builder()")
+        .expect("ipv4_only_client_builder() must exist — it is the shared client factory");
+    // The factory is short; cap the window so a later function's settings
+    // cannot satisfy this assertion by accident.
+    let end = src[start..]
+        .find("\n}")
+        .map(|e| start + e)
+        .unwrap_or(src.len());
+    let body = &src[start..end];
+
+    let mut missing = Vec::new();
+    if !body.contains(".pool_max_idle_per_host(") {
+        missing.push(".pool_max_idle_per_host(..)");
+    }
+    if !body.contains(".pool_idle_timeout(") {
+        missing.push(".pool_idle_timeout(..)");
+    }
+    if !body.contains(".connect_timeout(") {
+        missing.push(".connect_timeout(..)");
+    }
+
+    assert!(
+        missing.is_empty(),
+        "\n\n\
+         ═══ RESOURCE SAFETY VIOLATION: shared client factory lost a bound ═══\n\n\
+         ipv4_only_client_builder() is missing: {}\n\n\
+         reqwest defaults `pool_max_idle_per_host` to usize::MAX and\n\
+         `pool_idle_timeout` to 90s. Unbounded pooling converts request\n\
+         concurrency into a permanent socket population, and a large socket\n\
+         table then makes every subsequent bind()/connect() more expensive\n\
+         in the kernel — one busy subsystem degrades the whole process.\n\n\
+         Measured on a user's node 2026-08-13: 15,296 sockets — 6,932 ESTAB,\n\
+         5,839 CLOSE-WAIT, 2,821 SYN-SENT — against six peers.\n\n\
+         These are the defaults ~40 call sites inherit. Restore them rather\n\
+         than patching the one caller that happens to be hurting today.\n",
+        missing.join(", "),
+    );
+}
