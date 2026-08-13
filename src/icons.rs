@@ -11,10 +11,106 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::info;
 
 /// Where custom-installed icon packs are stored
 fn icon_packs_dir() -> String { crate::paths::get().icon_packs_dir }
+
+/// How long a pack scan stays valid. Icon packs only change when an
+/// operator installs or removes one, and both paths call
+/// [`invalidate_caches`], so this TTL only bounds staleness for packs
+/// dropped into /usr/share/icons behind our back.
+const PACK_SCAN_TTL: Duration = Duration::from_secs(300);
+
+static PACK_SCAN_CACHE: OnceLock<Mutex<Option<(Instant, Vec<IconPack>)>>> = OnceLock::new();
+/// (pack_id, semantic_name) -> resolved file, memoised. `None` is cached
+/// too: a miss is the *expensive* answer (~15k failed stat() calls once
+/// every candidate and every fallback has been tried), so never paying
+/// for the same miss twice is the whole point.
+static ICON_PATH_CACHE: OnceLock<Mutex<HashMap<(String, String), Option<PathBuf>>>> = OnceLock::new();
+
+fn pack_scan_cache() -> &'static Mutex<Option<(Instant, Vec<IconPack>)>> {
+    PACK_SCAN_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn icon_path_cache() -> &'static Mutex<HashMap<(String, String), Option<PathBuf>>> {
+    ICON_PATH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drop both caches. Called after any install/remove so the next request
+/// re-scans instead of serving a pack that is no longer on disk.
+pub fn invalidate_caches() {
+    if let Ok(mut c) = pack_scan_cache().lock() { *c = None; }
+    if let Ok(mut c) = icon_path_cache().lock() { c.clear(); }
+}
+
+/// Cached form of [`scan_all_packs`].
+///
+/// Every `/api/icon-packs/{pack}/icon/{name}` request used to call
+/// `scan_all_packs()` just to turn a pack id into a directory — a full
+/// read_dir of every icon theme on the box, including `count_icons_rough`
+/// walking seven subdirectories per pack. Selecting an icon pack fires one
+/// request per `[data-icon]` placeholder (1,022 on the datacenter page), so
+/// that scan ran a thousand times in a burst and starved every actix worker:
+/// an idle `/api/agent/status` went from 4 ms to 4,092 ms and the whole UI
+/// rendered empty (Paul, 2026-08-13, wolfstack-1).
+pub fn scan_all_packs_cached() -> Vec<IconPack> {
+    if let Ok(guard) = pack_scan_cache().lock() {
+        if let Some((at, packs)) = guard.as_ref() {
+            if at.elapsed() < PACK_SCAN_TTL {
+                return packs.clone();
+            }
+        }
+    }
+    // Scan outside the lock — a cold scan on a box with large packs takes
+    // long enough that holding the mutex would serialise every caller
+    // behind it. A concurrent burst may scan more than once; that is
+    // strictly better than a queue of threads waiting on one scan.
+    let packs = scan_all_packs();
+    if let Ok(mut guard) = pack_scan_cache().lock() {
+        *guard = Some((Instant::now(), packs.clone()));
+    }
+    packs
+}
+
+/// Set of names we are willing to memoise. See [`resolve_icon_cached`].
+static KNOWN_SEMANTICS: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+
+fn is_known_semantic(name: &str) -> bool {
+    KNOWN_SEMANTICS
+        .get_or_init(|| semantic_to_freedesktop().keys().copied().collect())
+        .contains(name)
+}
+
+/// Cached form of [`resolve_icon`], keyed by pack id + semantic name.
+///
+/// Only *known* semantic names are memoised. `semantic_name` arrives from
+/// the request path, so caching it unconditionally would let any logged-in
+/// user grow this map without bound by requesting made-up icon names. The
+/// frontend only ever asks for names from `semantic_names()`, so the cache
+/// stays bounded at (packs x semantics) and nothing real loses its cache
+/// entry. Unknown names still resolve correctly, just without memoisation.
+pub fn resolve_icon_cached(pack_id: &str, theme_dir: &Path, semantic_name: &str) -> Option<PathBuf> {
+    if !is_known_semantic(semantic_name) {
+        return resolve_icon(theme_dir, semantic_name);
+    }
+    let key = (pack_id.to_string(), semantic_name.to_string());
+    if let Ok(cache) = icon_path_cache().lock() {
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+    }
+    // Resolve outside the lock — this is the multi-thousand-stat() call the
+    // cache exists to avoid, and holding the mutex across it would put every
+    // other icon request behind this one.
+    let resolved = resolve_icon(theme_dir, semantic_name);
+    if let Ok(mut cache) = icon_path_cache().lock() {
+        cache.insert(key, resolved.clone());
+    }
+    resolved
+}
 
 /// Standard system icon theme paths to scan
 const SYSTEM_ICON_DIRS: &[&str] = &[
@@ -537,6 +633,10 @@ pub async fn install_from_github(url: &str) -> Result<IconPack, String> {
 
     let icon_count = count_icons_rough(&dest);
 
+    // A newly installed pack must show up immediately, and any negative
+    // resolutions cached while it was absent are now wrong.
+    invalidate_caches();
+
     Ok(IconPack {
         id: repo_name,
         name,
@@ -562,6 +662,9 @@ pub fn remove_pack(pack_id: &str) -> Result<(), String> {
     }
     std::fs::remove_dir_all(&dest)
         .map_err(|e| format!("Failed to remove icon pack: {}", e))?;
+    // The pack is gone from disk — drop the scan and every resolved path
+    // that pointed into it, or we keep serving a deleted pack for the TTL.
+    invalidate_caches();
     info!("Removed icon pack '{}'", pack_id);
     Ok(())
 }

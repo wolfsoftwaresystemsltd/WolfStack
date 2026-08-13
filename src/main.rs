@@ -4781,6 +4781,25 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             .keep_alive(std::time::Duration::from_secs(2))
             .client_request_timeout(std::time::Duration::from_secs(3))
             .client_disconnect_timeout(std::time::Duration::from_millis(500))
+            // The keep-alive knobs above CANNOT reclaim a socket whose
+            // request is still in flight. actix-http's dispatcher only
+            // starts shutdown on a client FIN when the half-closure is
+            // disallowed *or* request processing has finished:
+            //
+            //   if READ_DISCONNECT && (!config.h1_allow_half_closed() || state_is_none)
+            //       -> start shutdown                (h1/dispatcher.rs:1228)
+            //
+            // h1_allow_half_closed defaults to TRUE (config.rs:103), so a
+            // client that gives up mid-request left us holding the fd for
+            // the entire remaining handler duration — CLOSE_WAIT residence
+            // became "however long the slowest handler takes". klas
+            // (hemulen) and klnet-12gb both showed 75-80k CLOSE_WAIT on the
+            // inter-node listener with CPU pegged at 80-100%.
+            //
+            // A client that has closed its writer-side cannot send another
+            // request on this connection, so there is nothing to preserve:
+            // abort as soon as we see EOF and give the fd straight back.
+            .h1_allow_half_closed(false)
             .workers(http_workers)
             .on_connect(mtls_on_connect)
             .bind_openssl(&https_bind, ssl_builder)
@@ -4821,6 +4840,13 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .keep_alive(std::time::Duration::from_secs(2))
                     .client_request_timeout(std::time::Duration::from_secs(3))
                     .client_disconnect_timeout(std::time::Duration::from_millis(500))
+                    // See the HTTPS listener above. This is the listener that
+                    // actually drowned: klnet-12gb showed 75,084 CLOSE_WAIT
+                    // here against 4,394 on :8553, because every peer's
+                    // route-announce falls back to http://{peer}:8554 and the
+                    // half-closure default pinned each fd for the whole
+                    // handler.
+                    .h1_allow_half_closed(false)
                     .workers(http_workers)
                     .bind(&http_bind)
                     .map_err(|e| {
@@ -4840,6 +4866,17 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .app_data(app_state3.clone())
                     .configure(api::configure_statuspage_only)
             })
+            // The status listener is the one surface we publish to the open
+            // internet, and until now it was the only HttpServer with NO
+            // lifecycle limits at all — actix defaults of 5s keep-alive, 5s
+            // request timeout, 0s disconnect timeout and half-closures
+            // allowed. Give it the same budget protection as the admin
+            // listeners; an anonymous client must not be able to park fds
+            // here.
+            .keep_alive(std::time::Duration::from_secs(2))
+            .client_request_timeout(std::time::Duration::from_secs(3))
+            .client_disconnect_timeout(std::time::Duration::from_millis(500))
+            .h1_allow_half_closed(false)
             .workers(http_workers)
             .bind(&sp_bind)
             .map_err(|e| {
@@ -4921,10 +4958,13 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
             })
             // See matching block above on the TLS path for why these
             // lifecycle knobs matter. Keep-alive / disconnect tuning
-            // caps CLOSE_WAIT residence time to protect fd budget.
+            // caps CLOSE_WAIT residence time to protect fd budget, and
+            // disallowing half-closures is what lets a client FIN reclaim
+            // the fd mid-request instead of at handler completion.
             .keep_alive(std::time::Duration::from_secs(2))
             .client_request_timeout(std::time::Duration::from_secs(3))
             .client_disconnect_timeout(std::time::Duration::from_millis(500))
+            .h1_allow_half_closed(false)
             .workers(http_workers)
             .bind(netaddr::host_port(&cli.bind, api_port))?
             .run();
@@ -4936,6 +4976,17 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                     .app_data(app_state2.clone())
                     .configure(api::configure_statuspage_only)
             })
+            // The status listener is the one surface we publish to the open
+            // internet, and until now it was the only HttpServer with NO
+            // lifecycle limits at all — actix defaults of 5s keep-alive, 5s
+            // request timeout, 0s disconnect timeout and half-closures
+            // allowed. Give it the same budget protection as the admin
+            // listeners; an anonymous client must not be able to park fds
+            // here.
+            .keep_alive(std::time::Duration::from_secs(2))
+            .client_request_timeout(std::time::Duration::from_secs(3))
+            .client_disconnect_timeout(std::time::Duration::from_millis(500))
+            .h1_allow_half_closed(false)
             .workers(http_workers)
             .bind(&sp_bind)
             .map_err(|e| {

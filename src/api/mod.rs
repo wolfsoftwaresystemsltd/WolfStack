@@ -38065,7 +38065,15 @@ async fn patreon_disconnect(req: HttpRequest, state: web::Data<AppState>) -> Htt
 /// GET /api/icon-packs — list all available icon packs (system + custom)
 async fn icon_packs_list(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
-    let packs = crate::icons::scan_all_packs();
+    // read_dir over every icon theme on the box — blocking, never on a worker.
+    let packs = match web::block(crate::icons::scan_all_packs_cached).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("icon pack scan failed: {e}");
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({ "error": "icon pack scan failed" }));
+        }
+    };
     HttpResponse::Ok().json(serde_json::json!({ "packs": packs }))
 }
 
@@ -38104,26 +38112,60 @@ async fn icon_packs_serve(req: HttpRequest, state: web::Data<AppState>, path: we
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let (pack_id, icon_name) = path.into_inner();
 
-    // Find the pack directory
-    let packs = crate::icons::scan_all_packs();
-    let pack = match packs.iter().find(|p| p.id == pack_id) {
-        Some(p) => p,
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "pack not found" })),
-    };
+    // Pack lookup, icon resolution and the file read are all synchronous
+    // filesystem work. Selecting an icon pack fires one of these per
+    // [data-icon] placeholder — over a thousand in a single burst — so
+    // running them inline pinned every worker thread and stalled the whole
+    // API (see icons::scan_all_packs_cached for the measurements).
+    //
+    // The outcome is an enum rather than an Option so the three distinct
+    // failures stay distinguishable to the caller, as they were before this
+    // moved off the worker thread.
+    enum IconServe {
+        Served(&'static str, Vec<u8>),
+        PackNotFound,
+        IconNotFound,
+        ReadFailed(std::io::Error),
+    }
 
-    let theme_dir = std::path::Path::new(&pack.path);
-    match crate::icons::resolve_icon(theme_dir, &icon_name) {
-        Some(file_path) => {
-            let mime = crate::icons::icon_mime(&file_path);
-            match std::fs::read(&file_path) {
-                Ok(data) => HttpResponse::Ok()
-                    .content_type(mime)
-                    .insert_header(("Cache-Control", "public, max-age=86400"))
-                    .body(data),
-                Err(_) => HttpResponse::InternalServerError().finish(),
-            }
+    let resolved = web::block(move || {
+        let packs = crate::icons::scan_all_packs_cached();
+        let pack = match packs.iter().find(|p| p.id == pack_id) {
+            Some(p) => p,
+            None => return IconServe::PackNotFound,
+        };
+        let theme_dir = std::path::Path::new(&pack.path);
+        let file_path = match crate::icons::resolve_icon_cached(&pack.id, theme_dir, &icon_name) {
+            Some(f) => f,
+            None => return IconServe::IconNotFound,
+        };
+        let mime = crate::icons::icon_mime(&file_path);
+        match std::fs::read(&file_path) {
+            Ok(data) => IconServe::Served(mime, data),
+            Err(e) => IconServe::ReadFailed(e),
         }
-        None => HttpResponse::NotFound().json(serde_json::json!({ "error": "icon not found in pack" })),
+    })
+    .await;
+
+    match resolved {
+        Ok(IconServe::Served(mime, data)) => HttpResponse::Ok()
+            .content_type(mime)
+            .insert_header(("Cache-Control", "public, max-age=86400"))
+            .body(data),
+        Ok(IconServe::PackNotFound) => {
+            HttpResponse::NotFound().json(serde_json::json!({ "error": "pack not found" }))
+        }
+        Ok(IconServe::IconNotFound) => {
+            HttpResponse::NotFound().json(serde_json::json!({ "error": "icon not found in pack" }))
+        }
+        Ok(IconServe::ReadFailed(e)) => {
+            error!("icon file read failed: {e}");
+            HttpResponse::InternalServerError().finish()
+        }
+        Err(e) => {
+            error!("icon serve failed: {e}");
+            HttpResponse::InternalServerError().finish()
+        }
     }
 }
 
@@ -38132,26 +38174,38 @@ async fn icon_packs_preview(req: HttpRequest, state: web::Data<AppState>, path: 
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let pack_id = path.into_inner();
 
-    let packs = crate::icons::scan_all_packs();
-    let pack = match packs.iter().find(|p| p.id == pack_id) {
-        Some(p) => p,
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "pack not found" })),
-    };
+    // This is the single most expensive icon call: it resolves EVERY
+    // semantic name, and a miss costs thousands of failed stat() calls.
+    // Settings > Appearance fires one per installed pack, so it must never
+    // run on a worker thread — and the per-icon memoisation means the
+    // second caller pays almost nothing.
+    let pack_id_for_block = pack_id.clone();
+    let result = web::block(move || {
+        let packs = crate::icons::scan_all_packs_cached();
+        let pack = packs.iter().find(|p| p.id == pack_id_for_block)?;
+        let theme_dir = std::path::Path::new(&pack.path);
+        let names = crate::icons::semantic_names();
+        let available: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| crate::icons::resolve_icon_cached(&pack.id, theme_dir, name).is_some())
+            .collect();
+        Some((names.len(), available))
+    })
+    .await;
 
-    // Return a list of which semantic icons are available
-    let theme_dir = std::path::Path::new(&pack.path);
-    let names = crate::icons::semantic_names();
-    let mut available: Vec<&str> = Vec::new();
-    for name in &names {
-        if crate::icons::resolve_icon(theme_dir, name).is_some() {
-            available.push(name);
+    match result {
+        Ok(Some((total, available))) => HttpResponse::Ok().json(serde_json::json!({
+            "pack_id": pack_id,
+            "total_semantic": total,
+            "available": available,
+        })),
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({ "error": "pack not found" })),
+        Err(e) => {
+            error!("icon pack preview failed: {e}");
+            HttpResponse::InternalServerError().finish()
         }
     }
-    HttpResponse::Ok().json(serde_json::json!({
-        "pack_id": pack_id,
-        "total_semantic": names.len(),
-        "available": available,
-    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════
