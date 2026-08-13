@@ -52,16 +52,80 @@ pub(crate) static API_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
             .unwrap_or_else(|_| reqwest::Client::new())
     });
 
-/// Start a reqwest ClientBuilder pinned to IPv4. Wolfstacks run on
-/// mixed-stack hosts where AAAA records exist but the peer's :8553
-/// is only bound to 0.0.0.0 — without this, hyper will happily try
-/// the v6 address first, time out, and only then try the v4 one,
-/// adding seconds of latency per call. `local_address` bound to
-/// `Ipv4Addr::UNSPECIFIED` forces the outgoing socket into the IPv4
-/// stack so v6 candidates are skipped.
+/// Idle keep-alive sockets retained per peer by clients built through
+/// [`ipv4_only_client_builder`]. reqwest's default is `usize::MAX`
+/// (reqwest-0.12.28 src/async_impl/client.rs:302) — unbounded, so a busy
+/// node accumulates pooled sockets against every peer until something
+/// else breaks. Eight is ample for keep-alive reuse and makes the
+/// process-wide socket table O(peers) instead of O(request concurrency).
+const POOL_MAX_IDLE_PER_HOST: usize = 8;
+
+/// Reap idle pooled sockets after this long. reqwest's default is 90s
+/// (client.rs:301); a peer that closes its end first leaves ours in
+/// CLOSE-WAIT for the remainder of that window.
+const POOL_IDLE_TIMEOUT_SECS: u64 = 15;
+
+/// DNS resolver that discards AAAA results and returns only IPv4 addresses.
+///
+/// Wolfstacks run on mixed-stack hosts where AAAA records exist but the
+/// peer's :8553 is only bound to 0.0.0.0. Without filtering, hyper tries
+/// the v6 address first, times out, and only then falls back to v4.
+///
+/// This replaces a previous `local_address(Ipv4Addr::UNSPECIFIED)`, which
+/// achieved the same filtering only as a *side effect* of setting a source
+/// address (hyper-util `SocketAddrs::split_by_preference`,
+/// client/legacy/connect/dns.rs:216-218, keeps only v4 candidates when
+/// `local_address_ipv4` is `Some`). The cost of that side effect is a
+/// `bind()` on every outbound connection: hyper-util `bind_local_address`
+/// (client/legacy/connect/http.rs:800-803) binds the socket to
+/// `<addr>:0` whenever a source address is set. Port 0 sends the kernel
+/// into `inet_csk_find_open_port`, which scans the bind table under a
+/// spinlock — cost proportional to the number of sockets on the host.
+///
+/// On klas's node (2026-08-13) that scan was **77.7% of all CPU**, spread
+/// across 14 actix workers colliding in `native_queued_spin_lock_slowpath`,
+/// with 15,296 sockets in the table. Resolving the address family here
+/// keeps the behaviour and removes the syscall entirely — with no source
+/// address set, `bind_local_address`'s fallback arm is a no-op off Windows.
+struct Ipv4OnlyResolver;
+
+impl reqwest::dns::Resolve for Ipv4OnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            // Port 0 is a placeholder — reqwest substitutes the scheme's
+            // port. Documented on `Resolve::resolve`, reqwest-0.12.28
+            // src/dns/resolve.rs:30-31.
+            let resolved = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let v4: Vec<std::net::SocketAddr> =
+                resolved.filter(std::net::SocketAddr::is_ipv4).collect();
+            Ok(Box::new(v4.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Start a reqwest ClientBuilder pinned to IPv4, with safe pool and
+/// connect defaults for every caller.
+///
+/// Hosts reached by IP literal never enter the resolver at all, so the
+/// v4 filtering costs nothing on the cluster-peer path; it exists for
+/// the hostname callers (registries, webhooks, licensing).
 pub(crate) fn ipv4_only_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
-        .local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
+        .dns_resolver(std::sync::Arc::new(Ipv4OnlyResolver))
+        // SAFE DEFAULT for every client built through this factory.
+        //
+        // An unbounded idle pool turns request concurrency into a
+        // permanent socket population. Beyond the descriptor cost, a large
+        // socket table makes every subsequent `bind()`/`connect()` more
+        // expensive in the kernel, so this is what stops one busy
+        // subsystem degrading the whole process.
+        //
+        // Callers wanting no pooling at all override with
+        // `pool_max_idle_per_host(0)`; overrides applied after this call
+        // win. Enforced by tests/resource_safety.rs.
+        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(std::time::Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
         // SAFE DEFAULT for every client built through this factory.
         //
         // A total `.timeout()` does not bound a connection that never
