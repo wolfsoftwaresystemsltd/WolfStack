@@ -16,7 +16,7 @@ use crate::containers;
 use crate::storage;
 use crate::networking;
 use crate::backup;
-use crate::agent::{ClusterState, AgentMessage};
+use crate::agent::ClusterState;
 use crate::auth::SessionManager;
 use crate::appstore;
 
@@ -7699,58 +7699,36 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
         }
     }
 
-    // Fallback: first request before cache is populated (only happens once at startup)
-    let st = state.clone().into_inner();
-    let (metrics, components, docker_count, lxc_count, vm_count, compose_count, has_docker, has_lxc, has_kvm) =
-        tokio::task::spawn_blocking(move || {
-            let m = st.monitor.lock().unwrap().collect();
-            let c = installer::get_all_status();
-            let dc = containers::docker_list_all().len() as u32;
-            let lc = containers::lxc_list_all().len() as u32;
-            let vc = st.vms.lock().unwrap().list_vms().len() as u32;
-            let cmc = compose_stack_count();
-            let hd = containers::docker_status().installed;
-            let hl = containers::lxc_status().installed;
-            let hk = containers::kvm_installed();
-            (m, c, dc, lc, vc, cmc, hd, hl, hk)
-        }).await.unwrap();
-    let hostname = metrics.hostname.clone();
-    let public_ip = state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.public_ip);
-    let msg = AgentMessage::StatusReport {
-        node_id: state.cluster.self_id.clone(),
-        hostname,
-        metrics,
-        components,
-        docker_count,
-        lxc_count,
-        vm_count,
-        compose_count,
-        public_ip,
-        known_nodes: state.cluster.get_all_nodes(),
-        deleted_ids: state.cluster.get_deleted_ids(),
-        wolfnet_ips: containers::wolfnet_used_ips(),
-        has_docker,
-        has_lxc,
-        has_kvm,
-        // Local Docker / LXC / VM bridge CIDRs. Remote peers consume
-        // this to decide whether their subnet_routes are complete — see
-        // predictive::missing_subnet_route for the analyzer.
-        workload_subnets: crate::networking::collect_workload_subnets(),
-        // Self's declared site tag, gossiped so the cluster-sync on
-        // peers can decide whether to dial us at our LAN address or
-        // route over the public IP.
-        site: state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.site),
-        // Self's operator-set display name — gossiped so peers render the
-        // chosen name rather than the OS hostname.
-        display_name: state.cluster.get_node(&state.cluster.self_id).and_then(|n| n.display_name),
-        // Self's assigned tier roles — gossiped so peers know which nodes
-        // carry the DNS / mail / ingress / host roles.
-        roles: state.cluster.get_node(&state.cluster.self_id).map(|n| n.roles).unwrap_or_default(),
-        license_key: if crate::compat::platform_ready() {
-            std::fs::read_to_string(crate::compat::dm_path()).ok().map(|s| s.trim().to_string())
-        } else { None },
-    };
-    HttpResponse::Ok().json(msg)
+    // Cache miss. Do NOT collect here.
+    //
+    // This used to fall through to its own full collection — sysinfo,
+    // docker, lxc and VM enumeration — on a blocking thread, taking
+    // `monitor`'s mutex on the way. Harmless for the single startup request
+    // it was written for; catastrophic at a cluster's poll rate.
+    //
+    // On a node with peers, EVERY poll arriving before the cache was first
+    // populated took that path at once. Each consumed a blocking-pool
+    // thread and queued on the same mutex. The pool caps at 512 and tokio's
+    // blocking queue is unbounded (runtime/blocking/pool.rs — at the cap it
+    // simply pushes and returns), so the background refresher's own
+    // spawn_blocking queued behind the stampede it had caused, and could
+    // never publish the cache that would have ended it. Requests stopped
+    // returning, so actix never closed their connections, and inbound
+    // CLOSE-WAIT grew without limit until the descriptor table was gone.
+    // Observed on a user's cluster 2026-08-13: ~320 leaked sockets/second,
+    // reproducible within seconds of every restart, never self-healing.
+    //
+    // 503 is the honest answer: this node cannot report yet. The cluster
+    // poller already treats non-2xx as an unsuccessful poll and drains the
+    // body (enforced by tests/resource_safety.rs), so a peer neither hangs
+    // nor records stale data. The refresher publishes on its first tick,
+    // which now runs at startup rather than one interval later.
+    HttpResponse::ServiceUnavailable()
+        .insert_header(("Retry-After", "1"))
+        .json(serde_json::json!({
+            "error": "status cache warming up",
+            "node_id": state.cluster.self_id.clone(),
+        }))
 }
 
 /// POST /api/install/{tech} — install Docker, LXC, or KVM on this node

@@ -550,3 +550,66 @@ fn shared_client_factory_does_not_bound_its_pool() {
         "ipv4_only_client_builder() must keep .connect_timeout(..)"
     );
 }
+
+/// `agent_status` is the endpoint every peer polls. It must be served from
+/// the cache and must NEVER do collection work itself.
+///
+/// It used to fall back to a full collection — sysinfo, docker, lxc, VM
+/// enumeration — whenever the cache was empty, taking a blocking-pool
+/// thread and the `monitor` mutex. That is fine for one request at startup
+/// and fatal at a cluster's poll rate: every poll arriving before the cache
+/// was first populated took that path together, capped the 512-thread pool,
+/// and left tokio's UNBOUNDED blocking queue growing. The background
+/// refresher's own spawn_blocking then queued behind the stampede it had
+/// caused, so the cache could never be published and the node never
+/// recovered. Handlers stopped returning, actix could not close their
+/// sockets, and inbound CLOSE-WAIT grew until the descriptor table was
+/// exhausted — ~320 leaked sockets/second on a real cluster, within seconds
+/// of every restart.
+///
+/// A cache miss must stay cheap. Return 503 and let the refresher publish.
+#[test]
+fn agent_status_never_collects_on_a_cache_miss() {
+    let src = fs::read_to_string("src/api/mod.rs")
+        .expect("src/api/mod.rs must exist");
+
+    let start = src
+        .find("pub async fn agent_status(")
+        .expect("agent_status must exist — it is the endpoint peers poll");
+    // Function body ends at the first closing brace in column 0.
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|e| start + e)
+        .expect("agent_status must have a closing brace");
+    let body = strip_line_comments(&src[start..end]);
+
+    let mut offenders = Vec::new();
+    if body.contains("spawn_blocking(") {
+        offenders.push("tokio::task::spawn_blocking");
+    }
+    if body.contains("web::block(") {
+        offenders.push("web::block");
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "\n\n\
+         ═══ RESOURCE SAFETY VIOLATION: agent_status does blocking work ═══\n\n\
+         Found: {}\n\n\
+         Every peer in the cluster polls this endpoint. If a cache miss can\n\
+         trigger collection, then every poll arriving before the cache is\n\
+         populated triggers it AT ONCE — one blocking-pool thread each, all\n\
+         contending on the same mutex.\n\n\
+         tokio caps the pool at 512 and its blocking queue is unbounded, so\n\
+         the background refresher's own spawn_blocking queues behind the\n\
+         stampede and can never publish the cache that would end it. The\n\
+         node cannot recover: requests stop returning, actix cannot close\n\
+         their sockets, and inbound CLOSE-WAIT grows until the descriptor\n\
+         table is gone.\n\n\
+         Measured on a user's cluster 2026-08-13: ~320 leaked sockets per\n\
+         second, reproducible within seconds of every restart.\n\n\
+         FIX: serve from the cache; on a miss return 503 with Retry-After\n\
+         and let the background refresher publish.\n",
+        offenders.join(", "),
+    );
+}
