@@ -5839,6 +5839,7 @@
                         <button class="settings-tab-btn" onclick="switchSettingsTab('dnsproviders')"><span class="ws-icon-clean-wrap" data-icon="globe"></span> DNS Providers</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('cloudproviders')"><span class="ws-icon-clean-wrap" data-icon="cloud"></span> Cloud Providers</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('systemcheck')"><span class="ws-icon-clean-wrap" data-icon="health"></span> System Check</button>
+                        <button class="settings-tab-btn" onclick="switchSettingsTab('diagnostics')"><span class="ws-icon-clean-wrap" data-icon="health"></span> Diagnostics</button>
                         <button class="settings-tab-btn" onclick="switchSettingsTab('paths')"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span> File Locations</button>
                         <button class="settings-tab-btn" id="settings-tab-btn-sso" style="display:none;" onclick="switchSettingsTab('sso')"><span class="ws-icon-clean-wrap" data-icon="key"></span> Single Sign-On</button>
                         <button class="settings-tab-btn" id="settings-tab-btn-support" style="display:none;" onclick="switchSettingsTab('support')"><span class="ws-icon-clean-wrap" data-icon="bell"></span> Support</button>
@@ -7817,6 +7818,31 @@ dns_cloudflare_api_token = your_token_here"
                             <button class="btn btn-primary" id="systemcheck-run-btn" onclick="runSystemCheck()" style="white-space:nowrap;">▶ Run Check</button>
                         </div>
                         <div id="systemcheck-results"></div>
+                    </div>
+
+                    <div id="settings-tab-diagnostics" class="settings-tab-panel">
+                        <div style="margin-bottom:12px;">
+                            <h4 style="margin:0 0 4px 0; font-size:16px; font-weight:600;">Diagnostics</h4>
+                            <p style="font-size:13px; color:var(--text-muted); margin:0 0 8px 0;">
+                                Captures what is actually needed to root-cause high CPU, memory growth, or a node running out of
+                                file descriptors. WolfStack inspects itself, so this needs no extra tools installed and spawns no
+                                processes — the collection cannot become the load it is measuring.
+                            </p>
+                            <p style="font-size:13px; color:var(--text-muted); margin:0;">
+                                <strong>What is included:</strong> host and kernel details, per-thread CPU, network socket states
+                                and the peers they point at, file-descriptor counts, and the recent WolfStack log.
+                                <strong>What is never included:</strong> anything from <code>/etc/wolfstack</code> — no cluster
+                                secret, no credentials, no backup destinations. Peer IP addresses and log lines do appear, so
+                                read the bundle before sending it on.
+                            </p>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+                            <button class="btn btn-primary" id="diagnostics-run-btn" onclick="runDiagnostics()" style="white-space:nowrap;">▶ Run Diagnostic</button>
+                            <button class="btn" id="diagnostics-download-btn" onclick="downloadDiagnosticBundle()" disabled style="white-space:nowrap;">⬇ Download bundle</button>
+                            <span id="diagnostics-status" role="status" aria-live="polite" style="font-size:13px; color:var(--text-muted);"></span>
+                        </div>
+                        <div id="diagnostics-error" role="alert" aria-live="assertive" style="display:none; margin-bottom:16px; padding:12px 14px; border-radius:6px; border:1px solid var(--danger,#ef4444); background:rgba(239,68,68,0.12); color:var(--text); font-size:13px;"></div>
+                        <div id="diagnostics-results"></div>
                     </div>
 
                     <div id="settings-tab-apikeys" class="settings-tab-panel">

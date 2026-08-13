@@ -13,6 +13,7 @@
 
 mod api;
 mod agent;
+mod diagnostics;
 mod ai;
 mod auth;
 mod monitoring;

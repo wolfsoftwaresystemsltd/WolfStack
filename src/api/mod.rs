@@ -44768,6 +44768,67 @@ fn serde_qs_from_map(
     })
 }
 
+/// Strip a hostname down to what is safe inside a `Content-Disposition`
+/// filename. A hostname is operator-controlled, and CR/LF or a quote in a
+/// response header is header injection — so this allows only characters
+/// that cannot terminate or escape the header value.
+pub(crate) fn sanitise_filename_part(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let trimmed = cleaned.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "wolfstack".to_string()
+    } else {
+        trimmed.chars().take(64).collect()
+    }
+}
+
+/// GET /api/diagnostics — collect a full self-diagnostic.
+///
+/// Returns the structured report for on-screen display AND the rendered
+/// text bundle in the same response, so what the operator reads and what
+/// they send us are the same snapshot. Rendering server-side also keeps
+/// the one formatter in one place rather than duplicating it in JS.
+///
+/// Admin-only: the report exposes peer addresses, thread layout and
+/// journal lines. It deliberately contains nothing from /etc/wolfstack,
+/// so no cluster secret or credential can ride along.
+pub async fn diagnostics_collect(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    if !crate::auth::session_user_is_admin(&caller) {
+        return HttpResponse::Forbidden().json(serde_json::json!({
+            "error": "Only admin users can run diagnostics"
+        }));
+    }
+
+    // Blocking: samples CPU for ~1.5s and shells out to journalctl once.
+    // Never run that on a runtime worker.
+    let report = match web::block(crate::diagnostics::collect).await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("diagnostics collection failed: {e}");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Diagnostic collection failed: {e}")
+            }));
+        }
+    };
+
+    let text = crate::diagnostics::render_text(&report);
+    let filename = format!(
+        "wolfstack-diagnostic-{}-{}.txt",
+        sanitise_filename_part(&report.context.hostname),
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+    );
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "report": report,
+        "text": text,
+        "filename": filename,
+    }))
+}
+
 /// Configure all API routes
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -44845,6 +44906,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/auth/smtp-configured", web::get().to(smtp_configured))
         .route("/api/auth/forgot-password", web::post().to(forgot_password))
         .route("/api/auth/reset-password", web::post().to(reset_password))
+        // Self-diagnostics (Settings > Diagnostics). Admin-only.
+        .route("/api/diagnostics", web::get().to(diagnostics_collect))
         // Support tickets — proxied to wolfstack.org, auth = dashboard session
         .route("/api/support/entitlement", web::get().to(support_entitlement))
         .route("/api/support/tickets", web::get().to(support_tickets_list))
