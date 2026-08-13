@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.12.6: fix the startup stampede that exhausted file descriptors** _(2026-08-13 — [`65a204a6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65a204a670c7ec1f33d722adcc9975372848527c))_
+- **v25.12.5: undo the connection-pool bound that made socket exhaustion 140x worse** _(2026-08-13 — [`b427faa4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b427faa40ad00f42529713b62f3822e5a7680691))_
 - **v25.12.4: Settings > Diagnostics — one button for the numbers support actually needs** _(2026-08-13 — [`e760439b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e760439b4b0246efd3cca5a5306494d7006359b9))_
 - **v25.12.3: stop binding a socket on every outbound connection** _(2026-08-13 — [`ef77df0d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ef77df0d06849c88c49d2ff3de2db5b81dddc879))_
 - **v25.12.2: WolfStack stops running a command inside every container every 30 seconds** _(2026-08-12 — [`2d0e7cde`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d0e7cded82810f2f7a1faf5a012bf37023dd337))_
