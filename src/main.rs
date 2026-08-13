@@ -2591,8 +2591,26 @@ async fn main() -> std::io::Result<()> {
         let self_monitor_secs = if agent_mode { 5 } else { 2 };
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(self_monitor_secs)).await;
-                // Run all blocking sysinfo/subprocess work off the async runtime
+                // Collect IMMEDIATELY on the first pass — the sleep is at the
+                // BOTTOM of this loop deliberately.
+                //
+                // Sleeping first left `cached_status` as None for the first
+                // couple of seconds after every start. `agent_status` serves
+                // peers from that cache, and on a cluster with real traffic
+                // every poll arriving in that window used to fall through to
+                // its own full collection: a blocking thread each, all
+                // contending on `monitor`. The pool capped at 512, tokio's
+                // blocking queue is unbounded, and THIS task's own
+                // spawn_blocking then queued behind the stampede it caused —
+                // so the cache could never be populated and the node never
+                // recovered. Requests stopped returning, actix could not
+                // close their sockets, and inbound CLOSE-WAIT grew without
+                // limit until the descriptor table was gone.
+                //
+                // Populating before serving closes the window; `agent_status`
+                // no longer collects on a miss, which removes the stampede
+                // even if the window is somehow hit.
+                // Run all blocking sysinfo/subprocess work off the async runtime.
                 let sc = state_clone.clone();
                 let (metrics, components, docker_count, lxc_count, vm_count, compose_count, has_docker, has_lxc, has_kvm) =
                     tokio::task::spawn_blocking(move || {
@@ -2661,6 +2679,11 @@ async fn main() -> std::io::Result<()> {
                 }
 
                 cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip.read().await.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
+
+                // Sleep at the BOTTOM so the first collection happens at
+                // startup rather than `self_monitor_secs` after it. See the
+                // note at the top of this loop.
+                tokio::time::sleep(Duration::from_secs(self_monitor_secs)).await;
             }
         });
 
