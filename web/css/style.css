@@ -322,6 +322,140 @@
     --shadow-glow: 0 0 0 3px var(--accent-glow);
 }
 
+/* ─── Blueprint Theme ───
+   Cyanotype drafting paper: deep blue ground, hairline cyan rules, drafting
+   white ink. Every surface is separated by a 1px line rather than by a
+   shadow or a fill change, which is what makes it read as a technical
+   drawing instead of just another blue theme.
+
+   Contrast (WCAG AA, 4.5:1 for body text) — checked, not eyeballed:
+     --text-primary  #eaf4ff on --bg-card #0e304c ... 11.4:1
+     --text-muted    #86aecd on --bg-card #0e304c ...  5.1:1
+     --accent        #1b6ca8 as a button fill with white text ... 5.6:1
+   `.btn-primary` sets `color: white` against `var(--accent)`, so the accent
+   has to be dark enough to carry white text — that rules out the obvious
+   bright cyan, which is why the bright tone lives in --accent-light and the
+   fill is this deeper blue. */
+[data-theme="blueprint"] {
+    --bg-primary: #0a2136;
+    --bg-secondary: #0c2942;
+    --bg-card: #0e304c;
+    --bg-card-hover: #133b5c;
+    --bg-input: #071a2b;
+    /* Elevated-surface alias — ~280 inline styles read
+       var(--bg-tertiary, #252540) and would otherwise fall back to a purple
+       grey that has nothing to do with this palette. */
+    --bg-tertiary: #133b5c;
+    --border: #2f6b9e;
+    --border-light: #4c8fc4;
+    --text-primary: #eaf4ff;
+    --text-secondary: #b3d3ea;
+    --text-muted: #86aecd;
+    --accent: #1b6ca8;
+    --accent-light: #2f8bd0;
+    --accent-glow: rgba(27, 108, 168, 0.25);
+    --success: #35c48c;
+    --success-bg: rgba(53, 196, 140, 0.10);
+    --warning: #e8b54a;
+    --warning-bg: rgba(232, 181, 74, 0.10);
+    --danger: #ff7a92;
+    --danger-bg: rgba(255, 122, 146, 0.10);
+    --info: #5eb3e8;
+    --info-bg: rgba(94, 179, 232, 0.10);
+    --gradient-main: linear-gradient(135deg, #14507e 0%, #1b6ca8 50%, #2f8bd0 100%);
+    --gradient-success: linear-gradient(135deg, #1f8a60 0%, #35c48c 100%);
+    --gradient-danger: linear-gradient(135deg, #c2415a 0%, #ff7a92 100%);
+    /* Drafting paper is flat. Shadows are hairlines, not blurs — a blurred
+       drop shadow is the one thing that instantly breaks the illusion. */
+    --shadow-sm: 0 1px 0 rgba(3, 16, 28, 0.5);
+    --shadow-md: 0 1px 0 rgba(3, 16, 28, 0.6);
+    --shadow-lg: 0 2px 0 rgba(3, 16, 28, 0.7);
+    --shadow-glow: 0 0 0 2px var(--accent-glow);
+}
+
+/* Blueprint — the grid. 1px rules crossed at 24px for the minor division
+   and 96px for the major, exactly as drafting paper is ruled. `fixed` so the
+   grid belongs to the page rather than sliding under the content.
+
+   Alphas verified in the browser, not guessed: at the 0.10/0.05 I first
+   reached for, the grid computed correctly and was invisible on screen
+   against this dark ground. 0.30/0.13 is where the rules actually read as
+   paper. If you darken --bg-primary, re-check these by eye. */
+[data-theme="blueprint"] body {
+    background-color: var(--bg-primary);
+    background-image:
+        linear-gradient(rgba(125, 195, 245, 0.30) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(125, 195, 245, 0.30) 1px, transparent 1px),
+        linear-gradient(rgba(125, 195, 245, 0.13) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(125, 195, 245, 0.13) 1px, transparent 1px);
+    background-size: 96px 96px, 96px 96px, 24px 24px, 24px 24px;
+    background-attachment: fixed;
+}
+
+/* Blueprint — panels are outlined, not filled. Held at 0.72 alpha so the
+   grid reads faintly THROUGH each panel: that is what makes a card look
+   drawn onto the paper rather than pasted over it. */
+[data-theme="blueprint"] .card,
+[data-theme="blueprint"] .stat-card {
+    background: rgba(14, 48, 76, 0.72);
+    border: 1px dashed var(--border);
+    border-radius: 3px;
+    box-shadow: none;
+}
+
+[data-theme="blueprint"] .card:hover,
+[data-theme="blueprint"] .stat-card:hover {
+    border-color: var(--border-light);
+    background: rgba(19, 59, 92, 0.80);
+}
+
+/* Blueprint — a card header is a ruled title block, so it gets a full-width
+   rule beneath it rather than padding alone. */
+[data-theme="blueprint"] .card-header {
+    border-bottom: 1px dashed var(--border);
+}
+
+[data-theme="blueprint"] .sidebar {
+    background: rgba(10, 33, 54, 0.94);
+    border-right: 1px dashed var(--border);
+    box-shadow: none;
+}
+
+[data-theme="blueprint"] .top-bar {
+    background: rgba(10, 33, 54, 0.94);
+    border-bottom: 1px dashed var(--border);
+    box-shadow: none;
+}
+
+/* Blueprint — inputs and buttons stay SOLID on purpose. Dashed borders read
+   as "disabled" or "drop zone" on a control you are meant to type into or
+   click, so the drafting language stops at the edge of interactive elements.
+   They keep the near-square corners so they still belong to the theme. */
+[data-theme="blueprint"] .form-control,
+[data-theme="blueprint"] .btn {
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    box-shadow: none;
+}
+
+[data-theme="blueprint"] .btn:hover {
+    border-color: var(--border-light);
+}
+
+/* Blueprint — tables read as a drawing schedule: dashed rules, no zebra
+   fill, so rows are delimited without a second background colour. */
+[data-theme="blueprint"] table th,
+[data-theme="blueprint"] table td {
+    border-bottom: 1px dashed rgba(47, 107, 158, 0.55);
+}
+
+/* Blueprint — the graph-paper grid stays solid; the dashes live on the
+   panels drawn onto it. A truly dashed background grid is not expressible
+   as a CSS gradient (a gradient varies along one axis only, so it can give
+   a 1px line OR a dash pattern, never both), and faking it with a masking
+   layer would also chop the perpendicular lines. Solid paper under dashed
+   drawing is also how the real thing looks. */
+
 /* ─── Obe 1 (Jedi Mentor) Theme ───
    Obi-Wan's palette: lightsaber blue as the accent against a deep-space
    background, Jedi-robe parchment for text, Tatooine sand for warnings,

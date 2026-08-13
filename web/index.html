@@ -5896,6 +5896,26 @@
                                     <div class="theme-card-desc">Clean white with red accents</div>
                                 </div>
                             </div>
+                            <!-- Blueprint -->
+                            <div class="theme-card" onclick="applyTheme('blueprint')" data-theme-id="blueprint">
+                                <div class="theme-preview">
+                                    <div class="theme-preview-sidebar"
+                                        style="background:#0a2136; border-right:1px solid #2f6b9e;"></div>
+                                    <div class="theme-preview-main"
+                                        style="background:#0a2136; background-image:linear-gradient(rgba(120,180,225,0.16) 1px, transparent 1px), linear-gradient(90deg, rgba(120,180,225,0.16) 1px, transparent 1px); background-size:8px 8px;">
+                                        <div class="theme-preview-bar" style="background:#0e304c; border-bottom:1px solid #2f6b9e;"></div>
+                                        <div class="theme-preview-card" style="background:rgba(14,48,76,0.88); border:1px solid #2f6b9e;">
+                                            <div class="theme-preview-card-inner" style="background:#1b6ca8;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#35c48c;"></div>
+                                            <div class="theme-preview-card-inner" style="background:#e8b54a;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="theme-card-info">
+                                    <div class="theme-card-name">Blueprint</div>
+                                    <div class="theme-card-desc">Cyanotype drafting paper — ruled grid, hairline panels</div>
+                                </div>
+                            </div>
                             <!-- Midnight -->
                             <div class="theme-card" onclick="applyTheme('midnight')" data-theme-id="midnight">
                                 <div class="theme-preview">
@@ -6672,13 +6692,12 @@
                         <div class="form-group" style="margin-bottom:16px;">
                             <label>Check interval</label>
                             <select id="docker-updates-check-interval" class="form-control" style="max-width:240px;">
-                                <option value="1800">Every 30 minutes</option>
-                                <option value="3600" selected>Every 1 hour</option>
-                                <option value="10800">Every 3 hours</option>
-                                <option value="21600">Every 6 hours</option>
+                                <option value="21600" selected>Every 6 hours</option>
+                                <option value="43200">Every 12 hours</option>
                                 <option value="86400">Every 24 hours</option>
+                                <option value="604800">Every 7 days</option>
                             </select>
-                            <small style="color:var(--text-muted);">How often the watcher queries upstream registries for new digests. Each query is one HEAD request per running container — fast, but rate-limits exist.</small>
+                            <small style="color:var(--text-muted);">How often the watcher queries upstream registries for new digests — one request per running container, plus a <code>docker inspect</code> each. Six hours is the minimum; shorter values are raised to it. Upstream tags rarely move faster than that, and registries rate-limit anonymous pulls. Across a cluster the checks are staggered automatically from each node's WolfNet address, so your nodes never all query at once.</small>
                         </div>
 
                         <div class="form-group" style="margin-bottom:16px;">

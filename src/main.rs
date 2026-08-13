@@ -3191,11 +3191,27 @@ async fn main() -> std::io::Result<()> {
                     }
                     // Wake as often as the most-frequently-checked container
                     // needs (the shortest of the global + per-container
-                    // intervals, floored at 60s). Containers not yet due are
-                    // skipped cheaply inside check_due_containers, so a short
-                    // tick doesn't mean extra registry traffic.
+                    // intervals, floored at 6h). Containers not yet due are
+                    // skipped cheaply inside check_due_containers.
+                    //
+                    // Phase-locked to this node's stagger slot rather than
+                    // sleeping a flat interval from process start. Every node
+                    // in a fleet boots within seconds of the others during an
+                    // upgrade, so a flat sleep had them all pulling registry
+                    // manifests and running `docker inspect` at the same
+                    // instant, forever. The slot comes from the WolfNet
+                    // address's last octet, so the fleet self-spreads with no
+                    // coordination and each node keeps its slot across
+                    // restarts.
                     let interval = config.min_effective_interval_secs();
-                    tokio::time::sleep(Duration::from_secs(interval)).await;
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let delay = crate::containers::image_watcher::secs_until_next_slot(
+                        interval, now_unix,
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
             });
         }
@@ -4171,145 +4187,29 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                             }
                     }
 
-                    // ── Container memory monitoring (local node only) ──
-                    if config.alert_containers {
-                        let format_bytes = |b: u64| -> String {
-                            if b >= 1073741824 { format!("{:.1} GB", b as f64 / 1073741824.0) }
-                            else if b >= 1048576 { format!("{:.0} MB", b as f64 / 1048576.0) }
-                            else { format!("{:.0} KB", b as f64 / 1024.0) }
-                        };
-
-                        let docker_stats = tokio::task::spawn_blocking(|| containers::docker_stats()).await.unwrap_or_default();
-                        let lxc_stats = tokio::task::spawn_blocking(|| containers::lxc_stats()).await.unwrap_or_default();
-
-                        // Container memory threshold dispatch — RETIRED.
-                        //
-                        // Predictive item 5 (`predictive::container_memory`) is the
-                        // canonical source for per-container memory findings. It uses
-                        // the same `containers::*_stats_cached()` data this loop did,
-                        // but routes through the unified Inbox with snooze/dismiss/ack
-                        // semantics instead of the legacy cooldown HashMap. The
-                        // first-appearance dispatch in `predictive::notify` fires the
-                        // Discord/Slack/Telegram/email channels with stable severity
-                        // and per-finding dedup.
-                        //
-                        // Keep these `_stats` bindings — they're consumed by the
-                        // top-N renderer below, which is unrelated to thresholds.
-                        let _ = (&docker_stats, &lxc_stats, &config);
-                        let docker_alerts: Vec<alerting::ContainerAlert> = Vec::new();
-                        let lxc_alerts: Vec<alerting::ContainerAlert> = Vec::new();
-
-                        let all_container_alerts: Vec<_> = docker_alerts.into_iter().chain(lxc_alerts.into_iter()).collect();
-
-                        for alert in &all_container_alerts {
-                            let cooldown_key = format!("container:{}:memory", alert.container_name);
-                            if !alerting::is_in_cooldown_secs(&cooldowns, &cooldown_key, "memory", config.cooldown_secs) {
-                                let runtime_label = if alert.runtime == "docker" { "Docker" } else { "LXC" };
-
-                                let ai_suggestion = alert_ai.analyze_issue(
-                                    &format!(
-                                        "{} container '{}' memory usage is at {:.1}% ({} / {}). \
-                                         What are the likely causes and how can the admin reduce memory usage or increase limits?",
-                                        runtime_label, alert.container_name, alert.memory_percent,
-                                        format_bytes(alert.memory_usage), format_bytes(alert.memory_limit)
-                                    )
-                                ).await.unwrap_or_default();
-
-                                let title = format!(
-                                    "[WolfStack ALERT] {} container '{}' memory at {:.1}%",
-                                    runtime_label, alert.container_name, alert.memory_percent
-                                );
-                                let mut body = format!(
-                                    "⚠️ Container Memory Alert\n\n\
-                                     Container: {} ({})\n\
-                                     Memory Used: {} / {}\n\
-                                     Usage: {:.1}%\n\
-                                     Threshold: {:.0}%\n\
-                                     Time: {}\n\n\
-                                     This alert will not repeat for 15 minutes.",
-                                    alert.container_name, runtime_label,
-                                    format_bytes(alert.memory_usage), format_bytes(alert.memory_limit),
-                                    alert.memory_percent, alert.threshold,
-                                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-                                );
-                                if !ai_suggestion.is_empty() {
-                                    body.push_str(&format!(
-                                        "\n\n🤖 AI Recommendations:\n{}", ai_suggestion
-                                    ));
-                                }
-
-                                let t = title.clone();
-                                let b = body.clone();
-                                tokio::spawn(async move {
-                                    // Container memory threshold — Threshold.
-                                    alerting::send_local_alert(
-                                        alerting::AlertCategory::Threshold,
-                                        &t, &b,
-                                    ).await;
-                                });
-                                let wn_title = title.clone();
-                                let wn_body = body.clone();
-                                tokio::spawn(async move {
-                                    wolfnote::log_alert_to_wolfnote(&wn_title, &wn_body).await;
-                                });
-                                alerting::record_alert(&mut cooldowns, &cooldown_key, "memory");
-                            }
-                        }
-
-                        // Container recovery: clear cooldown when container drops below threshold
-                        let running_names: Vec<String> = docker_stats.iter().chain(lxc_stats.iter())
-                            .filter(|s| s.memory_limit > 0)
-                            .map(|s| s.name.clone())
-                            .collect();
-                        let alerted_names: Vec<String> = all_container_alerts.iter()
-                            .map(|a| a.container_name.clone())
-                            .collect();
-                        for name in &running_names {
-                            if !alerted_names.contains(name) {
-                                let cooldown_key = format!("container:{}:memory", name);
-                                if alerting::was_alerted(&cooldowns, &cooldown_key, "memory") {
-                                    // Find the stats for recovery message
-                                    let stats = docker_stats.iter().chain(lxc_stats.iter())
-                                        .find(|s| s.name == *name);
-                                    if let Some(s) = stats {
-                                        let runtime_label = if s.runtime == "docker" { "Docker" } else { "LXC" };
-                                        let title = format!(
-                                            "[WolfStack OK] {} container '{}' memory recovered",
-                                            runtime_label, name
-                                        );
-                                        let body = format!(
-                                            "✅ Container Memory Recovered\n\n\
-                                             Container: {} ({})\n\
-                                             Memory Used: {} / {}\n\
-                                             Usage: {:.1}%\n\
-                                             Time: {}\n\n\
-                                             Container memory has dropped below the threshold.",
-                                            name, runtime_label,
-                                            format_bytes(s.memory_usage), format_bytes(s.memory_limit),
-                                            s.memory_percent,
-                                            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-                                        );
-
-                                        let t = title.clone();
-                                        let b = body.clone();
-                                        tokio::spawn(async move {
-                                            // Container memory recovery — Threshold.
-                                            alerting::send_local_alert(
-                                                alerting::AlertCategory::Threshold,
-                                                &t, &b,
-                                            ).await;
-                                        });
-                                        let wn_title = title.clone();
-                                        let wn_body = body.clone();
-                                        tokio::spawn(async move {
-                                            wolfnote::log_alert_to_wolfnote(&wn_title, &wn_body).await;
-                                        });
-                                    }
-                                    alerting::clear_cooldown(&mut cooldowns, &cooldown_key, "memory");
-                                }
-                            }
-                        }
-                    }
+                    // Container memory monitoring lived here and was removed in
+                    // v25.12.8. It collected `docker_stats()` + `lxc_stats()` on
+                    // every tick of this loop — five `docker` subprocesses plus a
+                    // full LXC enumeration, every 30-60s on every install, since
+                    // `alert_containers` defaults to true.
+                    //
+                    // All of it fed code that could not execute. When the
+                    // threshold dispatch moved to `predictive::container_memory`,
+                    // the `docker_alerts`/`lxc_alerts` vectors were left hardcoded
+                    // empty, so the alert loop never ran; and the recovery branch
+                    // below it asked `was_alerted("container:<name>:memory")`, a
+                    // key written ONLY inside that dead loop, so it was always
+                    // false too. Net effect: the most expensive Docker calls in
+                    // the daemon ran forever to produce nothing, and on a host
+                    // with a slow dockerd they outlived their own interval and
+                    // piled up (klas, 2026-08-13: hundreds of concurrent
+                    // `docker inspect` processes, node unreachable).
+                    //
+                    // `predictive::container_memory` is the live path: it honours
+                    // the same `alert_containers` toggle, reads
+                    // `docker_stats_cached()`, and routes findings through the
+                    // Inbox with ack/suppress/dedup. Do not reinstate this block —
+                    // add to the predictive item instead.
                 }
 
                 // Use the configured interval (re-read each loop in case user changed it)
