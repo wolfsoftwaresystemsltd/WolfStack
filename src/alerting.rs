@@ -132,16 +132,11 @@ pub struct ThresholdAlert {
     pub threshold: f32,       // configured threshold
 }
 
-/// A container-level memory alert
-#[derive(Debug, Clone)]
-pub struct ContainerAlert {
-    pub container_name: String,
-    pub runtime: String,       // "docker" or "lxc"
-    pub memory_percent: f64,
-    pub memory_usage: u64,
-    pub memory_limit: u64,
-    pub threshold: f32,
-}
+// `ContainerAlert` was removed in v25.12.8 along with the container-memory
+// block in the alerting loop. Its only remaining role was as the element type
+// of two hardcoded-empty vectors, which is what hid the fact that the whole
+// path was unreachable. Container memory findings are `Proposal`s built by
+// `predictive::container_memory` now.
 
 /// Check if a specific alert is in cooldown given a configured
 /// cooldown duration. Returns true if it should be suppressed.

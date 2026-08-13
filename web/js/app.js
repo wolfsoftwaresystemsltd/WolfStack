@@ -21006,7 +21006,7 @@ async function loadDockerUpdatesSettings() {
         const cfg = await r.json();
         document.getElementById('docker-updates-enabled').checked = !!cfg.enabled;
         const ci = document.getElementById('docker-updates-check-interval');
-        if (ci) ci.value = String(cfg.check_interval_secs || 3600);
+        if (ci) ci.value = String(cfg.check_interval_secs || 21600);
         const dp = document.getElementById('docker-updates-default-policy');
         if (dp) dp.value = cfg.default_policy || 'notify_only';
         const sc = document.getElementById('docker-updates-schedule-cron');
@@ -21073,7 +21073,7 @@ async function saveDockerUpdatesConfig() {
         return;
     }
     cfg.enabled = document.getElementById('docker-updates-enabled').checked;
-    cfg.check_interval_secs = parseInt(document.getElementById('docker-updates-check-interval').value, 10) || 3600;
+    cfg.check_interval_secs = parseInt(document.getElementById('docker-updates-check-interval').value, 10) || 21600;
     cfg.default_policy = document.getElementById('docker-updates-default-policy').value;
     const cronRaw = document.getElementById('docker-updates-schedule-cron').value.trim();
     cfg.schedule_cron = cronRaw === '' ? null : cronRaw;
@@ -47200,7 +47200,7 @@ async function saveFail2banConfig(nodePrefix, btn) {
 
 // ─── Theme System ───
 function applyTheme(themeId) {
-    const validThemes = ['dark', 'light', 'midnight', 'datacenter', 'forest', 'amber', 'glass', 'deepred', 'tty', 'obsidian', 'carbon', 'void', 'twilight', 'arctic', 'trek', 'punk', 'fruit', 'obe1', 'bat'];
+    const validThemes = ['dark', 'light', 'midnight', 'datacenter', 'forest', 'amber', 'glass', 'deepred', 'tty', 'obsidian', 'carbon', 'void', 'twilight', 'arctic', 'trek', 'punk', 'fruit', 'obe1', 'bat', 'blueprint'];
     if (!validThemes.includes(themeId)) themeId = 'dark';
 
     // Apply to root element

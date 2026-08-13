@@ -77,8 +77,103 @@ pub struct ImageWatcherConfig {
     pub exclude_bind_mounts_from_backup: bool,
 }
 
-fn default_check_interval() -> u64 { 3600 }
+/// Hard floor on how often an image check may run, for the global setting
+/// AND for any per-container override: 6 hours.
+///
+/// Each check is a registry round-trip plus a `docker inspect` per watched
+/// container. The old floors (300s global, 60s per-container) let a host
+/// with a few dozen containers issue continuous registry traffic and
+/// subprocess churn all day — for tags that move at most daily, and against
+/// registries that rate-limit anonymous pulls. Nothing upstream changes
+/// fast enough to justify anything tighter.
+///
+/// Applied as a clamp on READ (`effective_interval_secs`), so a stored
+/// config carrying a smaller value is simply raised — no migration needed.
+pub const MIN_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+fn default_check_interval() -> u64 { MIN_CHECK_INTERVAL_SECS }
 fn default_window_minutes() -> u64 { 60 }
+
+/// Number of distinct start slots a check period is divided into. 24 so that
+/// on a 24-hour period the slot lands on the hour — a node whose WolfNet
+/// address ends `.10` checks at 10:00, `.11` at 11:00, which is how an
+/// operator can predict when a given box will do its work.
+const STAGGER_SLOTS: u64 = 24;
+
+/// This node's slot number, 0..[`STAGGER_SLOTS`).
+///
+/// Prefers the last octet of the WolfNet address, so the spread is
+/// human-predictable across a mesh. Falls back to a stable hash of the
+/// hostname when WolfNet isn't configured — most single-node installs have no
+/// `wolfnet0`, and they still deserve a stable slot rather than all landing
+/// on zero.
+fn stagger_slot() -> u64 {
+    if let Some(octet) = wolfnet_last_octet() {
+        return u64::from(octet) % STAGGER_SLOTS;
+    }
+    let host = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
+    let host = host.trim();
+    if host.is_empty() {
+        return 0;
+    }
+    // FNV-1a — deterministic across restarts and across versions, unlike
+    // DefaultHasher whose output Rust explicitly does not guarantee.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in host.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h % STAGGER_SLOTS
+}
+
+/// Last octet of this node's WolfNet address, if it has one.
+fn wolfnet_last_octet() -> Option<u8> {
+    let ips = crate::containers::wolfnet_used_ips_cached();
+    let host_ip = ips.first()?;
+    host_ip.parse::<std::net::Ipv4Addr>().ok().map(|v4| v4.octets()[3])
+}
+
+/// Seconds to wait before the next check, phase-locked to this node's slot.
+///
+/// Without this every node in a cluster checks at the same moment — they all
+/// start their loop at boot and boots are correlated (a fleet upgrade
+/// restarts every node within seconds of each other). That put N nodes'
+/// registry traffic and `docker inspect` load on top of each other, which is
+/// exactly what a low-powered box cannot absorb.
+///
+/// The schedule is computed against the Unix epoch rather than from process
+/// start, so it is stable across restarts: a node keeps its slot instead of
+/// re-randomising every time it comes up. Returns the delay to the next slot
+/// boundary at or after `now`.
+pub fn secs_until_next_slot(period_secs: u64, now_unix: u64) -> u64 {
+    let period = period_secs.max(1);
+    let offset = stagger_offset_within(period, stagger_slot());
+    secs_until_next_slot_for(period, now_unix, offset)
+}
+
+/// The scheduling arithmetic, with the node's offset passed in so it can be
+/// tested without a WolfNet interface or a particular hostname.
+fn secs_until_next_slot_for(period_secs: u64, now_unix: u64, offset: u64) -> u64 {
+    let period = period_secs.max(1);
+    // Boundaries sit at `k * period + offset` for integer k. Take the first
+    // one strictly after `now`, so landing exactly on a boundary schedules the
+    // NEXT period rather than returning a zero-length sleep that would spin
+    // the loop.
+    let elapsed = now_unix.wrapping_sub(offset);
+    let next = (elapsed / period + 1).wrapping_mul(period).wrapping_add(offset);
+    next.saturating_sub(now_unix).max(1)
+}
+
+/// Where in the period this slot starts, in seconds.
+fn stagger_offset_within(period_secs: u64, slot: u64) -> u64 {
+    let slot_width = period_secs / STAGGER_SLOTS;
+    // A period shorter than the slot count would collapse every slot to 0;
+    // spread across the whole period instead so the stagger still functions.
+    if slot_width == 0 {
+        return (slot * period_secs) / STAGGER_SLOTS;
+    }
+    slot * slot_width
+}
 fn default_max_parallel_updates() -> usize { 1 }
 
 impl Default for ImageWatcherConfig {
@@ -114,17 +209,17 @@ impl ImageWatcherConfig {
 
     /// How often to check a specific container, in seconds: its own
     /// `check_interval_secs` override if set, else the global interval.
-    /// The global keeps its historical 300s floor (so installs that never
-    /// set an override behave exactly as before); an explicit per-container
-    /// override may go as low as 60s (registry-protection floor) so an
-    /// operator can watch a fast-moving image more closely.
+    /// Both are clamped to [`MIN_CHECK_INTERVAL_SECS`] — a per-container
+    /// override can no longer pull the cadence below the global floor, which
+    /// is what let one "watch this closely" container put the whole loop on a
+    /// 60-second cycle.
     pub fn effective_interval_secs(&self, container_name: &str) -> u64 {
         match self.container_policies.get(container_name)
             .and_then(|p| p.check_interval_secs)
             .filter(|&s| s > 0)
         {
-            Some(s) => s.max(60),
-            None => self.check_interval_secs.max(300),
+            Some(s) => s.max(MIN_CHECK_INTERVAL_SECS),
+            None => self.check_interval_secs.max(MIN_CHECK_INTERVAL_SECS),
         }
     }
 
@@ -134,11 +229,11 @@ impl ImageWatcherConfig {
     /// (Ignore/Pinned) containers are skipped: they're never checked, so
     /// their override must not drag the whole loop's cadence down.
     pub fn min_effective_interval_secs(&self) -> u64 {
-        let mut m = self.check_interval_secs.max(300);
+        let mut m = self.check_interval_secs.max(MIN_CHECK_INTERVAL_SECS);
         for p in self.container_policies.values() {
             if p.is_passive() { continue; }
             if let Some(s) = p.check_interval_secs {
-                if s > 0 { m = m.min(s.max(60)); }
+                if s > 0 { m = m.min(s.max(MIN_CHECK_INTERVAL_SECS)); }
             }
         }
         m
@@ -1345,50 +1440,58 @@ mod tests {
 
     #[test]
     fn per_container_check_interval_overrides_global() {
+        const DAY: u64 = 86_400;
         let mut cfg = ImageWatcherConfig::default();
-        cfg.check_interval_secs = 3600; // global 1h
+        cfg.check_interval_secs = DAY; // global 24h
 
         // No override → global.
-        assert_eq!(cfg.effective_interval_secs("nginx"), 3600);
+        assert_eq!(cfg.effective_interval_secs("nginx"), DAY);
 
-        // Override for one container.
-        let mut fast = ContainerUpdatePolicy::default();
-        fast.check_interval_secs = Some(900); // 15 min
-        cfg.container_policies.insert("nginx".into(), fast);
-        assert_eq!(cfg.effective_interval_secs("nginx"), 900);
-        assert_eq!(cfg.effective_interval_secs("other"), 3600); // still global
+        // An override ABOVE the floor is honoured verbatim.
+        let mut slower = ContainerUpdatePolicy::default();
+        slower.check_interval_secs = Some(2 * DAY);
+        cfg.container_policies.insert("nginx".into(), slower);
+        assert_eq!(cfg.effective_interval_secs("nginx"), 2 * DAY);
+        assert_eq!(cfg.effective_interval_secs("other"), DAY); // still global
 
-        // The loop must wake as often as the fastest container.
-        assert_eq!(cfg.min_effective_interval_secs(), 900);
+        // The loop wakes as often as the most-frequently-checked container,
+        // which here is still the global setting.
+        assert_eq!(cfg.min_effective_interval_secs(), DAY);
 
-        // A silly-small value is floored to 60s (registry protection).
+        // Any override BELOW the 6h floor is clamped up to it. This is the
+        // guard that matters: a single "watch this closely" container used to
+        // be able to put the whole loop on a 60-second cycle.
         let mut tiny = ContainerUpdatePolicy::default();
         tiny.check_interval_secs = Some(5);
         cfg.container_policies.insert("db".into(), tiny);
-        assert_eq!(cfg.effective_interval_secs("db"), 60);
-        assert_eq!(cfg.min_effective_interval_secs(), 60);
+        assert_eq!(cfg.effective_interval_secs("db"), MIN_CHECK_INTERVAL_SECS);
+        assert_eq!(cfg.min_effective_interval_secs(), MIN_CHECK_INTERVAL_SECS);
 
         // Explicit 0 (or None) means "use global", not "check constantly".
         let mut zero = ContainerUpdatePolicy::default();
         zero.check_interval_secs = Some(0);
         cfg.container_policies.insert("z".into(), zero);
-        assert_eq!(cfg.effective_interval_secs("z"), 3600);
+        assert_eq!(cfg.effective_interval_secs("z"), DAY);
 
-        // The global interval keeps its historical 300s floor for
-        // no-override containers (no regression for a small global setting).
+        // A global smaller than the floor is raised to it, so a config
+        // stored before this clamp existed can't check more often than 6h.
         let mut cfg2 = ImageWatcherConfig::default();
         cfg2.check_interval_secs = 120;
-        assert_eq!(cfg2.effective_interval_secs("any"), 300);
-        assert_eq!(cfg2.min_effective_interval_secs(), 300);
+        assert_eq!(cfg2.effective_interval_secs("any"), MIN_CHECK_INTERVAL_SECS);
+        assert_eq!(cfg2.min_effective_interval_secs(), MIN_CHECK_INTERVAL_SECS);
 
-        // A passive (Pinned) container's fast override must NOT drag the
-        // whole loop's cadence down — it's never checked anyway.
+        // The default config is itself at the floor, never below it.
+        assert_eq!(ImageWatcherConfig::default().check_interval_secs, MIN_CHECK_INTERVAL_SECS);
+        assert!(MIN_CHECK_INTERVAL_SECS >= 6 * 60 * 60);
+
+        // A passive (Pinned) container's override must NOT drag the whole
+        // loop's cadence down — it's never checked anyway.
         let mut pinned = ContainerUpdatePolicy::default();
         pinned.policy = UpdatePolicy::Pinned;
         pinned.pinned_to = Some("1.2.3".into());
         pinned.check_interval_secs = Some(60);
         cfg2.container_policies.insert("frozen".into(), pinned);
-        assert_eq!(cfg2.min_effective_interval_secs(), 300);
+        assert_eq!(cfg2.min_effective_interval_secs(), MIN_CHECK_INTERVAL_SECS);
 
         // The override round-trips through JSON (the wire the PUT uses).
         let json = serde_json::to_string(&cfg2.container_policies["frozen"]).unwrap();
@@ -1540,10 +1643,71 @@ mod tests {
     }
 
     #[test]
+    fn stagger_offset_puts_a_24h_period_on_the_hour() {
+        const DAY: u64 = 86_400;
+        // Paul's stated model: last octet .10 → 10:00, .11 → 11:00.
+        assert_eq!(stagger_offset_within(DAY, 10), 10 * 3600);
+        assert_eq!(stagger_offset_within(DAY, 11), 11 * 3600);
+        assert_eq!(stagger_offset_within(DAY, 0), 0);
+        assert_eq!(stagger_offset_within(DAY, 23), 23 * 3600);
+    }
+
+    #[test]
+    fn stagger_offset_spreads_a_6h_period_evenly() {
+        // On the 6h floor the 24 slots are 15 minutes apart, still covering
+        // the whole period and never exceeding it.
+        for slot in 0..STAGGER_SLOTS {
+            let off = stagger_offset_within(MIN_CHECK_INTERVAL_SECS, slot);
+            assert_eq!(off, slot * 900);
+            assert!(off < MIN_CHECK_INTERVAL_SECS);
+        }
+    }
+
+    #[test]
+    fn slot_boundaries_are_stable_and_never_zero_length() {
+        const DAY: u64 = 86_400;
+        let offset = stagger_offset_within(DAY, 10); // 10:00
+        // Just before this node's slot → short wait to reach it.
+        let now = 5 * DAY + offset - 60;
+        let d = secs_until_next_slot_for(DAY, now, offset);
+        assert_eq!(d, 60);
+        // Exactly ON the boundary → next period, never a 0s sleep that would
+        // spin the loop.
+        let d = secs_until_next_slot_for(DAY, 5 * DAY + offset, offset);
+        assert_eq!(d, DAY);
+        // Just after → nearly a full period.
+        let d = secs_until_next_slot_for(DAY, 5 * DAY + offset + 1, offset);
+        assert_eq!(d, DAY - 1);
+    }
+
+    #[test]
+    fn two_nodes_never_share_a_slot() {
+        // The whole point: distinct octets land on distinct wall-clock times.
+        const DAY: u64 = 86_400;
+        let now = 9 * DAY;
+        let a = secs_until_next_slot_for(DAY, now, stagger_offset_within(DAY, 10));
+        let b = secs_until_next_slot_for(DAY, now, stagger_offset_within(DAY, 11));
+        assert_ne!(a, b);
+        assert_eq!(b - a, 3600, "adjacent octets should be an hour apart");
+    }
+
+    #[test]
+    fn a_period_shorter_than_the_slot_count_still_spreads() {
+        // Degenerate but must not collapse every node onto offset 0.
+        let offs: Vec<u64> = (0..STAGGER_SLOTS)
+            .map(|s| stagger_offset_within(12, s))
+            .collect();
+        assert!(offs.iter().all(|o| *o < 12));
+        assert!(offs.iter().any(|o| *o > 0), "must not be all zero");
+    }
+
+    #[test]
     fn config_defaults_from_empty_json() {
         let config: ImageWatcherConfig = serde_json::from_str("{}").expect("deserialize");
         assert!(!config.enabled);
-        assert_eq!(config.check_interval_secs, 3600);
+        // A config written before the 6h floor existed omits the field
+        // entirely; serde's default must land ON the floor, not below it.
+        assert_eq!(config.check_interval_secs, MIN_CHECK_INTERVAL_SECS);
         assert_eq!(config.default_policy, UpdatePolicy::NotifyOnly);
         assert!(config.container_policies.is_empty());
         assert!(config.update_history.is_empty());

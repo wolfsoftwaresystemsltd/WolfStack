@@ -57,9 +57,26 @@ pub struct DiagnosticReport {
     pub fd_total: usize,
     pub fd_kinds: Vec<Count>,
     pub journal: Vec<String>,
+    /// Docker daemon responsiveness, measured straight down the socket with
+    /// `GET /_ping` rather than by forking the CLI. This is the reading that
+    /// separates "daemon is busy" from "daemon is wedged" — the latter being
+    /// the state in which every `docker` invocation piles up instead of
+    /// completing, which is how a node goes from slow to unreachable.
+    pub docker: Option<crate::containers::DockerHealth>,
+    /// A container-enumeration refresh that has been in flight far longer
+    /// than any healthy one takes. Names the specific probe, so an empty
+    /// container list has a stated cause instead of looking like "no
+    /// containers".
+    pub stuck_probe: Option<StuckProbe>,
     /// Anything that could not be collected, with the reason. Present so a
     /// missing section is never mistaken for a zero reading.
     pub notes: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct StuckProbe {
+    pub probe: String,
+    pub running_for_secs: u64,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -542,6 +559,31 @@ pub fn collect() -> DiagnosticReport {
     let (journal, journal_notes) = journal_tail();
     notes.extend(journal_notes);
 
+    // Two-second budget: `/_ping` does no I/O and touches no container
+    // state, so a daemon that cannot answer it in two seconds is unwell, not
+    // merely busy. Deliberately not a `docker` CLI call — see
+    // `containers::docker_health`.
+    let docker = Some(crate::containers::docker_health(
+        std::time::Duration::from_secs(2),
+    ));
+    if let Some(crate::containers::DockerHealth::Unresponsive { waited_ms }) = &docker {
+        notes.push(format!(
+            "Docker daemon accepted the socket connection but did not answer /_ping \
+             within {}ms — the daemon is up but not servicing requests. Container \
+             lists and stats will be empty or stale until it recovers.",
+            waited_ms,
+        ));
+    }
+
+    let stuck_probe = crate::containers::hung_runtime_probe().map(|(probe, age)| {
+        notes.push(format!(
+            "Container probe '{}' has been running for {}s. Concurrent callers are \
+             being served cached data rather than starting their own probes.",
+            probe, age.as_secs(),
+        ));
+        StuckProbe { probe: probe.to_string(), running_for_secs: age.as_secs() }
+    });
+
     DiagnosticReport {
         generated_at: chrono::Utc::now().to_rfc3339(),
         context,
@@ -551,6 +593,8 @@ pub fn collect() -> DiagnosticReport {
         fd_total,
         fd_kinds,
         journal,
+        docker,
+        stuck_probe,
         notes,
     }
 }
@@ -589,6 +633,52 @@ pub fn render_text(r: &DiagnosticReport) -> String {
     }
     let _ = writeln!(s, "docker:    {} ({} running)", c.docker_total, c.docker_running);
     let _ = writeln!(s, "lxc:       {} ({} running)", c.lxc_total, c.lxc_running);
+    let _ = writeln!(s);
+
+    // Runtime responsiveness comes before the CPU and socket sections on
+    // purpose: when it reads UNRESPONSIVE, it explains the numbers below it
+    // rather than being explained by them.
+    let _ = writeln!(s, "== container runtime ==");
+    match &r.docker {
+        Some(crate::containers::DockerHealth::Alive { latency_ms }) => {
+            let verdict = if *latency_ms >= 250 {
+                "  <-- alive but STRESSED; healthy is single-digit ms"
+            } else {
+                ""
+            };
+            let _ = writeln!(s, "docker /_ping:  {}ms{}", latency_ms, verdict);
+        }
+        Some(crate::containers::DockerHealth::Unresponsive { waited_ms }) => {
+            let _ = writeln!(
+                s,
+                "docker /_ping:  UNRESPONSIVE after {}ms\n\
+                 \x20               The socket accepted the connection but the daemon did not\n\
+                 \x20               answer. It is running and not servicing requests. Every\n\
+                 \x20               `docker` call made while this is true will accumulate\n\
+                 \x20               rather than complete. Container data will be stale or\n\
+                 \x20               empty; that is a symptom, not a separate fault.",
+                waited_ms,
+            );
+        }
+        Some(crate::containers::DockerHealth::Down { reason }) => {
+            let _ = writeln!(s, "docker /_ping:  unreachable ({reason})");
+        }
+        None => {
+            let _ = writeln!(s, "docker /_ping:  not measured");
+        }
+    }
+    match &r.stuck_probe {
+        Some(p) => {
+            let _ = writeln!(
+                s,
+                "stuck probe:    '{}' in flight for {}s (callers served cached data)",
+                p.probe, p.running_for_secs,
+            );
+        }
+        None => {
+            let _ = writeln!(s, "stuck probe:    none");
+        }
+    }
     let _ = writeln!(s);
 
     let _ = writeln!(s, "== threads using CPU (% of one core, {:.1}s sample) ==", CPU_SAMPLE.as_secs_f64());

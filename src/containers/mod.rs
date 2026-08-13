@@ -496,14 +496,299 @@ const COUNT_CACHE_TTL_SECS: u64 = 5;
 // ─── Cached container list/stats/images ───
 // Avoid spawning dozens of subprocesses per API request.
 
-static DOCKER_LIST_CACHE: Mutex<Option<(Vec<ContainerInfo>, Instant)>> = Mutex::new(None);
-static DOCKER_STATS_CACHE: Mutex<Option<(Vec<ContainerStats>, Instant)>> = Mutex::new(None);
-static DOCKER_IMAGES_CACHE: Mutex<Option<(Vec<ContainerImage>, Instant)>> = Mutex::new(None);
-static LXC_LIST_CACHE: Mutex<Option<(Vec<ContainerInfo>, Instant)>> = Mutex::new(None);
-static LXC_STATS_CACHE: Mutex<Option<(Vec<ContainerStats>, Instant)>> = Mutex::new(None);
-
 const LIST_CACHE_TTL_SECS: u64 = 5;
 const IMAGES_CACHE_TTL_SECS: u64 = 60;
+
+/// A probe whose refresh has been in flight longer than this is reported as
+/// a hung runtime. Chosen well above any healthy enumeration (the slowest
+/// observed real host takes low single-digit seconds) and well below the
+/// point at which an operator has already given up on the page.
+const PROBE_HUNG_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Refresh-coalescing cache for an expensive container probe.
+///
+/// The previous shape of these caches was:
+///
+/// ```ignore
+/// { let c = CACHE.lock().unwrap(); if fresh { return c.clone() } }   // lock dropped
+/// let v = expensive_probe();                                        // <-- unguarded
+/// *CACHE.lock().unwrap() = Some((v.clone(), Instant::now()));
+/// ```
+///
+/// The lock is released before the probe runs, so every caller arriving
+/// while it runs starts its OWN probe. With a 5s TTL, ~24 call sites (four
+/// `predictive` items, the WolfRun reconciler, the alerting loop and several
+/// API handlers) and a daemon that has slowed down, that is unbounded
+/// growth: each `docker_list_all` spawns a batched `docker inspect` over
+/// every container, the extra load slows the daemon further, and more
+/// callers therefore miss the cache. klas 2026-08-13 — hundreds of
+/// concurrent `docker inspect` processes against one container id, node
+/// unreachable.
+///
+/// A timeout is the wrong instrument for that: it bounds each call's
+/// lifetime but not how many get started, and it cannot tell a slow daemon
+/// from a wedged one — it just converts a slow success into a certain
+/// failure. This type removes the multiplication instead:
+///
+/// * **Single-flight.** At most one refresh runs at a time. Callers do not
+///   queue behind it either; they take the previous value.
+/// * **Serve-stale.** A caller arriving during a refresh gets the last good
+///   value immediately. Slightly stale beats both blocking and (worse)
+///   an empty list, which reads as "you have no containers".
+/// * **Observable.** [`Self::refresh_age`] reports how long the in-flight
+///   refresh has been running, so a wedged runtime is a reportable state
+///   rather than a mystery blank page.
+pub(crate) struct CoalescedProbe<T: Clone> {
+    inner: Mutex<ProbeState<T>>,
+    /// Signalled when a refresh finishes, so a cold caller can wake as soon
+    /// as the first value exists instead of polling.
+    ready: std::sync::Condvar,
+    label: &'static str,
+}
+
+struct ProbeState<T> {
+    value: Option<(T, Instant)>,
+    /// `Some(started)` while a refresh is in flight. Cleared by
+    /// `RefreshGuard::drop`, so a panicking probe cannot wedge the cache.
+    refresh_started: Option<Instant>,
+}
+
+/// Clears the in-flight marker even if the probe panics, and wakes anyone
+/// waiting on a cold cache.
+struct RefreshGuard<'a, T: Clone> {
+    cache: &'a CoalescedProbe<T>,
+}
+
+impl<T: Clone> Drop for RefreshGuard<'_, T> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.cache.inner.lock() {
+            g.refresh_started = None;
+        }
+        // Wake cold waiters unconditionally: on the panic path there is no
+        // new value, and leaving them parked until their timeout would turn
+        // one failed probe into a stall for every concurrent caller.
+        self.cache.ready.notify_all();
+    }
+}
+
+impl<T: Clone + Default> CoalescedProbe<T> {
+    pub(crate) const fn new(label: &'static str) -> Self {
+        Self {
+            inner: Mutex::new(ProbeState { value: None, refresh_started: None }),
+            ready: std::sync::Condvar::new(),
+            label,
+        }
+    }
+
+    /// How long the in-flight refresh has been running, or `None` if idle.
+    pub(crate) fn refresh_age(&self) -> Option<std::time::Duration> {
+        self.inner.lock().ok()?.refresh_started.map(|t| t.elapsed())
+    }
+
+    /// Fetch, refreshing at most one-at-a-time. `probe` runs outside the
+    /// lock so a slow runtime never blocks readers of the cached value.
+    pub(crate) fn get(&self, ttl: std::time::Duration, probe: impl FnOnce() -> T) -> T {
+        let mut g = match self.inner.lock() {
+            Ok(g) => g,
+            // A poisoned lock means a previous probe panicked mid-update.
+            // Recover rather than propagating: container enumeration is not
+            // worth taking a handler thread down for.
+            Err(e) => e.into_inner(),
+        };
+
+        if let Some((v, ts)) = &g.value {
+            if ts.elapsed() < ttl {
+                return v.clone();
+            }
+        }
+
+        if let Some(started) = g.refresh_started {
+            // Another caller owns the refresh.
+            if let Some((v, _)) = &g.value {
+                return v.clone(); // serve stale — the common case
+            }
+            // Cold: no value has ever been produced, so stale isn't an
+            // option. Wait for the in-flight probe rather than starting a
+            // duplicate. Bounded so a wedged runtime can't park us forever.
+            let waited = started.elapsed();
+            let budget = PROBE_HUNG_AFTER.saturating_sub(waited);
+            if !budget.is_zero() {
+                let (g2, _) = self.ready
+                    .wait_timeout(g, budget)
+                    .unwrap_or_else(|e| e.into_inner());
+                g = g2;
+                if let Some((v, _)) = &g.value {
+                    return v.clone();
+                }
+            }
+            warn!(
+                "{}: runtime probe has been running {}s with no result yet — \
+                 treating the runtime as unresponsive and returning no data. \
+                 The daemon is likely wedged; existing data is unaffected.",
+                self.label,
+                g.refresh_started.map(|s| s.elapsed().as_secs()).unwrap_or(0),
+            );
+            return T::default();
+        }
+
+        // Claim the refresh.
+        g.refresh_started = Some(Instant::now());
+        drop(g);
+        let _guard = RefreshGuard { cache: self };
+        let started = Instant::now();
+        let val = probe();
+        let took = started.elapsed();
+        if took >= PROBE_HUNG_AFTER {
+            warn!(
+                "{}: runtime probe took {}s — the container runtime is \
+                 responding very slowly. Concurrent callers were served \
+                 cached data rather than starting their own probes.",
+                self.label, took.as_secs(),
+            );
+        }
+        {
+            let mut g = match self.inner.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            g.value = Some((val.clone(), Instant::now()));
+        }
+        // `_guard` clears refresh_started and notifies cold waiters here.
+        val
+    }
+
+    /// Drop the cached value so the next `get` re-probes.
+    pub(crate) fn invalidate(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.value = None;
+        } else if let Err(e) = self.inner.lock() {
+            e.into_inner().value = None;
+        }
+    }
+}
+
+static DOCKER_LIST_CACHE: CoalescedProbe<Vec<ContainerInfo>> = CoalescedProbe::new("docker list");
+static DOCKER_STATS_CACHE: CoalescedProbe<Vec<ContainerStats>> = CoalescedProbe::new("docker stats");
+static DOCKER_IMAGES_CACHE: CoalescedProbe<Vec<ContainerImage>> = CoalescedProbe::new("docker images");
+static LXC_LIST_CACHE: CoalescedProbe<Vec<ContainerInfo>> = CoalescedProbe::new("lxc list");
+static LXC_STATS_CACHE: CoalescedProbe<Vec<ContainerStats>> = CoalescedProbe::new("lxc stats");
+
+/// Outcome of a direct health check against the Docker daemon socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum DockerHealth {
+    /// Daemon answered `/_ping`. A healthy daemon replies in single-digit
+    /// milliseconds; tens or hundreds of ms means it is alive but stressed,
+    /// which is a very different situation from wedged and should not be
+    /// treated as a failure.
+    Alive { latency_ms: u64 },
+    /// The socket accepted our connection but the daemon never answered
+    /// inside the budget. The process is up and not servicing requests —
+    /// this is the genuine hang, and the state in which spawning more
+    /// `docker` CLI calls does nothing but consume descriptors.
+    Unresponsive { waited_ms: u64 },
+    /// Could not talk to the socket at all: Docker not installed, not
+    /// running, or we lack permission on the socket.
+    Down { reason: String },
+}
+
+/// Path to the Docker daemon socket, honouring a `unix://` `DOCKER_HOST`.
+fn docker_socket_path() -> String {
+    match std::env::var("DOCKER_HOST") {
+        Ok(h) if h.starts_with("unix://") => h.trim_start_matches("unix://").to_string(),
+        _ => "/var/run/docker.sock".to_string(),
+    }
+}
+
+/// Ask the Docker daemon whether it is servicing requests, via `GET /_ping`
+/// straight down the unix socket.
+///
+/// This is deliberately NOT `docker version` or any other CLI call: the
+/// point is to answer "is the daemon wedged?" without forking a process,
+/// because forking more `docker` processes is precisely what a wedged
+/// daemon turns into an outage. One socket write and a short read, bounded
+/// by socket timeouts.
+///
+/// Distinguishes the three states that matter operationally — alive (with a
+/// latency figure, so "slow" is visible as a number rather than inferred),
+/// unresponsive, and down. A short timeout is safe here in a way it is not
+/// for real work: `_ping` does no I/O and touches no container state, so a
+/// daemon that cannot answer it inside a second or two is genuinely unwell
+/// rather than merely busy.
+///
+/// Caveat: `std::os::unix::net::UnixStream` has no connect timeout, so if
+/// the daemon's listen backlog is full the connect itself can block. That is
+/// rare compared to the accept-then-never-answer case this catches, and
+/// bounding it would mean a nonblocking connect plus a poll loop.
+pub fn docker_health(budget: std::time::Duration) -> DockerHealth {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let path = docker_socket_path();
+    let started = Instant::now();
+    let mut stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) => return DockerHealth::Down { reason: format!("{}: {}", path, e) },
+    };
+    if let Err(e) = stream.set_write_timeout(Some(budget)) {
+        return DockerHealth::Down { reason: format!("set_write_timeout: {}", e) };
+    }
+    if let Err(e) = stream.set_read_timeout(Some(budget)) {
+        return DockerHealth::Down { reason: format!("set_read_timeout: {}", e) };
+    }
+    // HTTP/1.0 so the daemon closes the body itself and we never wait on a
+    // keep-alive connection for an end we can't detect.
+    if let Err(e) = stream.write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\n\r\n") {
+        return DockerHealth::Unresponsive { waited_ms: started.elapsed().as_millis() as u64 }
+            .or_down(e);
+    }
+    let mut buf = [0u8; 128];
+    match stream.read(&mut buf) {
+        Ok(0) => DockerHealth::Unresponsive { waited_ms: started.elapsed().as_millis() as u64 },
+        Ok(n) => {
+            let head = String::from_utf8_lossy(&buf[..n]);
+            if head.contains(" 200 ") || head.contains("OK") {
+                DockerHealth::Alive { latency_ms: started.elapsed().as_millis() as u64 }
+            } else {
+                // Answered, but not with a healthy ping — still "alive" in
+                // the sense that matters here (it is servicing the socket).
+                DockerHealth::Alive { latency_ms: started.elapsed().as_millis() as u64 }
+            }
+        }
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+            DockerHealth::Unresponsive { waited_ms: started.elapsed().as_millis() as u64 }
+        }
+        Err(e) => DockerHealth::Down { reason: format!("read: {}", e) },
+    }
+}
+
+impl DockerHealth {
+    /// Reclassify a write failure: a socket we connected to but cannot write
+    /// to is down, not merely unresponsive.
+    fn or_down(self, e: std::io::Error) -> Self {
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => self,
+            _ => DockerHealth::Down { reason: format!("write: {}", e) },
+        }
+    }
+}
+
+/// Longest-running in-flight container probe, if any is past
+/// [`PROBE_HUNG_AFTER`]. Lets the API surface "the container runtime is not
+/// responding" instead of an unexplained empty list.
+pub fn hung_runtime_probe() -> Option<(&'static str, std::time::Duration)> {
+    [
+        ("docker list", DOCKER_LIST_CACHE.refresh_age()),
+        ("docker stats", DOCKER_STATS_CACHE.refresh_age()),
+        ("docker images", DOCKER_IMAGES_CACHE.refresh_age()),
+        ("lxc list", LXC_LIST_CACHE.refresh_age()),
+        ("lxc stats", LXC_STATS_CACHE.refresh_age()),
+    ]
+    .into_iter()
+    .filter_map(|(n, age)| age.map(|a| (n, a)))
+    .filter(|(_, a)| *a >= PROBE_HUNG_AFTER)
+    .max_by_key(|(_, a)| *a)
+}
 
 // ─── Per-container probe caches ───
 // docker_list/lxc list spawn TWO subprocesses per container on every
@@ -576,77 +861,27 @@ fn probe_cache_prune<V>(map: &mut std::collections::HashMap<String, (V, Instant)
 
 /// Cached docker_list_all — reuses result for 5 seconds.
 pub fn docker_list_all_cached() -> Vec<ContainerInfo> {
-    {
-        let cache = DOCKER_LIST_CACHE.lock().unwrap();
-        if let Some((val, ts)) = &*cache {
-            if ts.elapsed().as_secs() < LIST_CACHE_TTL_SECS {
-                return val.clone();
-            }
-        }
-    }
-    let val = docker_list_all();
-    *DOCKER_LIST_CACHE.lock().unwrap() = Some((val.clone(), Instant::now()));
-    val
+    DOCKER_LIST_CACHE.get(std::time::Duration::from_secs(LIST_CACHE_TTL_SECS), docker_list_all)
 }
 
 /// Cached docker_stats — reuses result for 5 seconds.
 pub fn docker_stats_cached() -> Vec<ContainerStats> {
-    {
-        let cache = DOCKER_STATS_CACHE.lock().unwrap();
-        if let Some((val, ts)) = &*cache {
-            if ts.elapsed().as_secs() < LIST_CACHE_TTL_SECS {
-                return val.clone();
-            }
-        }
-    }
-    let val = docker_stats();
-    *DOCKER_STATS_CACHE.lock().unwrap() = Some((val.clone(), Instant::now()));
-    val
+    DOCKER_STATS_CACHE.get(std::time::Duration::from_secs(LIST_CACHE_TTL_SECS), docker_stats)
 }
 
 /// Cached docker_images — reuses result for 60 seconds.
 pub fn docker_images_cached() -> Vec<ContainerImage> {
-    {
-        let cache = DOCKER_IMAGES_CACHE.lock().unwrap();
-        if let Some((val, ts)) = &*cache {
-            if ts.elapsed().as_secs() < IMAGES_CACHE_TTL_SECS {
-                return val.clone();
-            }
-        }
-    }
-    let val = docker_images();
-    *DOCKER_IMAGES_CACHE.lock().unwrap() = Some((val.clone(), Instant::now()));
-    val
+    DOCKER_IMAGES_CACHE.get(std::time::Duration::from_secs(IMAGES_CACHE_TTL_SECS), docker_images)
 }
 
 /// Cached lxc_list_all — reuses result for 5 seconds.
 pub fn lxc_list_all_cached() -> Vec<ContainerInfo> {
-    {
-        let cache = LXC_LIST_CACHE.lock().unwrap();
-        if let Some((val, ts)) = &*cache {
-            if ts.elapsed().as_secs() < LIST_CACHE_TTL_SECS {
-                return val.clone();
-            }
-        }
-    }
-    let val = lxc_list_all();
-    *LXC_LIST_CACHE.lock().unwrap() = Some((val.clone(), Instant::now()));
-    val
+    LXC_LIST_CACHE.get(std::time::Duration::from_secs(LIST_CACHE_TTL_SECS), lxc_list_all)
 }
 
 /// Cached lxc_stats — reuses result for 5 seconds.
 pub fn lxc_stats_cached() -> Vec<ContainerStats> {
-    {
-        let cache = LXC_STATS_CACHE.lock().unwrap();
-        if let Some((val, ts)) = &*cache {
-            if ts.elapsed().as_secs() < LIST_CACHE_TTL_SECS {
-                return val.clone();
-            }
-        }
-    }
-    let val = lxc_stats();
-    *LXC_STATS_CACHE.lock().unwrap() = Some((val.clone(), Instant::now()));
-    val
+    LXC_STATS_CACHE.get(std::time::Duration::from_secs(LIST_CACHE_TTL_SECS), lxc_stats)
 }
 
 /// Invalidate container count caches (call after create/delete operations).
@@ -658,18 +893,18 @@ pub fn invalidate_count_caches() {
 /// Invalidate all container list/stats caches (call after create/delete/start/stop).
 #[allow(dead_code)]
 pub fn invalidate_list_caches() {
-    *DOCKER_LIST_CACHE.lock().unwrap() = None;
-    *DOCKER_STATS_CACHE.lock().unwrap() = None;
-    *DOCKER_IMAGES_CACHE.lock().unwrap() = None;
-    *LXC_LIST_CACHE.lock().unwrap() = None;
-    *LXC_STATS_CACHE.lock().unwrap() = None;
+    DOCKER_LIST_CACHE.invalidate();
+    DOCKER_STATS_CACHE.invalidate();
+    DOCKER_IMAGES_CACHE.invalidate();
+    LXC_LIST_CACHE.invalidate();
+    LXC_STATS_CACHE.invalidate();
 }
 
 /// Invalidate just the Docker list cache. Used by write paths that change
 /// docker-side metadata (autostart, memory, cpus, wolfnet IP, env) so the
 /// UI doesn't read back the pre-change snapshot for the next 5 seconds.
 pub fn invalidate_docker_list_cache() {
-    *DOCKER_LIST_CACHE.lock().unwrap() = None;
+    DOCKER_LIST_CACHE.invalidate();
 }
 
 /// Count Docker containers (cached for 5s).
@@ -895,6 +1130,88 @@ fn purge_container_dnat_for_ip(chain: &str, ip: &str, wolfnet_prefix: &str) {
         let mut argv: Vec<&str> = vec!["-t", "nat", "-D", chain];
         argv.extend(spec.split_whitespace());
         let _ = Command::new("iptables").args(&argv).output();
+    }
+}
+
+#[cfg(test)]
+mod coalesced_probe_tests {
+    use super::CoalescedProbe;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_fresh_value_is_reused_without_probing() {
+        static C: CoalescedProbe<Vec<u32>> = CoalescedProbe::new("test-fresh");
+        let hits = AtomicUsize::new(0);
+        let v = C.get(Duration::from_secs(60), || { hits.fetch_add(1, Ordering::SeqCst); vec![1] });
+        assert_eq!(v, vec![1]);
+        let v = C.get(Duration::from_secs(60), || { hits.fetch_add(1, Ordering::SeqCst); vec![2] });
+        assert_eq!(v, vec![1], "second call must serve the cached value");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "probe must run exactly once");
+    }
+
+    #[test]
+    fn an_expired_value_is_refreshed() {
+        static C: CoalescedProbe<Vec<u32>> = CoalescedProbe::new("test-expired");
+        assert_eq!(C.get(Duration::from_millis(1), || vec![1]), vec![1]);
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(C.get(Duration::from_millis(1), || vec![2]), vec![2]);
+    }
+
+    #[test]
+    fn invalidate_forces_a_reprobe() {
+        static C: CoalescedProbe<Vec<u32>> = CoalescedProbe::new("test-invalidate");
+        assert_eq!(C.get(Duration::from_secs(60), || vec![1]), vec![1]);
+        C.invalidate();
+        assert_eq!(C.get(Duration::from_secs(60), || vec![2]), vec![2]);
+    }
+
+    /// The bug this type exists to remove: a slow probe plus concurrent
+    /// callers used to mean one subprocess PER CALLER. klas 2026-08-13 —
+    /// hundreds of concurrent `docker inspect` against one container id.
+    #[test]
+    fn concurrent_callers_do_not_each_probe() {
+        static C: CoalescedProbe<Vec<u32>> = CoalescedProbe::new("test-single-flight");
+        CALLS.store(0, Ordering::SeqCst);
+        // Seed a value so the 15 late callers can be served stale rather
+        // than having to wait — that is the behaviour we want under load.
+        C.get(Duration::from_millis(1), || vec![0]);
+        std::thread::sleep(Duration::from_millis(5));
+
+        let threads: Vec<_> = (0..16).map(|_| std::thread::spawn(|| {
+            C.get(Duration::from_millis(1), || {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(120));
+                vec![9]
+            })
+        })).collect();
+        for t in threads { t.join().unwrap(); }
+
+        let n = CALLS.load(Ordering::SeqCst);
+        assert!(n >= 1, "at least one refresh must have run");
+        assert!(n < 16, "16 concurrent callers must NOT each start a probe (ran {n})");
+    }
+
+    #[test]
+    fn a_panicking_probe_does_not_wedge_the_cache() {
+        static C: CoalescedProbe<Vec<u32>> = CoalescedProbe::new("test-panic");
+        let panicked = std::panic::catch_unwind(|| {
+            C.get(Duration::from_secs(60), || -> Vec<u32> { panic!("probe blew up") })
+        });
+        assert!(panicked.is_err());
+        // The in-flight marker must have been cleared by RefreshGuard::drop,
+        // otherwise every later caller is locked out permanently.
+        assert!(C.refresh_age().is_none(), "refresh marker must be cleared after a panic");
+        assert_eq!(C.get(Duration::from_secs(60), || vec![7]), vec![7]);
+    }
+
+    #[test]
+    fn refresh_age_is_none_when_idle() {
+        static C: CoalescedProbe<Vec<u32>> = CoalescedProbe::new("test-idle");
+        C.get(Duration::from_secs(60), || vec![1]);
+        assert!(C.refresh_age().is_none());
     }
 }
 
