@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.12.4: Settings > Diagnostics — one button for the numbers support actually needs** _(2026-08-13 — [`e760439b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e760439b4b0246efd3cca5a5306494d7006359b9))_
 - **v25.12.3: stop binding a socket on every outbound connection** _(2026-08-13 — [`ef77df0d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ef77df0d06849c88c49d2ff3de2db5b81dddc879))_
 - **v25.12.2: WolfStack stops running a command inside every container every 30 seconds** _(2026-08-12 — [`2d0e7cde`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/2d0e7cded82810f2f7a1faf5a012bf37023dd337))_
 - **v25.12.1: the WolfRun load-balancer stops re-listing the whole nat table for every rule it deletes** _(2026-08-12 — [`c4875972`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c487597248dfae4de84f4c30e3c51064e54ff92e))_
