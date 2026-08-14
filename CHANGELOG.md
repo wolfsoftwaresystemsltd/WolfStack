@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.12.10: clear the clippy backlog, and stop three handlers holding a borrow across an await** _(2026-08-14 — [`802f0bca`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/802f0bcaeb74bc50b9433ae806f6303c4171894e))_
 - **v25.12.9: one panic no longer takes every fleet-wide endpoint down until restart** _(2026-08-14 — [`92066954`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/92066954bf2b31aa95269cd28e956fd857afc596))_
 - **v25.12.8: stop the container probes multiplying, and let a wedged Docker daemon say so** _(2026-08-13 — [`f09a49d9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f09a49d94224f51af6b407156f3685cf6a93ad7c))_
 - **v25.12.7: a client that gives up mid-request no longer parks a file descriptor, and icon packs stop stalling the API** _(2026-08-13 — [`dfcc964e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/dfcc964efc5c930577c58620abf62efa98c2b79b))_
