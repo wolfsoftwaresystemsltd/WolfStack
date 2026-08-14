@@ -38,11 +38,10 @@ static CLUSTER_SECRET: OnceLock<String> = OnceLock::new();
 pub fn init(cluster_secret: &str) {
     let _ = CLUSTER_SECRET.set(cluster_secret.to_string());
     let mut config = WolfUsbConfig::load();
-    if migrate_assignments_to_port_paths(&mut config) {
-        if let Err(e) = config.save() {
+    if migrate_assignments_to_port_paths(&mut config)
+        && let Err(e) = config.save() {
             warn!("WolfUSB: failed to save migrated assignments: {}", e);
         }
-    }
 }
 
 fn get_secret() -> &'static str {
@@ -71,7 +70,7 @@ impl Default for WolfUsbConfig {
 
 impl WolfUsbConfig {
     pub fn load() -> Self {
-        match std::fs::read_to_string(&config_path()) {
+        match std::fs::read_to_string(config_path()) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => {
                 let c = Self::default();
@@ -501,15 +500,14 @@ pub fn migrate_assignments_to_port_paths(config: &mut WolfUsbConfig) -> bool {
         // model plugged in. If two identical sticks are on the host we skip
         // — the operator must unassign + re-detect rather than let us guess.
         let mut target: Option<&SysfsUsbDevice> = None;
-        if !a.usb_id.is_empty() {
-            if let Some((vid, pid)) = a.usb_id.split_once(':') {
+        if !a.usb_id.is_empty()
+            && let Some((vid, pid)) = a.usb_id.split_once(':') {
                 let matches: Vec<_> = sysfs.iter()
                     .filter(|s| s.id_vendor.eq_ignore_ascii_case(vid)
                              && s.id_product.eq_ignore_ascii_case(pid))
                     .collect();
                 if matches.len() == 1 { target = Some(matches[0]); }
             }
-        }
         // Pass 2 (LEGACY ONLY): bus+addr lookup, but ONLY when the config
         // has no usb_id stored (truly old entries written before we tracked
         // it). If usb_id IS set and Pass 1 didn't match (stick unplugged
@@ -517,11 +515,10 @@ pub fn migrate_assignments_to_port_paths(config: &mut WolfUsbConfig) -> bool {
         // device coincidentally at that bus+addr would get wrongly migrated.
         if target.is_none() && a.usb_id.is_empty() {
             let parts: Vec<&str> = port.splitn(2, '-').collect();
-            if parts.len() == 2 {
-                if let (Ok(bus), Ok(addr)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
+            if parts.len() == 2
+                && let (Ok(bus), Ok(addr)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
                     target = sysfs.iter().find(|s| s.bus == bus && s.addr == addr);
                 }
-            }
         }
         let Some(dev) = target else { continue; };
         if dev.port_path == port { continue; } // already canonical
@@ -640,13 +637,12 @@ fn sysfs_port_path_for(busid: &str) -> Option<String> {
     // Legacy fallback — busid was "N-M" from an earlier build; walk
     // sysfs by (bus, addr) to find the real port path.
     let parts: Vec<&str> = port.splitn(2, '-').collect();
-    if parts.len() == 2 {
-        if let (Ok(bus), Ok(addr)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
+    if parts.len() == 2
+        && let (Ok(bus), Ok(addr)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
             return devices.into_iter()
                 .find(|d| d.bus == bus && d.addr == addr)
                 .map(|d| d.port_path);
         }
-    }
     None
 }
 
@@ -681,11 +677,10 @@ fn wolfusb_attach_device(source_address: &str, busid: &str) -> Result<u64, Strin
     ])?;
 
     // Parse session_id from output: "Attached to X:Y, session_id = NNN"
-    if let Some(sid_str) = output.split("session_id = ").nth(1) {
-        if let Ok(sid) = sid_str.trim().parse::<u64>() {
+    if let Some(sid_str) = output.split("session_id = ").nth(1)
+        && let Ok(sid) = sid_str.trim().parse::<u64>() {
             return Ok(sid);
         }
-    }
     // If we can't parse the session_id, the attach still succeeded
     warn!("WolfUSB: attached but could not parse session_id from: {}", output.trim());
     Ok(0)
@@ -985,10 +980,8 @@ pub fn diagnose(busid: &str) -> Vec<DiagnosticStep> {
                     unit_name, unit_name
                 )
             } else {
-                format!(
-                    "No mount unit installed. Click Re-attach to install it, or \
-                     reassign the device from the WolfUSB page."
-                )
+                "No mount unit installed. Click Re-attach to install it, or \
+                     reassign the device from the WolfUSB page.".to_string()
             },
         });
         // Final proof — is the device actually on the host's USB bus?
@@ -1400,8 +1393,8 @@ pub fn unassign_device(config: &mut WolfUsbConfig, busid: &str, source_node_id: 
 
             // If this was a VM assignment, remove the udev rule that blocked
             // host drivers so the device works normally on the host again.
-            if a.target_type == "vm" {
-                if let Some((v, p)) = a.usb_id.split_once(':') {
+            if a.target_type == "vm"
+                && let Some((v, p)) = a.usb_id.split_once(':') {
                     let rule_path = format!(
                         "/etc/udev/rules.d/99-wolfstack-vm-usb-{}-{}.rules",
                         v, p
@@ -1411,14 +1404,12 @@ pub fn unassign_device(config: &mut WolfUsbConfig, busid: &str, source_node_id: 
                         .args(["control", "--reload-rules"])
                         .status();
                 }
-            }
 
             // Release the device if we have a session
-            if let Some(sid) = a.session_id {
-                if let Err(e) = wolfusb_detach_device(&a.source_address, &a.busid, sid) {
+            if let Some(sid) = a.session_id
+                && let Err(e) = wolfusb_detach_device(&a.source_address, &a.busid, sid) {
                     warn!("WolfUSB: detach failed (non-fatal): {}", e);
                 }
-            }
             Ok(format!("USB device {} unassigned from {}:{}", a.busid, a.target_type, a.target_name))
         }
         None => Err("Device was not assigned".to_string()),
@@ -1832,11 +1823,10 @@ fn passthrough_to_docker(container_name: &str, dev_path: &str) -> Result<String,
 
     args.push(image);
     for ep_arg in entrypoint.iter().skip(1) { args.push(ep_arg.clone()); }
-    if entrypoint.len() <= 1 {
-        if let Some(cmds) = v.pointer("/Config/Cmd").and_then(|v| v.as_array()) {
+    if entrypoint.len() <= 1
+        && let Some(cmds) = v.pointer("/Config/Cmd").and_then(|v| v.as_array()) {
             for c in cmds { if let Some(s) = c.as_str() { args.push(s.to_string()); } }
         }
-    }
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let create = Command::new("docker").args(&args_ref).output()
@@ -2186,9 +2176,9 @@ fn unbind_host_drivers_now(vendor_id: &str, product_id: &str) {
             .unwrap_or_default()
             .trim()
             .to_string();
-        if v == vendor_id && pr == product_id {
-            if let Ok(driver) = std::fs::read_link(p.join("driver")) {
-                if let Some(drv_name) = driver.file_name().and_then(|n| n.to_str()) {
+        if v == vendor_id && pr == product_id
+            && let Ok(driver) = std::fs::read_link(p.join("driver"))
+                && let Some(drv_name) = driver.file_name().and_then(|n| n.to_str()) {
                     let unbind = format!("/sys/bus/usb/drivers/{}/unbind", drv_name);
                     let _ = std::fs::OpenOptions::new()
                         .write(true)
@@ -2198,8 +2188,6 @@ fn unbind_host_drivers_now(vendor_id: &str, product_id: &str) {
                             f.write_all(name.as_bytes())
                         });
                 }
-            }
-        }
     }
 }
 
@@ -2428,14 +2416,13 @@ pub fn merge_remote_assignments(remote_assignments: &[UsbAssignment]) {
         } else {
             if let Some(existing) = config.assignments.iter_mut().find(|a|
                 a.busid == ra.busid && a.source_node_id == ra.source_node_id
-            ) {
-                if existing.target_node_id != ra.target_node_id
-                    || existing.target_name != ra.target_name
+            )
+                && (existing.target_node_id != ra.target_node_id
+                    || existing.target_name != ra.target_name)
                 {
                     *existing = ra.clone();
                     changed = true;
                 }
-            }
         }
     }
 

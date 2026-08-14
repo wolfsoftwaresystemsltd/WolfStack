@@ -178,8 +178,8 @@ fn collect_docker() -> Vec<WorkloadAudit> {
                 "{{.HostConfig.Privileged}}|{{.HostConfig.NetworkMode}}|{{range .Mounts}}{{.Source}}\n{{end}}"
             ])
             .output();
-        if let Ok(out) = inspect {
-            if out.status.success() {
+        if let Ok(out) = inspect
+            && out.status.success() {
                 let info = String::from_utf8_lossy(&out.stdout);
                 let lines: Vec<&str> = info.split('\n').collect();
                 if let Some(first) = lines.first() {
@@ -202,7 +202,6 @@ fn collect_docker() -> Vec<WorkloadAudit> {
                     }
                 }
             }
-        }
         workloads.push(WorkloadAudit {
             kind: "docker".into(),
             name,

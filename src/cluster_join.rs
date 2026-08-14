@@ -274,7 +274,7 @@ pub fn recluster_override_armed() -> bool {
 /// target). Stores the arm timestamp (0600) so it self-expires after
 /// OVERRIDE_TTL_SECS — it's a security-sensitive marker.
 pub fn arm_recluster_override() -> Result<(), String> {
-    crate::paths::write_secure(&override_marker_path(), &now_unix().to_string())
+    crate::paths::write_secure(&override_marker_path(), now_unix().to_string())
         .map_err(|e| format!("Cannot arm re-cluster override: {}", e))
 }
 

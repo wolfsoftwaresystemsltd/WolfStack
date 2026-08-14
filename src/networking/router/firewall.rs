@@ -350,9 +350,8 @@ pub fn analyse_ruleset_against_session(
 /// always; we anchor on `-s`.
 fn rule_matches_any_port(rule: &str, mgmt_ports: &[u16]) -> bool {
     // --dport <X> (single port or single range).
-    if let Some(v) = find_flag_value(rule, "--dport") {
-        if port_spec_covers_any(v, mgmt_ports) { return true; }
-    }
+    if let Some(v) = find_flag_value(rule, "--dport")
+        && port_spec_covers_any(v, mgmt_ports) { return true; }
     // -m multiport --dports <comma-separated, each can be a range>
     if let Some(v) = find_flag_value(rule, "--dports") {
         for chunk in v.split(',') {

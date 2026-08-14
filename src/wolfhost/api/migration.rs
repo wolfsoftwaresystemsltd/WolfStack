@@ -392,9 +392,8 @@ async fn run_migration(state: Arc<AppState>, id: String) {
     for attempt in 0..POLL_BACKUP_MAX_ATTEMPTS {
         tokio::time::sleep(std::time::Duration::from_secs(POLL_BACKUP_INTERVAL_SECS)).await;
         // Refresh local view in case operator cancelled.
-        if let Some(latest) = state.migrations.list().await.into_iter().find(|m| m.id == id) {
-            if latest.status == MigrationStatus::Cancelled { return; }
-        }
+        if let Some(latest) = state.migrations.list().await.into_iter().find(|m| m.id == id)
+            && latest.status == MigrationStatus::Cancelled { return; }
         match da.list_user_backups(&starting.source_da_username).await {
             Ok(list) => {
                 if let Some(new) = list.into_iter().find(|b| !pre_existing.contains(&b.filename)) {
@@ -473,9 +472,8 @@ async fn run_migration(state: Arc<AppState>, id: String) {
                 }
             }
         }
-        if let Some(latest) = state.migrations.list().await.into_iter().find(|m| m.id == id) {
-            if latest.status == MigrationStatus::Cancelled { return; }
-        }
+        if let Some(latest) = state.migrations.list().await.into_iter().find(|m| m.id == id)
+            && latest.status == MigrationStatus::Cancelled { return; }
     }
     if !lxc_ready {
         return fail(&state, &id, "LXC didn't become reachable within 10 minutes").await;
@@ -649,8 +647,8 @@ async fn exec_in_lxc(container: &str, node_id: &str, cmd: &str) -> Result<String
     // the wolfhost host's own node.
     let local_path = format!("/api/containers/lxc/{}/exec", container);
     let body = serde_json::json!({"command": cmd});
-    if let Ok(r) = wolfstack_post_pub(&local_path, &body).await {
-        if r["ok"].as_bool() == Some(true) || r.get("exit_code").is_some() || r.get("stdout").is_some() {
+    if let Ok(r) = wolfstack_post_pub(&local_path, &body).await
+        && (r["ok"].as_bool() == Some(true) || r.get("exit_code").is_some() || r.get("stdout").is_some()) {
             let stdout = r["stdout"].as_str().unwrap_or("");
             let stderr = r["stderr"].as_str().unwrap_or("");
             let exit = r["exit_code"].as_i64().unwrap_or(0);
@@ -659,7 +657,6 @@ async fn exec_in_lxc(container: &str, node_id: &str, cmd: &str) -> Result<String
             }
             return Ok(stdout.to_string());
         }
-    }
     if !node_id.is_empty() {
         let remote = format!("/api/nodes/{}/proxy/containers/lxc/{}/exec", node_id, container);
         let r = wolfstack_post_pub(&remote, &body).await?;

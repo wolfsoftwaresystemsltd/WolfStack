@@ -178,16 +178,14 @@ fn sample_blocking() -> TamperFacts {
             let p = entry.path();
             if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
             // Cheap: load the JSON and look at its `path` field.
-            if let Ok(body) = std::fs::read_to_string(&p) {
-                if let Ok(b) = serde_json::from_str::<baselines::Baseline>(&body) {
-                    if b.path.starts_with(SUDOERS_D_DIR)
+            if let Ok(body) = std::fs::read_to_string(&p)
+                && let Ok(b) = serde_json::from_str::<baselines::Baseline>(&body)
+                    && b.path.starts_with(SUDOERS_D_DIR)
                         && !paths.iter().any(|tp| tp.path == b.path)
                         && std::fs::metadata(&b.path).is_err()
                     {
                         paths.push(verdict_to_path(&b.path));
                     }
-                }
-            }
         }
     }
 
@@ -299,13 +297,11 @@ fn parse_fail2ban_sshd_enabled() -> bool {
         if !in_sshd { continue; }
         // Match `enabled = true` (allowing extra whitespace + case).
         let lower = t.to_ascii_lowercase();
-        if lower.starts_with("enabled") {
-            if let Some((_, rhs)) = lower.split_once('=') {
-                if rhs.trim() == "true" || rhs.trim() == "1" {
+        if lower.starts_with("enabled")
+            && let Some((_, rhs)) = lower.split_once('=')
+                && (rhs.trim() == "true" || rhs.trim() == "1") {
                     sshd_enabled = true;
                 }
-            }
-        }
     }
     sshd_enabled
 }
@@ -557,15 +553,12 @@ fn unmask_and_start(unit: &str) -> RemediationOutcome {
     // /run/systemd/system, then daemon-reload + start.
     for base in &["/etc/systemd/system", "/run/systemd/system"] {
         let p = format!("{}/{}", base, unit);
-        if let Ok(meta) = std::fs::symlink_metadata(&p) {
-            if meta.file_type().is_symlink() {
-                if let Ok(target) = std::fs::read_link(&p) {
-                    if target.as_os_str() == "/dev/null" {
+        if let Ok(meta) = std::fs::symlink_metadata(&p)
+            && meta.file_type().is_symlink()
+                && let Ok(target) = std::fs::read_link(&p)
+                    && target.as_os_str() == "/dev/null" {
                         let _ = std::fs::remove_file(&p);
                     }
-                }
-            }
-        }
     }
     let _ = std::process::Command::new("systemctl").arg("daemon-reload").output();
     let out = std::process::Command::new("systemctl")
@@ -894,7 +887,7 @@ fn is_safe_service_user_line(line: &str) -> bool {
         "/bin/nologin",
         "/dev/null",
     ];
-    uid < 1000 && no_login_shells.iter().any(|s| *s == shell)
+    uid < 1000 && no_login_shells.contains(&shell)
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1181,13 +1174,11 @@ mod tests {
             }
             if !in_sshd { continue; }
             let lower = t.to_ascii_lowercase();
-            if lower.starts_with("enabled") {
-                if let Some((_, rhs)) = lower.split_once('=') {
-                    if rhs.trim() == "true" || rhs.trim() == "1" {
+            if lower.starts_with("enabled")
+                && let Some((_, rhs)) = lower.split_once('=')
+                    && (rhs.trim() == "true" || rhs.trim() == "1") {
                         sshd_enabled = true;
                     }
-                }
-            }
         }
         sshd_enabled
     }

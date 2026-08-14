@@ -33,6 +33,7 @@ fn oidc_config_path() -> String {
 
 /// Top-level OIDC configuration, persisted to /etc/wolfstack/oidc.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct OidcConfig {
     /// Whether OIDC login is enabled globally
     #[serde(default)]
@@ -42,18 +43,10 @@ pub struct OidcConfig {
     pub providers: Vec<OidcProvider>,
 }
 
-impl Default for OidcConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            providers: Vec::new(),
-        }
-    }
-}
 
 impl OidcConfig {
     pub fn load() -> Self {
-        match std::fs::read_to_string(&oidc_config_path()) {
+        match std::fs::read_to_string(oidc_config_path()) {
             Ok(data) => match serde_json::from_str(&data) {
                 Ok(cfg) => cfg,
                 Err(e) => {

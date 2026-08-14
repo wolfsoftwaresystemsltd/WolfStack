@@ -236,14 +236,13 @@ pub fn known_clusters() -> Vec<String> {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             // Pattern: threat-intel-<slug>.json  (NOT threat-intel-state-*.json)
-            if let Some(rest) = name.strip_prefix("threat-intel-") {
-                if let Some(slug) = rest.strip_suffix(".json") {
+            if let Some(rest) = name.strip_prefix("threat-intel-")
+                && let Some(slug) = rest.strip_suffix(".json") {
                     if slug.starts_with("state-") || slug == "state" { continue; }
                     if !out.contains(&slug.to_string()) {
                         out.push(slug.to_string());
                     }
                 }
-            }
         }
     }
     out
@@ -545,207 +544,6 @@ pub fn filter_safe(
         }
     }
     (kept, dropped)
-}
-
-// ═══════════════════════════════════════════════
-// ─── Tests ───
-// ═══════════════════════════════════════════════
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_config_is_safe() {
-        let c = ThreatIntelConfig::default();
-        assert!(!c.enabled, "must be off by default");
-        assert!(c.dry_run, "must be dry-run by default");
-        assert!(!c.paused, "must not be paused by default");
-        assert_eq!(c.refresh_hours, DEFAULT_REFRESH_HOURS);
-        assert!(c.providers.contains_key("spamhaus_drop"));
-        assert!(c.providers.contains_key("firehol_level1"));
-    }
-
-    #[test]
-    fn test_enforcement_active_logic() {
-        let mut c = ThreatIntelConfig::default();
-        c.enabled = true; c.dry_run = false; c.paused = false;
-        assert!(enforcement_active(&c));
-        c.paused = true;
-        assert!(!enforcement_active(&c), "paused must short-circuit enforcement");
-        c.paused = false; c.dry_run = true;
-        assert!(!enforcement_active(&c), "dry-run must short-circuit enforcement");
-        c.dry_run = false; c.enabled = false;
-        assert!(!enforcement_active(&c), "disabled must short-circuit enforcement");
-    }
-
-    #[test]
-    fn test_cidr_contains_v4() {
-        let ip: std::net::IpAddr = "10.5.6.7".parse().unwrap();
-        assert!(cidr_contains("10.0.0.0/8", &ip));
-        assert!(!cidr_contains("172.16.0.0/12", &ip));
-        assert!(cidr_contains("0.0.0.0/0", &ip));
-        assert!(cidr_contains("10.5.6.7/32", &ip));
-    }
-
-    #[test]
-    fn test_cidr_contains_v6() {
-        let ip: std::net::IpAddr = "fe80::1".parse().unwrap();
-        assert!(cidr_contains("fe80::/10", &ip));
-        let ip2: std::net::IpAddr = "::1".parse().unwrap();
-        assert!(cidr_contains("::1/128", &ip2));
-        assert!(!cidr_contains("fe80::/10", &ip2));
-    }
-
-    /// klas 2026-07-05 regression: overlap must work in BOTH directions —
-    /// a feed CIDR wrapping a protected bare IP or a narrower allowlist
-    /// CIDR, and a feed range merely straddling a safe range.
-    #[test]
-    fn test_filter_safe_overlap_both_directions() {
-        let mut candidates = BTreeSet::new();
-        candidates.insert("84.12.0.0/16".to_string());   // wraps the exempt bare IP
-        candidates.insert("198.51.0.0/16".to_string());  // wraps the narrower allowlist /24
-        candidates.insert("8.0.0.0/6".to_string());      // 8.0.0.0–11.255.255.255 straddles RFC1918 10.0.0.0/8
-        candidates.insert("203.0.113.1".to_string());    // disjoint — must be kept
-        let (kept, dropped) = filter_safe(
-            &candidates,
-            &["198.51.100.0/24".to_string()],
-            &["84.12.34.56".to_string()],
-            false,
-        );
-        assert_eq!(kept.len(), 1, "kept: {:?}", kept);
-        assert!(kept.contains("203.0.113.1"));
-        assert_eq!(dropped.len(), 3, "dropped: {:?}", dropped);
-    }
-
-    #[test]
-    fn test_filter_safe_drops_rfc1918() {
-        let mut candidates = BTreeSet::new();
-        candidates.insert("10.1.2.3".to_string());
-        candidates.insert("8.8.8.8".to_string());
-        candidates.insert("192.168.1.5".to_string());
-        candidates.insert("203.0.113.1".to_string());
-        let (kept, dropped) = filter_safe(&candidates, &[], &[], false);
-        assert_eq!(kept.len(), 2);
-        assert!(kept.contains("8.8.8.8"));
-        assert!(kept.contains("203.0.113.1"));
-        assert_eq!(dropped.len(), 2);
-    }
-
-    #[test]
-    fn test_filter_safe_drops_cluster_nodes() {
-        let mut candidates = BTreeSet::new();
-        candidates.insert("203.0.113.5".to_string());
-        candidates.insert("8.8.8.8".to_string());
-        let (kept, dropped) = filter_safe(&candidates, &[], &["203.0.113.5".to_string()], false);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(dropped, vec!["203.0.113.5".to_string()]);
-    }
-
-    #[test]
-    fn test_filter_safe_respects_user_allowlist() {
-        let mut candidates = BTreeSet::new();
-        candidates.insert("198.51.100.50".to_string());
-        candidates.insert("8.8.8.8".to_string());
-        let (kept, _) = filter_safe(&candidates, &["198.51.100.0/24".to_string()], &[], false);
-        assert_eq!(kept.len(), 1);
-        assert!(kept.contains("8.8.8.8"));
-    }
-
-    #[test]
-    fn test_lookup_ip_empty_cache() {
-        // Cache starts empty (load returns default). Lookup returns empty.
-        let result = lookup_ip_for("", "8.8.8.8");
-        assert!(result.is_empty() || result.iter().all(|_| true));  // tolerate state from prior tests
-    }
-
-    #[test]
-    fn test_scan_self_blacklist_finds_listing() {
-        let mut sp_v4 = BTreeSet::new();
-        sp_v4.insert("203.0.113.5".to_string());
-        let mut fh_v4 = BTreeSet::new();
-        fh_v4.insert("203.0.113.0/24".to_string()); // CIDR containment
-
-        let mut per_provider = HashMap::new();
-        per_provider.insert("spamhaus_drop".to_string(),  (sp_v4, BTreeSet::new()));
-        per_provider.insert("firehol_level1".to_string(), (fh_v4, BTreeSet::new()));
-
-        let cluster_ips = vec!["203.0.113.5".to_string(), "8.8.8.8".to_string()];
-        let result = scan_self_blacklist(&cluster_ips, &per_provider);
-        assert_eq!(result.len(), 1);
-        let listed = &result["203.0.113.5"];
-        assert!(listed.contains(&"spamhaus_drop".to_string()));
-        assert!(listed.contains(&"firehol_level1".to_string()));
-        assert!(!result.contains_key("8.8.8.8"));
-    }
-
-    #[test]
-    fn test_scan_self_blacklist_skips_unspecified() {
-        // FireHOL Level 1 legitimately lists 0.0.0.0/8 (RFC 1122 "this
-        // network"). Nodes that haven't reported a real address show up
-        // in cluster_node_ips as "0.0.0.0" — must not appear in banner.
-        let mut sp_v4 = BTreeSet::new();
-        sp_v4.insert("0.0.0.0/8".to_string());
-        let mut per_provider = HashMap::new();
-        per_provider.insert("firehol_level1".to_string(), (sp_v4, BTreeSet::new()));
-        let cluster_ips = vec!["0.0.0.0".to_string()];
-        assert!(scan_self_blacklist(&cluster_ips, &per_provider).is_empty());
-    }
-
-    #[test]
-    fn test_scan_self_blacklist_skips_safe_ranges() {
-        // RFC1918 IPs should never appear in the banner even if a malformed
-        // feed listed them — we don't want noise from that case.
-        let mut sp_v4 = BTreeSet::new();
-        sp_v4.insert("10.0.0.0/8".to_string()); // would-be-listing
-        let mut per_provider = HashMap::new();
-        per_provider.insert("spamhaus_drop".to_string(), (sp_v4, BTreeSet::new()));
-        let cluster_ips = vec!["10.5.6.7".to_string()];
-        let result = scan_self_blacklist(&cluster_ips, &per_provider);
-        assert!(result.is_empty(), "RFC1918 IPs must not appear in self-blacklist banner");
-    }
-
-    #[test]
-    fn test_scan_self_blacklist_empty_when_no_listings() {
-        let mut sp_v4 = BTreeSet::new();
-        sp_v4.insert("203.0.113.5".to_string());
-        let mut per_provider = HashMap::new();
-        per_provider.insert("spamhaus_drop".to_string(), (sp_v4, BTreeSet::new()));
-        let cluster_ips = vec!["8.8.8.8".to_string()];
-        assert!(scan_self_blacklist(&cluster_ips, &per_provider).is_empty());
-    }
-
-    #[test]
-    fn test_state_round_trip_serde() {
-        let mut s = ThreatIntelState::default();
-        s.blocklist_size = 12345;
-        s.blocklist_v4.insert("203.0.113.0/24".to_string());
-        s.last_refresh_secs = 1_700_000_000;
-        s.providers.insert("spamhaus_drop".to_string(), ProviderState {
-            last_count: 1000, last_success_secs: 1_700_000_000, last_error: String::new(), last_attempt_secs: 1_700_000_000,
-        });
-        s.self_blacklisted.insert("203.0.113.5".to_string(), vec!["spamhaus_drop".to_string()]);
-        let json = serde_json::to_string(&s).unwrap();
-        let back: ThreatIntelState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.blocklist_size, 12345);
-        assert_eq!(back.providers["spamhaus_drop"].last_count, 1000);
-        assert_eq!(back.self_blacklisted["203.0.113.5"], vec!["spamhaus_drop"]);
-    }
-
-    #[test]
-    fn test_state_default_has_empty_self_blacklisted() {
-        let s = ThreatIntelState::default();
-        assert!(s.self_blacklisted.is_empty());
-    }
-
-    #[test]
-    fn test_legacy_state_json_loads_without_self_blacklisted() {
-        // Pre-v22.5.0 state files don't have the self_blacklisted field —
-        // serde(default) must populate it as empty.
-        let legacy = r#"{"last_refresh_secs":0,"providers":{},"blocklist_size":0,"blocklist_v4":[],"blocklist_v6":[],"applied":false}"#;
-        let parsed: ThreatIntelState = serde_json::from_str(legacy).expect("legacy state must parse");
-        assert!(parsed.self_blacklisted.is_empty());
-    }
 }
 
 // ═══════════════════════════════════════════════
@@ -1205,4 +1003,205 @@ pub fn apply_state_change_for(cluster: &str, apply_local_kernel: bool) -> Result
         let _ = snapshot.save_for(cluster);
     }
     Ok(())
+}
+
+// ═══════════════════════════════════════════════
+// ─── Tests ───
+// ═══════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config_is_safe() {
+        let c = ThreatIntelConfig::default();
+        assert!(!c.enabled, "must be off by default");
+        assert!(c.dry_run, "must be dry-run by default");
+        assert!(!c.paused, "must not be paused by default");
+        assert_eq!(c.refresh_hours, DEFAULT_REFRESH_HOURS);
+        assert!(c.providers.contains_key("spamhaus_drop"));
+        assert!(c.providers.contains_key("firehol_level1"));
+    }
+
+    #[test]
+    fn test_enforcement_active_logic() {
+        let mut c = ThreatIntelConfig::default();
+        c.enabled = true; c.dry_run = false; c.paused = false;
+        assert!(enforcement_active(&c));
+        c.paused = true;
+        assert!(!enforcement_active(&c), "paused must short-circuit enforcement");
+        c.paused = false; c.dry_run = true;
+        assert!(!enforcement_active(&c), "dry-run must short-circuit enforcement");
+        c.dry_run = false; c.enabled = false;
+        assert!(!enforcement_active(&c), "disabled must short-circuit enforcement");
+    }
+
+    #[test]
+    fn test_cidr_contains_v4() {
+        let ip: std::net::IpAddr = "10.5.6.7".parse().unwrap();
+        assert!(cidr_contains("10.0.0.0/8", &ip));
+        assert!(!cidr_contains("172.16.0.0/12", &ip));
+        assert!(cidr_contains("0.0.0.0/0", &ip));
+        assert!(cidr_contains("10.5.6.7/32", &ip));
+    }
+
+    #[test]
+    fn test_cidr_contains_v6() {
+        let ip: std::net::IpAddr = "fe80::1".parse().unwrap();
+        assert!(cidr_contains("fe80::/10", &ip));
+        let ip2: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(cidr_contains("::1/128", &ip2));
+        assert!(!cidr_contains("fe80::/10", &ip2));
+    }
+
+    /// klas 2026-07-05 regression: overlap must work in BOTH directions —
+    /// a feed CIDR wrapping a protected bare IP or a narrower allowlist
+    /// CIDR, and a feed range merely straddling a safe range.
+    #[test]
+    fn test_filter_safe_overlap_both_directions() {
+        let mut candidates = BTreeSet::new();
+        candidates.insert("84.12.0.0/16".to_string());   // wraps the exempt bare IP
+        candidates.insert("198.51.0.0/16".to_string());  // wraps the narrower allowlist /24
+        candidates.insert("8.0.0.0/6".to_string());      // 8.0.0.0–11.255.255.255 straddles RFC1918 10.0.0.0/8
+        candidates.insert("203.0.113.1".to_string());    // disjoint — must be kept
+        let (kept, dropped) = filter_safe(
+            &candidates,
+            &["198.51.100.0/24".to_string()],
+            &["84.12.34.56".to_string()],
+            false,
+        );
+        assert_eq!(kept.len(), 1, "kept: {:?}", kept);
+        assert!(kept.contains("203.0.113.1"));
+        assert_eq!(dropped.len(), 3, "dropped: {:?}", dropped);
+    }
+
+    #[test]
+    fn test_filter_safe_drops_rfc1918() {
+        let mut candidates = BTreeSet::new();
+        candidates.insert("10.1.2.3".to_string());
+        candidates.insert("8.8.8.8".to_string());
+        candidates.insert("192.168.1.5".to_string());
+        candidates.insert("203.0.113.1".to_string());
+        let (kept, dropped) = filter_safe(&candidates, &[], &[], false);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.contains("8.8.8.8"));
+        assert!(kept.contains("203.0.113.1"));
+        assert_eq!(dropped.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_safe_drops_cluster_nodes() {
+        let mut candidates = BTreeSet::new();
+        candidates.insert("203.0.113.5".to_string());
+        candidates.insert("8.8.8.8".to_string());
+        let (kept, dropped) = filter_safe(&candidates, &[], &["203.0.113.5".to_string()], false);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(dropped, vec!["203.0.113.5".to_string()]);
+    }
+
+    #[test]
+    fn test_filter_safe_respects_user_allowlist() {
+        let mut candidates = BTreeSet::new();
+        candidates.insert("198.51.100.50".to_string());
+        candidates.insert("8.8.8.8".to_string());
+        let (kept, _) = filter_safe(&candidates, &["198.51.100.0/24".to_string()], &[], false);
+        assert_eq!(kept.len(), 1);
+        assert!(kept.contains("8.8.8.8"));
+    }
+
+    #[test]
+    fn test_lookup_ip_empty_cache() {
+        // Cache starts empty (load returns default). Lookup returns empty.
+        let result = lookup_ip_for("", "8.8.8.8");
+        assert!(result.is_empty() || result.iter().all(|_| true));  // tolerate state from prior tests
+    }
+
+    #[test]
+    fn test_scan_self_blacklist_finds_listing() {
+        let mut sp_v4 = BTreeSet::new();
+        sp_v4.insert("203.0.113.5".to_string());
+        let mut fh_v4 = BTreeSet::new();
+        fh_v4.insert("203.0.113.0/24".to_string()); // CIDR containment
+
+        let mut per_provider = HashMap::new();
+        per_provider.insert("spamhaus_drop".to_string(),  (sp_v4, BTreeSet::new()));
+        per_provider.insert("firehol_level1".to_string(), (fh_v4, BTreeSet::new()));
+
+        let cluster_ips = vec!["203.0.113.5".to_string(), "8.8.8.8".to_string()];
+        let result = scan_self_blacklist(&cluster_ips, &per_provider);
+        assert_eq!(result.len(), 1);
+        let listed = &result["203.0.113.5"];
+        assert!(listed.contains(&"spamhaus_drop".to_string()));
+        assert!(listed.contains(&"firehol_level1".to_string()));
+        assert!(!result.contains_key("8.8.8.8"));
+    }
+
+    #[test]
+    fn test_scan_self_blacklist_skips_unspecified() {
+        // FireHOL Level 1 legitimately lists 0.0.0.0/8 (RFC 1122 "this
+        // network"). Nodes that haven't reported a real address show up
+        // in cluster_node_ips as "0.0.0.0" — must not appear in banner.
+        let mut sp_v4 = BTreeSet::new();
+        sp_v4.insert("0.0.0.0/8".to_string());
+        let mut per_provider = HashMap::new();
+        per_provider.insert("firehol_level1".to_string(), (sp_v4, BTreeSet::new()));
+        let cluster_ips = vec!["0.0.0.0".to_string()];
+        assert!(scan_self_blacklist(&cluster_ips, &per_provider).is_empty());
+    }
+
+    #[test]
+    fn test_scan_self_blacklist_skips_safe_ranges() {
+        // RFC1918 IPs should never appear in the banner even if a malformed
+        // feed listed them — we don't want noise from that case.
+        let mut sp_v4 = BTreeSet::new();
+        sp_v4.insert("10.0.0.0/8".to_string()); // would-be-listing
+        let mut per_provider = HashMap::new();
+        per_provider.insert("spamhaus_drop".to_string(), (sp_v4, BTreeSet::new()));
+        let cluster_ips = vec!["10.5.6.7".to_string()];
+        let result = scan_self_blacklist(&cluster_ips, &per_provider);
+        assert!(result.is_empty(), "RFC1918 IPs must not appear in self-blacklist banner");
+    }
+
+    #[test]
+    fn test_scan_self_blacklist_empty_when_no_listings() {
+        let mut sp_v4 = BTreeSet::new();
+        sp_v4.insert("203.0.113.5".to_string());
+        let mut per_provider = HashMap::new();
+        per_provider.insert("spamhaus_drop".to_string(), (sp_v4, BTreeSet::new()));
+        let cluster_ips = vec!["8.8.8.8".to_string()];
+        assert!(scan_self_blacklist(&cluster_ips, &per_provider).is_empty());
+    }
+
+    #[test]
+    fn test_state_round_trip_serde() {
+        let mut s = ThreatIntelState::default();
+        s.blocklist_size = 12345;
+        s.blocklist_v4.insert("203.0.113.0/24".to_string());
+        s.last_refresh_secs = 1_700_000_000;
+        s.providers.insert("spamhaus_drop".to_string(), ProviderState {
+            last_count: 1000, last_success_secs: 1_700_000_000, last_error: String::new(), last_attempt_secs: 1_700_000_000,
+        });
+        s.self_blacklisted.insert("203.0.113.5".to_string(), vec!["spamhaus_drop".to_string()]);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ThreatIntelState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.blocklist_size, 12345);
+        assert_eq!(back.providers["spamhaus_drop"].last_count, 1000);
+        assert_eq!(back.self_blacklisted["203.0.113.5"], vec!["spamhaus_drop"]);
+    }
+
+    #[test]
+    fn test_state_default_has_empty_self_blacklisted() {
+        let s = ThreatIntelState::default();
+        assert!(s.self_blacklisted.is_empty());
+    }
+
+    #[test]
+    fn test_legacy_state_json_loads_without_self_blacklisted() {
+        // Pre-v22.5.0 state files don't have the self_blacklisted field —
+        // serde(default) must populate it as empty.
+        let legacy = r#"{"last_refresh_secs":0,"providers":{},"blocklist_size":0,"blocklist_v4":[],"blocklist_v6":[],"applied":false}"#;
+        let parsed: ThreatIntelState = serde_json::from_str(legacy).expect("legacy state must parse");
+        assert!(parsed.self_blacklisted.is_empty());
+    }
 }

@@ -158,7 +158,7 @@ mod tests {
         let mut b = Baseline::default();
         let now = chrono::Utc::now().timestamp();
         b.samples.push(sample(now - 8 * 24 * 3600, 10.0, 50.0));
-        b.samples.push(sample(now - 1 * 24 * 3600, 20.0, 55.0));
+        b.samples.push(sample(now - 24 * 3600, 20.0, 55.0));
         b.push(sample(now, 30.0, 60.0));
         assert_eq!(b.samples.len(), 2, "8-day-old sample should be pruned");
     }

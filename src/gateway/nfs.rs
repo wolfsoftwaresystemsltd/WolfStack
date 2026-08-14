@@ -198,11 +198,10 @@ pub fn write_gateway_export(g: &Gateway, share_path: &Path) -> Result<(), NfsErr
     reload_exports()?;
 
     // New path is live — now drop the stale one, if the name changed.
-    if let Some(old) = previous {
-        if old != friendly.to_string_lossy() && old.starts_with(EXPORTS_PREFIX) {
+    if let Some(old) = previous
+        && old != friendly.to_string_lossy() && old.starts_with(EXPORTS_PREFIX) {
             drop_friendly_bind(&old);
         }
-    }
     Ok(())
 }
 
@@ -446,14 +445,13 @@ pub fn status() -> NfsStatus {
                 .map(|s| s.success())
                 .unwrap_or(false)
         });
-        if let Ok(out) = Command::new("exportfs").arg("-v").output() {
-            if out.status.success() {
+        if let Ok(out) = Command::new("exportfs").arg("-v").output()
+            && out.status.success() {
                 st.exports = String::from_utf8_lossy(&out.stdout)
                     .lines()
                     .filter(|l| !l.trim().is_empty())
                     .count() as u32;
             }
-        }
     }
     st
 }

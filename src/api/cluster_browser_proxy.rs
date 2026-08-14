@@ -417,10 +417,10 @@ async fn ws_bridge(
             br_msg = browser_rx.next() => {
                 match br_msg {
                     Some(Ok(Message::Binary(b))) => {
-                        if up_tx.send(tungstenite::Message::Binary(b.to_vec().into())).await.is_err() { break; }
+                        if up_tx.send(tungstenite::Message::Binary(b.to_vec())).await.is_err() { break; }
                     }
                     Some(Ok(Message::Text(t))) => {
-                        if up_tx.send(tungstenite::Message::Text(t.to_string().into())).await.is_err() { break; }
+                        if up_tx.send(tungstenite::Message::Text(t.to_string())).await.is_err() { break; }
                     }
                     Some(Ok(Message::Ping(b))) => {
                         let _ = browser.pong(&b).await;

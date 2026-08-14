@@ -518,11 +518,10 @@ const STATUS_CACHE_TTL_SECS: u64 = 10;
 /// Get status of all components (cached for 10s to reduce subprocess overhead).
 pub fn get_all_status_cached() -> Vec<ComponentStatus> {
     let mut cache = STATUS_CACHE.lock().unwrap();
-    if let Some((ref val, ts)) = *cache {
-        if ts.elapsed().as_secs() < STATUS_CACHE_TTL_SECS {
+    if let Some((ref val, ts)) = *cache
+        && ts.elapsed().as_secs() < STATUS_CACHE_TTL_SECS {
             return val.clone();
         }
-    }
     let val = get_all_status();
     *cache = Some((val.clone(), Instant::now()));
     val
@@ -800,11 +799,10 @@ pub fn wolfproxy_pids_on_ports(ports: &[u16]) -> Vec<u32> {
             while let Some(i) = rest.find("pid=") {
                 rest = &rest[i + 4..];
                 let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(pid) = digits.parse::<u32>() {
-                    if proc_comm(pid).as_deref() == Some("wolfproxy") {
+                if let Ok(pid) = digits.parse::<u32>()
+                    && proc_comm(pid).as_deref() == Some("wolfproxy") {
                         found.insert(pid);
                     }
-                }
             }
         }
     }
@@ -1012,8 +1010,8 @@ fn scan_pve_certificates() -> Vec<(String, String, String)> {
 
     // Per-node certs: /etc/pve/nodes/<hostname>/pve-ssl.pem
     let nodes_dir = std::path::Path::new("/etc/pve/nodes");
-    if nodes_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(nodes_dir) {
+    if nodes_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(nodes_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if !path.is_dir() { continue; }
@@ -1031,7 +1029,6 @@ fn scan_pve_certificates() -> Vec<(String, String, String)> {
                 }
             }
         }
-    }
 
     results
 }
@@ -1577,12 +1574,11 @@ pub fn install_certificate_files(
     // If the key is encrypted, decrypt it on disk now that it's at .new.
     // The decrypted version replaces the .new file; the unencrypted form
     // is what gets atomically renamed into place at the end.
-    if key_is_encrypted {
-        if let Err(e) = decrypt_key_in_place(&key_tmp, key_passphrase.unwrap_or("")) {
+    if key_is_encrypted
+        && let Err(e) = decrypt_key_in_place(&key_tmp, key_passphrase.unwrap_or("")) {
             cleanup(&[&cert_tmp, &key_tmp]);
             return Err(e);
         }
-    }
 
     if let Err(e) = verify_cert_key_pair(&cert_tmp, &key_tmp) {
         cleanup(&[&cert_tmp, &key_tmp]);

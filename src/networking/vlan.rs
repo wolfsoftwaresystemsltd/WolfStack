@@ -420,29 +420,23 @@ pub fn discover(store: &VlanStore) -> Vec<DiscoveredVlan> {
             let t = line.trim();
             if let Some(rest) = t.strip_prefix("iface ") {
                 // Flush previous block.
-                if let Some(name) = current_iface.take() {
-                    if current_uses_this_bridge {
-                        if let Some(vid) = name.strip_prefix("vlan").and_then(|s| s.parse::<u32>().ok()) {
+                if let Some(name) = current_iface.take()
+                    && current_uses_this_bridge
+                        && let Some(vid) = name.strip_prefix("vlan").and_then(|s| s.parse::<u32>().ok()) {
                             found_vids.push(vid);
                         }
-                    }
-                }
                 current_iface = rest.split_whitespace().next().map(|s| s.to_string());
                 current_uses_this_bridge = false;
-            } else if t.starts_with("vlan-raw-device") || t.starts_with("vlan_raw_device") {
-                if let Some(dev) = t.split_whitespace().nth(1) {
-                    if dev == l.name { current_uses_this_bridge = true; }
-                }
-            }
+            } else if (t.starts_with("vlan-raw-device") || t.starts_with("vlan_raw_device"))
+                && let Some(dev) = t.split_whitespace().nth(1)
+                    && dev == l.name { current_uses_this_bridge = true; }
         }
         // Flush trailing block.
-        if let Some(name) = current_iface.take() {
-            if current_uses_this_bridge {
-                if let Some(vid) = name.strip_prefix("vlan").and_then(|s| s.parse::<u32>().ok()) {
+        if let Some(name) = current_iface.take()
+            && current_uses_this_bridge
+                && let Some(vid) = name.strip_prefix("vlan").and_then(|s| s.parse::<u32>().ok()) {
                     found_vids.push(vid);
                 }
-            }
-        }
 
         // Find what physical NIC is bridged through here (the parent
         // for VID purposes — the underlying L2 carrier).
@@ -561,13 +555,11 @@ fn primary_ipv4(iface: &str) -> Option<(String, u8)> {
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         // Format: "N: iface inet 1.2.3.4/24 scope global ..."
-        if let Some(addr) = parts.get(3) {
-            if let Some((ip, prefix)) = addr.split_once('/') {
-                if let Ok(p) = prefix.parse::<u8>() {
+        if let Some(addr) = parts.get(3)
+            && let Some((ip, prefix)) = addr.split_once('/')
+                && let Ok(p) = prefix.parse::<u8>() {
                     return Some((ip.to_string(), p));
                 }
-            }
-        }
     }
     None
 }
@@ -810,13 +802,11 @@ fn vlan_id_from_block(b: &IfaceBlock) -> Option<u32> {
     // Explicit `vlan-id` wins.
     if let Some(v) = b.vlan_id_directive { return Some(v); }
     // DEV.NNN pattern.
-    if let Some((_, vid)) = b.name.rsplit_once('.') {
-        if let Ok(n) = vid.parse::<u32>() { return Some(n); }
-    }
+    if let Some((_, vid)) = b.name.rsplit_once('.')
+        && let Ok(n) = vid.parse::<u32>() { return Some(n); }
     // vlanNNN pattern.
-    if let Some(rest) = b.name.strip_prefix("vlan") {
-        if let Ok(n) = rest.parse::<u32>() { return Some(n); }
-    }
+    if let Some(rest) = b.name.strip_prefix("vlan")
+        && let Ok(n) = rest.parse::<u32>() { return Some(n); }
     None
 }
 
@@ -829,19 +819,17 @@ fn parse_address_subnet(b: &IfaceBlock) -> (Option<String>, Option<String>) {
     //   address 10.0.1.5/24    (CIDR — modern)
     //   address 10.0.1.5
     //   netmask 255.255.255.0  (split — old-style)
-    if let Some((ip, prefix_str)) = addr.split_once('/') {
-        if let Ok(prefix) = prefix_str.parse::<u8>() {
+    if let Some((ip, prefix_str)) = addr.split_once('/')
+        && let Ok(prefix) = prefix_str.parse::<u8>() {
             let net = network_addr(ip, prefix);
             return (Some(ip.to_string()), Some(format!("{}/{}", net, prefix)));
         }
-    }
     // Old-style with netmask.
-    if let Some(mask) = b.netmask.as_ref() {
-        if let Some(prefix) = netmask_to_prefix(mask) {
+    if let Some(mask) = b.netmask.as_ref()
+        && let Some(prefix) = netmask_to_prefix(mask) {
             let net = network_addr(&addr, prefix);
             return (Some(addr), Some(format!("{}/{}", net, prefix)));
         }
-    }
     (Some(addr), None)
 }
 
@@ -859,8 +847,8 @@ fn parse_routes_from_up(lines: &[String]) -> Vec<RouteEntry> {
     for line in lines {
         let toks: Vec<&str> = line.split_whitespace().collect();
         // Look for "ip ... route add DEST via VIA"
-        if !toks.iter().any(|t| *t == "route") { continue; }
-        if !toks.iter().any(|t| *t == "add") { continue; }
+        if !toks.contains(&"route") { continue; }
+        if !toks.contains(&"add") { continue; }
         let mut dest: Option<&str> = None;
         let mut via: Option<&str> = None;
         let mut i = 0;
@@ -1366,15 +1354,14 @@ pub fn detect_net_manager() -> NetManager {
     if active("networking") { return NetManager::Ifupdown; }
     // Netplan generates output for either networkd or NM, so this
     // check fires when /etc/netplan has files AND `netplan` exists.
-    if std::path::Path::new("/etc/netplan").exists() {
-        if let Ok(read) = std::fs::read_dir("/etc/netplan") {
+    if std::path::Path::new("/etc/netplan").exists()
+        && let Ok(read) = std::fs::read_dir("/etc/netplan") {
             let any_yaml = read.filter_map(|e| e.ok())
                 .any(|e| e.file_name().to_string_lossy().ends_with(".yaml"));
             if any_yaml {
                 return NetManager::Netplan;
             }
         }
-    }
     if active("systemd-networkd") { return NetManager::SystemdNetworkd; }
     // ifupdown is the fallback for Debian-derived systems with the
     // /etc/network/interfaces file present.
@@ -1656,8 +1643,8 @@ pub fn preflight(
         // auto-raise the parent MTU; if it's lower, our VLAN MTU is
         // silently capped and packets bigger than the cap get dropped
         // or fragmented depending on PMTU discovery state.
-        if let Some(parent_mtu) = iface_mtu(&v.parent_iface) {
-            if parent_mtu < v.mtu {
+        if let Some(parent_mtu) = iface_mtu(&v.parent_iface)
+            && parent_mtu < v.mtu {
                 findings.push(PreflightFinding {
                     severity: PreflightSeverity::Critical,
                     title: format!(
@@ -1674,7 +1661,6 @@ pub fn preflight(
                     ),
                 });
             }
-        }
         // Bridge name conflict — does it already exist as something else?
         if bridge_exists_unrelated(&v.bridge_name, &v.parent_iface, v.vlan_id) {
             findings.push(PreflightFinding {

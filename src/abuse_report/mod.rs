@@ -161,9 +161,8 @@ fn parse_whois_into(raw: &str, info: &mut WhoisInfo) {
                 // descr is typically the org name. Good enough.
                 if info.org.is_empty() { info.org = value; }
             }
-            "origin" => {
-                if info.asn.is_empty() { info.asn = value; }
-            }
+            "origin"
+                if info.asn.is_empty() => { info.asn = value; }
             _ => {}
         }
     }
@@ -279,9 +278,8 @@ pub fn compose_report(
     let now = chrono::Utc::now().to_rfc3339();
     let mut body = String::new();
     body.push_str("Hello abuse team,\n\n");
-    body.push_str(&format!(
-        "We are observing brute-force authentication attempts originating from one of your IP addresses against our infrastructure. \
-        We have automatically firewall-blocked the source IP and are reporting the activity to you per standard internet abuse-reporting practice.\n\n"));
+    body.push_str("We are observing brute-force authentication attempts originating from one of your IP addresses against our infrastructure. \
+        We have automatically firewall-blocked the source IP and are reporting the activity to you per standard internet abuse-reporting practice.\n\n");
     body.push_str("---- INCIDENT SUMMARY ----\n");
     body.push_str(&format!("Reported at:    {}\n", now));
     body.push_str(&format!("Source IP:      {}\n", ip));
@@ -499,11 +497,10 @@ mod tests {
             let path = entry.path();
             if path.is_dir() {
                 walk_rs(&path, f);
-            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-                if let Ok(c) = std::fs::read_to_string(&path) {
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs")
+                && let Ok(c) = std::fs::read_to_string(&path) {
                     f(&path, &c);
                 }
-            }
         }
     }
 

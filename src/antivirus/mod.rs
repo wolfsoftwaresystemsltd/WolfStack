@@ -487,11 +487,10 @@ fn detect_clamav() -> ToolStatus {
             let name = e.file_name();
             let n = name.to_string_lossy();
             if !(n.ends_with(".cvd") || n.ends_with(".cld")) { continue; }
-            if let Ok(m) = e.metadata() {
-                if let Ok(t) = m.modified() {
+            if let Ok(m) = e.metadata()
+                && let Ok(t) = m.modified() {
                     newest = Some(newest.map(|x| x.max(t)).unwrap_or(t));
                 }
-            }
         }
         if let Some(t) = newest {
             s.last_db_update = Some(format_rfc3339(t));
@@ -2037,6 +2036,7 @@ fn save_quarantine_index(v: &[QuarantineEntry]) -> std::io::Result<()> {
 // ══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize)]
+#[derive(Default)]
 pub struct ScanState {
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2056,16 +2056,6 @@ pub struct ScanState {
     pub last_error: Option<String>,
 }
 
-impl Default for ScanState {
-    fn default() -> Self {
-        Self {
-            running: false, started_at: None, completed_at: None,
-            active_scanner: None, progress_message: String::new(),
-            last_clamav_run: None, last_rkhunter_run: None, last_chkrootkit_run: None,
-            last_error: None,
-        }
-    }
-}
 
 /// Live install-run state. The endpoint `GET /api/antivirus/install-log`
 /// returns this; the UI polls it to render a terminal-style log box.
@@ -2195,13 +2185,12 @@ fn run_clamav_scan(
     // Dynamic mount-based excludes. Discovered every scan so a freshly-
     // attached NFS share is honoured without restarting WolfStack.
     let skip_mounts = discover_skippable_mountpoints();
-    if !skip_mounts.is_empty() {
-        if let Ok(mut s) = state.scan_state.write() {
+    if !skip_mounts.is_empty()
+        && let Ok(mut s) = state.scan_state.write() {
             s.progress_message = format!(
                 "Excluding {} non-local mount(s) (NFS / CIFS / FUSE / S3FS / overlay / tmpfs / etc.)",
                 skip_mounts.len());
         }
-    }
     for mp in &skip_mounts {
         // ClamAV --exclude-dir is a POSIX regex tested against directory
         // pathnames. `^<escaped>(/|$)` excludes the mountpoint itself
@@ -2244,9 +2233,8 @@ fn run_clamav_scan(
                 // Classify the line.
                 if trimmed.ends_with(" FOUND") {
                     // Real hit. Parse it and stash for the caller.
-                    if let Some(h) = parse_one_clamav_hit(trimmed) {
-                        if let Ok(mut g) = hits.lock() { g.push(h); }
-                    }
+                    if let Some(h) = parse_one_clamav_hit(trimmed)
+                        && let Ok(mut g) = hits.lock() { g.push(h); }
                     files_seen += 1;
                     if let Ok(mut ss) = state.scan_state.write() {
                         ss.progress_message = format!(
@@ -2255,7 +2243,7 @@ fn run_clamav_scan(
                     }
                 } else if trimmed.ends_with(": OK") {
                     files_seen += 1;
-                    if files_seen % PROGRESS_SAMPLE_EVERY == 0 {
+                    if files_seen.is_multiple_of(PROGRESS_SAMPLE_EVERY) {
                         // Trim the path-only part for display; clamscan
                         // emits "/path/to/file: OK" so strip the suffix.
                         let path = trimmed.rsplit_once(": OK").map(|(p, _)| p).unwrap_or(trimmed);
@@ -2540,7 +2528,7 @@ pub fn quarantine_file(
     // Try rename first (cheap, atomic, same-filesystem). If that fails
     // because the source crosses a filesystem boundary, fall back to
     // copy + remove.
-    if let Err(_) = std::fs::rename(p, &dest) {
+    if std::fs::rename(p, &dest).is_err() {
         std::fs::copy(p, &dest)
             .map_err(|e| format!("copy {} -> {}: {}", path, dest.display(), e))?;
         std::fs::remove_file(p)
@@ -2640,23 +2628,20 @@ pub fn delete_quarantined(state: &AntivirusState, id: &str) -> Result<(), String
 /// as a fallback so we still get something on hosts without fuser.
 pub fn pids_using(path: &str) -> Vec<i32> {
     let mut pids: HashSet<i32> = HashSet::new();
-    if which("fuser").is_some() {
-        if let Ok(out) = Command::new("fuser").arg(path).output() {
+    if which("fuser").is_some()
+        && let Ok(out) = Command::new("fuser").arg(path).output() {
             // fuser writes PIDs to stderr (yes, really) prefixed with the path.
             let s = String::from_utf8_lossy(&out.stderr);
             for tok in s.split_whitespace() {
-                if let Ok(p) = tok.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<i32>() {
-                    if p > 0 { pids.insert(p); }
-                }
+                if let Ok(p) = tok.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<i32>()
+                    && p > 0 { pids.insert(p); }
             }
             let s2 = String::from_utf8_lossy(&out.stdout);
             for tok in s2.split_whitespace() {
-                if let Ok(p) = tok.parse::<i32>() {
-                    if p > 0 { pids.insert(p); }
-                }
+                if let Ok(p) = tok.parse::<i32>()
+                    && p > 0 { pids.insert(p); }
             }
         }
-    }
     // /proc walk fallback / supplement — catches the case where the
     // binary has been deleted (shows up as "/path (deleted)") and fuser
     // can't find it any more.
@@ -2673,9 +2658,8 @@ pub fn pids_using(path: &str) -> Vec<i32> {
                 if t_stripped == path { pids.insert(pid); continue; }
             }
             // maps — for libraries loaded as shared objects
-            if let Ok(maps) = std::fs::read_to_string(e.path().join("maps")) {
-                if maps.contains(path) { pids.insert(pid); }
-            }
+            if let Ok(maps) = std::fs::read_to_string(e.path().join("maps"))
+                && maps.contains(path) { pids.insert(pid); }
         }
     }
     let mut v: Vec<i32> = pids.into_iter().collect();
@@ -2726,11 +2710,10 @@ fn is_kernel_thread(pid: i32) -> bool {
     if let Some(close) = stat.rfind(')') {
         let tail = &stat[close+1..];
         let parts: Vec<&str> = tail.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let Ok(ppid) = parts[1].parse::<i32>() {
+        if parts.len() >= 2
+            && let Ok(ppid) = parts[1].parse::<i32>() {
                 return ppid == 2 || ppid == 0;
             }
-        }
     }
     false
 }
@@ -2994,8 +2977,8 @@ pub fn run_full_scan(state: &AntivirusState) -> ScanRunSummary {
         // error so the operator can see whether freshclam is missing,
         // network-blocked, etc. (piranhaSponsor 2026-05-27).
         let mut repair_note: Option<String> = None;
-        if let Err(ref e) = scan_result {
-            if let Some(rr) = try_recover_clamav_signatures(state, e) {
+        if let Err(ref e) = scan_result
+            && let Some(rr) = try_recover_clamav_signatures(state, e) {
                 if rr.signatures_present_after {
                     {
                         let mut s = state.scan_state.write().unwrap();
@@ -3007,7 +2990,6 @@ pub fn run_full_scan(state: &AntivirusState) -> ScanRunSummary {
                     repair_note = Some(format!("auto-repair failed: {}", reason));
                 }
             }
-        }
         match scan_result {
             Ok(hits) => {
                 summary.clamav_hits = hits.len();
@@ -3154,12 +3136,11 @@ fn handle_clamav_hits(
         });
     }
 
-    if !new_quarantine.is_empty() {
-        if let Ok(mut g) = state.quarantine.write() {
+    if !new_quarantine.is_empty()
+        && let Ok(mut g) = state.quarantine.write() {
             for e in new_quarantine { g.push(e); }
             let _ = save_quarantine_index(&g);
         }
-    }
     append_findings(state, new_findings);
 }
 
@@ -3273,11 +3254,10 @@ fn which(bin: &str) -> Option<PathBuf> {
         if candidate.is_file() {
             // executable check — st_mode & 0o111
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(m) = std::fs::metadata(&candidate) {
-                if m.permissions().mode() & 0o111 != 0 {
+            if let Ok(m) = std::fs::metadata(&candidate)
+                && m.permissions().mode() & 0o111 != 0 {
                     return Some(candidate);
                 }
-            }
         }
     }
     None

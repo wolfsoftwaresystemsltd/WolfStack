@@ -619,62 +619,6 @@ fn apply_spec_patches(cfg: &mut Value, func: &WolfFunction, run_dir: &str, dns_m
     }
 }
 
-#[cfg(test)]
-mod runtime_tests {
-    use super::*;
-
-    fn sample_func() -> WolfFunction {
-        WolfFunction {
-            id: "abc123".into(), name: "t".into(), cluster: "WolfStack".into(),
-            runtime: FunctionRuntime::Node22, code: String::new(), description: String::new(),
-            memory_mb: 128, timeout_secs: 30, replicas: 2, max_per_node: 4,
-            env: vec!["FOO=bar".into()], placed_nodes: vec![], public_slug: None,
-            schedules: vec![], events: vec![], enabled: true, version: 1,
-            created_at: 0, updated_at: 0,
-        }
-    }
-
-    #[test]
-    fn patches_vivify_resources_when_absent() {
-        // node:22 runsc spec has linux but no linux.resources.
-        let mut cfg = serde_json::json!({
-            "process": { "env": ["PATH=/usr/bin"] },
-            "root": { "path": "rootfs" },
-            "mounts": [],
-            "linux": { "namespaces": [ {"type": "pid"}, {"type": "network"} ] }
-        });
-        apply_spec_patches(&mut cfg, &sample_func(), "/var/lib/wolfstack/wolffunctions/run/x", vec!["/etc/hosts"]);
-        assert_eq!(cfg["linux"]["resources"]["memory"]["limit"], 128 * 1024 * 1024);
-        // network namespace stripped, pid kept
-        let ns = cfg["linux"]["namespaces"].as_array().unwrap();
-        assert!(ns.iter().all(|n| n["type"] != "network"));
-        assert!(ns.iter().any(|n| n["type"] == "pid"));
-        // env appended, not replaced; shim self-picks port (0) + portfile
-        let env = cfg["process"]["env"].as_array().unwrap();
-        assert!(env.iter().any(|e| e == "PATH=/usr/bin"));
-        assert!(env.iter().any(|e| e == "WOLFFN_PORT=0"));
-        assert!(env.iter().any(|e| e == "WOLFFN_PORTFILE=/run/wolffn/port"));
-        assert!(env.iter().any(|e| e == "FOO=bar"));
-        // rootfs forced read-only
-        assert_eq!(cfg["root"]["readonly"], true);
-        // /function + /run/wolffn + /tmp + one dns mount = 4
-        assert_eq!(cfg["mounts"].as_array().unwrap().len(), 4);
-        // the rw rendezvous mount is present
-        let mounts = cfg["mounts"].as_array().unwrap();
-        assert!(mounts.iter().any(|m| m["destination"] == "/run/wolffn"
-            && m["options"].as_array().unwrap().iter().any(|o| o == "rw")));
-    }
-
-    #[test]
-    fn valid_name_rules() {
-        assert!(super::super::valid_name("my-fn-1"));
-        assert!(!super::super::valid_name("My_Fn"));
-        assert!(!super::super::valid_name("-lead"));
-        assert!(!super::super::valid_name("trail-"));
-        assert!(!super::super::valid_name(""));
-    }
-}
-
 /// Start one warm instance of `func` on this node. Blocks until the shim
 /// answers /healthz (or errors out).
 pub async fn start_instance(
@@ -1378,4 +1322,60 @@ pub async fn schedule_tick(
     }
     state.save();
     true
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    fn sample_func() -> WolfFunction {
+        WolfFunction {
+            id: "abc123".into(), name: "t".into(), cluster: "WolfStack".into(),
+            runtime: FunctionRuntime::Node22, code: String::new(), description: String::new(),
+            memory_mb: 128, timeout_secs: 30, replicas: 2, max_per_node: 4,
+            env: vec!["FOO=bar".into()], placed_nodes: vec![], public_slug: None,
+            schedules: vec![], events: vec![], enabled: true, version: 1,
+            created_at: 0, updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn patches_vivify_resources_when_absent() {
+        // node:22 runsc spec has linux but no linux.resources.
+        let mut cfg = serde_json::json!({
+            "process": { "env": ["PATH=/usr/bin"] },
+            "root": { "path": "rootfs" },
+            "mounts": [],
+            "linux": { "namespaces": [ {"type": "pid"}, {"type": "network"} ] }
+        });
+        apply_spec_patches(&mut cfg, &sample_func(), "/var/lib/wolfstack/wolffunctions/run/x", vec!["/etc/hosts"]);
+        assert_eq!(cfg["linux"]["resources"]["memory"]["limit"], 128 * 1024 * 1024);
+        // network namespace stripped, pid kept
+        let ns = cfg["linux"]["namespaces"].as_array().unwrap();
+        assert!(ns.iter().all(|n| n["type"] != "network"));
+        assert!(ns.iter().any(|n| n["type"] == "pid"));
+        // env appended, not replaced; shim self-picks port (0) + portfile
+        let env = cfg["process"]["env"].as_array().unwrap();
+        assert!(env.iter().any(|e| e == "PATH=/usr/bin"));
+        assert!(env.iter().any(|e| e == "WOLFFN_PORT=0"));
+        assert!(env.iter().any(|e| e == "WOLFFN_PORTFILE=/run/wolffn/port"));
+        assert!(env.iter().any(|e| e == "FOO=bar"));
+        // rootfs forced read-only
+        assert_eq!(cfg["root"]["readonly"], true);
+        // /function + /run/wolffn + /tmp + one dns mount = 4
+        assert_eq!(cfg["mounts"].as_array().unwrap().len(), 4);
+        // the rw rendezvous mount is present
+        let mounts = cfg["mounts"].as_array().unwrap();
+        assert!(mounts.iter().any(|m| m["destination"] == "/run/wolffn"
+            && m["options"].as_array().unwrap().iter().any(|o| o == "rw")));
+    }
+
+    #[test]
+    fn valid_name_rules() {
+        assert!(super::super::valid_name("my-fn-1"));
+        assert!(!super::super::valid_name("My_Fn"));
+        assert!(!super::super::valid_name("-lead"));
+        assert!(!super::super::valid_name("trail-"));
+        assert!(!super::super::valid_name(""));
+    }
 }

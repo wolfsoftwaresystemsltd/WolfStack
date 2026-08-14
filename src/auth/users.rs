@@ -69,7 +69,7 @@ impl Default for AuthConfig {
 
 impl AuthConfig {
     pub fn load() -> Self {
-        match std::fs::read_to_string(&auth_config_path()) {
+        match std::fs::read_to_string(auth_config_path()) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
         }
@@ -152,7 +152,7 @@ pub struct UserStore {
 
 impl UserStore {
     pub fn load() -> Self {
-        match std::fs::read_to_string(&users_config_path()) {
+        match std::fs::read_to_string(users_config_path()) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
         }
@@ -240,41 +240,18 @@ pub fn control_plane_apply(
     if users_version > UserStore::load().version
         && !users_json.trim().is_empty()
         && serde_json::from_str::<UserStore>(users_json).is_ok()
-    {
-        if crate::paths::write_secure(&users_config_path(), users_json.to_string()).is_ok() {
+        && crate::paths::write_secure(&users_config_path(), users_json).is_ok() {
             users_updated = true;
         }
-    }
 
     if auth_version > AuthConfig::load().version
         && !auth_json.trim().is_empty()
         && serde_json::from_str::<AuthConfig>(auth_json).is_ok()
-    {
-        if crate::paths::write_secure(&auth_config_path(), auth_json.to_string()).is_ok() {
+        && crate::paths::write_secure(&auth_config_path(), auth_json).is_ok() {
             auth_updated = true;
         }
-    }
 
     (users_updated, auth_updated)
-}
-
-// ─── Password Hashing (pure Rust, no libcrypt dependency) ───
-
-/// Hash a password using SHA-512 crypt (same as Linux /etc/shadow)
-#[cfg(test)]
-mod password_roundtrip_tests {
-    /// The password-reset flow writes hash_password() output into the
-    /// UserStore and login verifies it via verify_password() (native
-    /// libc crypt() when available, pure-Rust sha512_check otherwise).
-    /// If those two ever disagree on hash format, reset "succeeds" and
-    /// every subsequent login fails — lock the contract.
-    #[test]
-    fn hash_then_verify_roundtrip() {
-        let h = super::hash_password("test-password-123").expect("hash");
-        assert!(h.starts_with("$6$"), "expected sha512-crypt format, got {}", &h[..h.len().min(12)]);
-        assert!(super::verify_password("test-password-123", &h), "fresh hash must verify");
-        assert!(!super::verify_password("wrong-password", &h), "wrong password must fail");
-    }
 }
 
 pub fn hash_password(password: &str) -> Result<String, String> {
@@ -392,5 +369,24 @@ pub fn authenticate_wolfstack_user(username: &str, password: &str) -> Option<Wol
         Some(user.clone())
     } else {
         None
+    }
+}
+
+// ─── Password Hashing (pure Rust, no libcrypt dependency) ───
+
+/// Hash a password using SHA-512 crypt (same as Linux /etc/shadow)
+#[cfg(test)]
+mod password_roundtrip_tests {
+    /// The password-reset flow writes hash_password() output into the
+    /// UserStore and login verifies it via verify_password() (native
+    /// libc crypt() when available, pure-Rust sha512_check otherwise).
+    /// If those two ever disagree on hash format, reset "succeeds" and
+    /// every subsequent login fails — lock the contract.
+    #[test]
+    fn hash_then_verify_roundtrip() {
+        let h = super::hash_password("test-password-123").expect("hash");
+        assert!(h.starts_with("$6$"), "expected sha512-crypt format, got {}", &h[..h.len().min(12)]);
+        assert!(super::verify_password("test-password-123", &h), "fresh hash must verify");
+        assert!(!super::verify_password("wrong-password", &h), "wrong password must fail");
     }
 }

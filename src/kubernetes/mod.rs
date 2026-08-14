@@ -198,25 +198,19 @@ pub struct K8sWolfNetPortMap {
 // ─── Config ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct KubernetesConfig {
     #[serde(default)]
     pub clusters: Vec<K8sCluster>,
 }
 
-impl Default for KubernetesConfig {
-    fn default() -> Self {
-        Self {
-            clusters: Vec::new(),
-        }
-    }
-}
 
 // ═══════════════════════════════════════════════
 // ─── Config Persistence ───
 // ═══════════════════════════════════════════════
 
 pub fn load_config() -> KubernetesConfig {
-    match fs::read_to_string(&config_file()) {
+    match fs::read_to_string(config_file()) {
         Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
         Err(_) => KubernetesConfig::default(),
     }
@@ -447,8 +441,7 @@ pub fn detect_existing_clusters() -> Vec<(String, String, K8sClusterType)> {
         if let Ok(output) = Command::new("k0s")
             .args(["kubeconfig", "admin"])
             .output()
-        {
-            if output.status.success() {
+            && output.status.success() {
                 // Write kubeconfig to a known location
                 let kc_path = "/etc/k0s/kubeconfig";
                 let _ = fs::create_dir_all("/etc/k0s");
@@ -459,7 +452,6 @@ pub fn detect_existing_clusters() -> Vec<(String, String, K8sClusterType)> {
                     K8sClusterType::K0s,
                 ));
             }
-        }
     }
 
     // RKE2: kubeconfig at /etc/rancher/rke2/rke2.yaml
@@ -1460,12 +1452,11 @@ fn find_available_k8s_wolfnet_ip(config: &KubernetesConfig) -> Option<String> {
     if let Ok(content) = fs::read_to_string("/etc/wolfnet/config.toml") {
         for line in content.lines() {
             let trimmed = line.trim();
-            if (trimmed.starts_with("address") || trimmed.starts_with("allowed_ip")) && trimmed.contains('=') {
-                if let Some(val) = trimmed.split('=').nth(1) {
+            if (trimmed.starts_with("address") || trimmed.starts_with("allowed_ip")) && trimmed.contains('=')
+                && let Some(val) = trimmed.split('=').nth(1) {
                     let ip = val.trim().trim_matches('"').trim().to_string();
                     if !ip.is_empty() { used.insert(ip); }
                 }
-            }
         }
     }
 
@@ -1474,41 +1465,36 @@ fn find_available_k8s_wolfnet_ip(config: &KubernetesConfig) -> Option<String> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("inet ") {
-                if let Some(cidr) = trimmed.split_whitespace().nth(1) {
+            if trimmed.starts_with("inet ")
+                && let Some(cidr) = trimmed.split_whitespace().nth(1) {
                     let ip = cidr.split('/').next().unwrap_or("").to_string();
                     if !ip.is_empty() { used.insert(ip); }
                 }
-            }
         }
     }
 
     // WolfRun service VIPs and route cache
-    if let Ok(content) = fs::read_to_string(&crate::paths::get().wolfrun_services) {
-        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+    if let Ok(content) = fs::read_to_string(&crate::paths::get().wolfrun_services)
+        && let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
             for svc in &services {
-                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
-                    if !vip.is_empty() { used.insert(vip.to_string()); }
-                }
+                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str())
+                    && !vip.is_empty() { used.insert(vip.to_string()); }
                 if let Some(instances) = svc.get("instances").and_then(|v| v.as_array()) {
                     for inst in instances {
-                        if let Some(ip) = inst.get("wolfnet_ip").and_then(|v| v.as_str()) {
-                            if !ip.is_empty() { used.insert(ip.to_string()); }
-                        }
+                        if let Some(ip) = inst.get("wolfnet_ip").and_then(|v| v.as_str())
+                            && !ip.is_empty() { used.insert(ip.to_string()); }
                     }
                 }
             }
         }
-    }
 
     // Route cache
-    if let Ok(content) = fs::read_to_string("/var/run/wolfnet/routes.json") {
-        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+    if let Ok(content) = fs::read_to_string("/var/run/wolfnet/routes.json")
+        && let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
             for ip in routes.keys() {
                 used.insert(ip.clone());
             }
         }
-    }
 
     let prefix = crate::containers::wolfnet_subnet_prefix()?;
 
@@ -1644,12 +1630,11 @@ fn find_kube_svc_chain(cluster_ip: &str, service_port: u16, protocol: &str) -> O
     let dport_str = format!("--dport {}", service_port);
 
     for line in stdout.lines() {
-        if line.contains(&dest) && line.contains(&dport_str) && line.contains(&format!("-p {}", proto)) {
-            if let Some(pos) = line.find("-j KUBE-SVC-") {
+        if line.contains(&dest) && line.contains(&dport_str) && line.contains(&format!("-p {}", proto))
+            && let Some(pos) = line.find("-j KUBE-SVC-") {
                 let chain = line[pos + 3..].split_whitespace().next()?;
                 return Some(chain.to_string());
             }
-        }
     }
     None
 }
@@ -2265,13 +2250,11 @@ pub fn get_nodes(kubeconfig: &str) -> Vec<K8sNode> {
             let mut roles = Vec::new();
             if let Some(obj) = labels.as_object() {
                 for (key, _) in obj {
-                    if key.starts_with("node-role.kubernetes.io/") {
-                        if let Some(role) = key.strip_prefix("node-role.kubernetes.io/") {
-                            if !role.is_empty() {
+                    if key.starts_with("node-role.kubernetes.io/")
+                        && let Some(role) = key.strip_prefix("node-role.kubernetes.io/")
+                            && !role.is_empty() {
                                 roles.push(role.to_string());
                             }
-                        }
-                    }
                 }
             }
             let roles_str = if roles.is_empty() {
@@ -3326,7 +3309,7 @@ pub fn deploy_app_to_k8s(
                     let host_port = strip_proto(parts[0]).parse::<u32>().ok()?;
                     let container_port = strip_proto(parts[1]).parse::<u32>().ok()?;
                     // NodePort must be in range 30000-32767; map host ports accordingly
-                    let node_port = if host_port >= 30000 && host_port <= 32767 {
+                    let node_port = if (30000..=32767).contains(&host_port) {
                         Some(host_port)
                     } else {
                         None
@@ -3509,7 +3492,7 @@ pub fn health_summary() -> Option<String> {
         lines.push(format!(
             "  Cluster '{}' ({}): {} — {}/{} nodes ready, {}/{} pods running, {} namespaces, API {}",
             cluster.name,
-            cluster.cluster_type.to_string(),
+            cluster.cluster_type,
             health,
             status.nodes_ready, status.nodes_total,
             status.pods_running, status.pods_total,

@@ -296,11 +296,10 @@ pub fn certbot_probe() -> (Option<String>, Vec<String>) {
         }
     }
     for cand in &candidates {
-        if std::path::Path::new(cand).exists() {
-            if let Some(found) = try_path(cand, "explicit-list", &mut trace) {
+        if std::path::Path::new(cand).exists()
+            && let Some(found) = try_path(cand, "explicit-list", &mut trace) {
                 return (Some(found), trace);
             }
-        }
     }
     trace.push(format!("explicit-list: none of {} known paths existed", candidates.len()));
 
@@ -312,8 +311,7 @@ pub fn certbot_probe() -> (Option<String>, Vec<String>) {
         if let Ok(out) = Command::new("find")
             .args([root, "-maxdepth", "6", "-name", "certbot", "-type", "f", "-executable"])
             .output()
-        {
-            if out.status.success() {
+            && out.status.success() {
                 let s = String::from_utf8_lossy(&out.stdout);
                 let mut any = false;
                 for line in s.lines() {
@@ -328,7 +326,6 @@ pub fn certbot_probe() -> (Option<String>, Vec<String>) {
                     trace.push(format!("find {}: no matches", root));
                 }
             }
-        }
     }
 
     (None, trace)
@@ -508,15 +505,14 @@ fn probe_cert_via_target(
             // semantics match — containers can have skewed clocks but
             // openssl emits UTC, so date -d on the target is fine.
             let date_cmd = format!("date -d '{}' +%s", val.replace('\'', "'\\''"));
-            if let Ok(out) = target.exec(&date_cmd) {
-                if let Ok(ts) = out.trim().parse::<i64>() {
+            if let Ok(out) = target.exec(&date_cmd)
+                && let Ok(ts) = out.trim().parse::<i64>() {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
                     days = (ts - now) / 86400;
                 }
-            }
         }
     }
     (domains, expires, days)
@@ -558,14 +554,12 @@ pub(crate) fn probe_cert(pem: &Path) -> (Vec<String>, String, i64) {
             // across the BSDs/GNU-isms the installer might be on.
             if let Ok(d) = Command::new("date")
                 .args(["-d", val, "+%s"]).output()
-            {
-                if let Ok(ts) = String::from_utf8_lossy(&d.stdout).trim().parse::<i64>() {
+                && let Ok(ts) = String::from_utf8_lossy(&d.stdout).trim().parse::<i64>() {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64).unwrap_or(0);
                     days = (ts - now) / 86400;
                 }
-            }
         }
     }
 
@@ -1539,7 +1533,7 @@ pub fn apt_packages_available(names: &[&str]) -> std::collections::HashSet<Strin
             // Filter to the names we asked about so we don't include
             // reverse-dependencies apt sometimes inlines.
             let n = rest.trim();
-            if names.iter().any(|x| *x == n) {
+            if names.contains(&n) {
                 found.insert(n.to_string());
             }
         }
@@ -1579,7 +1573,7 @@ pub fn dnf_packages_available(names: &[&str]) -> std::collections::HashSet<Strin
             let after = after.trim_start();
             if let Some(rest) = after.strip_prefix(':') {
                 let n = rest.trim();
-                if names.iter().any(|x| *x == n) {
+                if names.contains(&n) {
                     found.insert(n.to_string());
                 }
             }

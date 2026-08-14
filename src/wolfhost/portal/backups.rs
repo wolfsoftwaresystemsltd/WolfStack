@@ -13,12 +13,12 @@ fn is_proxmox() -> bool {
 fn lxc_exec(container: &str, cmd: &str) -> Result<String, String> {
     let output = if is_proxmox() {
         Command::new("pct")
-            .args(&["exec", container, "--", "sh", "-c", cmd])
+            .args(["exec", container, "--", "sh", "-c", cmd])
             .output()
             .map_err(|e| format!("pct exec failed: {}", e))?
     } else {
         Command::new("lxc-attach")
-            .args(&["-n", container, "--", "sh", "-c", cmd])
+            .args(["-n", container, "--", "sh", "-c", cmd])
             .output()
             .map_err(|e| format!("lxc-attach failed: {}", e))?
     };
@@ -261,11 +261,11 @@ pub async fn download(req: HttpRequest, state: web::Data<Arc<AppState>>, body: w
     // Read file from container
     let output = if is_proxmox() {
         Command::new("pct")
-            .args(&["exec", container, "--", "cat", &format!("/var/backups/wolfhost/{}", filename)])
+            .args(["exec", container, "--", "cat", &format!("/var/backups/wolfhost/{}", filename)])
             .output()
     } else {
         Command::new("lxc-attach")
-            .args(&["-n", container, "--", "cat", &format!("/var/backups/wolfhost/{}", filename)])
+            .args(["-n", container, "--", "cat", &format!("/var/backups/wolfhost/{}", filename)])
             .output()
     };
 

@@ -77,7 +77,7 @@ pub struct DockerWolfnetCollisionFacts {
 /// Runs on the blocking pool because Docker calls are synchronous
 /// subprocesses.
 pub async fn sample_now_async(_timeout: Duration) -> DockerWolfnetCollisionFacts {
-    tokio::task::spawn_blocking(|| sample_blocking())
+    tokio::task::spawn_blocking(sample_blocking)
         .await
         .unwrap_or_default()
 }

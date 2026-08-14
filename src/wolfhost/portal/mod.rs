@@ -319,8 +319,8 @@ async fn dns_records(req: actix_web::HttpRequest, state: web::Data<std::sync::Ar
     // For non-DA domains, use PowerDNS
     for domain in &my_domains {
         if da_domains.contains(domain) { continue; } // Already fetched from DA
-        if let Ok(zone) = crate::wolfhost::provisioning::dns::get_zone_records(domain) {
-            if let Some(rrsets) = zone["rrsets"].as_array() {
+        if let Ok(zone) = crate::wolfhost::provisioning::dns::get_zone_records(domain)
+            && let Some(rrsets) = zone["rrsets"].as_array() {
                 for rr in rrsets {
                     let rtype = rr["type"].as_str().unwrap_or("");
                     if rtype == "SOA" || rtype == "NS" { continue; }
@@ -337,7 +337,6 @@ async fn dns_records(req: actix_web::HttpRequest, state: web::Data<std::sync::Ar
                     }
                 }
             }
-        }
     }
 
     let branding = state.config.get_branding();

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ServiceUsage {
     #[serde(default)]
     pub disk_mb: u64,
@@ -8,11 +9,6 @@ pub struct ServiceUsage {
     pub bandwidth_mb: u64,
 }
 
-impl Default for ServiceUsage {
-    fn default() -> Self {
-        Self { disk_mb: 0, bandwidth_mb: 0 }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostingService {

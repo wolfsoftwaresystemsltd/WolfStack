@@ -60,7 +60,7 @@ pub const KNOWN_PLUGINS: &[&str] = &[
 ];
 
 pub fn is_known_plugin(plugin: &str) -> bool {
-    KNOWN_PLUGINS.iter().any(|p| *p == plugin)
+    KNOWN_PLUGINS.contains(&plugin)
 }
 
 /// One DNS provider entry. `credentials_enc` is XOR-obfuscated INI
@@ -201,15 +201,14 @@ impl DnsProviderStore {
             }
             entry.name = n;
         }
-        if let Some(ini) = credentials_ini {
-            if !ini.trim().is_empty() {
+        if let Some(ini) = credentials_ini
+            && !ini.trim().is_empty() {
                 validate_ini(ini)?;
                 entry.credentials_enc = obfuscate(ini);
                 // Re-test status is now stale.
                 entry.last_tested_at = String::new();
                 entry.last_test_result = String::new();
             }
-        }
         Ok(())
     }
 

@@ -80,7 +80,7 @@ fn detect_dns_method() -> DnsMethod {
     if std::path::Path::new("/etc/netplan").exists() {
         let has_files = std::fs::read_dir("/etc/netplan")
             .map(|entries| entries.filter_map(|e| e.ok())
-                .any(|e| e.path().extension().map_or(false, |ext| ext == "yaml" || ext == "yml")))
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "yaml" || ext == "yml")))
             .unwrap_or(false);
         if has_files {
             return DnsMethod::Netplan;
@@ -130,7 +130,7 @@ pub fn get_dns() -> DnsConfig {
                 for line in text.lines() {
                     let line = line.trim();
                     if line.starts_with("DNS Servers:") || line.starts_with("DNS Server:") {
-                        let servers = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+                        let servers = line.split_once(':').map(|x| x.1).unwrap_or("").trim();
                         for s in servers.split_whitespace() {
                             if !s.is_empty() && !nameservers.contains(&s.to_string()) {
                                 nameservers.push(s.to_string());
@@ -138,7 +138,7 @@ pub fn get_dns() -> DnsConfig {
                         }
                     }
                     if line.starts_with("DNS Domain:") {
-                        let domains = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+                        let domains = line.split_once(':').map(|x| x.1).unwrap_or("").trim();
                         for d in domains.split_whitespace() {
                             if !d.is_empty() && !search_domains.contains(&d.to_string()) {
                                 search_domains.push(d.to_string());
@@ -188,33 +188,30 @@ pub fn get_dns() -> DnsConfig {
         DnsMethod::NetworkManager => {
             // On RHEL/Fedora/IBM Power, read DNS from the primary NM connection
             // (ethernet or wifi), not from ALL devices which includes Tailscale etc.
-            if let Some(conn_name) = find_primary_nm_connection() {
-                if let Ok(out) = Command::new("nmcli")
+            if let Some(conn_name) = find_primary_nm_connection()
+                && let Ok(out) = Command::new("nmcli")
                     .args(["-t", "-f", "IP4.DNS,IP4.DOMAIN", "connection", "show", &conn_name])
                     .output()
                 {
                     let text = String::from_utf8_lossy(&out.stdout);
                     for line in text.lines() {
                         let line = line.trim();
-                        if line.starts_with("IP4.DNS") {
-                            if let Some(dns) = line.splitn(2, ':').nth(1) {
+                        if line.starts_with("IP4.DNS")
+                            && let Some(dns) = line.split_once(':').map(|x| x.1) {
                                 let dns = dns.trim();
                                 if !dns.is_empty() && !nameservers.contains(&dns.to_string()) {
                                     nameservers.push(dns.to_string());
                                 }
                             }
-                        }
-                        if line.starts_with("IP4.DOMAIN") {
-                            if let Some(domain) = line.splitn(2, ':').nth(1) {
+                        if line.starts_with("IP4.DOMAIN")
+                            && let Some(domain) = line.split_once(':').map(|x| x.1) {
                                 let domain = domain.trim();
                                 if !domain.is_empty() && !search_domains.contains(&domain.to_string()) {
                                     search_domains.push(domain.to_string());
                                 }
                             }
-                        }
                     }
                 }
-            }
             // Fallback to resolv.conf if nmcli gave nothing
             if nameservers.is_empty() {
                 read_resolv_conf(&mut nameservers, &mut search_domains);
@@ -417,11 +414,10 @@ unmanaged-devices=interface-name:wg-*;interface-name:wolfnet*
         Ok(existing) => existing != content,
         Err(_) => true,
     };
-    if needs_write {
-        if std::fs::write(conf_path, content).is_ok() {
+    if needs_write
+        && std::fs::write(conf_path, content).is_ok() {
             let _ = Command::new("nmcli").args(["general", "reload"]).output();
         }
-    }
 }
 
 /// Find the primary NetworkManager connection (ethernet or wifi)
@@ -526,11 +522,10 @@ pub fn detect_primary_interface() -> String {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(idx) = parts.iter().position(|&p| p == "dev") {
-                if let Some(iface) = parts.get(idx + 1) {
+            if let Some(idx) = parts.iter().position(|&p| p == "dev")
+                && let Some(iface) = parts.get(idx + 1) {
                     return iface.to_string();
                 }
-            }
         }
     }
     "eth0".to_string()
@@ -628,9 +623,9 @@ pub fn list_interfaces() -> Vec<NetworkInterface> {
 /// Detect if an interface is a VLAN
 fn detect_vlan(name: &str, entry: &serde_json::Value) -> (bool, Option<u32>, Option<String>) {
     // Check link_info for VLAN
-    if let Some(linkinfo) = entry.get("linkinfo") {
-        if let Some(info_kind) = linkinfo.get("info_kind").and_then(|v| v.as_str()) {
-            if info_kind == "vlan" {
+    if let Some(linkinfo) = entry.get("linkinfo")
+        && let Some(info_kind) = linkinfo.get("info_kind").and_then(|v| v.as_str())
+            && info_kind == "vlan" {
                 let vlan_id = linkinfo.get("info_data")
                     .and_then(|d| d.get("id"))
                     .and_then(|v| v.as_u64())
@@ -638,16 +633,13 @@ fn detect_vlan(name: &str, entry: &serde_json::Value) -> (bool, Option<u32>, Opt
                 let parent = entry.get("link").and_then(|v| v.as_str()).map(|s| s.to_string());
                 return (true, vlan_id, parent);
             }
-        }
-    }
 
     // Fallback: check if name contains a dot (e.g. eth0.100)
-    if let Some(dot_pos) = name.rfind('.') {
-        if let Ok(vid) = name[dot_pos + 1..].parse::<u32>() {
+    if let Some(dot_pos) = name.rfind('.')
+        && let Ok(vid) = name[dot_pos + 1..].parse::<u32>() {
             let parent = name[..dot_pos].to_string();
             return (true, Some(vid), Some(parent));
         }
-    }
 
     (false, None, None)
 }
@@ -983,11 +975,10 @@ static WOLFNET_CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 /// auto-derived one (e.g. `192.168.10`); explicit tags never carry
 /// that prefix.
 pub fn effective_site(site: &Option<String>, address: &str) -> Option<String> {
-    if let Some(s) = site.as_ref() {
-        if !s.is_empty() {
+    if let Some(s) = site.as_ref()
+        && !s.is_empty() {
             return Some(s.clone());
         }
-    }
     let ip: std::net::Ipv4Addr = match address.parse() {
         Ok(ip) => ip,
         Err(_) => return None,
@@ -1090,16 +1081,14 @@ pub fn decide_peer_endpoint(
     //    `public_ip == self_lan_address` the self-loop branch would
     //    also trigger, but the loop guard logs the more specific
     //    cause.
-    if let Some((net_addr, prefix)) = self_wolfnet_subnet {
-        if is_in_subnet(pip, net_addr, prefix) {
+    if let Some((net_addr, prefix)) = self_wolfnet_subnet
+        && is_in_subnet(pip, net_addr, prefix) {
             return PeerEndpoint::Clear;
         }
-    }
 
     // 3. Self-loop.
-    if let Ok(self_ip) = self_lan_address.parse::<std::net::Ipv4Addr>() {
-        if pip == self_ip { return PeerEndpoint::Clear; }
-    }
+    if let Ok(self_ip) = self_lan_address.parse::<std::net::Ipv4Addr>()
+        && pip == self_ip { return PeerEndpoint::Clear; }
 
     // 4. Loopback / link-local.
     if pip.is_loopback() {
@@ -1111,13 +1100,11 @@ pub fn decide_peer_endpoint(
     }
 
     // 5. Behind-NAT.
-    if let Some(plan) = peer_lan_address {
-        if let Ok(plan_ip) = plan.parse::<std::net::Ipv4Addr>() {
-            if plan_ip != pip {
+    if let Some(plan) = peer_lan_address
+        && let Ok(plan_ip) = plan.parse::<std::net::Ipv4Addr>()
+            && plan_ip != pip {
                 return PeerEndpoint::Clear;
             }
-        }
-    }
 
     PeerEndpoint::Set(format!("{}:{}", pip, peer_port))
 }
@@ -1233,26 +1220,20 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
     let existing_idx = peers.as_ref().and_then(|arr| {
         arr.iter().position(|p| {
             // Match by name
-            if let Some(pname) = p.get("name").and_then(|v| v.as_str()) {
-                if pname == name { return true; }
-            }
+            if let Some(pname) = p.get("name").and_then(|v| v.as_str())
+                && pname == name { return true; }
             // Match by public key
-            if let Some(pk) = public_key {
-                if !pk.is_empty() {
-                    if let Some(ppk) = p.get("public_key").and_then(|v| v.as_str()) {
-                        if ppk == pk { return true; }
-                    }
-                }
-            }
+            if let Some(pk) = public_key
+                && !pk.is_empty()
+                    && let Some(ppk) = p.get("public_key").and_then(|v| v.as_str())
+                        && ppk == pk { return true; }
             // Match by IP — compare bare. `ip` is already normalised above;
             // an existing entry may still carry a legacy "/32" suffix, so
             // strip it here too or a bare add would miss the match and
             // append a duplicate peer.
-            if !ip.is_empty() {
-                if let Some(pip) = p.get("allowed_ip").and_then(|v| v.as_str()) {
-                    if pip.split('/').next().unwrap_or(pip) == ip { return true; }
-                }
-            }
+            if !ip.is_empty()
+                && let Some(pip) = p.get("allowed_ip").and_then(|v| v.as_str())
+                    && pip.split('/').next().unwrap_or(pip) == ip { return true; }
             false
         })
     });
@@ -1323,16 +1304,14 @@ pub fn add_wolfnet_peer(name: &str, endpoint: PeerEndpoint, ip: &str, public_key
         // Add new peer
         let mut new_peer = toml::map::Map::new();
         new_peer.insert("name".to_string(), toml::Value::String(name.to_string()));
-        if let Some(pk) = public_key {
-            if !pk.is_empty() {
+        if let Some(pk) = public_key
+            && !pk.is_empty() {
                 new_peer.insert("public_key".to_string(), toml::Value::String(pk.to_string()));
             }
-        }
-        if let PeerEndpoint::Set(s) = &endpoint {
-            if !s.is_empty() {
+        if let PeerEndpoint::Set(s) = &endpoint
+            && !s.is_empty() {
                 new_peer.insert("endpoint".to_string(), toml::Value::String(s.clone()));
             }
-        }
         if !ip.is_empty() {
             new_peer.insert("allowed_ip".to_string(), toml::Value::String(ip.to_string()));
         }
@@ -1744,12 +1723,11 @@ pub fn reconcile_wolfnet_peers_batch(
                 Some(s) if s.contains('/') => Some(s.split('/').next().unwrap_or(s).to_string()),
                 _ => None,
             };
-            if let Some(bare) = bare {
-                if let Some(tbl) = peer.as_table_mut() {
+            if let Some(bare) = bare
+                && let Some(tbl) = peer.as_table_mut() {
                     tbl.insert("allowed_ip".to_string(), toml::Value::String(bare));
                     changes += 1;
                 }
-            }
         }
 
         for peer in peers_arr.iter_mut() {
@@ -1769,17 +1747,16 @@ pub fn reconcile_wolfnet_peers_batch(
             // `target_by_name`, and we ONLY write an address that is inside
             // our own WolfNet subnet, so a stale out-of-mesh IP can never be
             // propagated back into the config.
-            if let Some(target) = target_by_name.get(name.as_str()) {
-                if let (Some(correct_ip), Some((net_addr, prefix))) =
+            if let Some(target) = target_by_name.get(name.as_str())
+                && let (Some(correct_ip), Some((net_addr, prefix))) =
                     (target.wolfnet_ip.as_deref(), wn_subnet)
-                {
-                    if let Ok(correct_v4) = correct_ip.parse::<std::net::Ipv4Addr>() {
+                    && let Ok(correct_v4) = correct_ip.parse::<std::net::Ipv4Addr>() {
                         let current_ip = peer.get("allowed_ip").and_then(|v| v.as_str())
                             .or_else(|| peer.get("ip").and_then(|v| v.as_str()))
                             .map(|s| s.split('/').next().unwrap_or(s).to_string());
-                        if is_in_subnet(correct_v4, net_addr, prefix) {
-                            if let Some(cur) = current_ip {
-                                if !cur.is_empty() && cur != correct_ip {
+                        if is_in_subnet(correct_v4, net_addr, prefix)
+                            && let Some(cur) = current_ip
+                                && !cur.is_empty() && cur != correct_ip {
                                     if let Some(tbl) = peer.as_table_mut() {
                                         // Write a BARE address, no CIDR suffix.
                                         // WolfNet parses allowed_ip with a plain
@@ -1803,11 +1780,7 @@ pub fn reconcile_wolfnet_peers_batch(
                                         name, cur, correct_ip
                                     );
                                 }
-                            }
-                        }
                     }
-                }
-            }
 
             let current_endpoint = peer.get("endpoint")
                 .and_then(|v| v.as_str())
@@ -2208,11 +2181,10 @@ pub fn generate_wolfnet_invite() -> Result<serde_json::Value, String> {
     let get_val = |key: &str| -> String {
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with(key) {
-                if let Some(eq_pos) = trimmed.find('=') {
+            if trimmed.starts_with(key)
+                && let Some(eq_pos) = trimmed.find('=') {
                     return trimmed[eq_pos+1..].trim().trim_matches('"').trim_matches('\'').to_string();
                 }
-            }
         }
         String::new()
     };
@@ -2280,14 +2252,12 @@ fn detect_public_ip() -> Option<String> {
         if let Ok(output) = Command::new("curl")
             .args(["-sf", "--connect-timeout", "3", url])
             .output()
-        {
-            if output.status.success() {
+            && output.status.success() {
                 let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if ip.parse::<std::net::Ipv4Addr>().is_ok() {
                     return Some(ip);
                 }
             }
-        }
     }
     None
 }
@@ -2424,7 +2394,7 @@ struct IpMappingConfig {
 }
 
 fn load_ip_mapping_config() -> IpMappingConfig {
-    match std::fs::read_to_string(&ip_mappings_path()) {
+    match std::fs::read_to_string(ip_mappings_path()) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => IpMappingConfig::default(),
     }
@@ -2525,11 +2495,10 @@ pub fn add_ip_mapping(
     }
 
     // Self-mapping guard: don't route traffic to yourself
-    if let Some(gw) = detect_wolfnet_gateway_ip() {
-        if wolfnet_ip == gw {
+    if let Some(gw) = detect_wolfnet_gateway_ip()
+        && wolfnet_ip == gw {
             return Err("Cannot map to this server's own WolfNet IP — this would create a routing loop".to_string());
         }
-    }
 
     // Protocol validation
     if !["all", "tcp", "udp"].contains(&protocol) {
@@ -2651,16 +2620,16 @@ pub fn get_listening_ports() -> Vec<serde_json::Value> {
 
     let mut ports = Vec::new();
 
-    if let Ok(o) = output {
-        if o.status.success() {
+    if let Ok(o) = output
+        && o.status.success() {
             for line in String::from_utf8_lossy(&o.stdout).lines().skip(1) {
                 // Format: State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process
                 let cols: Vec<&str> = line.split_whitespace().collect();
                 if cols.len() >= 5 {
                     let local = cols[3];
                     // Extract port from the last colon-separated part
-                    if let Some(port_str) = local.rsplit(':').next() {
-                        if let Ok(port) = port_str.parse::<u16>() {
+                    if let Some(port_str) = local.rsplit(':').next()
+                        && let Ok(port) = port_str.parse::<u16>() {
                             let process = if cols.len() >= 6 { cols[5..].join(" ") } else { String::new() };
                             // Extract process name from users:(("name",pid=N,fd=N))
                             let proc_name = process.split('"').nth(1).unwrap_or("").to_string();
@@ -2670,25 +2639,23 @@ pub fn get_listening_ports() -> Vec<serde_json::Value> {
                                 "process": proc_name,
                             }));
                         }
-                    }
                 }
             }
         }
-    }
 
     // Also get UDP
     let output = Command::new("ss")
         .args(["-ulnp"])
         .output();
 
-    if let Ok(o) = output {
-        if o.status.success() {
+    if let Ok(o) = output
+        && o.status.success() {
             for line in String::from_utf8_lossy(&o.stdout).lines().skip(1) {
                 let cols: Vec<&str> = line.split_whitespace().collect();
                 if cols.len() >= 5 {
                     let local = cols[4];
-                    if let Some(port_str) = local.rsplit(':').next() {
-                        if let Ok(port) = port_str.parse::<u16>() {
+                    if let Some(port_str) = local.rsplit(':').next()
+                        && let Ok(port) = port_str.parse::<u16>() {
                             let process = if cols.len() >= 6 { cols[5..].join(" ") } else { String::new() };
                             let proc_name = process.split('"').nth(1).unwrap_or("").to_string();
                             ports.push(serde_json::json!({
@@ -2697,11 +2664,9 @@ pub fn get_listening_ports() -> Vec<serde_json::Value> {
                                 "process": proc_name,
                             }));
                         }
-                    }
                 }
             }
         }
-    }
 
     // De-duplicate by port+protocol
     ports.sort_by_key(|p| (p["port"].as_u64().unwrap_or(0), p["protocol"].as_str().unwrap_or("").to_string()));
@@ -2758,14 +2723,13 @@ pub fn update_ip_mapping(
     }
 
     // Validate ports
-    if let Some(port_str) = ports {
-        if !port_str.trim().is_empty() {
+    if let Some(port_str) = ports
+        && !port_str.trim().is_empty() {
             if protocol == "all" {
                 return Err("When specifying ports, you must select TCP or UDP (not 'All').".to_string());
             }
             parse_port_list(port_str)?;
         }
-    }
 
     // Validate dest_ports
     let dest_ports_clean: Option<&str> = match dest_ports {
@@ -3008,11 +2972,10 @@ fn apply_mapping_rules(m: &IpMapping) -> Result<(), String> {
     };
 
     // Check if target is a WolfRun VIP with backends
-    if let Some((backends, lb_policy)) = resolve_wolfrun_vip(&m.wolfnet_ip) {
-        if !backends.is_empty() {
+    if let Some((backends, lb_policy)) = resolve_wolfrun_vip(&m.wolfnet_ip)
+        && !backends.is_empty() {
             return apply_vip_mapping_rules(m, &backends, &lb_policy, &gateway_ip, &proto_args, &src_port_args);
         }
-    }
 
     // Standard mapping (non-VIP target)
 
@@ -3553,11 +3516,10 @@ fn iface_ipv4_cidrs(iface: &str) -> Vec<String> {
 pub fn detect_wolfnet_gateway_ip() -> Option<String> {
     let interfaces = list_interfaces();
     for iface in &interfaces {
-        if iface.name.starts_with("wn") || iface.name.starts_with("wolfnet") {
-            if let Some(addr) = iface.addresses.iter().find(|a| a.family == "inet") {
+        if (iface.name.starts_with("wn") || iface.name.starts_with("wolfnet"))
+            && let Some(addr) = iface.addresses.iter().find(|a| a.family == "inet") {
                 return Some(addr.address.clone());
             }
-        }
     }
     None
 }
@@ -3605,13 +3567,11 @@ pub fn detect_lan_ip() -> Option<String> {
             continue;
         }
         for addr in &iface.addresses {
-            if addr.family == "inet" {
-                if let Ok(ip) = addr.address.parse::<std::net::Ipv4Addr>() {
-                    if is_private_ip(ip) && !ip.is_loopback() {
+            if addr.family == "inet"
+                && let Ok(ip) = addr.address.parse::<std::net::Ipv4Addr>()
+                    && is_private_ip(ip) && !ip.is_loopback() {
                         return Some(addr.address.clone());
                     }
-                }
-            }
         }
     }
     None
@@ -3663,13 +3623,11 @@ pub fn detect_public_ips() -> Vec<String> {
             continue;
         }
         for addr in &iface.addresses {
-            if addr.family == "inet" {
-                if let Ok(ip) = addr.address.parse::<std::net::Ipv4Addr>() {
-                    if !is_private_ip(ip) {
+            if addr.family == "inet"
+                && let Ok(ip) = addr.address.parse::<std::net::Ipv4Addr>()
+                    && !is_private_ip(ip) {
                         public_ips.push(addr.address.clone());
                     }
-                }
-            }
         }
     }
     public_ips
@@ -3706,13 +3664,11 @@ pub fn collect_workload_subnets() -> Vec<String> {
     use std::sync::Mutex;
     use std::time::Instant;
     static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
-    if let Ok(guard) = CACHE.lock() {
-        if let Some((ts, ref cached)) = *guard {
-            if ts.elapsed().as_secs() < 30 {
+    if let Ok(guard) = CACHE.lock()
+        && let Some((ts, ref cached)) = *guard
+            && ts.elapsed().as_secs() < 30 {
                 return cached.clone();
             }
-        }
-    }
     let fresh = collect_workload_subnets_uncached();
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some((Instant::now(), fresh.clone()));
@@ -3833,25 +3789,22 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
     if let Ok(output) = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}|{{.Label \"wolfnet.ip\"}}"])
         .output()
-    {
-        if output.status.success() {
+        && output.status.success() {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 let parts: Vec<&str> = line.splitn(2, '|').collect();
                 if parts.len() == 2 {
                     let name = parts[0].trim();
                     let wip = parts[1].trim();
-                    if !wip.is_empty() && wip != "<no value>" {
-                        if wip.parse::<std::net::Ipv4Addr>().is_ok() {
+                    if !wip.is_empty() && wip != "<no value>"
+                        && wip.parse::<std::net::Ipv4Addr>().is_ok() {
                             ips.push(serde_json::json!({
                                 "ip": wip,
                                 "source": format!("docker: {}", name)
                             }));
                         }
-                    }
                 }
             }
         }
-    }
 
     // LXC containers with WolfNet IPs — scan all registered storage paths
     for lxc_path in crate::containers::lxc_storage_paths() {
@@ -3873,8 +3826,8 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
     }
 
     // Proxmox LXC containers — check pct configs for wn0 IPs
-    if std::path::Path::new("/etc/pve").exists() {
-        if let Ok(entries) = std::fs::read_dir("/etc/pve/lxc") {
+    if std::path::Path::new("/etc/pve").exists()
+        && let Ok(entries) = std::fs::read_dir("/etc/pve/lxc") {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map(|e| e == "conf").unwrap_or(false) {
@@ -3882,8 +3835,8 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
                     if let Ok(conf) = std::fs::read_to_string(&path) {
                         for line in conf.lines() {
                             // net lines look like: net1: name=wn0,bridge=lxcbr0,ip=x.x.x.x/24,...
-                            if line.contains("name=wn0") {
-                                if let Some(ip_part) = line.split(',').find(|p| p.starts_with("ip=")) {
+                            if line.contains("name=wn0")
+                                && let Some(ip_part) = line.split(',').find(|p| p.starts_with("ip=")) {
                                     let ip = ip_part.trim_start_matches("ip=")
                                         .split('/')
                                         .next()
@@ -3896,13 +3849,11 @@ pub fn detect_wolfnet_ips() -> Vec<serde_json::Value> {
                                         }));
                                     }
                                 }
-                            }
                         }
                     }
                 }
             }
         }
-    }
 
     // Remote container/VIP IPs from the WolfNet routes cache
     let routes = crate::containers::WOLFNET_ROUTES.lock().unwrap().clone();
@@ -4441,11 +4392,10 @@ pub fn teardown_wireguard_bridge(cluster: &str) -> Result<(), String> {
 pub fn apply_all_wireguard_bridges() {
     let bridges = load_wireguard_bridges();
     for (cluster, bridge) in &bridges {
-        if bridge.enabled {
-            if let Err(e) = apply_wireguard_bridge(bridge) {
+        if bridge.enabled
+            && let Err(e) = apply_wireguard_bridge(bridge) {
                 warn!("Failed to apply WireGuard bridge for cluster '{}': {}", cluster, e);
             }
-        }
     }
 }
 
@@ -4680,14 +4630,13 @@ fn detect_wolfnet_subnet() -> Option<String> {
     }
 
     // Fallback: runtime status (may be stale if WolfNet was reconfigured but not restarted)
-    if let Some(info) = get_wolfnet_local_info() {
-        if let Some(addr) = info["address"].as_str() {
+    if let Some(info) = get_wolfnet_local_info()
+        && let Some(addr) = info["address"].as_str() {
             let parts: Vec<&str> = addr.split('.').collect();
             if parts.len() >= 3 {
                 return Some(format!("{}.{}.{}", parts[0], parts[1], parts[2]));
             }
         }
-    }
     None
 }
 

@@ -329,12 +329,11 @@ fn desired_token_set() -> std::collections::HashSet<String> {
         out.insert(cfg.telegram_bot_token.clone());
     }
     for agent in crate::wolfagents::load_all() {
-        if let Some(tg) = &agent.telegram {
-            if let Some(t) = &tg.bot_token {
+        if let Some(tg) = &agent.telegram
+            && let Some(t) = &tg.bot_token {
                 let t = t.trim();
                 if !t.is_empty() { out.insert(t.to_string()); }
             }
-        }
     }
     out
 }

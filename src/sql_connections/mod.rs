@@ -225,7 +225,7 @@ pub fn list_saved(user: &str, connection_id: &str) -> Vec<SavedQueryEntry> {
     let mut out: Vec<_> = load_saved_queries().saved.into_iter()
         .filter(|e| e.user == user && e.connection_id == connection_id && !e.name.is_empty())
         .collect();
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 
@@ -699,7 +699,7 @@ pub async fn execute_with_schema(
     // local-only checks, only proxying truly needs live cluster data.
     let self_id = cluster
         .map(|c| c.self_id.clone())
-        .unwrap_or_else(|| crate::agent::self_node_id());
+        .unwrap_or_else(crate::agent::self_node_id);
     let is_local = conn.node_id.is_empty() || conn.node_id == self_id;
 
     if is_local {
@@ -901,8 +901,8 @@ async fn execute_proxied(
                 // return it directly so the caller gets the actual database error, rather
                 // than a confusing "proxy to X failed: HTTP 400..." message that makes it
                 // look like the proxy infrastructure is broken.
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                    if let Some(err_msg) = json.get("error").and_then(|v| v.as_str()) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_text)
+                    && let Some(err_msg) = json.get("error").and_then(|v| v.as_str()) {
                         let clean_err = err_msg.to_string();
                         let elapsed_ms = start.elapsed().as_millis() as u64;
                         write_audit(
@@ -911,7 +911,6 @@ async fn execute_proxied(
                         );
                         return Err(clean_err);
                     }
-                }
                 
                 last_err = format!("HTTP {} from {}: {}", status, url, body_text);
                 // Authentic HTTP errors don't retry with different

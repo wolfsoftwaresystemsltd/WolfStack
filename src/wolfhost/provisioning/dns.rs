@@ -5,7 +5,7 @@ pub fn install_powerdns() -> Result<(), String> {
     log::info!("Installing PowerDNS...");
 
     let output = Command::new("sh")
-        .args(&["-c", "export DEBIAN_FRONTEND=noninteractive && \
+        .args(["-c", "export DEBIAN_FRONTEND=noninteractive && \
             apt-get install -y -qq pdns-server pdns-backend-sqlite3 sqlite3 2>/dev/null"])
         .output()
         .map_err(|e| format!("Failed to install PowerDNS: {}", e))?;
@@ -15,7 +15,7 @@ pub fn install_powerdns() -> Result<(), String> {
     }
 
     // Create SQLite database
-    Command::new("sh").args(&["-c", "mkdir -p /var/lib/powerdns"]).output().ok();
+    Command::new("sh").args(["-c", "mkdir -p /var/lib/powerdns"]).output().ok();
 
     let schema = r#"
 CREATE TABLE IF NOT EXISTS domains (
@@ -54,12 +54,12 @@ CREATE TABLE IF NOT EXISTS supermasters (
 "#;
 
     Command::new("sh")
-        .args(&["-c", &format!("sqlite3 /var/lib/powerdns/pdns.sqlite3 '{}'", schema.replace('\'', "'\\''"))])
+        .args(["-c", &format!("sqlite3 /var/lib/powerdns/pdns.sqlite3 '{}'", schema.replace('\'', "'\\''"))])
         .output()
         .map_err(|e| format!("Failed to create DB: {}", e))?;
 
     Command::new("sh")
-        .args(&["-c", "chown -R pdns:pdns /var/lib/powerdns"])
+        .args(["-c", "chown -R pdns:pdns /var/lib/powerdns"])
         .output().ok();
 
     // Configure PowerDNS
@@ -81,7 +81,7 @@ default-soa-content=ns1.@ hostmaster.@ 0 10800 3600 604800 3600
         .map_err(|e| format!("Failed to write pdns.conf: {}", e))?;
 
     // Disable systemd-resolved on port 53 if it's running
-    Command::new("sh").args(&["-c",
+    Command::new("sh").args(["-c",
         "if systemctl is-active systemd-resolved >/dev/null 2>&1; then \
             mkdir -p /etc/systemd/resolved.conf.d && \
             echo '[Resolve]\nDNSStubListener=no' > /etc/systemd/resolved.conf.d/no-stub.conf && \
@@ -89,8 +89,8 @@ default-soa-content=ns1.@ hostmaster.@ 0 10800 3600 604800 3600
          fi"
     ]).output().ok();
 
-    Command::new("systemctl").args(&["enable", "pdns"]).output().ok();
-    Command::new("systemctl").args(&["restart", "pdns"]).output().ok();
+    Command::new("systemctl").args(["enable", "pdns"]).output().ok();
+    Command::new("systemctl").args(["restart", "pdns"]).output().ok();
 
     log::info!("PowerDNS installed and running");
     Ok(())
@@ -99,7 +99,7 @@ default-soa-content=ns1.@ hostmaster.@ 0 10800 3600 604800 3600
 /// Check if PowerDNS is running
 pub fn is_pdns_running() -> bool {
     Command::new("systemctl")
-        .args(&["is-active", "pdns"])
+        .args(["is-active", "pdns"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -110,7 +110,7 @@ const PDNS_KEY: &str = "wolfhost-dns-key";
 
 fn pdns_get(path: &str) -> Result<serde_json::Value, String> {
     let output = Command::new("curl")
-        .args(&["-s", "-H", &format!("X-API-Key: {}", PDNS_KEY),
+        .args(["-s", "-H", &format!("X-API-Key: {}", PDNS_KEY),
                 &format!("{}{}", PDNS_API, path)])
         .output()
         .map_err(|e| format!("PDNS API request failed: {}", e))?;
@@ -121,7 +121,7 @@ fn pdns_get(path: &str) -> Result<serde_json::Value, String> {
 fn pdns_request(method: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
     let body_str = serde_json::to_string(body).unwrap_or_default();
     let output = Command::new("curl")
-        .args(&["-s", "-X", method,
+        .args(["-s", "-X", method,
                 "-H", &format!("X-API-Key: {}", PDNS_KEY),
                 "-H", "Content-Type: application/json",
                 "-d", &body_str,

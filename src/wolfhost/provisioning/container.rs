@@ -67,7 +67,7 @@ pub fn request_ssl_certificate(domain: &str, container_ip: &str, email: &str) ->
     let _email_arg = if email.is_empty() { "--register-unsafely-without-email".to_string() } else { format!("--email {}", email) };
 
     let output = Command::new("certbot")
-        .args(&[
+        .args([
             "certonly",
             "--webroot",
             "-w", "/var/www/acme",
@@ -160,7 +160,7 @@ server {{
 /// Renew all Let's Encrypt certificates
 pub fn renew_certificates() -> Result<String, String> {
     let output = Command::new("certbot")
-        .args(&["renew", "--quiet"])
+        .args(["renew", "--quiet"])
         .output()
         .map_err(|e| format!("Certbot renew failed: {}", e))?;
 
@@ -180,10 +180,10 @@ pub fn check_ssl_status(domain: &str) -> bool {
 
 /// Test nginx config and reload
 fn nginx_test_and_reload() -> Result<(), String> {
-    let test = Command::new("nginx").args(&["-t"]).output()
+    let test = Command::new("nginx").args(["-t"]).output()
         .map_err(|e| format!("nginx -t failed: {}", e))?;
     if test.status.success() {
-        Command::new("systemctl").args(&["reload", "nginx"]).output().ok();
+        Command::new("systemctl").args(["reload", "nginx"]).output().ok();
         Ok(())
     } else {
         Err(format!("Nginx config test failed: {}", String::from_utf8_lossy(&test.stderr)))
@@ -196,11 +196,11 @@ pub fn teardown_proxy(domain: &str, _container_ip: &str) -> Result<(), String> {
     let conf_path = format!("/etc/nginx/sites-available/wh-{}", domain);
     std::fs::remove_file(&link_path).ok();
     std::fs::remove_file(&conf_path).ok();
-    Command::new("systemctl").args(&["reload", "nginx"]).output().ok();
+    Command::new("systemctl").args(["reload", "nginx"]).output().ok();
 
     // Revoke cert (best effort)
     Command::new("certbot")
-        .args(&["delete", "--cert-name", domain, "--non-interactive"])
+        .args(["delete", "--cert-name", domain, "--non-interactive"])
         .output().ok();
 
     Ok(())

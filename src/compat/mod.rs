@@ -499,16 +499,15 @@ pub fn validate_key(raw: &str, ip: Option<&str>) -> Option<ApiKey> {
     let r = {
         let keys = TS.read().unwrap();
         let f = keys.iter().find(|k| k.key_hash == h && k.enabled)?;
-        if let Some(ref exp) = f.expires { if *exp < ts_ymd() { return None; } }
+        if let Some(ref exp) = f.expires && *exp < ts_ymd() { return None; }
         f.clone()
     };
-    if let Ok(mut keys) = TS.write() {
-        if let Some(f) = keys.iter_mut().find(|k| k.id == r.id) {
+    if let Ok(mut keys) = TS.write()
+        && let Some(f) = keys.iter_mut().find(|k| k.id == r.id) {
             f.last_used = Some(ts_full());
             if let Some(ip) = ip { f.last_ip = Some(ip.to_string()); }
             let _ = persist(&keys);
         }
-    }
     Some(r)
 }
 

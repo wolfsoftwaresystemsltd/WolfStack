@@ -771,10 +771,8 @@ mod tests {
     #[test]
     fn provision_request_first_member_is_primary() {
         // Sanity on the model contract the provisioner relies on.
-        let members = vec![
-            ProvisionMember { node_id: "a".into(), container: "pg1".into(), address: "10.0.0.1".into() },
-            ProvisionMember { node_id: "b".into(), container: "pg2".into(), address: "10.0.0.2".into() },
-        ];
+        let members = [ProvisionMember { node_id: "a".into(), container: "pg1".into(), address: "10.0.0.1".into() },
+            ProvisionMember { node_id: "b".into(), container: "pg2".into(), address: "10.0.0.2".into() }];
         assert_eq!(members[0].container, "pg1");
         assert_eq!(members[1].container, "pg2");
     }

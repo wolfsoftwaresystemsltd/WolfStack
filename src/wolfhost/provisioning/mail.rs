@@ -9,12 +9,12 @@ fn is_proxmox() -> bool {
 fn lxc_exec(container: &str, cmd: &str) -> Result<String, String> {
     let output = if is_proxmox() {
         Command::new("pct")
-            .args(&["exec", container, "--", "sh", "-c", cmd])
+            .args(["exec", container, "--", "sh", "-c", cmd])
             .output()
             .map_err(|e| format!("pct exec failed: {}", e))?
     } else {
         Command::new("lxc-attach")
-            .args(&["-n", container, "--", "sh", "-c", cmd])
+            .args(["-n", container, "--", "sh", "-c", cmd])
             .output()
             .map_err(|e| format!("lxc-attach failed: {}", e))?
     };
@@ -108,27 +108,27 @@ submission_relay_restrictions = permit_sasl_authenticated,reject
     lxc_exec(container, "touch /etc/postfix/vmailbox && postmap /etc/postfix/vmailbox")?;
 
     // Configure Dovecot
-    let dovecot_conf = format!(r#"
+    let dovecot_conf = r#"
 protocols = imap pop3 lmtp
 listen = *, ::
 
 mail_location = maildir:/var/mail/vhosts/%d/%n
 mail_privileged_group = vmail
 
-namespace inbox {{
+namespace inbox {
   inbox = yes
-}}
+}
 
 # Authentication
 auth_mechanisms = plain login
-passdb {{
+passdb {
   driver = passwd-file
   args = scheme=SHA512-CRYPT username_format=%u /etc/dovecot/users
-}}
-userdb {{
+}
+userdb {
   driver = static
   args = uid=vmail gid=vmail home=/var/mail/vhosts/%d/%n
-}}
+}
 
 # SSL
 ssl = yes
@@ -136,31 +136,31 @@ ssl_cert = </etc/ssl/certs/ssl-cert-snakeoil.pem
 ssl_key = </etc/ssl/private/ssl-cert-snakeoil.key
 
 # LMTP for Postfix delivery
-service lmtp {{
-  unix_listener /var/spool/postfix/private/dovecot-lmtp {{
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
     mode = 0600
     user = postfix
     group = postfix
-  }}
-}}
+  }
+}
 
 # SASL for Postfix auth
-service auth {{
-  unix_listener /var/spool/postfix/private/auth {{
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
     mode = 0660
     user = postfix
     group = postfix
-  }}
-  unix_listener auth-userdb {{
+  }
+  unix_listener auth-userdb {
     mode = 0600
     user = vmail
-  }}
-}}
+  }
+}
 
-service auth-worker {{
+service auth-worker {
   user = vmail
-}}
-"#);
+}
+"#.to_string();
 
     lxc_exec(container, &format!("cat > /etc/dovecot/dovecot.conf << 'DOVECF'\n{}\nDOVECF", dovecot_conf))?;
 
@@ -176,7 +176,7 @@ service auth-worker {{
     ))?;
 
     // Configure OpenDKIM
-    let dkim_conf = format!(r#"
+    let dkim_conf = r#"
 AutoRestart             Yes
 AutoRestartRate         10/1h
 Syslog                  yes
@@ -193,7 +193,7 @@ Socket                  local:/var/spool/postfix/opendkim/opendkim.sock
 PidFile                 /run/opendkim/opendkim.pid
 UMask                   007
 UserID                  opendkim
-"#);
+"#.to_string();
 
     lxc_exec(container, &format!("cat > /etc/opendkim.conf << 'DKIMCF'\n{}\nDKIMCF", dkim_conf))?;
     lxc_exec(container, &format!("echo 'mail._domainkey.{d} {d}:mail:/etc/opendkim/keys/{d}/mail.private' > /etc/opendkim/key.table", d = domain))?;
@@ -323,17 +323,17 @@ pub fn setup_mail_forwarding(container_ip: &str) -> Result<(), String> {
              iptables -t nat -A PREROUTING -p tcp --dport {} -j DNAT --to-destination {}:{}",
             port, container_ip, port, port, container_ip, port
         );
-        Command::new("sh").args(&["-c", &cmd]).output().ok();
+        Command::new("sh").args(["-c", &cmd]).output().ok();
 
         let masq = format!(
             "iptables -t nat -C POSTROUTING -p tcp -d {} --dport {} -j MASQUERADE 2>/dev/null || \
              iptables -t nat -A POSTROUTING -p tcp -d {} --dport {} -j MASQUERADE",
             container_ip, port, container_ip, port
         );
-        Command::new("sh").args(&["-c", &masq]).output().ok();
+        Command::new("sh").args(["-c", &masq]).output().ok();
     }
 
-    Command::new("sh").args(&["-c", "sysctl -w net.ipv4.ip_forward=1 2>/dev/null"]).output().ok();
+    Command::new("sh").args(["-c", "sysctl -w net.ipv4.ip_forward=1 2>/dev/null"]).output().ok();
     log::info!("Mail ports forwarded: 25, 587, 993, 995, 143, 110 -> {}", container_ip);
     Ok(())
 }

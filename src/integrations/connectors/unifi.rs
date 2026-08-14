@@ -315,11 +315,10 @@ impl UnifiConnector {
                 }
             }
         }
-        if arr.len() == 1 {
-            if let Some(id) = Self::site_id(&arr[0]) {
+        if arr.len() == 1
+            && let Some(id) = Self::site_id(&arr[0]) {
                 return Some(id.to_string());
             }
-        }
         None
     }
 

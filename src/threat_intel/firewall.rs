@@ -35,7 +35,7 @@ pub fn iptables_lines_v4() -> String {
         return String::new();
     }
     let mut out = String::new();
-    out.push_str(":");
+    out.push(':');
     out.push_str(super::CHAIN_NAME);
     out.push_str(" - [0:0]\n");
     // Inbound from blocklisted source — NEW connections only, so a feed
@@ -80,7 +80,7 @@ pub fn ip6tables_lines() -> String {
         return String::new();
     }
     let mut out = String::new();
-    out.push_str(":");
+    out.push(':');
     out.push_str(super::CHAIN_NAME);
     out.push_str(" - [0:0]\n");
     // Same state policy as v4: inbound NEW-only (operator's live session

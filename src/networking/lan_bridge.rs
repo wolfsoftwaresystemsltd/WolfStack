@@ -504,11 +504,10 @@ fn runtime_apply(
     // dhcp reservation"). Keeping the original MAC makes the swap invisible to
     // everything upstream. Best-effort — a failure here mustn't abort an
     // otherwise-working bridge, but it's the whole point of the fix so we log.
-    if let Some(m) = mac {
-        if let Err(e) = ip(&["link", "set", bridge, "address", m], &[]) {
+    if let Some(m) = mac
+        && let Err(e) = ip(&["link", "set", bridge, "address", m], &[]) {
             warn!("Could not set bridge {} MAC to {} (DHCP reservation may drift): {}", bridge, m, e);
         }
-    }
 
     // Re-add the captured addresses on the bridge (they were stripped
     // from the NIC by enslavement). Belt-and-braces delete clears any
@@ -667,11 +666,10 @@ fn persist_networkmanager(
     // Best-effort to match runtime_apply: an older NetworkManager that doesn't
     // know the `bridge.mac-address` property must NOT abort an otherwise-good
     // bridge and trigger a full revert (Golden Rule).
-    if let Some(m) = mac {
-        if let Err(e) = nmcli(&["con", "mod", &br_con, "bridge.mac-address", m]) {
+    if let Some(m) = mac
+        && let Err(e) = nmcli(&["con", "mod", &br_con, "bridge.mac-address", m]) {
             warn!("Could not pin NM bridge MAC for {} (DHCP reservation may drift on reboot): {}", br_con, e);
         }
-    }
 
     // IPv4 method: static if the NIC had a global address, else DHCP.
     if let Some(first) = cidrs.first() {
@@ -1109,7 +1107,7 @@ fn comment_out_nic_stanzas(text: &str, nic: &str, bridge: &str, bak: &str) -> Op
             // interfaces. Drop just `nic`; if it was the only one, comment
             // the whole line. Preserve original indentation.
             let ifaces: Vec<&str> = content.split_whitespace().skip(1).collect();
-            if ifaces.iter().any(|&i| i == nic) {
+            if ifaces.contains(&nic) {
                 let indent_len = line.len() - line.trim_start().len();
                 let indent = &line[..indent_len];
                 let remaining: Vec<&str> = ifaces.into_iter().filter(|&i| i != nic).collect();

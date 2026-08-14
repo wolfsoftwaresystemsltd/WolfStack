@@ -91,12 +91,11 @@ pub fn resolve_host_v4_cached(host: &str) -> Option<Ipv4Addr> {
     // Cache check — take the lock only as long as needed to copy out.
     {
         let cache = DNS_CACHE.lock().unwrap();
-        if let Some(entry) = cache.get(host) {
-            if entry.expires > Instant::now() {
+        if let Some(entry) = cache.get(host)
+            && entry.expires > Instant::now() {
                 *DNS_HITS.lock().unwrap() += 1;
                 return Some(entry.ip);
             }
-        }
     }
 
     // Miss — fall back to getaddrinfo. `(host, 0)` gives us every A
@@ -181,7 +180,7 @@ static PEER_SEMAPHORES: LazyLock<Mutex<HashMap<String, Arc<Semaphore>>>> =
 /// (one peer = one slot budget regardless of which port the client
 /// is trying).
 pub async fn acquire_peer_slot(host: &str, port: u16) -> OwnedPeerPermit {
-    let base = if port % 2 == 0 && port > 1 { port - 1 } else { port };
+    let base = if port.is_multiple_of(2) && port > 1 { port - 1 } else { port };
     let key = format!("{}:{}", host, base);
     let sem = {
         let mut map = PEER_SEMAPHORES.lock().unwrap();
@@ -232,7 +231,7 @@ static BREAKERS: LazyLock<Mutex<HashMap<String, BreakerState>>> =
 /// Key a breaker the same way a peer-slot is keyed — `host:base_port`,
 /// with HTTP/HTTPS fallback sharing one breaker.
 fn breaker_key(host: &str, port: u16) -> String {
-    let base = if port % 2 == 0 && port > 1 { port - 1 } else { port };
+    let base = if port.is_multiple_of(2) && port > 1 { port - 1 } else { port };
     format!("{}:{}", host, base)
 }
 

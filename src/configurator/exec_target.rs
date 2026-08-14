@@ -11,8 +11,10 @@ use crate::installer::DistroFamily;
 
 /// Where a configurator command should execute
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub enum ExecTarget {
     /// Execute on the local host (default, backward-compatible)
+    #[default]
     Host,
     /// Execute inside a Docker container
     Docker(String),
@@ -20,9 +22,6 @@ pub enum ExecTarget {
     Lxc(String),
 }
 
-impl Default for ExecTarget {
-    fn default() -> Self { ExecTarget::Host }
-}
 
 impl ExecTarget {
     /// Execute a shell command and return (stdout, stderr, success)

@@ -245,12 +245,10 @@ fn parse_size(v: Option<&serde_json::Value>) -> i64 {
     if let Some(obj) = v.as_object() {
         if let Some(p) = obj.get("parsed").and_then(|x| x.as_i64()) { return p; }
         if let Some(p) = obj.get("parsed").and_then(|x| x.as_f64()) { return p as i64; }
-        if let Some(r) = obj.get("rawvalue").and_then(|x| x.as_str()) {
-            if let Ok(n) = r.parse::<i64>() { return n; }
-        }
-        if let Some(val) = obj.get("value").and_then(|x| x.as_str()) {
-            if let Ok(n) = val.parse::<i64>() { return n; }
-        }
+        if let Some(r) = obj.get("rawvalue").and_then(|x| x.as_str())
+            && let Ok(n) = r.parse::<i64>() { return n; }
+        if let Some(val) = obj.get("value").and_then(|x| x.as_str())
+            && let Ok(n) = val.parse::<i64>() { return n; }
     }
     0
 }
@@ -589,23 +587,21 @@ impl TrueNasClient {
         let mut out = Vec::new();
 
         // Nested: find the pool root, take its children.
-        if let Some(root) = arr.iter().find(|d| jstr(d, "name").eq_ignore_ascii_case(pool)) {
-            if let Some(children) = root.get("children").and_then(|c| c.as_array()) {
+        if let Some(root) = arr.iter().find(|d| jstr(d, "name").eq_ignore_ascii_case(pool))
+            && let Some(children) = root.get("children").and_then(|c| c.as_array()) {
                 for c in children {
                     out.push(dataset_from(c));
                 }
             }
-        }
         // Flat fallback: any dataset exactly one level under the pool.
         if out.is_empty() {
             let prefix = format!("{}/", pool);
             for d in &arr {
                 let name = jstr(d, "name");
-                if let Some(rest) = name.strip_prefix(&prefix) {
-                    if !rest.contains('/') {
+                if let Some(rest) = name.strip_prefix(&prefix)
+                    && !rest.contains('/') {
                         out.push(dataset_from(d));
                     }
-                }
             }
         }
         out.sort_by(|a, b| b.used_bytes.cmp(&a.used_bytes));
@@ -803,11 +799,10 @@ impl TrueNasStore {
         inst.pool_name = pool_name;
         inst.insecure_tls = insecure_tls;
         inst.cache_ttl_secs = cache_ttl_secs;
-        if let Some(k) = new_key {
-            if !k.trim().is_empty() {
+        if let Some(k) = new_key
+            && !k.trim().is_empty() {
                 inst.api_key_enc = obfuscate_key(k.trim());
             }
-        }
         self.save()
     }
 

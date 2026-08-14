@@ -108,11 +108,9 @@ impl Allow {
     fn is_allowed(&self, ip: &IpAddr) -> bool {
         if ip.is_loopback() { return true; }
         if self.limiter.config().is_trusted(&ip.to_string()) { return true; }
-        if let IpAddr::V4(v4) = ip {
-            if let Some((net, prefix)) = crate::networking::get_local_wolfnet_subnet() {
-                if v4_in_cidr(*v4, net, prefix) { return true; }
-            }
-        }
+        if let IpAddr::V4(v4) = ip
+            && let Some((net, prefix)) = crate::networking::get_local_wolfnet_subnet()
+                && v4_in_cidr(*v4, net, prefix) { return true; }
         let needle = ip.to_string();
         let nodes = self.cluster.nodes_read();
         for n in nodes.values() {

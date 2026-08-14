@@ -203,11 +203,10 @@ fn resolve_node_ip(node: &serde_json::Value, overrides: &HashMap<String, String>
     let node_id = node["id"].as_str().unwrap_or("");
 
     // Check override first
-    if let Some(ip) = overrides.get(node_id) {
-        if !ip.is_empty() {
+    if let Some(ip) = overrides.get(node_id)
+        && !ip.is_empty() {
             return ip.clone();
         }
-    }
 
     // Fall back to WolfStack's public_ip
     let public_ip = node["public_ip"].as_str().unwrap_or("");
@@ -399,7 +398,7 @@ pub async fn provision_container(state: web::Data<Arc<AppState>>, body: web::Jso
     }).await.ok();
 
     // Create a provisioning log stream
-    let task_id = format!("prov-{}", &container_name);
+    let task_id = format!("prov-{}", container_name);
     let task_logger = state.provision_logger.create_stream(&task_id).await;
 
     // Spawn background task for web stack setup + port forwarding
@@ -431,13 +430,12 @@ pub async fn provision_container(state: web::Data<Arc<AppState>>, body: web::Jso
         let mut booted = false;
         for i in 0..20 {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if let Ok(r) = exec("echo ok".to_string()).await {
-                if r["ok"].as_bool() == Some(true) {
+            if let Ok(r) = exec("echo ok".to_string()).await
+                && r["ok"].as_bool() == Some(true) {
                     task_logger.ok(format!("Container ready after {}s", (i + 1) * 2)).await;
                     booted = true;
                     break;
                 }
-            }
         }
         if !booted {
             task_logger.err("Container did not start within 40s").await;
@@ -703,14 +701,13 @@ pub async fn list_customer_containers(_state: web::Data<Arc<AppState>>) -> HttpR
         })
         .map(|mut c| {
             // Attach stats if available
-            if let Some(ref stats_data) = stats {
-                if let Some(stats_arr) = stats_data.as_array() {
+            if let Some(ref stats_data) = stats
+                && let Some(stats_arr) = stats_data.as_array() {
                     let name = c["name"].as_str().unwrap_or("");
                     if let Some(st) = stats_arr.iter().find(|s| s["name"].as_str() == Some(name)) {
                         c["stats"] = st.clone();
                     }
                 }
-            }
 
             // Find the matching service/customer
             c

@@ -75,12 +75,11 @@ async fn drive_pool(pool: &Pool) -> Result<(), String> {
     };
     let mut changed = false;
     for (i, ip) in observed.iter().enumerate() {
-        if let Some(ip) = ip {
-            if i < latest.vms.len() && latest.vms[i].ipv4 != *ip {
+        if let Some(ip) = ip
+            && i < latest.vms.len() && latest.vms[i].ipv4 != *ip {
                 latest.vms[i].ipv4 = ip.clone();
                 changed = true;
             }
-        }
     }
     if changed {
         let mut store = PoolStore::load();
@@ -88,8 +87,8 @@ async fn drive_pool(pool: &Pool) -> Result<(), String> {
     }
 
     // Step 2: timeout check for stuck-without-leader pools.
-    if latest.status == "provisioning" {
-        if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&latest.created_at) {
+    if latest.status == "provisioning"
+        && let Ok(created) = chrono::DateTime::parse_from_rfc3339(&latest.created_at) {
             let age = chrono::Utc::now().signed_duration_since(created).num_seconds();
             if age > PROVISION_TIMEOUT_SECS {
                 latest.status = "failed".into();
@@ -104,7 +103,6 @@ async fn drive_pool(pool: &Pool) -> Result<(), String> {
                 return Ok(());
             }
         }
-    }
 
     // Step 3: if leader has come up, drive follower joins.
     if latest.status == "leader_up" {

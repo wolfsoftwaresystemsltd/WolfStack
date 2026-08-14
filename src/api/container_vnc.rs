@@ -626,11 +626,10 @@ fn build_install_script(
         // chosen block to avoid duplicates.
         let chosen_bin = chosen.as_ref().map(|d| d.session_binary.as_str());
         let mut probes: Vec<&str> = Vec::new();
-        if let Some(b) = detected_desktop {
-            if Some(b) != chosen_bin {
+        if let Some(b) = detected_desktop
+            && Some(b) != chosen_bin {
                 probes.push(b);
             }
-        }
         for (bin, _, _) in DE_PROBES {
             if Some(*bin) != detected_desktop && Some(*bin) != chosen_bin {
                 probes.push(bin);

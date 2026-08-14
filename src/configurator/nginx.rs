@@ -229,8 +229,8 @@ pub fn test_config(target: &ExecTarget) -> ConfigTestResult {
         .map(|s| !s.trim().is_empty()).unwrap_or(false);
 
     // Try nginx -t when nginx is actually installed.
-    if nginx_present {
-        if let Ok((output, stderr, success)) = target.exec_full("nginx -t 2>&1") {
+    if nginx_present
+        && let Ok((output, stderr, success)) = target.exec_full("nginx -t 2>&1") {
             let combined = if stderr.is_empty() { output }
                            else { format!("{}\n{}", output, stderr) };
             // If success, we're done. If failure AND the error is the
@@ -242,7 +242,6 @@ pub fn test_config(target: &ExecTarget) -> ConfigTestResult {
                 return ConfigTestResult { success, output: combined.trim().to_string() };
             }
         }
-    }
 
     if wolfproxy_present {
         // `--config` points the test at the deployed config (the test runs in
@@ -359,12 +358,11 @@ pub fn bootstrap_nginx(target: &ExecTarget) -> Result<String, String> {
         target.write_file(&config_path, default_config)?;
 
         // Enable on Debian
-        if paths.is_debian {
-            if let Some(enabled_dir) = paths.sites_enabled {
+        if paths.is_debian
+            && let Some(enabled_dir) = paths.sites_enabled {
                 let enabled_path = format!("{}/{}", enabled_dir, config_name);
                 let _ = target.symlink(&config_path, &enabled_path);
             }
-        }
 
         Ok("Default site configuration created".to_string())
     } else {

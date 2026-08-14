@@ -278,11 +278,10 @@ pub fn resolve_apply_interface(lan: &LanSegment) -> Result<ApplyResolution, Stri
     // uses) silently sees no client traffic. Redirect resolution to the
     // master bridge before any other branch runs. PapaSchlumpf hit this
     // when his HA VM's bridge-mode passthrough enslaved ens1.
-    if configured_exists {
-        if let Some(master) = bridge_master_of(&configured) {
+    if configured_exists
+        && let Some(master) = bridge_master_of(&configured) {
             return resolve_against_bridge_master(lan, &configured, &master);
         }
-    }
 
     // Find ANY interface (not just the configured one) currently carrying
     // router_ip. The PapaSchlumpf case: router_ip was a secondary on ens1
@@ -459,15 +458,14 @@ fn resolve_against_bridge_master(
         let prefix = lan.subnet_cidr.split('/').nth(1).unwrap_or("24");
         let cidr = format!("{}/{}", lan.router_ip, prefix);
         let out = Command::new("ip").args(["addr", "del", &cidr, "dev", slave]).output();
-        if let Ok(o) = out {
-            if o.status.success() {
+        if let Ok(o) = out
+            && o.status.success() {
                 tracing::info!(
                     "WolfRouter LAN '{}': removed stale router_ip {} from bridge slave '{}'; \
                      IP belongs on master '{}'.",
                     lan.name, cidr, slave, master
                 );
             }
-        }
     }
 
     let master_addrs = interface_addresses(master);
@@ -482,14 +480,13 @@ fn resolve_against_bridge_master(
     // interface entirely, bind dnsmasq there — the operator may have
     // moved the LAN to a different NIC and the slave/bridge situation
     // is incidental.
-    if let Some(other) = find_interface_with_ip(&lan.router_ip) {
-        if other != master && other != slave {
+    if let Some(other) = find_interface_with_ip(&lan.router_ip)
+        && other != master && other != slave {
             return Ok(ApplyResolution::BoundToActualInterface {
                 configured: slave.to_string(),
                 actual: other,
             });
         }
-    }
 
     // No other interface carries router_ip. Assign it to the master
     // bridge (NOT the slave — that bind would be invisible to clients).

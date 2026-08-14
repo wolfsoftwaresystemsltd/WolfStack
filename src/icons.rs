@@ -57,13 +57,11 @@ pub fn invalidate_caches() {
 /// an idle `/api/agent/status` went from 4 ms to 4,092 ms and the whole UI
 /// rendered empty (Paul, 2026-08-13, wolfstack-1).
 pub fn scan_all_packs_cached() -> Vec<IconPack> {
-    if let Ok(guard) = pack_scan_cache().lock() {
-        if let Some((at, packs)) = guard.as_ref() {
-            if at.elapsed() < PACK_SCAN_TTL {
+    if let Ok(guard) = pack_scan_cache().lock()
+        && let Some((at, packs)) = guard.as_ref()
+            && at.elapsed() < PACK_SCAN_TTL {
                 return packs.clone();
             }
-        }
-    }
     // Scan outside the lock — a cold scan on a box with large packs takes
     // long enough that holding the mutex would serialise every caller
     // behind it. A concurrent burst may scan more than once; that is
@@ -97,11 +95,10 @@ pub fn resolve_icon_cached(pack_id: &str, theme_dir: &Path, semantic_name: &str)
         return resolve_icon(theme_dir, semantic_name);
     }
     let key = (pack_id.to_string(), semantic_name.to_string());
-    if let Ok(cache) = icon_path_cache().lock() {
-        if let Some(hit) = cache.get(&key) {
+    if let Ok(cache) = icon_path_cache().lock()
+        && let Some(hit) = cache.get(&key) {
             return hit.clone();
         }
-    }
     // Resolve outside the lock — this is the multi-thousand-stat() call the
     // cache exists to avoid, and holding the mutex across it would put every
     // other icon request behind this one.
@@ -268,9 +265,8 @@ fn parse_index_theme(path: &Path) -> Option<(String, String)> {
         if !in_icon_theme { continue; }
         if let Some(val) = trimmed.strip_prefix("Name=") {
             if name.is_empty() { name = val.to_string(); }
-        } else if let Some(val) = trimmed.strip_prefix("Comment=") {
-            if comment.is_empty() { comment = val.to_string(); }
-        }
+        } else if let Some(val) = trimmed.strip_prefix("Comment=")
+            && comment.is_empty() { comment = val.to_string(); }
     }
     if name.is_empty() { return None; }
     Some((name, comment))
@@ -624,7 +620,7 @@ pub async fn install_from_github(url: &str) -> Result<IconPack, String> {
 
     let mut sample_icons = Vec::new();
     let semantic_map = semantic_to_freedesktop();
-    for (semantic, _) in &semantic_map {
+    for semantic in semantic_map.keys() {
         if sample_icons.len() >= 6 { break; }
         if resolve_icon(&dest, semantic).is_some() {
             sample_icons.push(semantic.to_string());

@@ -109,15 +109,11 @@ pub struct StorageMount {
 fn default_status() -> String { "unmounted".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct StorageConfig {
     pub mounts: Vec<StorageMount>,
 }
 
-impl Default for StorageConfig {
-    fn default() -> Self {
-        StorageConfig { mounts: Vec::new() }
-    }
-}
 
 // ─── Config Persistence ───
 
@@ -681,11 +677,10 @@ pub fn create_mount(mut mount: StorageMount, do_mount: bool) -> Result<StorageMo
 /// cluster apply — matched by id first (stable across the cluster), else by
 /// mount_point. Pure (no I/O) so the upsert decision is unit-testable.
 fn replicated_mount_match(mounts: &[StorageMount], incoming: &StorageMount) -> Option<usize> {
-    if !incoming.id.is_empty() {
-        if let Some(i) = mounts.iter().position(|m| m.id == incoming.id) {
+    if !incoming.id.is_empty()
+        && let Some(i) = mounts.iter().position(|m| m.id == incoming.id) {
             return Some(i);
         }
-    }
     mounts.iter().position(|m| m.mount_point == incoming.mount_point)
 }
 
@@ -803,11 +798,10 @@ pub fn update_mount(id: &str, updates: serde_json::Value) -> Result<StorageMount
     if let Some(enabled) = updates.get("enabled").and_then(|v| v.as_bool()) {
         mount.enabled = enabled;
     }
-    if let Some(mount_point) = updates.get("mount_point").and_then(|v| v.as_str()) {
-        if !mount_point.is_empty() {
+    if let Some(mount_point) = updates.get("mount_point").and_then(|v| v.as_str())
+        && !mount_point.is_empty() {
             mount.mount_point = mount_point.to_string();
         }
-    }
     if let Some(source) = updates.get("source").and_then(|v| v.as_str()) {
         mount.source = source.to_string();
     }
@@ -1600,7 +1594,7 @@ fn mount_disk(mount: &StorageMount) -> Result<String, String> {
     let mut args: Vec<String> = Vec::new();
     if let Some(opts) = mount.nfs_options.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         let lc = opts.to_lowercase();
-        if lc.split(|c| c == ',' || c == ' ').any(|o| matches!(o, "bind" | "rbind" | "move")) {
+        if lc.split([',', ' ']).any(|o| matches!(o, "bind" | "rbind" | "move")) {
             return Err("bind/rbind/move are not valid options for a disk mount".to_string());
         }
         args.push("-o".to_string());
@@ -1668,12 +1662,11 @@ fn mount_sshfs(mount: &StorageMount) -> Result<String, String> {
     ];
 
     // If nfs_options is set, treat it as the SSH key path
-    if let Some(ref key_path) = mount.nfs_options {
-        if !key_path.is_empty() {
+    if let Some(ref key_path) = mount.nfs_options
+        && !key_path.is_empty() {
             args.push("-o".to_string());
             args.push(format!("IdentityFile={}", key_path));
         }
-    }
 
     let output = Command::new("sshfs")
         .args(&args)
@@ -2827,11 +2820,10 @@ pub fn provider_action(name: &str, action: &str) -> Result<String, String> {
                 crate::installer::DistroFamily::Alpine => Command::new("apk").args(["add", "--no-cache", "fuse3"]).output(),
                 crate::installer::DistroFamily::Unknown => Command::new("apt-get").args(["install", "-y", "fuse3"]).output(),
             };
-            if let Ok(o) = &install_result {
-                if !o.status.success() {
+            if let Ok(o) = &install_result
+                && !o.status.success() {
                     eprintln!("fuse3 install failed: {}", String::from_utf8_lossy(&o.stderr));
                 }
-            }
             let _ = Command::new("modprobe").arg("fuse").output();
             if !Path::new("/dev/fuse").exists() {
                 return Err("FUSE is not available (/dev/fuse missing). Automatic install of fuse3 failed — install manually and try again.".to_string());
@@ -2843,8 +2835,8 @@ pub fn provider_action(name: &str, action: &str) -> Result<String, String> {
             let _ = std::fs::write("/etc/fuse.conf", format!("{}\nuser_allow_other\n", fuse_conf.trim()));
         }
         // Read mount path from config and ensure directory exists
-        if let Ok(content) = std::fs::read_to_string(config_path) {
-            if let Ok(config) = content.parse::<toml::Value>() {
+        if let Ok(content) = std::fs::read_to_string(config_path)
+            && let Ok(config) = content.parse::<toml::Value>() {
                 let mount_path = config.get("mount")
                     .and_then(|m| m.get("path"))
                     .and_then(|v| v.as_str())
@@ -2858,7 +2850,6 @@ pub fn provider_action(name: &str, action: &str) -> Result<String, String> {
                     .unwrap_or("/var/lib/wolfdisk");
                 let _ = std::fs::create_dir_all(data_dir);
             }
-        }
         // Regenerate the service file from current config to keep paths in sync
         regenerate_wolfdisk_service();
     }
@@ -3127,18 +3118,16 @@ pub fn read_system_logs(lines: usize, search: Option<&str>, unit: Option<&str>) 
         "-n".to_string(), lines.to_string(),
         "--output".to_string(), "short-iso".to_string(),
     ];
-    if let Some(u) = unit {
-        if !u.is_empty() {
+    if let Some(u) = unit
+        && !u.is_empty() {
             args.push("-u".to_string());
             args.push(u.to_string());
         }
-    }
-    if let Some(s) = search {
-        if !s.is_empty() {
+    if let Some(s) = search
+        && !s.is_empty() {
             args.push("-g".to_string());
             args.push(s.to_string());
         }
-    }
 
     match Command::new("journalctl").args(&args).output() {
         Ok(o) if o.status.success() => {
@@ -3265,9 +3254,8 @@ pub(crate) fn is_protected_device(device: &str) -> Result<bool, String> {
                         }
                     }
                 }
-                if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
-                    if check_nodes(children) { return true; }
-                }
+                if let Some(children) = node.get("children").and_then(|c| c.as_array())
+                    && check_nodes(children) { return true; }
             }
             false
         }
@@ -3437,7 +3425,7 @@ pub fn create_partition(disk: &str, size_mb: Option<u64>, fs_type_hint: Option<&
             // Lines like "1:1049kB:500MB:499MB:ext2:primary:;" — last numbered line is newest
             let last_num = text.lines()
                 .filter_map(|l| l.split(':').next()?.parse::<u32>().ok())
-                .last();
+                .next_back();
             if let Some(num) = last_num {
                 let flag = if fs_hint == "linux-lvm" { "lvm" } else { "raid" };
                 let _ = Command::new("parted")
@@ -3566,71 +3554,61 @@ pub fn format_partition(device: &str, fstype: &str, label: Option<&str>) -> Resu
         "ext4" | "ext3" | "ext2" => {
             cmd = format!("mkfs.{}", fstype);
             args.push("-F"); // Force — don't ask for confirmation
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-L"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-L"); args.push(l); }
         }
         "xfs" => {
             cmd = "mkfs.xfs".to_string();
             args.push("-f"); // Force overwrite
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-L"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-L"); args.push(l); }
         }
         "btrfs" => {
             cmd = "mkfs.btrfs".to_string();
             args.push("-f");
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-L"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-L"); args.push(l); }
         }
         "f2fs" => {
             cmd = "mkfs.f2fs".to_string();
             args.push("-f");
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-l"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-l"); args.push(l); }
         }
         "jfs" => {
             cmd = "mkfs.jfs".to_string();
             args.push("-q"); // Don't prompt
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-L"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-L"); args.push(l); }
         }
         "reiserfs" => {
             cmd = "mkfs.reiserfs".to_string();
             args.push("-f");
             args.push("-q");
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-l"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-l"); args.push(l); }
         }
         "nilfs2" => {
             cmd = "mkfs.nilfs2".to_string();
             args.push("-f");
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-L"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-L"); args.push(l); }
         }
         "exfat" => {
             cmd = "mkfs.exfat".to_string();
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-n"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-n"); args.push(l); }
         }
         "vfat" | "fat32" => {
             cmd = "mkfs.vfat".to_string();
             args.push("-F"); args.push("32");
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-n"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-n"); args.push(l); }
         }
         "swap" => {
             cmd = "mkswap".to_string();
-            if let Some(l) = label {
-                if !l.is_empty() { args.push("-L"); args.push(l); }
-            }
+            if let Some(l) = label
+                && !l.is_empty() { args.push("-L"); args.push(l); }
         }
         _ => return Err(format!("Unsupported filesystem: {}", fstype)),
     }

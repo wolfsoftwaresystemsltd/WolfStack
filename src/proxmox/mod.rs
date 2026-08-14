@@ -272,14 +272,12 @@ impl PveClient {
         }).collect();
         let status_futures: Vec<_> = status_paths.iter().map(|p| self.get(p)).collect();
         let status_results = futures::future::join_all(status_futures).await;
-        for (i, result) in running_indexes.iter().zip(status_results.into_iter()) {
+        for (i, result) in running_indexes.iter().zip(status_results) {
             if let Ok(s) = result {
-                if let Some(d) = s.get("disk").and_then(|v| v.as_u64()) {
-                    if d > 0 { guests[*i].disk = d; }
-                }
-                if let Some(md) = s.get("maxdisk").and_then(|v| v.as_u64()) {
-                    if md > 0 { guests[*i].maxdisk = md; }
-                }
+                if let Some(d) = s.get("disk").and_then(|v| v.as_u64())
+                    && d > 0 { guests[*i].disk = d; }
+                if let Some(md) = s.get("maxdisk").and_then(|v| v.as_u64())
+                    && md > 0 { guests[*i].maxdisk = md; }
             }
         }
 
@@ -331,7 +329,7 @@ impl PveClient {
         }).collect();
         let status_futures: Vec<_> = status_paths.iter().map(|p| self.get(p)).collect();
         let status_results = futures::future::join_all(status_futures).await;
-        for (i, result) in running_indexes.iter().zip(status_results.into_iter()) {
+        for (i, result) in running_indexes.iter().zip(status_results) {
             if let Ok(s) = result {
                 // status/current returns a richer view: `disk` here IS
                 // the live rootfs usage. `maxdisk` matches the configured
@@ -339,9 +337,8 @@ impl PveClient {
                 if let Some(d) = s.get("disk").and_then(|v| v.as_u64()) {
                     guests[*i].disk = d;
                 }
-                if let Some(md) = s.get("maxdisk").and_then(|v| v.as_u64()) {
-                    if md > 0 { guests[*i].maxdisk = md; }
-                }
+                if let Some(md) = s.get("maxdisk").and_then(|v| v.as_u64())
+                    && md > 0 { guests[*i].maxdisk = md; }
             }
         }
 
@@ -361,7 +358,7 @@ impl PveClient {
         }).collect();
         let config_results = futures::future::join_all(config_futures).await;
 
-        for (i, result) in unnamed.iter().zip(config_results.into_iter()) {
+        for (i, result) in unnamed.iter().zip(config_results) {
             if let Ok(cfg) = result {
                 if let Some(hostname) = cfg.get("hostname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                     guests[*i].name = hostname.to_string();
@@ -611,11 +608,10 @@ impl PveClient {
         let arr = data.as_array().ok_or("Expected array from /cluster/status")?;
         // Find the entry with type "cluster"
         for item in arr {
-            if let Some(type_) = item.get("type").and_then(|t| t.as_str()) {
-                if type_ == "cluster" {
+            if let Some(type_) = item.get("type").and_then(|t| t.as_str())
+                && type_ == "cluster" {
                     return Ok(item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string());
                 }
-            }
         }
         Ok("standalone".to_string())
     }
@@ -698,11 +694,10 @@ impl PveClient {
         for s in &storages {
             let content = s.get("content").and_then(|x| x.as_str()).unwrap_or("");
             // PVE returns "iso,vztmpl,backup,snippets" etc.
-            if content.split(',').any(|t| t.trim() == "snippets") {
-                if let Some(id) = s.get("storage").and_then(|x| x.as_str()) {
+            if content.split(',').any(|t| t.trim() == "snippets")
+                && let Some(id) = s.get("storage").and_then(|x| x.as_str()) {
                     return Ok(id.to_string());
                 }
-            }
         }
         Err("No PVE storage on this node has snippets enabled. \
             Enable it via Datacenter → Storage → <select> → Edit → \

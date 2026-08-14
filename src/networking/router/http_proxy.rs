@@ -358,15 +358,14 @@ fn apply_bucket(
             if let Some(rest) = name.strip_prefix(FILE_PREFIX) {
                 let id_opt = rest.strip_suffix(".conf")
                     .or_else(|| rest.rsplit_once("-error-").map(|(id, _)| id));
-                if let Some(id) = id_opt {
-                    if !keep.contains(id) {
+                if let Some(id) = id_opt
+                    && !keep.contains(id) {
                         let path = format!("{}/{}", CONFIG_DIR, name);
                         let q = path.replace('\'', "'\\''");
                         if target.exec(&format!("rm -f '{}'", q)).is_ok() {
                             removed_any = true;
                         }
                     }
-                }
             }
         }
     }
@@ -475,7 +474,7 @@ pub fn render(p: &HttpProxy) -> Result<String, String> {
 
     let upstream_name = format!(
         "wolfrouter_http_{}",
-        p.id.replace('.', "_").replace('-', "_")
+        p.id.replace(['.', '-'], "_")
     );
     let multi_backend = p.upstreams.len() > 1;
 

@@ -161,13 +161,12 @@ fn parse_failure(line: &str) -> Option<(String, String, &'static str)> {
     // sshd: "Invalid user <user> from <IP> port <port>" — also counts;
     // these are username-enumeration probes that often precede a
     // password attempt with the same source.
-    if let Some(rest) = line.find("Invalid user ").map(|i| &line[i + 13..]) {
-        if let Some((user_part, after)) = rest.split_once(" from ") {
+    if let Some(rest) = line.find("Invalid user ").map(|i| &line[i + 13..])
+        && let Some((user_part, after)) = rest.split_once(" from ") {
             let user = user_part.trim().to_string();
             let ip = after.split_whitespace().next()?.to_string();
             return Some((ip, user, "sshd-invalid-user"));
         }
-    }
     // pvedaemon / pveproxy: ... "authentication failure; rhost=<IP> user=<user> ..."
     // Both daemons share PVE::AccessControl and emit identical lines;
     // which one logs depends on where in the request the check ran.
@@ -180,8 +179,8 @@ fn parse_failure(line: &str) -> Option<(String, String, &'static str)> {
     } else {
         None
     };
-    if let Some(source) = pve_source {
-        if line.contains("authentication failure") {
+    if let Some(source) = pve_source
+        && line.contains("authentication failure") {
             // rhost=<IP>
             let rhost = line.find("rhost=").map(|i| &line[i + 6..])?;
             let ip = rhost.split_whitespace().next()?
@@ -194,7 +193,6 @@ fn parse_failure(line: &str) -> Option<(String, String, &'static str)> {
                 .to_string();
             return Some((ip, user, source));
         }
-    }
     None
 }
 
@@ -212,11 +210,10 @@ fn handle_failure(
     let now = Instant::now();
     {
         let mut map = dedup.lock().unwrap();
-        if let Some(last) = map.get(&key) {
-            if now.duration_since(*last) < Duration::from_secs(2) {
+        if let Some(last) = map.get(&key)
+            && now.duration_since(*last) < Duration::from_secs(2) {
                 return; // dedup'd
             }
-        }
         map.insert(key, now);
         // Bound the dedup map so it doesn't grow unbounded.
         if map.len() > 4096 {

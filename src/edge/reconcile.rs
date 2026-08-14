@@ -142,11 +142,10 @@ pub async fn run_pass(
 fn live_ips_for(proxy: &HttpProxy, snapshot: &ClusterSnapshot) -> Vec<String> {
     let mut ips = Vec::new();
     for t in &proxy.targets {
-        if let Some((ip, online)) = snapshot.nodes.get(&t.node_id) {
-            if *online && !ip.is_empty() {
+        if let Some((ip, online)) = snapshot.nodes.get(&t.node_id)
+            && *online && !ip.is_empty() {
                 ips.push(ip.clone());
             }
-        }
     }
     ips.sort();
     ips.dedup();
@@ -341,8 +340,8 @@ pub(super) fn strip_to_zone(fqdn: &str) -> String {
     // zone. We try the most-likely answer (last two labels); if Cloudflare's
     // zone-not-found is the failure, the operator's error message is clear
     // enough to fix it.
-    let zone = parts[parts.len()-2..].join(".");
-    zone
+    
+    parts[parts.len()-2..].join(".")
 }
 
 /// Deterministic leader election. Returns true if `self_node_id` is
@@ -657,16 +656,14 @@ async fn reconcile_digitalocean_lb(
     let added = to_add.len() as u32;
     let removed = to_remove.len() as u32;
     let unchanged = (existing_set.len() as u32).saturating_sub(removed);
-    if !to_add.is_empty() {
-        if let Err(e) = digitalocean_lb::add_droplets(&creds, &lb_id, &to_add).await {
+    if !to_add.is_empty()
+        && let Err(e) = digitalocean_lb::add_droplets(&creds, &lb_id, &to_add).await {
             errors.push(format!("digitalocean add droplets {:?}: {}", to_add, e));
         }
-    }
-    if !to_remove.is_empty() {
-        if let Err(e) = digitalocean_lb::remove_droplets(&creds, &lb_id, &to_remove).await {
+    if !to_remove.is_empty()
+        && let Err(e) = digitalocean_lb::remove_droplets(&creds, &lb_id, &to_remove).await {
             errors.push(format!("digitalocean remove droplets {:?}: {}", to_remove, e));
         }
-    }
     let mut before = desired_ips.to_vec(); before.sort();
     let mut after = desired_ips.to_vec(); after.sort();
     Ok(ProxyReconcileReport {

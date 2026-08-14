@@ -277,9 +277,8 @@ pub fn check(group_name: &str) -> Result<CheckResult, String> {
         }
         let installed = !found.is_empty();
         let package = d.package_for(pkg_mgr);
-        if !installed {
-            if let Some(p) = package { missing_pkgs.push(p); }
-        }
+        if !installed
+            && let Some(p) = package { missing_pkgs.push(p); }
         statuses.push(DepStatus {
             id: d.id,
             label: d.label,

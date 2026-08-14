@@ -333,14 +333,13 @@ impl SystemMonitor {
         // the cost independent of how hard any client polls.
         {
             let cache = TOP_PROC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((taken, cpu, mem)) = cache.as_ref() {
-                if taken.elapsed() < TOP_PROC_TTL {
+            if let Some((taken, cpu, mem)) = cache.as_ref()
+                && taken.elapsed() < TOP_PROC_TTL {
                     return (
                         cpu.iter().take(count).cloned().collect(),
                         mem.iter().take(count).cloned().collect(),
                     );
                 }
-            }
         }
 
         // Scan on a THROWAWAY System, never `self.sys`.

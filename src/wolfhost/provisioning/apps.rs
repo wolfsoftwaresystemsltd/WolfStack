@@ -10,12 +10,12 @@ fn is_proxmox() -> bool {
 fn lxc_exec(container: &str, cmd: &str) -> Result<String, String> {
     let output = if is_proxmox() {
         Command::new("pct")
-            .args(&["exec", container, "--", "sh", "-c", cmd])
+            .args(["exec", container, "--", "sh", "-c", cmd])
             .output()
             .map_err(|e| format!("pct exec failed: {}", e))?
     } else {
         Command::new("lxc-attach")
-            .args(&["-n", container, "--", "sh", "-c", cmd])
+            .args(["-n", container, "--", "sh", "-c", cmd])
             .output()
             .map_err(|e| format!("lxc-attach failed: {}", e))?
     };
@@ -322,11 +322,9 @@ fn install_ghost(container: &str, domain: &str) -> Result<String, String> {
     ))?;
 
     // Set up Apache reverse proxy to Ghost (port 2368)
-    let proxy_conf = format!(
-        r#"ProxyPreserveHost On
+    let proxy_conf = r#"ProxyPreserveHost On
 ProxyPass / http://127.0.0.1:2368/
-ProxyPassReverse / http://127.0.0.1:2368/"#
-    );
+ProxyPassReverse / http://127.0.0.1:2368/"#.to_string();
     lxc_exec(container, "a2enmod proxy proxy_http 2>/dev/null")?;
     lxc_exec(container, &format!(
         r#"cat > /etc/apache2/sites-available/000-default.conf << 'EOF'

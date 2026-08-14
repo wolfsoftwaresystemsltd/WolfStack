@@ -181,8 +181,8 @@ impl CloudProviderStore {
             if n.is_empty() { return Err("name cannot be blank".into()); }
             entry.name = n;
         }
-        if let Some(json) = credentials_json {
-            if !json.trim().is_empty() {
+        if let Some(json) = credentials_json
+            && !json.trim().is_empty() {
                 if serde_json::from_str::<serde_json::Value>(json).is_err() {
                     return Err("credentials must be a JSON object".into());
                 }
@@ -190,7 +190,6 @@ impl CloudProviderStore {
                 entry.last_verified_at = String::new();
                 entry.last_verify_result = String::new();
             }
-        }
         Ok(())
     }
 

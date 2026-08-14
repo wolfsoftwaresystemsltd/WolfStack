@@ -166,15 +166,14 @@ pub const FT_THREAT_INTEL_DISABLED: &str = "threat_intel:disabled_by_operator";
 ///   built and DROP rules are installed on INPUT/OUTPUT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum EnforceState {
+    #[default]
     Off,
     DryRun,
     Enforce,
 }
 
-impl Default for EnforceState {
-    fn default() -> Self { EnforceState::Off }
-}
 
 impl EnforceState {
     pub fn as_str(&self) -> &'static str {
@@ -290,11 +289,9 @@ pub fn state_for_cluster(cluster: &str) -> EnforceState {
 /// "WolfStack" to match agent default behaviour.
 pub fn this_node_cluster() -> String {
     let path = crate::paths::get().self_cluster_config.clone();
-    if let Ok(data) = std::fs::read_to_string(&path) {
-        if let Ok(name) = serde_json::from_str::<String>(&data) {
-            if !name.is_empty() { return name; }
-        }
-    }
+    if let Ok(data) = std::fs::read_to_string(&path)
+        && let Ok(name) = serde_json::from_str::<String>(&data)
+            && !name.is_empty() { return name; }
     "WolfStack".to_string()
 }
 
@@ -513,15 +510,12 @@ fn auto_allowlist() -> HashSet<String> {
         for line in text.lines() {
             let t = line.trim();
             // Format: "inet 142.132.140.78/26 brd ... scope global eth0"
-            if let Some(rest) = t.strip_prefix("inet ") {
-                if let Some(cidr_or_ip) = rest.split_whitespace().next() {
-                    if let Some(ip) = cidr_or_ip.split('/').next() {
-                        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+            if let Some(rest) = t.strip_prefix("inet ")
+                && let Some(cidr_or_ip) = rest.split_whitespace().next()
+                    && let Some(ip) = cidr_or_ip.split('/').next()
+                        && ip.parse::<std::net::Ipv4Addr>().is_ok() {
                             set.insert(ip.to_string());
                         }
-                    }
-                }
-            }
         }
     }
     // Cluster peer addresses. Read the persisted cluster nodes file
@@ -529,8 +523,8 @@ fn auto_allowlist() -> HashSet<String> {
     // this analyzer is sync-blocking and that handle isn't
     // available here.
     let nodes_path = crate::paths::get().nodes_config.clone();
-    if let Ok(body) = std::fs::read_to_string(&nodes_path) {
-        if let Ok(nodes) = serde_json::from_str::<Vec<serde_json::Value>>(&body) {
+    if let Ok(body) = std::fs::read_to_string(&nodes_path)
+        && let Ok(nodes) = serde_json::from_str::<Vec<serde_json::Value>>(&body) {
             for n in nodes {
                 if let Some(addr) = n.get("address").and_then(|v| v.as_str()) {
                     // address may be a hostname or an IPv4. Only
@@ -542,14 +536,12 @@ fn auto_allowlist() -> HashSet<String> {
                         set.insert(addr.to_string());
                     }
                 }
-                if let Some(pip) = n.get("public_ip").and_then(|v| v.as_str()) {
-                    if pip.parse::<std::net::Ipv4Addr>().is_ok() {
+                if let Some(pip) = n.get("public_ip").and_then(|v| v.as_str())
+                    && pip.parse::<std::net::Ipv4Addr>().is_ok() {
                         set.insert(pip.to_string());
                     }
-                }
             }
         }
-    }
     set
 }
 
@@ -723,7 +715,7 @@ fn refresh_feed() -> RemediationOutcome {
             action,
             ok: false,
             detail: format!("downloaded body doesn't look like a FireHOL feed (first chars: {:?})",
-                &head.chars().take(80).collect::<String>()),
+                head.chars().take(80).collect::<String>()),
         };
     }
     if let Err(e) = std::fs::rename(&tmp, FEED_LOCAL_PATH) {
@@ -1497,15 +1489,12 @@ pub fn preflight_blocking(node_id: String) -> PreflightReport {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let t = line.trim();
-            if let Some(rest) = t.strip_prefix("inet ") {
-                if let Some(cidr_or_ip) = rest.split_whitespace().next() {
-                    if let Some(ip) = cidr_or_ip.split('/').next() {
-                        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+            if let Some(rest) = t.strip_prefix("inet ")
+                && let Some(cidr_or_ip) = rest.split_whitespace().next()
+                    && let Some(ip) = cidr_or_ip.split('/').next()
+                        && ip.parse::<std::net::Ipv4Addr>().is_ok() {
                             local_ips.push(ip.to_string());
                         }
-                    }
-                }
-            }
         }
     }
     local_ips.sort();
@@ -1519,11 +1508,10 @@ pub fn preflight_blocking(node_id: String) -> PreflightReport {
                 Ok(nodes) => {
                     for n in nodes {
                         for key in ["address", "public_ip"] {
-                            if let Some(v) = n.get(key).and_then(|x| x.as_str()) {
-                                if v.parse::<std::net::Ipv4Addr>().is_ok() {
+                            if let Some(v) = n.get(key).and_then(|x| x.as_str())
+                                && v.parse::<std::net::Ipv4Addr>().is_ok() {
                                     peer_ips.push(v.to_string());
                                 }
-                            }
                         }
                     }
                 }

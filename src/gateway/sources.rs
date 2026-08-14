@@ -788,19 +788,16 @@ fn wolfdisk_volume_path(volume_id: &str) -> Result<PathBuf, SourceError> {
     let default = PathBuf::from(format!("/mnt/wolfdisk/{}", volume_id));
     if default.exists() { return Ok(default); }
     // Fallback: a published-by-WolfDisk volume manifest, if it exists.
-    if let Ok(content) = std::fs::read_to_string("/etc/wolfdisk/volumes.json") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(arr) = v.as_array() {
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfdisk/volumes.json")
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(arr) = v.as_array() {
                 for entry in arr {
-                    if entry.get("id").and_then(|x| x.as_str()) == Some(volume_id) {
-                        if let Some(p) = entry.get("mount_path").and_then(|x| x.as_str()) {
+                    if entry.get("id").and_then(|x| x.as_str()) == Some(volume_id)
+                        && let Some(p) = entry.get("mount_path").and_then(|x| x.as_str()) {
                             return Ok(PathBuf::from(p));
                         }
-                    }
                 }
             }
-        }
-    }
     Err(SourceError::PathInvalid(format!(
         "wolfdisk volume '{}' is not currently mounted (expected /mnt/wolfdisk/{} or volumes.json entry)",
         volume_id, volume_id
@@ -811,11 +808,11 @@ fn ceph_mon_addrs() -> Result<String, SourceError> {
     // `ceph mon dump --format=json` is the proper way; fall back to
     // ceph.conf parsing if `ceph` isn't installed (rare on a host
     // that has mount.ceph).
-    if which("ceph").is_some() {
-        if let Ok(out) = Command::new("ceph").args(["mon", "dump", "--format=json"]).output() {
-            if out.status.success() {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if let Some(mons) = v.get("mons").and_then(|x| x.as_array()) {
+    if which("ceph").is_some()
+        && let Ok(out) = Command::new("ceph").args(["mon", "dump", "--format=json"]).output()
+            && out.status.success()
+                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                    && let Some(mons) = v.get("mons").and_then(|x| x.as_array()) {
                         let addrs: Vec<String> = mons.iter()
                             .filter_map(|m| m.get("public_addr").and_then(|x| x.as_str()))
                             .map(|a| a.split('/').next().unwrap_or(a).to_string())
@@ -824,21 +821,16 @@ fn ceph_mon_addrs() -> Result<String, SourceError> {
                             return Ok(addrs.join(","));
                         }
                     }
-                }
-            }
-        }
-    }
     if let Ok(content) = std::fs::read_to_string("/etc/ceph/ceph.conf") {
         for line in content.lines() {
             let l = line.trim();
-            if let Some(rest) = l.strip_prefix("mon_host") {
-                if let Some(eq) = rest.find('=') {
+            if let Some(rest) = l.strip_prefix("mon_host")
+                && let Some(eq) = rest.find('=') {
                     let val = rest[eq + 1..].trim();
                     if !val.is_empty() {
                         return Ok(val.to_string());
                     }
                 }
-            }
         }
     }
     Err(SourceError::Unsupported(
@@ -914,7 +906,7 @@ mod tests {
         let base = tmpdir();
         std::fs::create_dir_all(base.join("ok")).unwrap();
         let result = safe_join(&base, "ok").expect("legit subpath");
-        assert!(result.starts_with(&base.canonicalize().unwrap()));
+        assert!(result.starts_with(base.canonicalize().unwrap()));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -950,7 +942,7 @@ mod tests {
         // "/ok" should be treated as relative "ok", not as "/ok"
         // (which would escape the base on canonicalize).
         let r = safe_join(&base, "/ok").expect("leading slash should be trimmed");
-        assert!(r.starts_with(&base.canonicalize().unwrap()));
+        assert!(r.starts_with(base.canonicalize().unwrap()));
         let _ = std::fs::remove_dir_all(&base);
     }
 

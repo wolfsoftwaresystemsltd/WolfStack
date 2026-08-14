@@ -121,13 +121,11 @@ pub fn analyze(
     let acfg = crate::alerting::AlertConfig::load();
 
     // ── CPU ──
-    if acfg.alert_cpu {
-        if let Some(p) = check_cpu(ctx, metrics, acks, proposals) { out.push(p); }
-    }
+    if acfg.alert_cpu
+        && let Some(p) = check_cpu(ctx, metrics, acks, proposals) { out.push(p); }
     // ── Memory ──
-    if acfg.alert_memory {
-        if let Some(p) = check_memory(ctx, metrics, acks, proposals) { out.push(p); }
-    }
+    if acfg.alert_memory
+        && let Some(p) = check_memory(ctx, metrics, acks, proposals) { out.push(p); }
     // ── Per-mount disk free space ──
     if acfg.alert_disk {
         out.extend(check_disks(ctx, metrics, acks, proposals));

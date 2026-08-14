@@ -358,7 +358,7 @@ async fn vnc_ws_bridge(
                         if qemu_tx.send(tungstenite::Message::Binary(data.into())).await.is_err() { break; }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        if qemu_tx.send(tungstenite::Message::Text(text.to_string().into())).await.is_err() { break; }
+                        if qemu_tx.send(tungstenite::Message::Text(text.to_string())).await.is_err() { break; }
                     }
                     Some(Ok(Message::Ping(bytes))) => {
                         let _ = browser_session.pong(&bytes).await;
@@ -596,9 +596,8 @@ async fn pve_bridge(
                         } else {
                             &text
                         };
-                        if !payload.is_empty() {
-                            if session.text(payload.to_string()).await.is_err() { break; }
-                        }
+                        if !payload.is_empty()
+                            && session.text(payload.to_string()).await.is_err() { break; }
                     }
                     Some(Ok(tungstenite::Message::Binary(data))) => {
                         if session.binary(data.to_vec()).await.is_err() { break; }

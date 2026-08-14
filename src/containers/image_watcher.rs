@@ -232,9 +232,8 @@ impl ImageWatcherConfig {
         let mut m = self.check_interval_secs.max(MIN_CHECK_INTERVAL_SECS);
         for p in self.container_policies.values() {
             if p.is_passive() { continue; }
-            if let Some(s) = p.check_interval_secs {
-                if s > 0 { m = m.min(s.max(MIN_CHECK_INTERVAL_SECS)); }
-            }
+            if let Some(s) = p.check_interval_secs
+                && s > 0 { m = m.min(s.max(MIN_CHECK_INTERVAL_SECS)); }
         }
         m
     }
@@ -345,9 +344,11 @@ impl ImageWatcherConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum UpdatePolicy {
     /// Detect updates and surface them in the UI / Predictive Inbox,
     /// but never apply automatically. Operator clicks "Update now".
+    #[default]
     NotifyOnly,
     /// Detect updates and apply automatically within the maintenance
     /// window. Backup + health-check + rollback semantics governed by
@@ -365,9 +366,6 @@ pub enum UpdatePolicy {
     Pinned,
 }
 
-impl Default for UpdatePolicy {
-    fn default() -> Self { Self::NotifyOnly }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerUpdatePolicy {
@@ -461,7 +459,9 @@ pub struct ImageUpdateEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ImageUpdateStatus {
+    #[default]
     UpdateAvailable,
     BackingUp,
     Pulling,
@@ -472,9 +472,6 @@ pub enum ImageUpdateStatus {
     Failed,
 }
 
-impl Default for ImageUpdateStatus {
-    fn default() -> Self { Self::UpdateAvailable }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageCheckResult {
@@ -1290,8 +1287,8 @@ fn wait_for_healthy(container_name: &str, timeout_secs: u64) -> bool {
                 container_name,
             ])
             .output();
-        if let Ok(o) = out {
-            if o.status.success() {
+        if let Ok(o) = out
+            && o.status.success() {
                 let raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 let (status, health) = raw.split_once('|').unwrap_or((raw.as_str(), "none"));
                 match health {
@@ -1313,7 +1310,6 @@ fn wait_for_healthy(container_name: &str, timeout_secs: u64) -> bool {
                     }
                 }
             }
-        }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }

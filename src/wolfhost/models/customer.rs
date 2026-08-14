@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Address {
     #[serde(default)]
     pub line1: String,
@@ -16,18 +17,6 @@ pub struct Address {
     pub country: String,
 }
 
-impl Default for Address {
-    fn default() -> Self {
-        Self {
-            line1: String::new(),
-            line2: String::new(),
-            city: String::new(),
-            state: String::new(),
-            zip: String::new(),
-            country: String::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Customer {

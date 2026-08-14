@@ -412,7 +412,7 @@ fn realign_wolfusb_env(new_secret: &str) -> Result<(), std::io::Error> {
     // Reuse the project's atomic 0600 writer so a partial write
     // can't leave the file truncated.
     crate::paths::write_secure(path, out)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .map_err(std::io::Error::other)
 }
 
 /// Stage 5 of the cluster-secret migration: is the built-in default
@@ -684,11 +684,10 @@ impl SessionManager {
     /// Validate a session token, returns the username if valid
     pub fn validate(&self, token: &str) -> Option<String> {
         let sessions = self.sessions.read().unwrap();
-        if let Some(session) = sessions.get(token) {
-            if session.created.elapsed() < SESSION_LIFETIME {
+        if let Some(session) = sessions.get(token)
+            && session.created.elapsed() < SESSION_LIFETIME {
                 return Some(session.username.clone());
             }
-        }
         None
     }
 
@@ -789,7 +788,7 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
     if stored_hash.starts_with("$y$") {
         use yescrypt::Yescrypt;
         use yescrypt::password_hash::PasswordVerifier;
-        return Yescrypt::default().verify_password(password.as_bytes(), stored_hash).is_ok();
+        Yescrypt::default().verify_password(password.as_bytes(), stored_hash).is_ok()
     } else if stored_hash.starts_with("$6$") {
         sha_crypt::sha512_check(password, stored_hash).is_ok()
     } else if stored_hash.starts_with("$5$") {
@@ -947,9 +946,8 @@ impl LoginLockoutConfig {
                 let net: std::net::IpAddr = match net_str.parse() { Ok(a) => a, Err(_) => continue };
                 let prefix: u8 = match prefix_str.parse() { Ok(p) => p, Err(_) => continue };
                 if ip_in_cidr(&target, &net, prefix) { return true; }
-            } else if let Ok(parsed) = entry.parse::<std::net::IpAddr>() {
-                if parsed == target { return true; }
-            }
+            } else if let Ok(parsed) = entry.parse::<std::net::IpAddr>()
+                && parsed == target { return true; }
         }
         false
     }
@@ -1367,11 +1365,10 @@ impl LoginRateLimiter {
         let mut attempts = self.attempts.write().unwrap();
         let entry = attempts.entry(ip.to_string()).or_default();
         let now = Instant::now();
-        if let Some(until) = entry.locked_until {
-            if until > now {
+        if let Some(until) = entry.locked_until
+            && until > now {
                 return false; // already locked, don't re-fire
             }
-        }
         entry.locked_until = Some(now + lockout);
         entry.last_username = source.to_string();
         drop(attempts);
@@ -2362,11 +2359,10 @@ pub fn migrate_legacy_block_rules() {
                 _ => continue,
             };
             for line in String::from_utf8_lossy(&out.stdout).lines() {
-                if let Some(ip) = parse_wolfstack_drop_rule(line, chain) {
-                    if !ips.contains(&ip) {
+                if let Some(ip) = parse_wolfstack_drop_rule(line, chain)
+                    && !ips.contains(&ip) {
                         ips.push(ip);
                     }
-                }
             }
         }
         for ip in &ips {
@@ -2487,14 +2483,13 @@ fn insert_drop_rule(cmd: &str, chain: &str, ip: &str) {
     let check = std::process::Command::new(cmd)
         .arg("-C").arg(chain).args(&rule)
         .output();
-    if let Ok(out) = check {
-        if out.status.success() {
+    if let Ok(out) = check
+        && out.status.success() {
             // Already correct — still sweep the legacy form, which an
             // upgrade from a pre-fix build leaves sitting below it.
             remove_legacy_per_ip_rule(cmd, chain, ip);
             return;
         }
-    }
     let r = std::process::Command::new(cmd)
         .arg("-I").arg(chain).arg("1").args(&rule)
         .output();
@@ -2851,8 +2846,8 @@ impl LoginRateLimiter {
         let mut snapshot: Vec<PersistedLockout> = Vec::new();
         let cfg = self.config.read().unwrap().clone();
         for (ip, rec) in attempts.iter() {
-            if let Some(until) = rec.locked_until {
-                if until > now {
+            if let Some(until) = rec.locked_until
+                && until > now {
                     let remaining = until.duration_since(now).as_secs();
                     // The lockout total isn't stored on the record (we
                     // only have an Instant); approximate from the config.
@@ -2864,7 +2859,6 @@ impl LoginRateLimiter {
                         lockout_seconds: total,
                     });
                 }
-            }
         }
         if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
             let _ = crate::paths::write_secure(&lockouts_file(), &json);
@@ -2961,11 +2955,10 @@ impl PasswordResetTokens {
     /// Validate and consume a reset token. Returns the username if valid.
     pub fn validate_and_consume(&self, token: &str) -> Option<String> {
         let mut tokens = self.tokens.write().unwrap();
-        if let Some(rt) = tokens.remove(token) {
-            if rt.created.elapsed() < RESET_TOKEN_LIFETIME {
+        if let Some(rt) = tokens.remove(token)
+            && rt.created.elapsed() < RESET_TOKEN_LIFETIME {
                 return Some(rt.username);
             }
-        }
         None
     }
 

@@ -418,18 +418,15 @@ fn remediate_masked_units(units: &[String]) -> RemediationOutcome {
         let mut any_removed = false;
         for base in &["/etc/systemd/system", "/run/systemd/system"] {
             let p = format!("{}/{}", base, unit);
-            if let Ok(meta) = std::fs::symlink_metadata(&p) {
-                if meta.file_type().is_symlink() {
-                    if let Ok(target) = std::fs::read_link(&p) {
-                        if target.as_os_str() == "/dev/null" {
+            if let Ok(meta) = std::fs::symlink_metadata(&p)
+                && meta.file_type().is_symlink()
+                    && let Ok(target) = std::fs::read_link(&p)
+                        && target.as_os_str() == "/dev/null" {
                             match std::fs::remove_file(&p) {
                                 Ok(()) => any_removed = true,
                                 Err(e) => errors.push(format!("rm {}: {}", p, e)),
                             }
                         }
-                    }
-                }
-            }
         }
         if any_removed { unmasked.push(unit.clone()); }
     }
@@ -652,12 +649,12 @@ pub fn inspect_root_shell(passwd: &str) -> Option<String> {
     for line in passwd.lines() {
         if !line.starts_with("root:") { continue; }
         // Format: name:passwd:uid:gid:gecos:home:shell
-        let shell = match line.rsplit(':').next() {
-            Some(s) => s.trim(),
-            None => return None,
+        let shell = {
+            let s = line.rsplit(':').next()?;
+            s.trim()
         };
         if shell.is_empty() { return None; }
-        if SAFE_SHELLS.iter().any(|s| *s == shell) {
+        if SAFE_SHELLS.contains(&shell) {
             return None;
         }
         return Some(shell.to_string());
@@ -718,13 +715,10 @@ pub fn is_unit_masked(unit: &str) -> bool {
     // used by some tooling for runtime masks.
     for base in &["/etc/systemd/system", "/run/systemd/system"] {
         let p = format!("{}/{}", base, unit);
-        if let Ok(meta) = std::fs::symlink_metadata(&p) {
-            if meta.file_type().is_symlink() {
-                if let Ok(target) = std::fs::read_link(&p) {
-                    if target.as_os_str() == "/dev/null" { return true; }
-                }
-            }
-        }
+        if let Ok(meta) = std::fs::symlink_metadata(&p)
+            && meta.file_type().is_symlink()
+                && let Ok(target) = std::fs::read_link(&p)
+                    && target.as_os_str() == "/dev/null" { return true; }
     }
     false
 }
@@ -736,21 +730,19 @@ pub fn is_unit_masked(unit: &str) -> bool {
 /// IP is reportable.
 fn inspect_c2_sockets(c2_ip: &str) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(ip4) = ipv4_to_proc_hex(c2_ip) {
-        if let Ok(body) = std::fs::read_to_string("/proc/net/tcp") {
+    if let Some(ip4) = ipv4_to_proc_hex(c2_ip)
+        && let Ok(body) = std::fs::read_to_string("/proc/net/tcp") {
             for line in body.lines().skip(1) {
                 if let Some(rem) = line.split_whitespace().nth(2) {
                     // Format: <hex_ip>:<hex_port> (little-endian for IP).
-                    if let Some((ip_h, port_h)) = rem.split_once(':') {
-                        if ip_h.eq_ignore_ascii_case(&ip4) {
+                    if let Some((ip_h, port_h)) = rem.split_once(':')
+                        && ip_h.eq_ignore_ascii_case(&ip4) {
                             let port = u16::from_str_radix(port_h, 16).unwrap_or(0);
                             out.push(format!("{}:{} (tcp)", c2_ip, port));
                         }
-                    }
                 }
             }
         }
-    }
     out
 }
 
@@ -858,13 +850,12 @@ pub fn analyze(
         facts.remediations.iter().find(|r| r.action.contains(label_substring))
     };
 
-    if let Some(shell) = &facts.root_shell_anomaly {
-        if !suppressed(FT_ROOT_SHELL, &scope_node, acks, proposals) {
+    if let Some(shell) = &facts.root_shell_anomaly
+        && !suppressed(FT_ROOT_SHELL, &scope_node, acks, proposals) {
             out.push(build_root_shell_proposal(
                 shell, find_remediation("root shell"), &scope_node,
             ));
         }
-    }
     if facts.locker_binary_present
         && !suppressed(FT_LOCKER_BINARY, &scope_node, acks, proposals)
     {

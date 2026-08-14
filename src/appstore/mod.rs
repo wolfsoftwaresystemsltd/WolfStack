@@ -197,7 +197,7 @@ fn default_deployment_type() -> String { "docker-run".to_string() }
 fn installed_file() -> String { crate::paths::get().appstore_installed }
 
 fn load_installed() -> Vec<InstalledApp> {
-    let mut installed: Vec<InstalledApp> = std::fs::read_to_string(&installed_file())
+    let mut installed: Vec<InstalledApp> = std::fs::read_to_string(installed_file())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -210,7 +210,7 @@ fn load_installed() -> Vec<InstalledApp> {
 
 fn save_installed(apps: &[InstalledApp]) {
     let _ = std::fs::create_dir_all(&crate::paths::get().appstore_dir);
-    let _ = std::fs::write(&installed_file(), serde_json::to_string_pretty(apps).unwrap_or_default());
+    let _ = std::fs::write(installed_file(), serde_json::to_string_pretty(apps).unwrap_or_default());
 }
 
 // ─── Public API ───
@@ -239,13 +239,13 @@ pub fn list_apps(query: Option<&str>, category: Option<&str>) -> Vec<AppManifest
     // clones all 533, but that's one clone per request, not 534 full
     // catalogue rebuilds (see CATALOGUE above).
     catalogue().iter().filter(|app| {
-        let q_match = query.map_or(true, |q| {
+        let q_match = query.is_none_or(|q| {
             let q = q.to_lowercase();
             app.name.to_lowercase().contains(&q) ||
             app.description.to_lowercase().contains(&q) ||
             app.id.to_lowercase().contains(&q)
         });
-        let c_match = category.map_or(true, |c| {
+        let c_match = category.is_none_or(|c| {
             c.eq_ignore_ascii_case("all") || app.category.eq_ignore_ascii_case(c)
         });
         q_match && c_match
@@ -347,11 +347,10 @@ pub fn install_app(
     let mut app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
 
     // Override manifest ports with custom ports if provided
-    if let Some(ports) = custom_ports {
-        if let Some(ref mut docker) = app.docker {
+    if let Some(ports) = custom_ports
+        && let Some(ref mut docker) = app.docker {
             docker.ports = ports.to_vec();
         }
-    }
 
     // Generate the install_id up-front — compose uses it as the stack
     // name so the dir and project name are known before we write the
@@ -548,7 +547,7 @@ fn install_docker(
         let Some(rel) = seed.container_path.strip_prefix(&format!("{}/", mount)) else { continue };
         if rel.is_empty() || source.is_empty() { continue; }
         let content = substitute_inputs(
-            &[seed.content.clone()], user_inputs,
+            std::slice::from_ref(&seed.content), user_inputs,
         ).into_iter().next().unwrap_or_default();
         // Create the named volume (no-op if exists) then write via
         // a throwaway alpine container. `[ -f … ] ||` preserves an
@@ -620,12 +619,8 @@ fn install_docker(
 /// template — the install path then falls back to synthesising one
 /// from the DockerTarget manifest. Template syntax is
 /// `${user_input_id}` substitution, same rules as env / cmd.
-pub fn handcrafted_compose_template(app_id: &str) -> Option<&'static str> {
-    match app_id {
-        // Add overrides here, e.g.:
-        // "nextcloud" => Some(include_str!("compose_templates/nextcloud.yml")),
-        _ => None,
-    }
+pub fn handcrafted_compose_template(_app_id: &str) -> Option<&'static str> {
+    None
 }
 
 /// Resolve the compose template for an app. Preference order:
@@ -1154,7 +1149,7 @@ fn pick_latest_iso_from_listing(original_url: &str, html: &str) -> Option<String
                     .split('.')
                     .filter_map(|s| s.parse().ok())
                     .collect();
-                let is_newer = best.as_ref().map_or(true, |(b, _)| ver > *b);
+                let is_newer = best.as_ref().is_none_or(|(b, _)| ver > *b);
                 if is_newer {
                     best = Some((ver, href.to_string()));
                 }
@@ -1414,7 +1409,7 @@ pub fn install_vm_streamed(
                 vec![
                     format!("LAN = physical NIC '{}' (vtnet0), WAN = physical NIC '{}' (vtnet1). OPNsense serves a real L2 LAN segment on the LAN NIC.",
                         lan_interface.as_ref().unwrap(),
-                        wan_interface.as_ref().map(|s| s.as_str()).unwrap_or("?")),
+                        wan_interface.as_deref().unwrap_or("?")),
                     "Wait ~60s for the live console login prompt.".into(),
                     "Log in as 'installer' / 'opnsense' to start the guided installer.".into(),
                     "Keymap - Continue - pick ZFS or UFS - pick the disk - Install.".into(),
@@ -1680,12 +1675,12 @@ fn download_iso_with_progress(
                 .filter_map(|l| {
                     let lower = l.to_ascii_lowercase();
                     if lower.starts_with("content-length:") {
-                        l.splitn(2, ':').nth(1).and_then(|v| v.trim().parse::<u64>().ok())
+                        l.split_once(':').map(|x| x.1).and_then(|v| v.trim().parse::<u64>().ok())
                     } else {
                         None
                     }
                 })
-                .last()
+                .next_back()
         });
 
     // ── Preflight: disk space ──
@@ -2021,17 +2016,16 @@ fn merge_pending_installs(installed: &mut Vec<InstalledApp>) {
     let mut changed = false;
     for entry in entries {
         let path = entry.path();
-        if path.extension().map_or(true, |e| e != "json") { continue; }
+        if path.extension().is_none_or(|e| e != "json") { continue; }
 
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(app) = serde_json::from_str::<InstalledApp>(&content) {
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(app) = serde_json::from_str::<InstalledApp>(&content) {
                 // Avoid duplicates
                 if !installed.iter().any(|a| a.install_id == app.install_id) {
                     installed.push(app);
                     changed = true;
                 }
             }
-        }
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2244,11 +2238,10 @@ pub fn prepare_install(
     let mut app = get_app(app_id).ok_or_else(|| format!("App '{}' not found", app_id))?;
 
     // Override manifest ports with custom ports if provided
-    if let Some(ports) = custom_ports {
-        if let Some(ref mut docker) = app.docker {
+    if let Some(ports) = custom_ports
+        && let Some(ref mut docker) = app.docker {
             docker.ports = ports.to_vec();
         }
-    }
 
     let session_id = format!("{}_{}", app_id, chrono_timestamp());
     let script_path = format!("/tmp/wolfstack-appinstall-{}.sh", session_id);
@@ -2438,7 +2431,7 @@ pub fn prepare_install(
                         {
                             // Source is everything before the first ':' —
                             // a host path (starts with /) or a named volume.
-                            let source = spec.splitn(2, ':').next().unwrap_or("").to_string();
+                            let source = spec.split(':').next().unwrap_or("").to_string();
                             match_entry = Some((source, target.clone()));
                             break;
                         }
@@ -2462,7 +2455,7 @@ pub fn prepare_install(
                     // substitute_inputs so `${VAR}` placeholders resolve
                     // (Misskey seeds ${DB_PASSWORD} into its config.yml).
                     let seeded_content = substitute_inputs(
-                        &[seed.content.clone()], user_inputs,
+                        std::slice::from_ref(&seed.content), user_inputs,
                     ).into_iter().next().unwrap_or_default();
                     script.push_str(&format!(
                         "docker run --rm -v {}:/seed -e SEED_CONTENT={} alpine sh -c '\
@@ -2473,7 +2466,7 @@ pub fn prepare_install(
                         rel, rel, rel,
                     ));
                 }
-                script.push_str("\n");
+                script.push('\n');
             }
 
             // Create main container
@@ -2529,7 +2522,7 @@ pub fn prepare_install(
                     if let Some(eq_pos) = trimmed.find('=') {
                         let key = &trimmed[..eq_pos];
                         if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                           && key.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
+                           && key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
                             create_args.push_str(&format!(" -e {}", shell_escape(trimmed)));
                         }
                     }
@@ -2812,9 +2805,7 @@ pub fn prepare_install(
         app.name
     ));
     script.push_str("echo -e '\\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\033[0m'\n");
-    script.push_str(&format!(
-        "echo -e '\\033[0;36m  Container is stopped — start it when ready.\\033[0m'\n"
-    ));
+    script.push_str("echo -e '\\033[0;36m  Container is stopped — start it when ready.\\033[0m'\n");
     script.push_str("echo -e '\\033[0;90m  You can close this terminal now.\\033[0m'\n");
 
     // Write the script
@@ -9985,11 +9976,10 @@ mod tests {
     fn every_docker_app_has_compose_template() {
         let mut missing: Vec<String> = Vec::new();
         for app in built_in_catalogue() {
-            if app.docker.is_some() {
-                if resolve_compose_template(&app.id).is_none() {
+            if app.docker.is_some()
+                && resolve_compose_template(&app.id).is_none() {
                     missing.push(app.id.clone());
                 }
-            }
         }
         assert!(
             missing.is_empty(),

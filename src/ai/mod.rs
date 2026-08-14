@@ -224,7 +224,7 @@ impl Default for AiConfig {
 
 impl AiConfig {
     pub fn load() -> Self {
-        match std::fs::read_to_string(&ai_config_path()) {
+        match std::fs::read_to_string(ai_config_path()) {
             Ok(content) => Self::parse_with_migrations(&content),
             Err(_) => Self::default(),
         }
@@ -404,11 +404,10 @@ impl AiConfig {
                     return Err("Cloudflare provider selected but no model is set (e.g. @cf/meta/llama-3.1-8b-instruct)".to_string());
                 }
             }
-            "local" => {
-                if self.local_url.is_empty() {
+            "local"
+                if self.local_url.is_empty() => {
                     return Err("Local provider selected but URL is not set".to_string());
                 }
-            }
             _ => {}
         }
 
@@ -424,11 +423,10 @@ impl AiConfig {
                     return Err("Gemini provider selected but API key is not set".to_string());
                 }
             }
-            "openai" => {
-                if self.openai_api_key.is_empty() {
+            "openai"
+                if self.openai_api_key.is_empty() => {
                     return Err("OpenAI provider selected but API key is not set".to_string());
                 }
-            }
             _ => {}
         }
 
@@ -460,9 +458,8 @@ static SUPPRESS_SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new(
 fn suppress_secret() -> &'static [u8] {
     SUPPRESS_SECRET.get_or_init(|| {
         let path = crate::paths::get().ai_suppress_secret;
-        if let Ok(existing) = std::fs::read(&path) {
-            if existing.len() >= 32 { return existing; }
-        }
+        if let Ok(existing) = std::fs::read(&path)
+            && existing.len() >= 32 { return existing; }
         use rand::RngCore;
         let mut bytes = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
@@ -1745,11 +1742,10 @@ impl AiAgent {
         // delivered the resolved notification.
         let (subject, body) = crate::alerting::decorate_local(&raw_subject, &raw_body);
 
-        if posture_allowed && config.email_enabled && !config.email_to.is_empty() {
-            if let Err(e) = send_alert_email(&config, &subject, &body) {
+        if posture_allowed && config.email_enabled && !config.email_to.is_empty()
+            && let Err(e) = send_alert_email(&config, &subject, &body) {
                 warn!("Failed to send resolved email: {}", e);
             }
-        }
 
         if alert_config.enabled && alert_config.has_channels() {
             // Webhook reuses the same decorated subject/body — single
@@ -3156,17 +3152,15 @@ pub(crate) fn extract_tool_calls_from_content(
     let mut out = Vec::new();
     if let Some(arr) = parsed.as_array() {
         for item in arr {
-            if let Some((n, a)) = parse_one_call(item) {
-                if allowed_tool_names.contains(&n.as_str()) {
+            if let Some((n, a)) = parse_one_call(item)
+                && allowed_tool_names.contains(&n.as_str()) {
                     out.push((n, a));
                 }
-            }
         }
-    } else if let Some((n, a)) = parse_one_call(&parsed) {
-        if allowed_tool_names.contains(&n.as_str()) {
+    } else if let Some((n, a)) = parse_one_call(&parsed)
+        && allowed_tool_names.contains(&n.as_str()) {
             out.push((n, a));
         }
-    }
 
     if out.is_empty() { None } else { Some(out) }
 }
@@ -3200,8 +3194,8 @@ fn parse_one_call(v: &serde_json::Value) -> Option<(String, serde_json::Value)> 
         return Some((name.to_string(), args_v));
     }
     // Shape 2: {"function": {"name": ..., "arguments": ...}}
-    if let Some(f) = v.get("function") {
-        if let (Some(name), args) = (f["name"].as_str(), &f["arguments"]) {
+    if let Some(f) = v.get("function")
+        && let (Some(name), args) = (f["name"].as_str(), &f["arguments"]) {
             let args_v = if args.is_string() {
                 serde_json::from_str::<serde_json::Value>(args.as_str().unwrap_or("{}"))
                     .unwrap_or(serde_json::json!({}))
@@ -3212,7 +3206,6 @@ fn parse_one_call(v: &serde_json::Value) -> Option<(String, serde_json::Value)> 
             };
             return Some((name.to_string(), args_v));
         }
-    }
     None
 }
 
@@ -3455,14 +3448,13 @@ async fn call_local_no_tools(
 /// and a node-version-manager layout). Returns the resolved path, or None.
 fn find_claude_binary() -> Option<String> {
     // On PATH already? (`command -v` honours the inherited PATH.)
-    if let Ok(o) = std::process::Command::new("sh").arg("-c").arg("command -v claude").output() {
-        if o.status.success() {
+    if let Ok(o) = std::process::Command::new("sh").arg("-c").arg("command -v claude").output()
+        && o.status.success() {
             let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if !p.is_empty() && std::path::Path::new(&p).exists() {
                 return Some(p);
             }
         }
-    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     let mut candidates = vec![
         "/usr/local/bin/claude".to_string(),
@@ -3924,12 +3916,11 @@ pub fn build_metrics_summary(
     );
 
     // When CPU or memory is elevated, include top processes so the AI can identify the cause
-    if cpu_percent > 50.0 || mem_percent > 75 {
-        if let Some(top_procs) = get_top_processes() {
+    if (cpu_percent > 50.0 || mem_percent > 75)
+        && let Some(top_procs) = get_top_processes() {
             summary.push_str("\n\nTop Processes (by CPU):\n");
             summary.push_str(&top_procs);
         }
-    }
 
     // Append per-guest CPU stats if available (from Proxmox nodes)
     if let Some(stats) = guest_cpu_stats {
@@ -4100,7 +4091,7 @@ async fn web_fetch(client: &reqwest::Client, url: &str) -> Result<String, String
 /// happily resolves `0x7f000001` or `2130706433` to 127.0.0.1.
 fn fetch_url_is_internal(url: &str) -> bool {
     // Strip scheme, pull host portion.
-    let no_scheme = url.splitn(2, "://").nth(1).unwrap_or("");
+    let no_scheme = url.split_once("://").map(|x| x.1).unwrap_or("");
     let host_with_port = no_scheme.split('/').next().unwrap_or("");
     // Handle bracketed IPv6: [::1]:8080 → host = "[::1]", port drop keeps "[::1]"
     let host = if host_with_port.starts_with('[') {
@@ -4120,30 +4111,26 @@ fn fetch_url_is_internal(url: &str) -> bool {
 
     // IPv4 dotted-quad form.
     let quad_octets: Vec<u8> = host_l.split('.').filter_map(|s| s.parse().ok()).collect();
-    if quad_octets.len() == 4 {
-        if ipv4_is_private(quad_octets[0], quad_octets[1]) { return true; }
-    }
+    if quad_octets.len() == 4
+        && ipv4_is_private(quad_octets[0], quad_octets[1]) { return true; }
     // IPv4 decimal form: a single integer like `2130706433` = 127.0.0.1.
     // All-digits, fits in u32.
-    if host_l.chars().all(|c| c.is_ascii_digit()) {
-        if let Ok(n) = host_l.parse::<u32>() {
+    if host_l.chars().all(|c| c.is_ascii_digit())
+        && let Ok(n) = host_l.parse::<u32>() {
             let a = ((n >> 24) & 0xFF) as u8;
             let b = ((n >> 16) & 0xFF) as u8;
             if ipv4_is_private(a, b) { return true; }
         }
-    }
     // IPv4 hex form: `0x7f000001` = 127.0.0.1. Curl supports this;
     // reqwest relays to the OS resolver which also resolves it on
     // Linux, so we must block it explicitly.
-    if let Some(hex) = host_l.strip_prefix("0x") {
-        if hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(n) = u32::from_str_radix(hex, 16) {
+    if let Some(hex) = host_l.strip_prefix("0x")
+        && hex.chars().all(|c| c.is_ascii_hexdigit())
+            && let Ok(n) = u32::from_str_radix(hex, 16) {
                 let a = ((n >> 24) & 0xFF) as u8;
                 let b = ((n >> 16) & 0xFF) as u8;
                 if ipv4_is_private(a, b) { return true; }
             }
-        }
-    }
     // IPv4 octal form: `0177.0.0.1` = 127.0.0.1. Each octet can be
     // 0-prefixed octal. Rust's u8::parse doesn't do octal, so if all
     // octets have a leading zero we convert manually.
@@ -4156,9 +4143,8 @@ fn fetch_url_is_internal(url: &str) -> bool {
                 s.parse::<u8>().ok()
             }
         }).collect();
-        if let Some(oct) = parsed_octal {
-            if oct.len() == 4 && ipv4_is_private(oct[0], oct[1]) { return true; }
-        }
+        if let Some(oct) = parsed_octal
+            && oct.len() == 4 && ipv4_is_private(oct[0], oct[1]) { return true; }
     }
 
     // IPv6 forms — loopback (::1), link-local (fe80::/10), unique-local (fc00::/7).
@@ -4179,8 +4165,7 @@ fn fetch_url_is_internal(url: &str) -> bool {
             return true;
         }
         // IPv4-mapped IPv6 (::ffff:127.0.0.1).
-        if host_l.starts_with("::ffff:") {
-            let mapped = &host_l[7..];
+        if let Some(mapped) = host_l.strip_prefix("::ffff:") {
             let oct: Vec<u8> = mapped.split('.').filter_map(|s| s.parse().ok()).collect();
             if oct.len() == 4 && ipv4_is_private(oct[0], oct[1]) { return true; }
         }
@@ -4386,13 +4371,12 @@ fn urldecode(s: &str) -> String {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
                 out.push(h * 16 + l);
                 i += 3;
                 continue;
             }
-        }
         if bytes[i] == b'+' { out.push(b' '); } else { out.push(bytes[i]); }
         i += 1;
     }
@@ -4507,8 +4491,7 @@ fn run_security_audit() -> String {
     if let Ok(out) = std::process::Command::new("stat")
         .args(["-c", "%a", "/etc/wolfstack"])
         .output()
-    {
-        if out.status.success() {
+        && out.status.success() {
             let mode = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !mode.starts_with("700") && !mode.starts_with("750") {
                 file_issues += 1;
@@ -4518,7 +4501,6 @@ fn run_security_audit() -> String {
                 ));
             }
         }
-    }
     if file_issues == 0 {
         lines.push("[OK] Sensitive file/directory permissions look right.".into());
     }
@@ -4544,8 +4526,7 @@ fn run_security_audit() -> String {
     if let Ok(out) = std::process::Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}\t{{.ID}}"])
         .output()
-    {
-        if out.status.success() {
+        && out.status.success() {
             let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
                 .lines().map(|l| l.to_string()).collect();
             if !names.is_empty() {
@@ -4565,7 +4546,6 @@ fn run_security_audit() -> String {
                 }
             }
         }
-    }
 
     lines.join("\n")
 }

@@ -220,28 +220,24 @@ pub fn id_for(ip: &str, port: u16) -> String {
 ///  4. The local host's own WolfNet IP
 fn all_wolfnet_ips() -> HashSet<String> {
     let mut ips = HashSet::new();
-    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
-        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content) {
+    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json")
+        && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content) {
             for (k, v) in map {
                 ips.insert(k);
                 ips.insert(v);
             }
         }
-    }
     // WolfNet peer table — covers hosts even when they have no containers.
-    if let Ok(content) = std::fs::read_to_string("/etc/wolfnet/config.toml") {
-        if let Ok(toml_val) = content.parse::<toml::Value>() {
-            if let Some(peers) = toml_val.get("peers").and_then(|p| p.as_array()) {
+    if let Ok(content) = std::fs::read_to_string("/etc/wolfnet/config.toml")
+        && let Ok(toml_val) = content.parse::<toml::Value>()
+            && let Some(peers) = toml_val.get("peers").and_then(|p| p.as_array()) {
                 for peer in peers {
-                    if let Some(ip) = peer.get("allowed_ip").and_then(|v| v.as_str()) {
-                        if !ip.is_empty() {
+                    if let Some(ip) = peer.get("allowed_ip").and_then(|v| v.as_str())
+                        && !ip.is_empty() {
                             ips.insert(ip.to_string());
                         }
-                    }
                 }
             }
-        }
-    }
     if let Some(local) = local_wolfnet_ip() {
         ips.insert(local);
     }
@@ -256,7 +252,7 @@ fn local_wolfnet_ip() -> Option<String> {
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines()
         .find(|l| l.contains("inet "))
-        .and_then(|l| l.trim().split_whitespace().nth(1))
+        .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.split('/').next())
         .map(|s| s.to_string())
 }

@@ -290,9 +290,8 @@ async fn tool_list_containers(
         for node in nodes.iter().filter(|n| n.online && !n.is_self) {
             // Skip nodes outside the caller's cluster filter — saves
             // per-node HTTP when the agent asked for one cluster.
-            if let Some(fc) = filter_cluster {
-                if node.cluster_name.as_deref() != Some(fc) { continue; }
-            }
+            if let Some(fc) = filter_cluster
+                && node.cluster_name.as_deref() != Some(fc) { continue; }
             // WolfStack listens on 8553 with TLS by default. The
             // remote exposes separate /api/containers/docker and
             // /api/containers/lxc endpoints; call both.
@@ -338,12 +337,10 @@ async fn tool_list_containers(
     // Apply filters.
     let list: Vec<serde_json::Value> = out.into_iter()
         .filter(|(_, name, _, _, cluster)| {
-            if let Some(p) = filter_pattern {
-                if !glob_match(p, name) { return false; }
-            }
-            if let Some(fc) = filter_cluster {
-                if cluster != fc { return false; }
-            }
+            if let Some(p) = filter_pattern
+                && !glob_match(p, name) { return false; }
+            if let Some(fc) = filter_cluster
+                && cluster != fc { return false; }
             // Agent scope enforcement: narrow to its container pattern allowlist.
             matches_container_pattern(name, &agent.target_scope.allowed_container_patterns)
         })
@@ -378,9 +375,8 @@ async fn tool_get_metrics(args: &serde_json::Value, state: &crate::api::AppState
     let mut per_node: Vec<serde_json::Value> = Vec::new();
     for node in &nodes {
         if !node.online { continue; }
-        if let Some(t) = target {
-            if node.hostname != t && node.id != t { continue; }
-        }
+        if let Some(t) = target
+            && node.hostname != t && node.id != t { continue; }
         // Local node collects directly — no HTTP hop needed.
         if node.is_self {
             let metrics = tokio::task::spawn_blocking(|| {
@@ -462,20 +458,18 @@ async fn tool_read_log(
         let try_journal = std::process::Command::new("journalctl")
             .args(["-u", target, "-n", &lines.to_string(), "--no-pager", "--output=short"])
             .output();
-        if let Ok(o) = try_journal {
-            if o.status.success() && !o.stdout.is_empty() {
+        if let Ok(o) = try_journal
+            && o.status.success() && !o.stdout.is_empty() {
                 let text = String::from_utf8_lossy(&o.stdout).to_string();
                 return ToolResult::ok(
                     format!("journalctl tail of {} ({} lines, this node)", target, lines),
                     serde_json::json!({ "source": "journalctl", "target": target, "node": "self", "log": text }),
                 );
             }
-        }
         if let Ok(o) = std::process::Command::new("docker")
             .args(["logs", "--tail", &lines.to_string(), target])
             .output()
-        {
-            if o.status.success() {
+            && o.status.success() {
                 let stdout = String::from_utf8_lossy(&o.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&o.stderr).to_string();
                 return ToolResult::ok(
@@ -486,7 +480,6 @@ async fn tool_read_log(
                     }),
                 );
             }
-        }
     }
 
     // Not found locally — fan out to every online remote node.
@@ -497,9 +490,8 @@ async fn tool_read_log(
 
     for node in &nodes {
         if !node.online || node.is_self { continue; }
-        if let Some(t) = target_node {
-            if node.hostname != t && node.id != t { continue; }
-        }
+        if let Some(t) = target_node
+            && node.hostname != t && node.id != t { continue; }
         let scheme = if node.port == 443 || node.port == 8553 { "https" } else { "http" };
         // Try docker-style first, then lxc-style. Whichever exists on
         // the remote for this container name wins; both endpoints
@@ -571,9 +563,8 @@ async fn tool_check_disk_usage(
     let http = &*DISPATCH_CLIENT;
     {
         for node in nodes.iter().filter(|n| n.online && !n.is_self) {
-            if let Some(fc) = filter_cluster {
-                if node.cluster_name.as_deref() != Some(fc) { continue; }
-            }
+            if let Some(fc) = filter_cluster
+                && node.cluster_name.as_deref() != Some(fc) { continue; }
             let scheme = if node.port == 443 || node.port == 8553 { "https" } else { "http" };
             for (path, runtime) in &[
                 ("/api/containers/docker", "docker"),
@@ -611,9 +602,8 @@ async fn tool_check_disk_usage(
     let filtered: Vec<_> = targets.into_iter()
         .filter(|(_, name, _, cluster, _, _, _)| {
             if !glob_match(container_pattern, name) { return false; }
-            if let Some(fc) = filter_cluster {
-                if cluster != fc { return false; }
-            }
+            if let Some(fc) = filter_cluster
+                && cluster != fc { return false; }
             matches_container_pattern(name, &agent.target_scope.allowed_container_patterns)
         })
         .collect();
@@ -1781,9 +1771,9 @@ async fn tool_web_fetch(args: &serde_json::Value, rendered: bool) -> ToolResult 
 /// and ignores credentials (`scheme://user:pass@host`). Returns None
 /// on malformed input.
 fn extract_host(url: &str) -> Option<String> {
-    let after_scheme = url.splitn(2, "://").nth(1)?;
+    let after_scheme = url.split_once("://")?.1;
     // Drop anything after the first '/', '?', or '#'.
-    let authority: &str = after_scheme.splitn(2, |c: char| c == '/' || c == '?' || c == '#')
+    let authority: &str = after_scheme.split(['/', '?', '#'])
         .next().unwrap_or("");
     // Drop credentials.
     let hostport = authority.rsplit('@').next().unwrap_or(authority);
@@ -1794,7 +1784,7 @@ fn extract_host(url: &str) -> Option<String> {
         }
         return None;
     }
-    let host = hostport.splitn(2, ':').next().unwrap_or(hostport);
+    let host = hostport.split(':').next().unwrap_or(hostport);
     if host.is_empty() { None } else { Some(host.to_string()) }
 }
 
@@ -2141,8 +2131,8 @@ pub(crate) struct SearchDoc {
 
 pub(crate) fn collect_search_corpus(sources: &[&str]) -> Vec<SearchDoc> {
     let mut out = Vec::new();
-    if sources.contains(&"memory") {
-        if let Ok(agents_dir) = std::fs::read_dir("/etc/wolfstack/agents") {
+    if sources.contains(&"memory")
+        && let Ok(agents_dir) = std::fs::read_dir("/etc/wolfstack/agents") {
             for ent in agents_dir.flatten() {
                 let mem = ent.path().join("memory.jsonl");
                 if !mem.exists() { continue; }
@@ -2164,9 +2154,8 @@ pub(crate) fn collect_search_corpus(sources: &[&str]) -> Vec<SearchDoc> {
                 }
             }
         }
-    }
-    if sources.contains(&"audit") {
-        if let Ok(agents_dir) = std::fs::read_dir("/etc/wolfstack/agents") {
+    if sources.contains(&"audit")
+        && let Ok(agents_dir) = std::fs::read_dir("/etc/wolfstack/agents") {
             for ent in agents_dir.flatten() {
                 let audit = ent.path().join("audit.jsonl");
                 if !audit.exists() { continue; }
@@ -2184,7 +2173,6 @@ pub(crate) fn collect_search_corpus(sources: &[&str]) -> Vec<SearchDoc> {
                 }
             }
         }
-    }
     if sources.contains(&"alerts") {
         // Alert history lives in memory (alerting::ALERT_HISTORY),
         // not on disk — snapshot it the same way the

@@ -108,7 +108,6 @@ mod integrations;
 mod cluster_join;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
-use actix_files;
 use clap::{CommandFactory, Parser};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -898,9 +897,9 @@ async fn main() -> std::io::Result<()> {
                 return;
             };
             for url in &services {
-                if let Ok(resp) = client.get(*url).send().await {
-                    if resp.status().is_success() {
-                        if let Ok(text) = resp.text().await {
+                if let Ok(resp) = client.get(*url).send().await
+                    && resp.status().is_success()
+                        && let Ok(text) = resp.text().await {
                             let ip = text.trim().to_string();
                             if ip.parse::<std::net::Ipv4Addr>().is_ok() {
                                 info!("  Public IP:  {}", ip);
@@ -908,8 +907,6 @@ async fn main() -> std::io::Result<()> {
                                 return;
                             }
                         }
-                    }
-                }
             }
             info!("  Public IP:  (detection failed)");
         });
@@ -971,8 +968,8 @@ async fn main() -> std::io::Result<()> {
     // right default for the thousands of installs without a public
     // domain; operators who configure Let's Encrypt or supply their
     // own cert are unaffected (early-returns above keep their path).
-    if !cli.no_tls && cli.tls_cert.is_none() && cli.tls_key.is_none() {
-        if installer::find_tls_certificate(cli.tls_domain.as_deref()).is_none() {
+    if !cli.no_tls && cli.tls_cert.is_none() && cli.tls_key.is_none()
+        && installer::find_tls_certificate(cli.tls_domain.as_deref()).is_none() {
             let detected_hostname = hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "wolfstack".into());
@@ -986,7 +983,6 @@ async fn main() -> std::io::Result<()> {
                 );
             }
         }
-    }
 
     // Check if TLS will be available (so the frontend knows the correct protocol for URLs)
     let tls_enabled = if cli.no_tls {
@@ -2246,9 +2242,8 @@ async fn main() -> std::io::Result<()> {
                             .trim()
                             .to_string();
                         let now = std::time::Instant::now();
-                        if let Some(prev) = recent_alerts.get(&key) {
-                            if now.duration_since(*prev) < cooldown { continue; }
-                        }
+                        if let Some(prev) = recent_alerts.get(&key)
+                            && now.duration_since(*prev) < cooldown { continue; }
                         recent_alerts.insert(key.clone(), now);
 
                         let title = format!("🚨 WolfStack Security — {}", f.name);
@@ -2672,11 +2667,10 @@ async fn main() -> std::io::Result<()> {
                         std::fs::read_to_string(crate::compat::dm_path()).ok().map(|s| s.trim().to_string())
                     } else { None },
                 };
-                if let Ok(json) = serde_json::to_value(&msg) {
-                    if let Ok(mut cache) = cached_status_bg.write() {
+                if let Ok(json) = serde_json::to_value(&msg)
+                    && let Ok(mut cache) = cached_status_bg.write() {
                         *cache = Some(json);
                     }
-                }
 
                 cluster_clone.update_self(metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip.read().await.clone(), has_docker, has_lxc, has_kvm, tls_enabled);
 
@@ -3161,12 +3155,11 @@ async fn main() -> std::io::Result<()> {
                                 {
                                     let mut cache = iw_cache.write().unwrap();
                                     for ev in &events {
-                                        if matches!(ev.status, iw::ImageUpdateStatus::Completed) {
-                                            if let Some(r) = cache.get_mut(&ev.container_name) {
+                                        if matches!(ev.status, iw::ImageUpdateStatus::Completed)
+                                            && let Some(r) = cache.get_mut(&ev.container_name) {
                                                 r.update_available = false;
                                                 r.last_checked = chrono::Utc::now().to_rfc3339();
                                             }
-                                        }
                                     }
                                 }
                                 // Persist the audit trail. Reload the
@@ -3376,9 +3369,8 @@ async fn main() -> std::io::Result<()> {
                             let mut current_cluster = String::new();
                             let mut current_host = String::new();
                             for (cluster, host, issue) in issues {
-                                if let Some(sev) = filter_sev {
-                                    if issue.severity != sev { continue; }
-                                }
+                                if let Some(sev) = filter_sev
+                                    && issue.severity != sev { continue; }
                                 if *cluster != current_cluster {
                                     current_cluster = cluster.clone();
                                     current_host.clear();
@@ -3444,11 +3436,10 @@ async fn main() -> std::io::Result<()> {
                             // the webhook recipients see the same originator
                             // metadata.
                             let (subject, body) = crate::alerting::decorate_local(&subject, &body);
-                            if posture_allowed {
-                                if let Err(e) = ai::send_alert_email(&config, &subject, &body) {
+                            if posture_allowed
+                                && let Err(e) = ai::send_alert_email(&config, &subject, &body) {
                                     tracing::warn!("Failed to send critical issues email: {}", e);
                                 }
-                            }
 
                             // Also send to webhook channels
                             if alert_config.enabled && alert_config.has_channels() {
@@ -3579,7 +3570,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
 
                             // ─── Docker Containers Table ───
                             {
-                                let local_docker = tokio::task::spawn_blocking(|| crate::containers::docker_list_all()).await.unwrap_or_default();
+                                let local_docker = tokio::task::spawn_blocking(crate::containers::docker_list_all).await.unwrap_or_default();
                                 // Also fetch from remote WolfStack nodes
                                 let mut all_docker: Vec<(String, crate::containers::ContainerInfo)> = Vec::new();
                                 let local_host = {
@@ -3596,13 +3587,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                         .header("X-WolfStack-Secret", scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
                                         .send().await
-                                    {
-                                        if let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
+                                        && let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
                                             for c in containers {
                                                 all_docker.push((node.hostname.clone(), c));
                                             }
                                         }
-                                    }
                                 }
 
                                 if !all_docker.is_empty() {
@@ -3622,7 +3611,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
 
                             // ─── LXC Containers Table ───
                             {
-                                let local_lxc = tokio::task::spawn_blocking(|| crate::containers::lxc_list_all()).await.unwrap_or_default();
+                                let local_lxc = tokio::task::spawn_blocking(crate::containers::lxc_list_all).await.unwrap_or_default();
                                 let mut all_lxc: Vec<(String, crate::containers::ContainerInfo)> = Vec::new();
                                 let local_host = {
                                     let nodes = scan_cluster.get_all_nodes();
@@ -3637,13 +3626,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                         .header("X-WolfStack-Secret", scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
                                         .send().await
-                                    {
-                                        if let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
+                                        && let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
                                             for c in containers {
                                                 all_lxc.push((node.hostname.clone(), c));
                                             }
                                         }
-                                    }
                                 }
 
                                 if !all_lxc.is_empty() {
@@ -3685,13 +3672,11 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                         .header("X-WolfStack-Secret", scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
                                         .send().await
-                                    {
-                                        if let Ok(vms) = resp.json::<Vec<crate::vms::manager::VmConfig>>().await {
+                                        && let Ok(vms) = resp.json::<Vec<crate::vms::manager::VmConfig>>().await {
                                             for vm in vms {
                                                 all_vms.push((node.hostname.clone(), vm));
                                             }
                                         }
-                                    }
                                 }
 
                                 if !all_vms.is_empty() {
@@ -4130,7 +4115,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                             // If uptime is under 10 minutes, the node recently rebooted
                             if metrics.uptime_secs < 600 {
                                 let reboot_key = format!("{}:reboot", node.id);
-                                if !cooldowns.contains_key(&reboot_key) {
+                                if let std::collections::hash_map::Entry::Vacant(e) = cooldowns.entry(reboot_key) {
                                     let uptime_mins = metrics.uptime_secs / 60;
 
                                     // Gather reboot reason diagnostics
@@ -4182,7 +4167,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                         wolfnote::log_alert_to_wolfnote(&wn_title, &wn_body).await;
                                     });
                                     // Use a long cooldown (1 hour) so we don't re-alert for the same reboot
-                                    cooldowns.insert(reboot_key, std::time::Instant::now());
+                                    e.insert(std::time::Instant::now());
                                 }
                             }
                     }
@@ -5053,7 +5038,7 @@ async fn gather_reboot_reason_remote(
 
     let mut result = String::new();
     for (label, cmd) in &commands {
-        let mut output = format!("(could not reach node)");
+        let mut output = "(could not reach node)".to_string();
         for url in &urls {
             let resp = client
                 .post(url)
@@ -5250,7 +5235,8 @@ mod shell_launch_tests {
     fn any_argument_counts_as_deliberate() {
         // --port, --bind, --agent, --no-tls … all of them. The refusal is for
         // the zero-argument case only, so no supervisor anywhere is blocked.
-        for has_args in [true] {
+        {
+            let has_args = true;
             assert!(!should_refuse_shell_launch(false, false, has_args));
         }
     }

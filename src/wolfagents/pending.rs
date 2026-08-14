@@ -253,9 +253,8 @@ fn load_one_locked(agent_id: &str, seq: u64) -> Result<PendingEntry, String> {
     let mut latest: Option<PendingEntry> = None;
     for line in text.lines() {
         if line.trim().is_empty() { continue; }
-        if let Ok(e) = serde_json::from_str::<PendingEntry>(line) {
-            if e.seq == seq { latest = Some(e); }
-        }
+        if let Ok(e) = serde_json::from_str::<PendingEntry>(line)
+            && e.seq == seq { latest = Some(e); }
     }
     latest.ok_or_else(|| format!("no pending entry with seq {}", seq))
 }

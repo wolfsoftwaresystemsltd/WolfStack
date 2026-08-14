@@ -294,11 +294,10 @@ pub fn release_port_53(upstream: Option<&str>) -> Result<String, String> {
         }
         None => "1.1.1.1",
     };
-    if !Path::new(RESOLV_BACKUP).exists() {
-        if let Ok(existing) = std::fs::read_to_string(RESOLV_CONF) {
+    if !Path::new(RESOLV_BACKUP).exists()
+        && let Ok(existing) = std::fs::read_to_string(RESOLV_CONF) {
             let _ = std::fs::write(RESOLV_BACKUP, existing);
         }
-    }
     let new_resolv = format!(
         "# Managed by WolfStack — host DNS routed to {upstream}\n\
          # Original saved to {backup}. Delete {dropin} and restart\n\
@@ -367,14 +366,13 @@ pub fn restore() -> Result<String, String> {
         std::fs::remove_file(RELEASE_DROPIN)
             .map_err(|e| format!("remove {}: {}", RELEASE_DROPIN, e))?;
     }
-    if backup_existed {
-        if let Ok(orig) = std::fs::read_to_string(RESOLV_BACKUP) {
+    if backup_existed
+        && let Ok(orig) = std::fs::read_to_string(RESOLV_BACKUP) {
             let _ = std::fs::remove_file(RESOLV_CONF);
             std::fs::write(RESOLV_CONF, orig)
                 .map_err(|e| format!("restore resolv.conf: {}", e))?;
             let _ = std::fs::remove_file(RESOLV_BACKUP);
         }
-    }
     // Clean up the NetworkManager drop-in if we laid one down, and
     // ask NM to reload so its normal DNS management resumes.
     if Path::new(NM_DROPIN).exists() {
@@ -409,8 +407,8 @@ fn systemd_resolved_active() -> bool {
 /// versions put the same info in `systemctl show systemd-resolved`.
 fn detect_stub_listener() -> bool {
     if !systemd_resolved_active() { return false; }
-    if let Ok(out) = Command::new("resolvectl").args(["status"]).output() {
-        if out.status.success() {
+    if let Ok(out) = Command::new("resolvectl").args(["status"]).output()
+        && out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             for line in s.lines() {
                 let l = line.trim();
@@ -419,7 +417,6 @@ fn detect_stub_listener() -> bool {
                 }
             }
         }
-    }
     // Fallback: if systemd-resolved is active and we can't prove
     // otherwise, assume the stub is on (the default).
     true
@@ -558,8 +555,8 @@ fn build_message(
     // no way forward. Now we always speak to stub/release state first
     // and let the per-LAN rows surface the dnsmasq-on-:53 action.
     if immutable {
-        return format!("/etc/resolv.conf is marked immutable (chattr +i). Release would fail. \
-                        Clear the flag with `sudo chattr -i /etc/resolv.conf` before using this.");
+        return "/etc/resolv.conf is marked immutable (chattr +i). Release would fail. \
+                        Clear the flag with `sudo chattr -i /etc/resolv.conf` before using this.".to_string();
     }
     if release_applied {
         let mut msg = String::from("WolfStack has released systemd-resolved's stub listener. Click Restore stub to undo.");

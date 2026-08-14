@@ -365,11 +365,10 @@ pub fn error_log(target: &ExecTarget, lines: usize) -> Vec<String> {
     ];
 
     for log_path in &log_paths {
-        if target.path_exists(log_path).unwrap_or(false) {
-            if let Ok(output) = target.exec(&format!("tail -n {} '{}' 2>/dev/null", n, log_path)) {
+        if target.path_exists(log_path).unwrap_or(false)
+            && let Ok(output) = target.exec(&format!("tail -n {} '{}' 2>/dev/null", n, log_path)) {
                 return output.lines().map(|l| l.to_string()).collect();
             }
-        }
     }
     Vec::new()
 }
