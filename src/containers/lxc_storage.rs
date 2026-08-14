@@ -68,11 +68,10 @@ pub struct LxcDiskInfo {
 pub fn inspect(name: &str) -> Result<LxcDiskInfo, String> {
     // Proxmox-hosted containers: look them up via `pct config`. WolfStack
     // already knows whether `pct` is on the host (via lxc_list_all).
-    if which("pct") {
-        if let Some(info) = inspect_pct_local(name) {
+    if which("pct")
+        && let Some(info) = inspect_pct_local(name) {
             return Ok(info);
         }
-    }
 
     // Native LXC: walk the registered storage paths to find this
     // container's config file.
@@ -109,27 +108,25 @@ pub fn resize(name: &str, new_size_bytes: u64) -> Result<String, String> {
     let info = inspect(name)?;
     // Refuse shrinks below current usage — that's a one-way ticket to
     // data corruption on most backends.
-    if let Some(used) = info.used_bytes {
-        if new_size_bytes < used {
+    if let Some(used) = info.used_bytes
+        && new_size_bytes < used {
             return Err(format!(
                 "refusing to resize below current usage ({} bytes used, requested {})",
                 used, new_size_bytes
             ));
         }
-    }
     // Belt-and-braces: most backends here are grow-only (lvextend,
     // zfs quota set is technically allowed to shrink but corrupts in
     // practice if used > new). Reject a shrink with a clear message
     // before we hit the underlying tool's "matches existing size" /
     // "out of space" failure modes.
-    if let Some(current) = info.size_bytes {
-        if new_size_bytes < current {
+    if let Some(current) = info.size_bytes
+        && new_size_bytes < current {
             return Err(format!(
                 "shrinking is not supported (current size {} bytes, requested {}). Migrate to a smaller storage instead.",
                 current, new_size_bytes
             ));
         }
-    }
 
     if info.proxmox {
         return Err("use proxmox::PveClient::pct_resize for Proxmox containers — the API endpoint will route there automatically".into());
@@ -217,8 +214,8 @@ pub fn migrate(name: &str, target_storage: &str, remove_source: bool) -> Result<
     // Refuse to migrate a running container — rsync of a live rootfs
     // is racy and produces an inconsistent copy.
     let state = Command::new("lxc-info").args(["-s", "-H", "-n", name]).output();
-    if let Ok(o) = state {
-        if o.status.success() {
+    if let Ok(o) = state
+        && o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if s.eq_ignore_ascii_case("RUNNING") {
                 return Err(format!(
@@ -227,7 +224,6 @@ pub fn migrate(name: &str, target_storage: &str, remove_source: bool) -> Result<
                 ));
             }
         }
-    }
     if target_storage == info.storage {
         return Err("source and target storage paths are the same".into());
     }
@@ -243,14 +239,13 @@ pub fn migrate(name: &str, target_storage: &str, remove_source: bool) -> Result<
     let parent = std::path::Path::new(target_storage)
         .parent()
         .map(|p| p.to_path_buf());
-    if let Some(p) = &parent {
-        if !p.exists() {
+    if let Some(p) = &parent
+        && !p.exists() {
             return Err(format!(
                 "target parent '{}' does not exist — mount the filesystem first",
                 p.display()
             ));
         }
-    }
     if !super::lxc_storage_paths().iter().any(|p| p == target_storage) {
         super::lxc_register_path(target_storage);
     }
@@ -349,8 +344,8 @@ fn rewrite_rootfs_path(cfg: &str, new_path: &str) -> String {
 fn classify_backend(rootfs: &str, parent: &str) -> LxcBackend {
     if rootfs.is_empty() { return LxcBackend::Unknown; }
     // Cheapest signal: file's filesystem from `stat -f -c %T <path>`.
-    if let Ok(out) = Command::new("stat").args(["-f", "-c", "%T", rootfs]).output() {
-        if out.status.success() {
+    if let Ok(out) = Command::new("stat").args(["-f", "-c", "%T", rootfs]).output()
+        && out.status.success() {
             let fs = String::from_utf8_lossy(&out.stdout).trim().to_string();
             return match fs.as_str() {
                 "zfs" => LxcBackend::Zfs,
@@ -363,7 +358,6 @@ fn classify_backend(rootfs: &str, parent: &str) -> LxcBackend {
                 }
             };
         }
-    }
     let _ = parent;
     LxcBackend::Directory
 }
@@ -414,22 +408,21 @@ fn measure_rootfs(rootfs: &str, _parent: &str, _name: &str, backend: LxcBackend)
             let out = Command::new("zfs")
                 .args(["list", "-H", "-p", "-o", "quota,used", &dataset])
                 .output().ok();
-            if let Some(o) = out {
-                if o.status.success() {
+            if let Some(o) = out
+                && o.status.success() {
                     let s = String::from_utf8_lossy(&o.stdout);
-                    let mut parts = s.trim().split_whitespace();
+                    let mut parts = s.split_whitespace();
                     let q = parts.next().and_then(|x| x.parse::<u64>().ok());
                     let u = parts.next().and_then(|x| x.parse::<u64>().ok());
                     return (q.filter(|&v| v > 0), u);
                 }
-            }
             (None, None)
         }
         _ => {
             // df -B1 <path>
             let out = Command::new("df").args(["-B1", "--output=size,used", rootfs]).output().ok();
-            if let Some(o) = out {
-                if o.status.success() {
+            if let Some(o) = out
+                && o.status.success() {
                     let txt = String::from_utf8_lossy(&o.stdout);
                     if let Some(line) = txt.lines().nth(1) {
                         let mut parts = line.split_whitespace();
@@ -438,7 +431,6 @@ fn measure_rootfs(rootfs: &str, _parent: &str, _name: &str, backend: LxcBackend)
                         return (s, u);
                     }
                 }
-            }
             (None, None)
         }
     }

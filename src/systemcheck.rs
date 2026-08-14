@@ -448,7 +448,7 @@ fn check_fuse3() -> DependencyCheck {
     // and more reliable than shelling out to pkg-config.
     let found = ["/usr/lib", "/usr/lib64", "/lib", "/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"]
         .iter()
-        .any(|dir| std::fs::read_dir(dir).ok().map_or(false, |entries|
+        .any(|dir| std::fs::read_dir(dir).ok().is_some_and(|entries|
             entries.flatten().any(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
                 name.starts_with("libfuse3.so")
@@ -495,7 +495,7 @@ fn check_kernel_module(modname: &str, category: &str, why: &str) -> DependencyCh
             Some(format!("modprobe {}", modname))
         } else {
             Some(hint(
-                &format!("linux-modules-extra-$(uname -r)"),
+                "linux-modules-extra-$(uname -r)",
                 "kernel-modules-extra",
                 "linux",
                 "kernel-default-extra",

@@ -38,9 +38,11 @@ use serde::{Deserialize, Serialize};
 /// hands DNS management entirely to the operator.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum EdgeStrategy {
     /// No automation. Operator runs the proxy on N nodes and manages
     /// DNS themselves. This is what v23.1.x effectively did.
+    #[default]
     Local,
 
     /// WolfStack reconciles A records via the named DNS provider,
@@ -124,9 +126,6 @@ pub enum EdgeStrategy {
     },
 }
 
-impl Default for EdgeStrategy {
-    fn default() -> Self { Self::Local }
-}
 
 impl EdgeStrategy {
     /// String tag used in API responses and UI dropdowns. Stable

@@ -1123,13 +1123,13 @@ fn bind_source_safe(path: &str) -> Result<(), String> {
         return Err("source path is empty".into());
     }
     let canonical = path.trim_end_matches('/');
-    if canonical.is_empty() || canonical == "" {
+    if canonical.is_empty() || canonical.is_empty() {
         return Err("refusing to back up the host root filesystem '/'".into());
     }
     let exact_deny: &[&str] = &[
         "/", "/usr", "/lib", "/lib64", "/bin", "/sbin", "/var", "/run", "/tmp",
     ];
-    if exact_deny.iter().any(|d| *d == canonical) {
+    if exact_deny.contains(&canonical) {
         return Err(format!("refusing to back up system path '{}' — bind a specific subdirectory instead", canonical));
     }
     let prefix_deny: &[&str] = &[
@@ -1351,6 +1351,7 @@ pub fn discover_lxc_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct BackupConfig {
     #[serde(default)]
     pub schedules: Vec<BackupSchedule>,
@@ -1358,19 +1359,11 @@ pub struct BackupConfig {
     pub entries: Vec<BackupEntry>,
 }
 
-impl Default for BackupConfig {
-    fn default() -> Self {
-        Self {
-            schedules: Vec::new(),
-            entries: Vec::new(),
-        }
-    }
-}
 
 // ─── Config Persistence ───
 
 pub fn load_config() -> BackupConfig {
-    match fs::read_to_string(&backup_config_path()) {
+    match fs::read_to_string(backup_config_path()) {
         Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
         Err(_) => BackupConfig::default(),
     }
@@ -2280,19 +2273,16 @@ fn purge_vzdump_leftovers(staging: &Path, vmid: &str, keep: Option<&Path>) {
 fn find_vzdump_result(stdout: &str, staging: &Path, vmid: &str, _timestamp: &str) -> Result<(PathBuf, u64), String> {
     // Try to find the archive from vzdump output
     for line in stdout.lines() {
-        if line.contains("creating") && line.contains("vzdump") {
-            if let Some(start) = line.find('\'') {
-                if let Some(end) = line.rfind('\'') {
-                    if start < end {
+        if line.contains("creating") && line.contains("vzdump")
+            && let Some(start) = line.find('\'')
+                && let Some(end) = line.rfind('\'')
+                    && start < end {
                         let path = PathBuf::from(&line[start+1..end]);
                         if path.exists() {
                             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                             return Ok((path, size));
                         }
                     }
-                }
-            }
-        }
     }
 
     // Fallback: search staging dir for the newest vzdump file for this VMID
@@ -2300,15 +2290,12 @@ fn find_vzdump_result(stdout: &str, staging: &Path, vmid: &str, _timestamp: &str
         let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("vzdump-lxc-{}-", vmid)) {
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        if best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
+            if name.starts_with(&format!("vzdump-lxc-{}-", vmid))
+                && let Ok(meta) = entry.metadata()
+                    && let Ok(modified) = meta.modified()
+                        && best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
                             best = Some((entry.path(), modified));
                         }
-                    }
-                }
-            }
         }
         if let Some((path, _)) = best {
             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -2603,7 +2590,7 @@ fn backup_vm_native(name: &str) -> Result<(PathBuf, u64), String> {
 
     let output = Command::new("tar")
         .arg("czf")
-        .arg(&tar_path.to_string_lossy().to_string())
+        .arg(tar_path.to_string_lossy().to_string())
         .arg("-C")
         .arg(vm_base)
         .args(&tar_items)
@@ -2793,8 +2780,8 @@ fn stage_config_bundle() -> Result<PathBuf, String> {
 
     // Also include VM configs (JSON only, not disk images)
     let vm_config_dir = Path::new("/var/lib/wolfstack/vms");
-    if vm_config_dir.exists() {
-        if let Ok(entries) = fs::read_dir(vm_config_dir) {
+    if vm_config_dir.exists()
+        && let Ok(entries) = fs::read_dir(vm_config_dir) {
             for entry in entries.flatten() {
                 let config_file = entry.path().join("config.json");
                 if config_file.exists() {
@@ -2807,7 +2794,6 @@ fn stage_config_bundle() -> Result<PathBuf, String> {
                 }
             }
         }
-    }
 
     Ok(temp_dir)
 }
@@ -2832,7 +2818,7 @@ fn reject_dangerous_root(path: &str, for_backup: bool) -> Result<(), String> {
             Ok(())
         };
     }
-    if kernel_fs.iter().any(|d| *d == canonical) {
+    if kernel_fs.contains(&canonical) {
         return Err(if for_backup {
             format!("Refusing to back up '{}' — kernel filesystem; \
                      pick a specific folder like /etc or /home", canonical)
@@ -3198,8 +3184,8 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
     } else {
         // Native WolfStack VMs — parse .json configs from /var/lib/wolfstack/vms.
         let vm_dir = Path::new("/var/lib/wolfstack/vms");
-        if vm_dir.exists() {
-            if let Ok(read) = fs::read_dir(vm_dir) {
+        if vm_dir.exists()
+            && let Ok(read) = fs::read_dir(vm_dir) {
                 for entry in read.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
@@ -3218,7 +3204,6 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
                     ));
                 }
             }
-        }
     }
 
     // Backup config
@@ -3281,13 +3266,12 @@ fn backup_comments_with_cluster(target: &BackupTarget, cluster: &str) -> String 
         }
         BackupTargetType::Vm => {
             let config_path = format!("/var/lib/wolfstack/vms/{}.json", target.name);
-            if let Ok(data) = std::fs::read_to_string(&config_path) {
-                if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Ok(data) = std::fs::read_to_string(&config_path)
+                && let Ok(vm) = serde_json::from_str::<serde_json::Value>(&data) {
                     let os = vm.get("os").and_then(|v| v.as_str()).unwrap_or("unknown");
                     let mem = vm.get("memory_mb").and_then(|v| v.as_u64()).unwrap_or(0);
                     return format!("[{}] VM: {} (OS: {}, {}MB RAM, disks + config)", cluster, target.name, os, mem);
                 }
-            }
             format!("VM: {} (disks + config)", target.name)
         }
         BackupTargetType::Config => "WolfStack configuration files".to_string(),
@@ -3322,8 +3306,8 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
     let cluster = local_cluster_name();
 
     // PBS file-level (pxar) path — see create_backup_with_log for the rationale.
-    if storage.storage_type == StorageType::Pbs && storage.pbs_file_level {
-        if let Some(res) = make_pbs_file_level_entry(&target, storage, &comments, &cluster, &hostname, None) {
+    if storage.storage_type == StorageType::Pbs && storage.pbs_file_level
+        && let Some(res) = make_pbs_file_level_entry(&target, storage, &comments, &cluster, &hostname, None) {
             match res {
                 Ok(entry) => return entry,
                 Err(e) => {
@@ -3339,7 +3323,6 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
             }
         }
         // else: fall through to the tarball path (VM/Proxmox-LXC).
-    }
 
     let (result, docker_config, mounts) = match target.target_type {
         BackupTargetType::Docker => {
@@ -3906,9 +3889,9 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
             list_cmd.env("PBS_PASSWORD", pbs_pw);
         }
 
-        if let Ok(snap_out) = list_cmd.output() {
-            if let Ok(snaps) = serde_json::from_slice::<serde_json::Value>(&snap_out.stdout) {
-                if let Some(arr) = snaps.as_array() {
+        if let Ok(snap_out) = list_cmd.output()
+            && let Ok(snaps) = serde_json::from_slice::<serde_json::Value>(&snap_out.stdout)
+                && let Some(arr) = snaps.as_array() {
                     let mut best_time: i64 = 0;
                     let mut best_snap = String::new();
                     for s in arr {
@@ -4003,8 +3986,6 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
                         }
                     }
                 }
-            }
-        }
     }
 
     Ok(())
@@ -4267,8 +4248,8 @@ fn build_pxar_pairs(target: &BackupTarget) -> Result<(String, String, Vec<PxarPa
                                 vol_idx += 1;
                             }
                         }
-                        "bind" => {
-                            if bind_source_safe(&m.source).is_ok() && Path::new(&m.source).is_dir() {
+                        "bind"
+                            if bind_source_safe(&m.source).is_ok() && Path::new(&m.source).is_dir() => {
                                 pairs.push(PxarPair {
                                     archive: format!("bind-{}.pxar", bind_idx),
                                     dir: PathBuf::from(&m.source),
@@ -4276,7 +4257,6 @@ fn build_pxar_pairs(target: &BackupTarget) -> Result<(String, String, Vec<PxarPa
                                 });
                                 bind_idx += 1;
                             }
-                        }
                         _ => {}
                     }
                 }
@@ -4913,28 +4893,25 @@ fn docker_run_args_from_inspect(inspect: &serde_json::Value) -> Vec<String> {
     }
 
     // Hostname
-    if let Some(hostname) = config["Hostname"].as_str() {
-        if !hostname.is_empty() {
+    if let Some(hostname) = config["Hostname"].as_str()
+        && !hostname.is_empty() {
             args.push("--hostname".to_string());
             args.push(hostname.to_string());
         }
-    }
 
     // Working dir
-    if let Some(workdir) = config["WorkingDir"].as_str() {
-        if !workdir.is_empty() {
+    if let Some(workdir) = config["WorkingDir"].as_str()
+        && !workdir.is_empty() {
             args.push("-w".to_string());
             args.push(workdir.to_string());
         }
-    }
 
     // Entrypoint override (only if different from image default)
-    if let Some(ep) = config["Entrypoint"].as_array() {
-        if !ep.is_empty() {
+    if let Some(ep) = config["Entrypoint"].as_array()
+        && !ep.is_empty() {
             args.push("--entrypoint".to_string());
             args.push(ep[0].as_str().unwrap_or("").to_string());
         }
-    }
 
     // TTY and stdin (needed for interactive containers like debian, ubuntu)
     if config["Tty"].as_bool().unwrap_or(false) {
@@ -4950,20 +4927,18 @@ fn docker_run_args_from_inspect(inspect: &serde_json::Value) -> Vec<String> {
     }
 
     // Memory limit
-    if let Some(mem) = host_config["Memory"].as_u64() {
-        if mem > 0 {
+    if let Some(mem) = host_config["Memory"].as_u64()
+        && mem > 0 {
             args.push("-m".to_string());
             args.push(format!("{}b", mem));
         }
-    }
 
     // CPU quota
-    if let Some(cpus) = host_config["NanoCpus"].as_u64() {
-        if cpus > 0 {
+    if let Some(cpus) = host_config["NanoCpus"].as_u64()
+        && cpus > 0 {
             args.push("--cpus".to_string());
             args.push(format!("{:.2}", cpus as f64 / 1_000_000_000.0));
         }
-    }
 
     args
 }
@@ -5014,11 +4989,10 @@ pub fn restore_docker(entry: &BackupEntry, overwrite: bool) -> Result<String, St
     let image_load_path: PathBuf = if new_format {
         // Read the wrapper's inspect.json (overrides entry.docker_config
         // if entry didn't have it for some reason).
-        if inspect_json.is_none() {
-            if let Ok(text) = fs::read_to_string(work_dir.join("inspect.json")) {
+        if inspect_json.is_none()
+            && let Ok(text) = fs::read_to_string(work_dir.join("inspect.json")) {
                 inspect_json = serde_json::from_str(&text).ok();
             }
-        }
 
         // Restore each mount BEFORE creating the container — so when
         // docker run mounts them, the data's already in place.
@@ -5137,7 +5111,7 @@ pub fn restore_docker(entry: &BackupEntry, overwrite: bool) -> Result<String, St
 
     // Build docker run args from inspect config, or use defaults.
     let extra_args = inspect_json.as_ref()
-        .map(|j| docker_run_args_from_inspect(j))
+        .map(docker_run_args_from_inspect)
         .unwrap_or_else(|| vec!["--restart".to_string(), "unless-stopped".to_string()]);
 
     let mut run_args = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), container_name.to_string()];
@@ -5257,7 +5231,7 @@ pub fn restore_lxc_local(
         .args(["xzf", &local_path.to_string_lossy(), "-C", &extract_root.to_string_lossy()])
         .output()
         .map_err(|e| format!("Failed to extract LXC backup: {}", e))?;
-    let _ = fs::remove_file(&local_path);
+    let _ = fs::remove_file(local_path);
     if !output.status.success() {
         let _ = fs::remove_dir_all(&extract_root);
         return Err(format!("LXC extract failed: {}", String::from_utf8_lossy(&output.stderr)));
@@ -7644,8 +7618,8 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
 
     if is_proxmox {
         // Proxmox: use pct list + pct config for hostname, cores, memory
-        if let Ok(output) = Command::new("pct").arg("list").output() {
-            if output.status.success() {
+        if let Ok(output) = Command::new("pct").arg("list").output()
+            && output.status.success() {
                 let listing = String::from_utf8_lossy(&output.stdout);
                 let entries: Vec<(String, String, String)> = listing.lines()
                     .skip(1)
@@ -7712,7 +7686,6 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
                     });
                 }
             }
-        }
     } else {
         // Native LXC: use lxc-ls -f for state + hostname from config
         if let Ok(output) = Command::new("lxc-ls")
@@ -7785,11 +7758,10 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
 fn lxc_config_hostname(name: &str) -> Option<String> {
     for base in &["/var/lib/lxc", "/var/snap/lxd/common/lxd/storage-pools"] {
         let config_path = format!("{}/{}/config", base, name);
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            if let Some(line) = content.lines().find(|l| l.trim().starts_with("lxc.uts.name")) {
+        if let Ok(content) = fs::read_to_string(&config_path)
+            && let Some(line) = content.lines().find(|l| l.trim().starts_with("lxc.uts.name")) {
                 return line.split('=').nth(1).map(|s| s.trim().to_string());
             }
-        }
     }
     None
 }
@@ -7819,8 +7791,8 @@ pub fn check_schedules() {
         }
 
         // Check if already ran today/this period
-        if !schedule.last_run.is_empty() {
-            if let Ok(last) = chrono::DateTime::parse_from_rfc3339(&schedule.last_run) {
+        if !schedule.last_run.is_empty()
+            && let Ok(last) = chrono::DateTime::parse_from_rfc3339(&schedule.last_run) {
                 let last_utc = last.with_timezone(&Utc);
                 match schedule.frequency {
                     BackupFrequency::Daily => {
@@ -7841,7 +7813,6 @@ pub fn check_schedules() {
                     },
                 }
             }
-        }
 
         // Time to run this schedule! Hooks + backups share one code path with
         // the on-demand runner (execute_schedule_run) — entries come back
@@ -8146,9 +8117,9 @@ pub fn enrich_pbs_snapshots(snapshots: serde_json::Value) -> serde_json::Value {
         let bid = s.get("backup-id").or_else(|| s.get("backup_id"))
             .and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-        if btype == "ct" || btype == "lxc" {
-            if let Some((hostname, specs)) = ct_info.get(&bid) {
-                if let Some(obj) = s.as_object_mut() {
+        if (btype == "ct" || btype == "lxc")
+            && let Some((hostname, specs)) = ct_info.get(&bid)
+                && let Some(obj) = s.as_object_mut() {
                     if !hostname.is_empty() {
                         obj.insert("hostname".to_string(), serde_json::json!(hostname));
                     }
@@ -8156,8 +8127,6 @@ pub fn enrich_pbs_snapshots(snapshots: serde_json::Value) -> serde_json::Value {
                         obj.insert("specs".to_string(), serde_json::json!(specs));
                     }
                 }
-            }
-        }
         s
     }).collect();
 
@@ -8482,11 +8451,10 @@ fn fix_pbs_snapshot_timestamp(snapshot: &str) -> String {
         return snapshot.to_string();
     }
     // Try to parse as Unix epoch
-    if let Ok(epoch) = timestamp_part.parse::<i64>() {
-        if let Some(dt) = chrono::DateTime::from_timestamp(epoch, 0) {
+    if let Ok(epoch) = timestamp_part.parse::<i64>()
+        && let Some(dt) = chrono::DateTime::from_timestamp(epoch, 0) {
             return format!("{}/{}/{}", parts[0], parts[1], dt.format("%Y-%m-%dT%H:%M:%SZ"));
         }
-    }
     snapshot.to_string()
 }
 
@@ -8660,11 +8628,10 @@ fn resolve_pbs_file_level(explicitly_set: bool, requested: bool, saved: bool) ->
 /// PBS configuration — stored in /etc/wolfstack/pbs/config.json
 pub fn load_pbs_config() -> BackupStorage {
     let path = "/etc/wolfstack/pbs/config.json";
-    if let Ok(content) = fs::read_to_string(path) {
-        if let Ok(storage) = serde_json::from_str::<BackupStorage>(&content) {
+    if let Ok(content) = fs::read_to_string(path)
+        && let Ok(storage) = serde_json::from_str::<BackupStorage>(&content) {
             return storage;
         }
-    }
     BackupStorage {
         storage_type: StorageType::Pbs,
         ..BackupStorage::default()
@@ -8893,11 +8860,10 @@ fn scrub_storage_secrets(storage: &mut BackupStorage) -> bool {
     let mut after = before.clone();
     if let serde_json::Value::Object(map) = &mut after {
         for (key, val) in map.iter_mut() {
-            if crate::secrets::is_secret_field(key) {
-                if let serde_json::Value::String(s) = val {
+            if crate::secrets::is_secret_field(key)
+                && let serde_json::Value::String(s) = val {
                     s.clear();
                 }
-            }
         }
     }
     if after == before { return false; }
@@ -9317,14 +9283,12 @@ fn scrub_value_for_host(value: &mut serde_json::Value, host: &str) -> bool {
                     .unwrap_or(false));
             if references {
                 for (key, val) in map.iter_mut() {
-                    if crate::secrets::is_secret_field(key) {
-                        if let serde_json::Value::String(s) = val {
-                            if !s.is_empty() {
+                    if crate::secrets::is_secret_field(key)
+                        && let serde_json::Value::String(s) = val
+                            && !s.is_empty() {
                                 s.clear();
                                 changed = true;
                             }
-                        }
-                    }
                 }
             }
             for (_k, val) in map.iter_mut() {

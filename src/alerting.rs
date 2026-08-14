@@ -1372,7 +1372,7 @@ mod tests {
             AlertCategory::Lifecycle,
         ] {
             assert!(!cat.as_str().is_empty());
-            assert_eq!(cat.as_str().chars().next().unwrap().is_lowercase(), true);
+            assert!(cat.as_str().chars().next().unwrap().is_lowercase());
         }
     }
 

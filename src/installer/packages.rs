@@ -425,9 +425,9 @@ pub fn install(logical: &str) -> Result<InstallReport, String> {
     // manually if needed.
     let service_started = mapping.service_unit.map(|unit| {
         let _ = Command::new("systemctl").args(["enable", unit]).status();
-        let started = Command::new("systemctl").args(["start", unit]).status()
-            .map(|s| s.success()).unwrap_or(false);
-        started
+        
+        Command::new("systemctl").args(["start", unit]).status()
+            .map(|s| s.success()).unwrap_or(false)
     });
 
     Ok(InstallReport {

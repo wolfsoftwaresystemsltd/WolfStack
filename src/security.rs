@@ -379,17 +379,15 @@ fn scan_committed_default_secrets(out: &mut Vec<DependencyCheck>) {
 /// finding even when the main /etc/ssh/sshd_config still says `yes` (e.g.
 /// Proxmox re-asserting it) — the drop-in wins in the effective config.
 pub fn sshd_effective(key: &str) -> Option<String> {
-    if let Ok(out) = std::process::Command::new("sshd").arg("-T").output() {
-        if out.status.success() {
+    if let Ok(out) = std::process::Command::new("sshd").arg("-T").output()
+        && out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
             for line in text.lines() {
                 let mut parts = line.split_whitespace();
-                if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                    if k.eq_ignore_ascii_case(key) { return Some(v.to_ascii_lowercase()); }
-                }
+                if let (Some(k), Some(v)) = (parts.next(), parts.next())
+                    && k.eq_ignore_ascii_case(key) { return Some(v.to_ascii_lowercase()); }
             }
         }
-    }
     // Fallback: raw file, first match (Includes are NOT expanded here — that's
     // exactly why sshd -T is preferred; this only runs if sshd -T is missing).
     let text = std::fs::read_to_string("/etc/ssh/sshd_config").ok()?;
@@ -399,9 +397,8 @@ pub fn sshd_effective(key: &str) -> Option<String> {
         if line.starts_with('#') || line.is_empty() { continue; }
         let lower = line.to_ascii_lowercase();
         let mut parts = lower.split_whitespace();
-        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-            if k == want { return Some(v.to_string()); }
-        }
+        if let (Some(k), Some(v)) = (parts.next(), parts.next())
+            && k == want { return Some(v.to_string()); }
     }
     None
 }
@@ -667,9 +664,9 @@ fn scan_control_mail_delivery(out: &mut Vec<DependencyCheck>) {
         let run_daily = parse_shell_assignment(&conf, "RUN_DAILY");
         let daily_disabled = matches!(run_daily.as_deref(), Some("false"));
         let mailto = parse_shell_assignment(&conf, "MAILTO");
-        if !daily_disabled {
-            if let Some(addr) = actionable_value(&mailto) {
-                if !binary_on_path("mail") && !binary_on_path("mailx") {
+        if !daily_disabled
+            && let Some(addr) = actionable_value(&mailto)
+                && !binary_on_path("mail") && !binary_on_path("mailx") {
                     out.push(critical(
                         "Security alerts undeliverable: chkrootkit has no mail command",
                         &format!(
@@ -688,8 +685,6 @@ fn scan_control_mail_delivery(out: &mut Vec<DependencyCheck>) {
                              echo test | mail -s \"chkrootkit mail path test\" root".into()),
                     ));
                 }
-            }
-        }
     }
 
     // ── rkhunter ──
@@ -701,9 +696,9 @@ fn scan_control_mail_delivery(out: &mut Vec<DependencyCheck>) {
                 .map(|v| v.starts_with(['y', 'Y', 't', 'T']))
                 .unwrap_or(false);
             let report = parse_shell_assignment(&defaults, "REPORT_EMAIL");
-            if cron_on {
-                if let Some(addr) = actionable_value(&report) {
-                    if !Path::new("/usr/sbin/sendmail").exists() && !binary_on_path("sendmail") {
+            if cron_on
+                && let Some(addr) = actionable_value(&report)
+                    && !Path::new("/usr/sbin/sendmail").exists() && !binary_on_path("sendmail") {
                         out.push(critical(
                             "Security alerts undeliverable: rkhunter has no sendmail",
                             &format!(
@@ -716,8 +711,6 @@ fn scan_control_mail_delivery(out: &mut Vec<DependencyCheck>) {
                                   a test message.".into()),
                         ));
                     }
-                }
-            }
         }
         if let Ok(conf) = std::fs::read_to_string("/etc/rkhunter.conf") {
             let warn_addr = parse_shell_assignment(&conf, "MAIL-ON-WARNING");
@@ -763,8 +756,8 @@ fn scan_control_mail_delivery(out: &mut Vec<DependencyCheck>) {
             .and_then(|t| parse_shell_assignment(&t, "MAILTO"))
             .unwrap_or_else(|| "root".to_string());
         let mailto_opt = Some(mailto);
-        if let Some(addr) = actionable_value(&mailto_opt) {
-            if !binary_on_path("s-nail") && !binary_on_path("mail") {
+        if let Some(addr) = actionable_value(&mailto_opt)
+            && !binary_on_path("s-nail") && !binary_on_path("mail") {
                 out.push(critical(
                     "Security alerts undeliverable: AIDE has no mail command",
                     &format!(
@@ -777,7 +770,6 @@ fn scan_control_mail_delivery(out: &mut Vec<DependencyCheck>) {
                           `systemctl start dailyaidecheck.service`.".into()),
                 ));
             }
-        }
     }
 }
 
@@ -1224,7 +1216,7 @@ fn scan_ip_conflicts(out: &mut Vec<DependencyCheck>) {
                 &format!(
                     "Containers sharing the same MAC on the same bridge will cause ARP confusion — packets go to the wrong container, connections drop randomly, and both containers appear to flicker on/off.\n\nContainers: {}",
                     names),
-                Some(format!("Open each container's Settings → Network tab and generate a unique MAC for one of them (🎲 button). Then restart both containers.")),
+                Some("Open each container's Settings → Network tab and generate a unique MAC for one of them (🎲 button). Then restart both containers.".to_string()),
             ));
         } else {
             out.push(critical(
@@ -1232,7 +1224,7 @@ fn scan_ip_conflicts(out: &mut Vec<DependencyCheck>) {
                 &format!(
                     "Multiple containers configured with the same IP address. Only one will actually hold the address at a time — the other silently fails to communicate, causing mysterious connectivity issues.\n\nContainers: {}",
                     names),
-                Some(format!("Open each container's Settings → Network tab and assign unique IPs. If using DHCP, remove the static IP from one of them.")),
+                Some("Open each container's Settings → Network tab and assign unique IPs. If using DHCP, remove the static IP from one of them.".to_string()),
             ));
         }
     }
@@ -1246,7 +1238,7 @@ fn scan_ip_conflicts(out: &mut Vec<DependencyCheck>) {
             &format!(
                 "Multiple containers assigned the same WolfNet overlay IP. WolfNet routes packets by IP — two containers on the same address means traffic goes to whichever one ARP'd last, and the other is unreachable.\n\nContainers: {}",
                 names),
-            Some(format!("Open each container's Settings → Network → WolfNet and assign a unique IP. Use 🔍 Next Available to find a free one.")),
+            Some("Open each container's Settings → Network → WolfNet and assign a unique IP. Use 🔍 Next Available to find a free one.".to_string()),
         ));
     }
 }

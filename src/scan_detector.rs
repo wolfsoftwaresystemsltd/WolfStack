@@ -666,13 +666,11 @@ fn build_inode_pid_map() -> HashMap<u64, i32> {
         for fd in fds.flatten() {
             let target = match std::fs::read_link(fd.path()) { Ok(t) => t, Err(_) => continue };
             let s = target.to_string_lossy();
-            if let Some(rest) = s.strip_prefix("socket:[") {
-                if let Some(end) = rest.find(']') {
-                    if let Ok(inode) = rest[..end].parse::<u64>() {
+            if let Some(rest) = s.strip_prefix("socket:[")
+                && let Some(end) = rest.find(']')
+                    && let Ok(inode) = rest[..end].parse::<u64>() {
                         map.insert(inode, pid);
                     }
-                }
-            }
         }
     }
     map
@@ -710,11 +708,9 @@ fn sample_raw_socket_pids(inode_to_pid: &HashMap<u64, i32>) -> HashSet<i32> {
     if let Ok(content) = std::fs::read_to_string("/proc/net/packet") {
         for (i, line) in content.lines().enumerate() {
             if i == 0 { continue; } // header
-            if let Some(inode_str) = line.split_whitespace().last() {
-                if let Ok(inode) = inode_str.parse::<u64>() {
-                    if let Some(&pid) = inode_to_pid.get(&inode) { pids.insert(pid); }
-                }
-            }
+            if let Some(inode_str) = line.split_whitespace().last()
+                && let Ok(inode) = inode_str.parse::<u64>()
+                    && let Some(&pid) = inode_to_pid.get(&inode) { pids.insert(pid); }
         }
     }
     // /proc/net/raw[6] — SOCK_RAW IP sockets. Same column layout as
@@ -725,9 +721,8 @@ fn sample_raw_socket_pids(inode_to_pid: &HashMap<u64, i32>) -> HashSet<i32> {
                 if i == 0 { continue; }
                 let cols: Vec<&str> = line.split_whitespace().collect();
                 if cols.len() < 10 { continue; }
-                if let Ok(inode) = cols[9].parse::<u64>() {
-                    if let Some(&pid) = inode_to_pid.get(&inode) { pids.insert(pid); }
-                }
+                if let Ok(inode) = cols[9].parse::<u64>()
+                    && let Some(&pid) = inode_to_pid.get(&inode) { pids.insert(pid); }
             }
         }
     }

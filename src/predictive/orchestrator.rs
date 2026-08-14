@@ -447,11 +447,10 @@ pub async fn tick(
             "predictive tick: refreshed {} standing proposal(s)", upserted,
         );
     }
-    if upserted > 0 || resolved > 0 {
-        if let Err(e) = s.save() {
+    if (upserted > 0 || resolved > 0)
+        && let Err(e) = s.save() {
             tracing::warn!("predictive: failed to save proposals: {}", e);
         }
-    }
 
     // 7. Notification dispatch — first appearance only. Compares
     //    the post-upsert state vs the pre-tick snapshot so a

@@ -145,12 +145,11 @@ fn persist_wolfnet_etc() {
                             continue;
                         }
                         let dest = Path::new(WOLFNET_APPDATA).join(ent.file_name());
-                        if !dest.exists() {
-                            if let Err(e) = std::fs::copy(&src, &dest) {
+                        if !dest.exists()
+                            && let Err(e) = std::fs::copy(&src, &dest) {
                                 warn!("unraid wolfnet: migrating {:?}: {}", ent.file_name(), e);
                                 migration_clean = false;
                             }
-                        }
                     }
                 }
                 Err(e) => {
@@ -309,11 +308,10 @@ fn wolfnet_running_externally() -> Option<bool> {
         let name = ent.file_name();
         let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
         // A process can exit mid-scan; a missing comm is not an error.
-        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-            if comm.trim() == "wolfnet" {
+        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid))
+            && comm.trim() == "wolfnet" {
                 return Some(true);
             }
-        }
     }
     Some(false)
 }

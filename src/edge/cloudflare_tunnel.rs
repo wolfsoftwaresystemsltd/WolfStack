@@ -61,6 +61,7 @@ impl CloudflareTunnelCreds {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Tunnel {
     pub id: String,
     pub name: String,
@@ -81,11 +82,6 @@ struct TunnelEnvelope {
     errors: Vec<CfError>,
     #[serde(default)]
     result: Tunnel,
-}
-impl Default for Tunnel {
-    fn default() -> Self {
-        Self { id: String::new(), name: String::new(), status: String::new(), token: String::new() }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

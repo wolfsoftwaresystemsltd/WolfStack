@@ -173,9 +173,8 @@ pub fn analyze(
                 // run still hours away) — don't alarm (wabil 2026-06-22). Once a
                 // whole interval has elapsed with still no run, it IS the
                 // pre-disaster condition this analyzer exists to catch.
-                if let Some(age) = fact.age_hours {
-                    if age < fact.interval_hours { continue; }
-                }
+                if let Some(age) = fact.age_hours
+                    && age < fact.interval_hours { continue; }
                 (Severity::High, HIGH_MULT)
             }
         };

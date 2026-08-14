@@ -42,7 +42,7 @@ pub struct FeedProvider {
 
 /// Enumerate all known providers. The order here drives the UI rendering.
 pub fn all_providers() -> &'static [FeedProvider] {
-    &PROVIDERS
+    PROVIDERS
 }
 
 const PROVIDERS: &[FeedProvider] = &[

@@ -93,11 +93,10 @@ pub struct UsbDevice {
 impl UsbDevice {
     /// Stable identifier used for conflict detection across VMs.
     pub fn match_key(&self) -> String {
-        if let Some(ref hb) = self.host_bus {
-            if !hb.is_empty() {
+        if let Some(ref hb) = self.host_bus
+            && !hb.is_empty() {
                 return format!("usb-bus:{}", hb);
             }
-        }
         format!("usb:{}:{}", self.vendor_id.to_lowercase(), self.product_id.to_lowercase())
     }
 }
@@ -554,7 +553,7 @@ fn vnc_firewall_reap_stale(name: &str, keep_port: u16) {
             let port = line.split_whitespace()
                 .skip_while(|t| *t != "--dport").nth(1)
                 .and_then(|p| p.parse::<u16>().ok());
-            if let Some(p) = port { if p != keep_port { vnc_firewall_close(p, name); } }
+            if let Some(p) = port && p != keep_port { vnc_firewall_close(p, name); }
         }
     }
 }
@@ -780,15 +779,14 @@ fn clone_vm_native_impl(src: &VmConfig, base_dir: &Path, new_name: &str) -> Resu
             "destination disk {} already exists — refusing to overwrite",
             dest_disk.display()));
     }
-    if src_disk.exists() {
-        if let Err(e) = fs::copy(&src_disk, &dest_disk) {
+    if src_disk.exists()
+        && let Err(e) = fs::copy(&src_disk, &dest_disk) {
             // fs::copy on Linux can leave a partial dest file when it
             // fails mid-write (disk full, I/O error). Remove it so we
             // don't leak corrupt qcow2 files into the VM directory.
             let _ = fs::remove_file(&dest_disk);
             return Err(format!("copy OS disk: {}", e));
         }
-    }
 
     // Copy extra disks. Roll back the OS-disk copy AND every extra
     // we've already placed in this loop if anything fails — both
@@ -991,17 +989,17 @@ impl VmManager {
                         if cline.starts_with("cores:") {
                             cpus = cline.split(':').nth(1).unwrap_or("1").trim().parse().unwrap_or(1);
                         } else if cline.starts_with("description:") {
-                            notes = cline.splitn(2, ':').nth(1).map(|s| containers::pve_decode_description(s.trim())).unwrap_or_default();
+                            notes = cline.split_once(':').map(|x| x.1).map(|s| containers::pve_decode_description(s.trim())).unwrap_or_default();
                         } else if cline.starts_with("args:") {
                             // `args:` carries the operator's extra raw KVM args (set via `qm set --args`).
-                            extra_qemu_args = cline.splitn(2, ':').nth(1).map(|s| s.trim().to_string()).unwrap_or_default();
+                            extra_qemu_args = cline.split_once(':').map(|x| x.1).map(|s| s.trim().to_string()).unwrap_or_default();
                         } else if cline.starts_with("memory:") {
                             memory_mb = cline.split(':').nth(1).unwrap_or("0").trim().parse().unwrap_or(mem_mb);
                         } else if cline.starts_with("onboot:") {
                             auto_start = cline.split(':').nth(1).unwrap_or("0").trim() == "1";
                         } else if cline.starts_with("net0:") {
                             // Extract MAC + bridge from net0: virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0
-                            if let Some(val) = cline.splitn(2, ':').nth(1) {
+                            if let Some(val) = cline.split_once(':').map(|x| x.1) {
                                 for part in val.split(',') {
                                     let part = part.trim();
                                     if part.starts_with("virtio=") || part.starts_with("e1000=") || part.starts_with("rtl8139=") {
@@ -1025,7 +1023,7 @@ impl VmManager {
                             }
                         } else if (cline.starts_with("ide2:") || cline.starts_with("cdrom:")) && cline.contains("media=cdrom") {
                             // Extract ISO path
-                            if let Some(val) = cline.splitn(2, ':').nth(1) {
+                            if let Some(val) = cline.split_once(':').map(|x| x.1) {
                                 let iso = val.split(',').next().unwrap_or("").trim().to_string();
                                 if !iso.is_empty() {
                                     iso_path = Some(iso);
@@ -1033,7 +1031,7 @@ impl VmManager {
                             }
                         } else if cline.starts_with("scsi0:") || cline.starts_with("virtio0:") || cline.starts_with("ide0:") || cline.starts_with("sata0:") {
                             // Extract storage and disk size from primary disk
-                            if let Some(val) = cline.splitn(2, ':').nth(1) {
+                            if let Some(val) = cline.split_once(':').map(|x| x.1) {
                                 // e.g. "local-lvm:vm-100-disk-0,size=32G"
                                 let disk_spec = val.trim();
                                 if let Some(store) = disk_spec.split(':').next() {
@@ -1486,8 +1484,8 @@ impl VmManager {
         // net0 stays on vmbr0 (with whatever VLAN tag the user wants),
         // net1 lives on its own dedicated bridge with no VLAN. The two
         // NICs never share a broadcast domain, so VLAN + WolfNet coexist.
-        if mode == "wolfnet" {
-            if let Some(ref wip) = config.wolfnet_ip {
+        if mode == "wolfnet"
+            && let Some(ref wip) = config.wolfnet_ip {
                 self.ensure_dnsmasq_installed();
                 let bridge = Self::wn_bridge_name(&vmid.to_string());
                 if let Err(e) = self.setup_wolfnet_bridge(&bridge, wip) {
@@ -1499,11 +1497,10 @@ impl VmManager {
                 // hardcoded-virtio NIC without virtio drivers (Gary 2026-06-21).
                 args.push(format!("{},bridge={}", net0_model, bridge));
             }
-        }
 
         // Boot media (ISO as CD-ROM, .img not supported as USB on Proxmox)
-        if let Some(ref iso) = config.iso_path {
-            if !iso.is_empty() {
+        if let Some(ref iso) = config.iso_path
+            && !iso.is_empty() {
                 let lower = iso.to_lowercase();
                 if lower.ends_with(".img") || lower.ends_with(".raw") {
                     return Err("Proxmox does not support booting from .img files directly. Use 'Import Image' to import it as the OS disk instead.".to_string());
@@ -1523,17 +1520,15 @@ impl VmManager {
                 // falls back to the default here.
                 args.push(pve_boot_order_arg(&config.boot_order));
             }
-        }
 
         // VirtIO-drivers ISO → ide3 (Windows installs whose OS disk is on the
         // virtio bus need these to see the disk during setup). Read back as
         // drivers_iso so the editor round-trips it.
-        if let Some(ref drv) = config.drivers_iso {
-            if !drv.trim().is_empty() {
+        if let Some(ref drv) = config.drivers_iso
+            && !drv.trim().is_empty() {
                 args.push("--ide3".to_string());
                 args.push(format!("{},media=cdrom", drv.trim()));
             }
-        }
 
         // BIOS: OVMF (UEFI) needs an efidisk0 NVRAM store on the same storage
         // as the OS disk; SeaBIOS is PVE's default and needs no flag.
@@ -1600,8 +1595,8 @@ impl VmManager {
         }
 
         // Import disk image if provided (convert and import via qm importdisk)
-        if let Some(ref import_src) = config.import_image {
-            if !import_src.is_empty() {
+        if let Some(ref import_src) = config.import_image
+            && !import_src.is_empty() {
                 if !std::path::Path::new(import_src).exists() {
                     return Err(format!("Import image not found: {}", import_src));
                 }
@@ -1650,14 +1645,12 @@ impl VmManager {
                     let _ = std::fs::remove_file(&import_path);
                 }
             }
-        }
 
         // Apply USB/PCI passthrough via qm set if the user configured any
-        if !config.usb_devices.is_empty() || !config.pci_devices.is_empty() {
-            if let Err(e) = super::passthrough::apply_proxmox_passthrough(vmid, config) {
+        if (!config.usb_devices.is_empty() || !config.pci_devices.is_empty())
+            && let Err(e) = super::passthrough::apply_proxmox_passthrough(vmid, config) {
                 warn!("Failed to apply passthrough devices to Proxmox VM {}: {}", vmid, e);
             }
-        }
 
         // Save a WolfStack config for tracking. Propagate errors —
         // pre-v18.7.30 we used `let _ =` which meant a failed write
@@ -1832,8 +1825,8 @@ impl VmManager {
 
         // Standalone: filesystem-based storage
         let mut locations = Vec::new();
-        if let Ok(output) = Command::new("df").args(["-BG", "--output=target,size,avail,fstype"]).output() {
-            if let Ok(text) = String::from_utf8(output.stdout) {
+        if let Ok(output) = Command::new("df").args(["-BG", "--output=target,size,avail,fstype"]).output()
+            && let Ok(text) = String::from_utf8(output.stdout) {
                 for line in text.lines().skip(1) {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 4 {
@@ -1856,7 +1849,6 @@ impl VmManager {
                     }
                 }
             }
-        }
         locations
     }
 
@@ -1893,8 +1885,8 @@ impl VmManager {
             let cores_str;
             let mem_str;
             let onboot_str;
-            if let Some(c) = cpus { if c > 0 { cores_str = c.to_string(); args.extend(["--cores", &cores_str]); } }
-            if let Some(m) = memory_mb { if m >= 256 { mem_str = m.to_string(); args.extend(["--memory", &mem_str]); } }
+            if let Some(c) = cpus && c > 0 { cores_str = c.to_string(); args.extend(["--cores", &cores_str]); }
+            if let Some(m) = memory_mb && m >= 256 { mem_str = m.to_string(); args.extend(["--memory", &mem_str]); }
             if let Some(a) = auto_start { onboot_str = if a { "1".to_string() } else { "0".to_string() }; args.extend(["--onboot", &onboot_str]); }
             // Notes / description: a separate `qm set` so an empty value can
             // use `--delete description` (which actually drops the stored line),
@@ -2159,8 +2151,8 @@ impl VmManager {
                     // failure (e.g., permissions) needs to surface so the
                     // UI doesn't report a false success.
                     let out = Command::new("qm").args(["set", &vmid_str, "--delete", "net1"]).output();
-                    if let Ok(o) = &out {
-                        if !o.status.success() {
+                    if let Ok(o) = &out
+                        && !o.status.success() {
                             let stderr = String::from_utf8_lossy(&o.stderr);
                             let stderr_trim = stderr.trim();
                             // PVE phrases the "net1 not in config" rejection
@@ -2177,7 +2169,6 @@ impl VmManager {
                                 ));
                             }
                         }
-                    }
                     let bridge = Self::wn_bridge_name(&vmid_str);
                     // Proxmox never persists the WolfNet IP (read-back forces it
                     // to None), so the supplied IP is None on removal. Recover it
@@ -2214,8 +2205,8 @@ impl VmManager {
         // changes). Pre-libvirt native VMs fall through to the JSON config
         // update path below.
         if containers::is_libvirt() && self.virsh_has_domain(name) {
-            if let Some(c) = cpus {
-                if c > 0 {
+            if let Some(c) = cpus
+                && c > 0 {
                     let cs = c.to_string();
                     let out = Command::new("virsh").args(["setvcpus", name, &cs, "--config", "--maximum"]).output()
                         .map_err(|e| format!("virsh setvcpus failed: {}", e))?;
@@ -2225,9 +2216,8 @@ impl VmManager {
                     }
                     let _ = Command::new("virsh").args(["setvcpus", name, &cs, "--config"]).output();
                 }
-            }
-            if let Some(m) = memory_mb {
-                if m >= 256 {
+            if let Some(m) = memory_mb
+                && m >= 256 {
                     let kb = format!("{}k", (m as u64) * 1024);
                     let out = Command::new("virsh").args(["setmaxmem", name, &kb, "--config"]).output()
                         .map_err(|e| format!("virsh setmaxmem failed: {}", e))?;
@@ -2237,7 +2227,6 @@ impl VmManager {
                     }
                     let _ = Command::new("virsh").args(["setmem", name, &kb, "--config"]).output();
                 }
-            }
             if let Some(a) = auto_start {
                 let val = if a { "--enable" } else { "--disable" };
                 let _ = Command::new("virsh").args(["autostart", name, val]).output();
@@ -2442,8 +2431,8 @@ impl VmManager {
         let old_network_mode = config.network_mode.clone();
         let old_bridge = config.bridge.clone();
 
-        if let Some(c) = cpus { if c > 0 { config.cpus = c; } }
-        if let Some(m) = memory_mb { if m >= 256 { config.memory_mb = m; } }
+        if let Some(c) = cpus && c > 0 { config.cpus = c; }
+        if let Some(m) = memory_mb && m >= 256 { config.memory_mb = m; }
         if let Some(a) = auto_start { config.auto_start = a; }
         
         // ISO: accept empty string to clear, or a path to set
@@ -2469,12 +2458,10 @@ impl VmManager {
         }
 
         // Hardware settings
-        if let Some(ref bus) = os_disk_bus {
-            if !bus.is_empty() { config.os_disk_bus = bus.clone(); }
-        }
-        if let Some(ref model) = net_model {
-            if !model.is_empty() { config.net_model = model.clone(); }
-        }
+        if let Some(ref bus) = os_disk_bus
+            && !bus.is_empty() { config.os_disk_bus = bus.clone(); }
+        if let Some(ref model) = net_model
+            && !model.is_empty() { config.net_model = model.clone(); }
         if let Some(ref drv) = drivers_iso {
             if drv.is_empty() {
                 config.drivers_iso = None;
@@ -2482,9 +2469,8 @@ impl VmManager {
                 config.drivers_iso = Some(drv.clone());
             }
         }
-        if let Some(ref bt) = bios_type {
-            if !bt.is_empty() { config.bios_type = bt.clone(); }
-        }
+        if let Some(ref bt) = bios_type
+            && !bt.is_empty() { config.bios_type = bt.clone(); }
         // Boot order persists to the native VM's JSON config and is applied on
         // the next start (start_vm rebuilds the qemu boot args from it).
         if let Some(bo) = boot_order {
@@ -2523,8 +2509,8 @@ impl VmManager {
         // patchable so the API caller can update just one without nulling
         // sibling fields. Empty string clears optional Strings; mode "" is
         // ignored (the editor never sends an empty mode).
-        if let Some(ref nm) = network_mode {
-            if !nm.is_empty() {
+        if let Some(ref nm) = network_mode
+            && !nm.is_empty() {
                 config.network_mode = Some(nm.clone());
                 // Switching off bridge mode wipes the bridge fields so a
                 // stale bridge name from a previous mode doesn't ride along
@@ -2536,7 +2522,6 @@ impl VmManager {
                     config.bridge_gateway = None;
                 }
             }
-        }
         if let Some(ref br) = bridge {
             config.bridge = if br.is_empty() { None } else { Some(br.clone()) };
         }
@@ -2594,18 +2579,17 @@ impl VmManager {
                         "/usr/share/qemu/OVMF_VARS.fd",
                         "/usr/share/OVMF/OVMF_VARS.pure-efi.fd",
                     ];
-                    if let Some(src) = vars_sources.iter().find(|p| std::path::Path::new(p).exists()) {
-                        if fs::copy(src, &vars_path).is_ok() {
+                    if let Some(src) = vars_sources.iter().find(|p| std::path::Path::new(p).exists())
+                        && fs::copy(src, &vars_path).is_ok() {
                             info!("Reset OVMF EFI vars for VM '{}' due to network topology change", name);
                         }
-                    }
                 }
             }
         }
 
         // Disk resize (grow only)
-        if let Some(new_size) = disk_size_gb {
-            if new_size > config.disk_size_gb {
+        if let Some(new_size) = disk_size_gb
+            && new_size > config.disk_size_gb {
                 let disk_path = self.vm_os_disk_path(&config);
                 let output = Command::new("qemu-img")
                     .args(["resize", &disk_path.to_string_lossy(), &format!("{}G", new_size)])
@@ -2617,7 +2601,6 @@ impl VmManager {
                 config.disk_size_gb = new_size;
 
             }
-        }
 
         let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
         fs::write(&config_path, json).map_err(|e| e.to_string())?;
@@ -2669,8 +2652,8 @@ impl VmManager {
         // black-holed at the now-unused bridge entry. setup_wolfnet_bridge
         // will install the route for the new IP. Also strip the matching
         // NAT MASQUERADE rule so it doesn't accumulate one per re-IP.
-        if let (Some(old), Some(new)) = (old_ip, config.wolfnet_ip.as_deref()) {
-            if old != new {
+        if let (Some(old), Some(new)) = (old_ip, config.wolfnet_ip.as_deref())
+            && old != new {
                 let _ = Command::new("ip")
                     .args(["route", "del", &format!("{}/32", old)])
                     .output();
@@ -2682,7 +2665,6 @@ impl VmManager {
                                "!", "-d", &wn_subnet, "-j", "MASQUERADE"]).output();
                 }
             }
-        }
 
         // Proxmox path
         if containers::is_proxmox() {
@@ -2937,13 +2919,12 @@ impl VmManager {
                 // password (set at create); open the firewall for the now-
                 // assigned (autoport) VNC port so external clients can reach it.
                 let (external, port) = self.libvirt_vnc_info(name);
-                if external {
-                    if let Some(p) = port {
+                if external
+                    && let Some(p) = port {
                         vnc_firewall_reap_stale(name, p);  // clear any orphan from a prior autoport
                         vnc_firewall_open(p, name);
                         info!("Opened libvirt VNC port {} for external clients (VM '{}')", p, name);
                     }
-                }
                 return Ok(());
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3046,9 +3027,7 @@ impl VmManager {
         // Check if KVM is available
         let kvm_available = std::path::Path::new("/dev/kvm").exists();
         write_log(&format!("KVM available: {}", kvm_available));
-        if !kvm_available {
-
-        }
+        
 
         let disk_path = self.vm_os_disk_path(&config);
         if !disk_path.exists() {
@@ -3314,14 +3293,13 @@ impl VmManager {
                         let _ = Command::new("ip").args(["link", "set", &tap, "down"]).output();
                         let _ = Command::new("ip").args(["tuntap", "del", "dev", &tap, "mode", "tap"]).output();
                         let mut ok = false;
-                        if let Ok(o) = Command::new("ip").args(["tuntap", "add", "dev", &tap, "mode", "tap"]).output() {
-                            if o.status.success() {
+                        if let Ok(o) = Command::new("ip").args(["tuntap", "add", "dev", &tap, "mode", "tap"]).output()
+                            && o.status.success() {
                                 let master_out = Command::new("ip").args(["link", "set", &tap, "master", &bridge]).output();
-                                if let Ok(ref mo) = master_out {
-                                    if !mo.status.success() {
+                                if let Ok(ref mo) = master_out
+                                    && !mo.status.success() {
                                         write_log(&format!("WARNING: bridge '{}' not found or cannot attach TAP — net0 may have no connectivity", bridge));
                                     }
-                                }
                                 let _ = Command::new("ip").args(["link", "set", &tap, "up"]).output();
                                 cmd.arg("-netdev").arg(format!("tap,id=net0,ifname={},script=no,downscript=no", tap))
                                    .arg("-device").arg(&nic_arg);
@@ -3329,7 +3307,6 @@ impl VmManager {
                                 ok = true;
                                 net0_attached = true;
                             }
-                        }
                         if !ok {
                             write_log(&format!("Net0 mode=bridge for '{}' failed — falling back to user-mode networking", bridge));
                         }
@@ -3373,21 +3350,19 @@ impl VmManager {
                 // Clean up any stale TAP
                 let _ = Command::new("ip").args(["link", "set", &tap, "down"]).output();
                 let _ = Command::new("ip").args(["tuntap", "del", "dev", &tap, "mode", "tap"]).output();
-                if let Ok(o) = Command::new("ip").args(["tuntap", "add", "dev", &tap, "mode", "tap"]).output() {
-                    if o.status.success() {
+                if let Ok(o) = Command::new("ip").args(["tuntap", "add", "dev", &tap, "mode", "tap"]).output()
+                    && o.status.success() {
                         let master_out = Command::new("ip").args(["link", "set", &tap, "master", &bridge]).output();
-                        if let Ok(ref mo) = master_out {
-                            if !mo.status.success() {
+                        if let Ok(ref mo) = master_out
+                            && !mo.status.success() {
                                 write_log(&format!("WARNING: bridge '{}' not found or cannot attach TAP — NIC {} may have no connectivity", bridge, net_id));
                             }
-                        }
                         let _ = Command::new("ip").args(["link", "set", &tap, "up"]).output();
                         cmd.arg("-netdev").arg(format!("tap,id={},ifname={},script=no,downscript=no", net_id, tap))
                            .arg("-device").arg(&dev_arg);
                         write_log(&format!("Extra NIC {}: {} on bridge {} (mac: {}, tap: {})", net_id, dev, bridge, mac, tap));
                         continue;
                     }
-                }
                 write_log(&format!("Extra NIC {}: bridge TAP failed for '{}', falling back to user-mode", net_id, bridge));
             }
             // Fallback: user-mode networking
@@ -3398,8 +3373,8 @@ impl VmManager {
 
         // Boot media: ISO (CD-ROM) or .img (USB drive)
         let mut has_boot_media = false;
-        if let Some(iso) = &config.iso_path {
-             if !iso.is_empty() {
+        if let Some(iso) = &config.iso_path
+             && !iso.is_empty() {
                  if !std::path::Path::new(iso).exists() {
                      let msg = format!("Boot media not found: {}", iso);
                      write_log(&msg);
@@ -3418,11 +3393,10 @@ impl VmManager {
                  }
                  has_boot_media = true;
              }
-        }
 
         // Secondary CD-ROM: VirtIO drivers (for Windows with virtio disk)
-        if let Some(ref drivers) = config.drivers_iso {
-            if !drivers.is_empty() {
+        if let Some(ref drivers) = config.drivers_iso
+            && !drivers.is_empty() {
                 if std::path::Path::new(drivers).exists() {
                     write_log(&format!("VirtIO drivers ISO: {}", drivers));
                     cmd.arg("-drive").arg(format!("file={},media=cdrom,index=1", drivers));
@@ -3430,7 +3404,6 @@ impl VmManager {
                     write_log(&format!("WARNING: Drivers ISO not found: {}", drivers));
                 }
             }
-        }
 
         // Boot order: always explicit so OVMF (UEFI) doesn't default to PXE.
         // Default (empty boot_order) keeps the historical behaviour — disk
@@ -3589,9 +3562,8 @@ impl VmManager {
             // stopped cleanly): the old runtime.json still holds its randomized
             // port, so close that rule before opening the new one. (The new
             // runtime.json with the new port is written just below.)
-            if let Some(old_port) = self.read_runtime_vnc_port(name) {
-                if old_port != vnc_port { vnc_firewall_close(old_port, name); }
-            }
+            if let Some(old_port) = self.read_runtime_vnc_port(name)
+                && old_port != vnc_port { vnc_firewall_close(old_port, name); }
             vnc_firewall_open(vnc_port, name);
             write_log(&format!("Opened VNC port {} to external clients (password-protected)", vnc_port));
         }
@@ -3841,12 +3813,11 @@ impl VmManager {
         }
 
         for vm in self.list_vms() {
-            if vm.auto_start && !vm.running {
+            if vm.auto_start && !vm.running
 
-                if let Err(e) = self.start_vm(&vm.name) {
+                && let Err(e) = self.start_vm(&vm.name) {
                     error!("Failed to autostart VM {}: {}", vm.name, e);
                 }
-            }
         }
     }
 
@@ -3955,15 +3926,13 @@ impl VmManager {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             // Lines look like "10.0.10.5/32 scope link" — take the /32 prefix.
-            if let Some(first) = line.split_whitespace().next() {
-                if let Some(ip) = first.strip_suffix("/32") {
-                    if ip.split('.').count() == 4
+            if let Some(first) = line.split_whitespace().next()
+                && let Some(ip) = first.strip_suffix("/32")
+                    && ip.split('.').count() == 4
                         && ip.split('.').all(|o| o.parse::<u8>().is_ok())
                     {
                         return Some(ip.to_string());
                     }
-                }
-            }
         }
         None
     }
@@ -4349,8 +4318,8 @@ impl VmManager {
 
         // Check if interface is already in a bridge — reuse it
         let master_link = format!("/sys/class/net/{}/master", iface);
-        if let Ok(target) = std::fs::read_link(&master_link) {
-            if let Some(bridge_name) = target.file_name().and_then(|n| n.to_str()) {
+        if let Ok(target) = std::fs::read_link(&master_link)
+            && let Some(bridge_name) = target.file_name().and_then(|n| n.to_str()) {
                 // Verify the master is actually a bridge (not a bond, etc.)
                 let bridge_check = format!("/sys/class/net/{}/bridge", bridge_name);
                 if Path::new(&bridge_check).exists() {
@@ -4381,7 +4350,6 @@ impl VmManager {
                 }
                 warn!("Passthrough: {} has master '{}' but it is not a bridge — creating new bridge", iface, bridge_name);
             }
-        }
 
         if containers::is_proxmox() {
             self.create_proxmox_passthrough_bridge(iface)
@@ -4571,12 +4539,11 @@ impl VmManager {
             "--autostart", "1",
         ]).output();
 
-        if let Ok(ref o) = pvesh_out {
-            if !o.status.success() {
+        if let Ok(ref o) = pvesh_out
+            && !o.status.success() {
                 warn!("pvesh create bridge failed: {} — creating with ip commands only",
                     String::from_utf8_lossy(&o.stderr).trim());
             }
-        }
 
         // Capture the host's current IP config BEFORE bridging
         let ip_config = Self::read_iface_ip_config(iface);
@@ -4618,8 +4585,8 @@ impl VmManager {
     /// Resolve the effective bridge for a NIC config — handles passthrough_interface
     fn resolve_nic_bridge(&self, nic: &NicConfig) -> Option<String> {
         // Passthrough takes priority over manual bridge
-        if let Some(ref pt_iface) = nic.passthrough_interface {
-            if !pt_iface.is_empty() {
+        if let Some(ref pt_iface) = nic.passthrough_interface
+            && !pt_iface.is_empty() {
                 match self.ensure_passthrough_bridge(pt_iface) {
                     Ok(bridge) => return Some(bridge),
                     Err(e) => {
@@ -4627,7 +4594,6 @@ impl VmManager {
                     }
                 }
             }
-        }
         // Fall back to manual bridge
         nic.bridge.clone().filter(|b| !b.is_empty())
     }
@@ -4665,17 +4631,15 @@ impl VmManager {
                 if path.extension().and_then(|e| e.to_str()) != Some("json") {
                     continue;
                 }
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(vm) = serde_json::from_str::<VmConfig>(&content) {
+                if let Ok(content) = fs::read_to_string(&path)
+                    && let Ok(vm) = serde_json::from_str::<VmConfig>(&content) {
                         for nic in &vm.extra_nics {
-                            if let Some(ref pt) = nic.passthrough_interface {
-                                if !pt.is_empty() {
+                            if let Some(ref pt) = nic.passthrough_interface
+                                && !pt.is_empty() {
                                     ifaces.insert(pt.clone());
                                 }
-                            }
                         }
                     }
-                }
             }
         }
 
@@ -4803,7 +4767,7 @@ impl VmManager {
             // (vncdisplay needs it up) so we can close the firewall hole after.
             let (external, vnc_port) = self.libvirt_vnc_info(name);
             let close_fw = || {
-                if external { if let Some(p) = vnc_port { vnc_firewall_close(p, name); } }
+                if external && let Some(p) = vnc_port { vnc_firewall_close(p, name); }
             };
             let (action, label) = if force { ("destroy", "virsh destroy") } else { ("shutdown", "virsh shutdown") };
             let output = Command::new("virsh").args([action, name]).output()
@@ -5301,11 +5265,10 @@ impl VmManager {
                 .arg("-f")
                 .arg(format!("{}.*-name {}", qemu_bin, name))
                 .output();
-            if let Ok(o) = output {
-                if o.status.success() {
+            if let Ok(o) = output
+                && o.status.success() {
                     return true;
                 }
-            }
         }
         false
     }
@@ -5346,9 +5309,8 @@ impl VmManager {
         if crate::containers::is_libvirt() {
             let xml = Command::new("virsh").args(["dumpxml", "--security-info", name]).output().ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())?;
-            if let Some(pw) = libvirt_xml_attr_in_block(&xml, "graphics", "passwd") {
-                if !pw.is_empty() { return Some(pw); }
-            }
+            if let Some(pw) = libvirt_xml_attr_in_block(&xml, "graphics", "passwd")
+                && !pw.is_empty() { return Some(pw); }
         }
         None
     }
@@ -5650,8 +5612,8 @@ impl VmManager {
         // NIC model, OS disk bus, ISOs, firmware — which the parse above reads
         // back directly; the sidecar only backfills the gaps libvirt can't
         // represent.
-        if let Ok(text) = fs::read_to_string(self.vm_config_path(name)) {
-            if let Ok(sidecar) = serde_json::from_str::<VmConfig>(&text) {
+        if let Ok(text) = fs::read_to_string(self.vm_config_path(name))
+            && let Ok(sidecar) = serde_json::from_str::<VmConfig>(&text) {
                 if config.wolfnet_ip.is_none() { config.wolfnet_ip = sidecar.wolfnet_ip; }
                 if config.extra_disks.is_empty() { config.extra_disks = sidecar.extra_disks; }
                 if config.extra_nics.is_empty() { config.extra_nics = sidecar.extra_nics; }
@@ -5665,7 +5627,6 @@ impl VmManager {
                 if config.bridge_ip.is_none() { config.bridge_ip = sidecar.bridge_ip; }
                 if config.bridge_gateway.is_none() { config.bridge_gateway = sidecar.bridge_gateway; }
             }
-        }
 
         Some(config)
     }
@@ -5842,8 +5803,8 @@ impl VmManager {
         // XML is authoritative for libvirt-owned hardware (NIC model, disk
         // bus, ISOs, firmware), so the sidecar only backfills WolfStack-only
         // fields libvirt can't carry.
-        if let Ok(text) = fs::read_to_string(self.vm_config_path(name)) {
-            if let Ok(sidecar) = serde_json::from_str::<VmConfig>(&text) {
+        if let Ok(text) = fs::read_to_string(self.vm_config_path(name))
+            && let Ok(sidecar) = serde_json::from_str::<VmConfig>(&text) {
                 if config.wolfnet_ip.is_none() { config.wolfnet_ip = sidecar.wolfnet_ip; }
                 if config.extra_disks.is_empty() { config.extra_disks = sidecar.extra_disks; }
                 if config.extra_nics.is_empty() { config.extra_nics = sidecar.extra_nics; }
@@ -5854,7 +5815,6 @@ impl VmManager {
                 if config.bridge_ip.is_none() { config.bridge_ip = sidecar.bridge_ip; }
                 if config.bridge_gateway.is_none() { config.bridge_gateway = sidecar.bridge_gateway; }
             }
-        }
 
         Some(config)
     }
@@ -5924,8 +5884,8 @@ impl VmManager {
         // via DHCP — same UX as the standalone QEMU path. dnsmasq is started
         // here (idempotent) and again at start_vm() time in case the host
         // rebooted or dnsmasq was killed.
-        if mode == "wolfnet" {
-            if let Some(ref wip) = config.wolfnet_ip {
+        if mode == "wolfnet"
+            && let Some(ref wip) = config.wolfnet_ip {
                 self.ensure_dnsmasq_installed();
                 let bridge = Self::wn_bridge_name(&config.name);
                 if let Err(e) = self.setup_wolfnet_bridge(&bridge, wip) {
@@ -5933,7 +5893,6 @@ impl VmManager {
                 }
                 args.extend(["--network".to_string(), format!("bridge={},model=virtio", bridge)]);
             }
-        }
 
         // Import image or ISO — one of these is required for virt-install
         if let Some(ref import) = config.import_image {
@@ -5988,12 +5947,11 @@ impl VmManager {
         // whose OS disk is on the virtio bus needs these drivers loaded
         // during setup to see the disk. Becomes cdrom slot 1 (the read-back
         // maps slot 0 → install ISO, slot 1 → drivers ISO).
-        if let Some(ref drv) = config.drivers_iso {
-            if !drv.trim().is_empty() {
+        if let Some(ref drv) = config.drivers_iso
+            && !drv.trim().is_empty() {
                 args.push("--disk".to_string());
                 args.push(format!("device=cdrom,path={}", drv.trim()));
             }
-        }
 
         // Extra disks — virt-install accepts multiple --disk flags. The
         // files are created by virt-install itself when size is given.
@@ -6014,11 +5972,10 @@ impl VmManager {
         }
 
         // Attach USB/PCI passthrough devices to the newly-created domain
-        if !config.usb_devices.is_empty() || !config.pci_devices.is_empty() {
-            if let Err(e) = super::passthrough::apply_libvirt_passthrough(&config.name, config) {
+        if (!config.usb_devices.is_empty() || !config.pci_devices.is_empty())
+            && let Err(e) = super::passthrough::apply_libvirt_passthrough(&config.name, config) {
                 warn!("Failed to attach passthrough devices to libvirt VM {}: {}", config.name, e);
             }
-        }
 
         // Operator notes / description → domain's <description> element. The
         // domain exists now, so `virsh desc --config` persists it (read back
@@ -6033,23 +5990,21 @@ impl VmManager {
 
         // Operator extra QEMU args → the domain's <qemu:commandline> block.
         // Best-effort like notes: a passthrough failure must not undo the VM.
-        if !config.extra_qemu_args.trim().is_empty() {
-            if let Err(e) = libvirt_set_qemu_commandline(&config.name, &config.extra_qemu_args) {
+        if !config.extra_qemu_args.trim().is_empty()
+            && let Err(e) = libvirt_set_qemu_commandline(&config.name, &config.extra_qemu_args) {
                 warn!("Setting <qemu:commandline> for VM '{}' failed: {}", config.name, e);
             }
-        }
 
         // virt-install auto-starts the domain; if the operator opted into
         // external VNC the graphics already listen on 0.0.0.0 with a password,
         // so open the firewall for the assigned VNC port now.
         if config.vnc_external {
             let (external, port) = self.libvirt_vnc_info(&config.name);
-            if external {
-                if let Some(p) = port {
+            if external
+                && let Some(p) = port {
                     vnc_firewall_reap_stale(&config.name, p);
                     vnc_firewall_open(p, &config.name);
                 }
-            }
         }
 
         Ok(())
@@ -6424,9 +6379,8 @@ pub fn migration_staging_root(explicit: Option<&str>) -> PathBuf {
         let p = p.trim();
         if !p.is_empty() { return PathBuf::from(p); }
     }
-    if let Ok(v) = std::env::var("TMPDIR") {
-        if !v.trim().is_empty() { return PathBuf::from(v); }
-    }
+    if let Ok(v) = std::env::var("TMPDIR")
+        && !v.trim().is_empty() { return PathBuf::from(v); }
     PathBuf::from("/tmp")
 }
 
@@ -6938,11 +6892,10 @@ pub fn import_vm_with_staging(
     staging_dir: Option<&str>,
 ) -> Result<String, String> {
     // Validate new_name to prevent path traversal
-    if let Some(n) = new_name {
-        if n.contains('/') || n.contains("..") || n.contains('\0') || n.is_empty() {
+    if let Some(n) = new_name
+        && (n.contains('/') || n.contains("..") || n.contains('\0') || n.is_empty()) {
             return Err("Invalid VM name: must not contain path separators".to_string());
         }
-    }
 
     let base = Path::new(VM_BASE);
     fs::create_dir_all(base)
@@ -7235,7 +7188,7 @@ pub fn import_vm_proxmox(
     // non-standard bridge layouts need a post-import fix via the PVE
     // UI. MAC gets regenerated automatically so the destination and
     // the still-running source can coexist.
-    let bridge = config.extra_nics.iter().next()
+    let bridge = config.extra_nics.first()
         .and_then(|n| n.bridge.clone())
         .unwrap_or_else(|| "vmbr0".to_string());
     let net_model = match config.net_model.as_str() {
@@ -7306,15 +7259,14 @@ pub fn import_vm_proxmox(
     let boot_out = Command::new("qm")
         .args(["set", &vmid.to_string(), "--boot", "order=scsi0"])
         .output();
-    if let Ok(o) = boot_out {
-        if !o.status.success() {
+    if let Ok(o) = boot_out
+        && !o.status.success() {
             warn!(
                 "import_vm_proxmox: vmid {} created but `qm set --boot order=scsi0` failed: {}. Fix via PVE UI → Hardware → Boot Order.",
                 vmid,
                 String::from_utf8_lossy(&o.stderr).trim()
             );
         }
-    }
 
     // Attach extras as scsi1..N.
     for (i, extra) in config.extra_disks.iter().enumerate() {
@@ -7409,8 +7361,8 @@ pub(crate) fn pve_import_and_attach_disk(
     // present.
     let mut disk_id: Option<String> = None;
     for line in stdout.lines().chain(stderr.lines()) {
-        if let Some(start) = line.find('\'') {
-            if let Some(end) = line[start + 1..].find('\'') {
+        if let Some(start) = line.find('\'')
+            && let Some(end) = line[start + 1..].find('\'') {
                 let inside = &line[start + 1..start + 1 + end];
                 // Must look like `<token>:vm-<digits>-disk-<digits>`
                 // — i.e. at least one colon AND the `vm-...-disk-`
@@ -7431,7 +7383,6 @@ pub(crate) fn pve_import_and_attach_disk(
                 disk_id = Some(candidate);
                 break;
             }
-        }
     }
     let disk_id = disk_id.ok_or_else(|| format!(
         "qm importdisk succeeded but we could not parse the new disk id from output: {}",
@@ -7517,18 +7468,16 @@ pub fn migrate_storage(
         if let Ok(o) = Command::new("pgrep")
             .args(["-f", &format!("{}.*-name {}", qemu_bin, name)])
             .output()
-        {
-            if o.status.success() {
+            && o.status.success() {
                 return Err(format!(
                     "VM '{}' has a live {} process — shutdown first",
                     name, qemu_bin
                 ));
             }
-        }
     }
     // Proxmox-managed VMs ask `qm` instead — same check, different OS.
-    if let Some(vmid) = config.vmid.filter(|_| containers::is_proxmox()) {
-        if let Ok(o) = Command::new("qm").args(["status", &vmid.to_string()]).output() {
+    if let Some(vmid) = config.vmid.filter(|_| containers::is_proxmox())
+        && let Ok(o) = Command::new("qm").args(["status", &vmid.to_string()]).output() {
             let s = String::from_utf8_lossy(&o.stdout).to_lowercase();
             if s.contains("status: running") {
                 return Err(format!(
@@ -7537,7 +7486,6 @@ pub fn migrate_storage(
                 ));
             }
         }
-    }
 
     // Proxmox-managed VMs: shell out to `qm move_disk`. PVE handles
     // the copy between storage pools (zfs send/recv, dd for LVM-thin,
@@ -7586,14 +7534,13 @@ pub fn migrate_storage(
             bytes_needed += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         }
     }
-    if let Some(avail) = available_bytes(target) {
-        if avail < bytes_needed {
+    if let Some(avail) = available_bytes(target)
+        && avail < bytes_needed {
             return Err(format!(
                 "target '{}' has {} bytes free, but migration needs {} bytes",
                 target, avail, bytes_needed
             ));
         }
-    }
 
     // Copy the OS disk.
     let mut copied: Vec<PathBuf> = Vec::new();
@@ -7664,12 +7611,11 @@ pub fn migrate_storage(
     // copy already succeeded and the config points at the new copy,
     // so a stale source file on disk isn't a correctness problem.
     if remove_source {
-        if source_os_disk.exists() {
-            if let Err(e) = fs::remove_file(&source_os_disk) {
+        if source_os_disk.exists()
+            && let Err(e) = fs::remove_file(&source_os_disk) {
                 warn!("migrate_storage: failed to remove source OS disk {}: {}",
                     source_os_disk.display(), e);
             }
-        }
         // For extras we need the OLD paths — the old disk list was
         // just replaced, so we walk the pre-replace list.
         // (Avoid re-reading config from disk — it's already updated.
@@ -7677,12 +7623,11 @@ pub fn migrate_storage(
         if let Ok(old_cfg) = serde_json::from_str::<VmConfig>(&content) {
             for disk in &old_cfg.extra_disks {
                 let p = disk.file_path();
-                if p.exists() {
-                    if let Err(e) = fs::remove_file(&p) {
+                if p.exists()
+                    && let Err(e) = fs::remove_file(&p) {
                         warn!("migrate_storage: failed to remove source extra disk {}: {}",
                             p.display(), e);
                     }
-                }
             }
         }
     }
@@ -7787,14 +7732,12 @@ pub fn total_disk_bytes(config: &VmConfig) -> u64 {
     } else {
         base.join(format!("{}.qcow2", config.name))
     };
-    if os_disk.exists() {
-        if let Ok(md) = fs::metadata(&os_disk) { total += md.len(); }
-    }
+    if os_disk.exists()
+        && let Ok(md) = fs::metadata(&os_disk) { total += md.len(); }
     for disk in &config.extra_disks {
         let p = disk.file_path();
-        if p.exists() {
-            if let Ok(md) = fs::metadata(&p) { total += md.len(); }
-        }
+        if p.exists()
+            && let Ok(md) = fs::metadata(&p) { total += md.len(); }
     }
     total
 }
@@ -7905,8 +7848,8 @@ mod pve_slot_tests {
     /// old- and new-style `qm importdisk` output without spawning qm.
     fn extract_disk_id(stdout: &str) -> Option<String> {
         for line in stdout.lines() {
-            if let Some(start) = line.find('\'') {
-                if let Some(end) = line[start + 1..].find('\'') {
+            if let Some(start) = line.find('\'')
+                && let Some(end) = line[start + 1..].find('\'') {
                     let inside = &line[start + 1..start + 1 + end];
                     if !inside.contains(":vm-") || !inside.contains("-disk-") { continue; }
                     let candidate = if let Some(rest) = inside.split_once(':')
@@ -7922,7 +7865,6 @@ mod pve_slot_tests {
                     };
                     return Some(candidate);
                 }
-            }
         }
         None
     }
@@ -8424,8 +8366,8 @@ fn qm_apply_media_bios(vmid: u32, iso_path: &Option<String>, drivers_iso: &Optio
         let cur_bios = pve_conf_value(&conf, "bios").unwrap_or_else(|| "seabios".into());
         let is_ovmf = cur_bios == "ovmf" || bios_type.as_deref().map(|b| b.trim()) == Some("ovmf");
         let already = conf.contains("pre-enrolled-keys=1");
-        if is_ovmf && !already {
-            if let Some(storage) = pve_os_disk_storage(&conf) {
+        if is_ovmf && !already
+            && let Some(storage) = pve_os_disk_storage(&conf) {
                 let args = vec!["set".into(), vmid_str.clone(), "--efidisk0".into(),
                     format!("{}:1,efitype=4m,pre-enrolled-keys=1", storage)];
                 // Applies silently on success — `changed` alone surfaces the
@@ -8436,7 +8378,6 @@ fn qm_apply_media_bios(vmid: u32, iso_path: &Option<String>, drivers_iso: &Optio
                 // Windows 11 install, which is the only time Secure Boot is set.
                 changed |= run_tool_cmd("qm", &args, "Secure Boot", &mut failures);
             }
-        }
     }
 
     (failures, changed)
@@ -9228,11 +9169,10 @@ fn libvirt_xml_attr_in_block(block: &str, inner_tag: &str, attr: &str) -> Option
     for token in inside.split_whitespace() {
         for quote in ['\'', '"'] {
             let prefix = format!("{}={}", attr, quote);
-            if let Some(rest) = token.strip_prefix(prefix.as_str()) {
-                if let Some(end) = rest.find(quote) {
+            if let Some(rest) = token.strip_prefix(prefix.as_str())
+                && let Some(end) = rest.find(quote) {
                     return Some(rest[..end].to_string());
                 }
-            }
         }
     }
     None
@@ -9374,15 +9314,14 @@ pub fn probe_wolfnet_tap_health(tap: &str, wolfnet_ip: &str) -> WolfnetTapHealth
     //    DHCP'd. A successful spawn with no lease for a running VM
     //    means the VM never reached the DHCP server.
     let lease_path = format!("/run/dnsmasq-{}.leases", tap);
-    if let Ok(meta) = std::fs::metadata(&lease_path) {
-        if meta.len() > 0 {
+    if let Ok(meta) = std::fs::metadata(&lease_path)
+        && meta.len() > 0 {
             h.lease_present = true;
         }
         // Empty lease file is normal for a freshly-started VM that
         // hasn't DHCP'd yet — don't flag as a failure here, the
         // analyzer can decide whether "running for >30s with no
         // lease" rises to a finding.
-    }
 
     h
 }

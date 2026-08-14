@@ -45,11 +45,10 @@ fn main() {
     if let Ok(s) = fs::read_to_string("Cargo.toml") {
         for line in s.lines() {
             let t = line.trim();
-            if let Some(v) = t.strip_prefix("version = \"") {
-                if let Some(end) = v.find('"') {
+            if let Some(v) = t.strip_prefix("version = \"")
+                && let Some(end) = v.find('"') {
                     out.push_str(&format!("- **WolfStack version**: {}\n", &v[..end]));
                 }
-            }
         }
     }
     if let Some(branch) = git_out(&["rev-parse", "--abbrev-ref", "HEAD"]) {

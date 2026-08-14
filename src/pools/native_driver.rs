@@ -59,9 +59,8 @@ fn command_exists(name: &str) -> bool {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&p) {
-                    if meta.permissions().mode() & 0o111 != 0 { return true; }
-                }
+                if let Ok(meta) = std::fs::metadata(&p)
+                    && meta.permissions().mode() & 0o111 != 0 { return true; }
             }
             #[cfg(not(unix))]
             { return true; }
@@ -254,16 +253,14 @@ pub async fn destroy(pool: &Pool) -> Result<(), String> {
     let manager = VmManager::new();
     let mut errors: Vec<String> = Vec::new();
     for vm in &pool.vms {
-        if let Err(e) = manager.stop_vm(&vm.backend_id, true) {
-            if !e.to_lowercase().contains("not found") && !e.to_lowercase().contains("doesn't exist") {
+        if let Err(e) = manager.stop_vm(&vm.backend_id, true)
+            && !e.to_lowercase().contains("not found") && !e.to_lowercase().contains("doesn't exist") {
                 errors.push(format!("VM {}: stop: {}", vm.hostname, e));
             }
-        }
-        if let Err(e) = manager.delete_vm(&vm.backend_id) {
-            if !e.to_lowercase().contains("not found") && !e.to_lowercase().contains("doesn't exist") {
+        if let Err(e) = manager.delete_vm(&vm.backend_id)
+            && !e.to_lowercase().contains("not found") && !e.to_lowercase().contains("doesn't exist") {
                 errors.push(format!("VM {}: delete: {}", vm.hostname, e));
             }
-        }
     }
     // Wipe the per-pool artefact directory wholesale. It contains
     // user-data files with plaintext bootstrap_token / pool_secret /
@@ -273,11 +270,10 @@ pub async fn destroy(pool: &Pool) -> Result<(), String> {
     let bootstrap_token = crate::xo::deobfuscate_token(&pool.bootstrap_token_enc);
     if !bootstrap_token.is_empty() {
         let dir = pool_dir_for(&bootstrap_token);
-        if std::path::Path::new(&dir).exists() {
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if std::path::Path::new(&dir).exists()
+            && let Err(e) = std::fs::remove_dir_all(&dir) {
                 errors.push(format!("pool dir cleanup ({}): {}", dir, e));
             }
-        }
     }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
 }

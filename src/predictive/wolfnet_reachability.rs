@@ -49,9 +49,11 @@ pub const FINDING_TYPE: &str = "wolfnet_peer_unreachable";
 /// hour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum EndpointKind {
     /// No endpoint configured in /etc/wolfnet/config.toml. Peer can
     /// only join via inbound handshake — common for relay-only nodes.
+    #[default]
     Empty,
     /// RFC1918 / loopback / link-local. Reachable only on the same LAN.
     Private,
@@ -62,9 +64,6 @@ pub enum EndpointKind {
     Unparseable,
 }
 
-impl Default for EndpointKind {
-    fn default() -> Self { EndpointKind::Empty }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerProbe {

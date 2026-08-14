@@ -337,8 +337,8 @@ pub fn lan_health(lan: &LanSegment, self_node_id: &str) -> LanHealth {
             //    "bound", but does a query actually round-trip? Catches
             //    the host-firewall and apparmor cases where the socket
             //    is open but packets get dropped.
-            if bound_to_router_ip {
-                if let Some((ok, msg)) = probe_udp_dns(&lan.router_ip, lan.dns.listen_port) {
+            if bound_to_router_ip
+                && let Some((ok, msg)) = probe_udp_dns(&lan.router_ip, lan.dns.listen_port) {
                     if ok {
                         checks.push(HealthCheck {
                             id: "dns_probe",
@@ -366,7 +366,6 @@ pub fn lan_health(lan: &LanSegment, self_node_id: &str) -> LanHealth {
                         });
                     }
                 }
-            }
         }
         DnsMode::External => {
             let ext = lan.dns.external_server.as_deref().unwrap_or("").trim();

@@ -1027,8 +1027,8 @@ pub async fn api_coordinated_rotate(
     let active = crate::paths::get().cluster_secret;
     let pending = pending_path();
     let backup = format!("{}{}{}", active, BACKUP_SUFFIX_PREFIX, now_compact());
-    if Path::new(&active).exists() {
-        if let Err(e) = std::fs::copy(&active, &backup) {
+    if Path::new(&active).exists()
+        && let Err(e) = std::fs::copy(&active, &backup) {
             // M2 fix: include the pending-file path in both the audit
             // log and the operator response. The .pending file is
             // intentionally LEFT on disk in this branch — it's the
@@ -1049,7 +1049,6 @@ pub async fn api_coordinated_rotate(
                 "stage": "commit-self-backup",
             }));
         }
-    }
     if let Err(e) = std::fs::rename(&pending, &active) {
         audit(&format!("ORCHESTRATE_SELF_RENAME_FAIL operator={} err={} \
                         pending_left_on_disk={}",
@@ -1347,7 +1346,7 @@ mod tests {
     fn valid_secret_shape_rejects_uppercase() {
         // Lowercase-only by convention — keeps generated values byte-
         // identical across nodes regardless of who hex-printed them.
-        let upper = format!("wsk_{}", &CANONICAL[4..].to_uppercase());
+        let upper = format!("wsk_{}", CANONICAL[4..].to_uppercase());
         assert!(!valid_secret_shape(&upper));
     }
 

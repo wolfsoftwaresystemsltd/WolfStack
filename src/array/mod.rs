@@ -542,11 +542,10 @@ pub fn parse_mdstat(content: &str, backend_label: &str) -> Vec<Array> {
             let t = next.trim_start();
             if t.is_empty() || (t.starts_with("md") && t.contains(':')) { break; }
             if t.contains("blocks") {
-                if let Some(blocks_str) = t.split_whitespace().next() {
-                    if let Ok(blocks) = blocks_str.parse::<u64>() {
+                if let Some(blocks_str) = t.split_whitespace().next()
+                    && let Ok(blocks) = blocks_str.parse::<u64>() {
                         size_bytes = blocks * 1024;
                     }
-                }
                 if t.contains('_') {
                     state_refined = "degraded".into();
                 } else if t.contains("[U") {
@@ -638,11 +637,10 @@ pub fn parse_nmdstat(content: &str) -> Vec<Array> {
     // (P first, data slots ascending, Q last).
     let mut slots: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for k in kv.keys() {
-        if let Some(dot) = k.find('.') {
-            if let Ok(n) = k[dot + 1..].parse::<u32>() {
+        if let Some(dot) = k.find('.')
+            && let Ok(n) = k[dot + 1..].parse::<u32>() {
                 slots.insert(n);
             }
-        }
     }
 
     let mut disks: Vec<Disk> = Vec::new();
@@ -1147,11 +1145,10 @@ fn smart_summary(device: &str) -> Option<(String, Option<i32>)> {
         }
         // SMART attribute 194 is Temperature_Celsius — line format:
         //   "194 Temperature_Celsius     0x0022   ... 38 ..."
-        if l.starts_with("194") && l.contains("Temperature") {
-            if let Some(num) = l.split_whitespace().nth(9).and_then(|t| t.parse::<i32>().ok()) {
+        if l.starts_with("194") && l.contains("Temperature")
+            && let Some(num) = l.split_whitespace().nth(9).and_then(|t| t.parse::<i32>().ok()) {
                 temp = Some(num);
             }
-        }
     }
     Some((status, temp))
 }
@@ -1287,13 +1284,11 @@ pub fn disk_is_rotational(device: &str) -> bool {
     }
     // Partition: /sys/class/block/<name> symlinks to …/block/<parent>/<name>;
     // the parent dir name is the whole disk that carries the queue attribute.
-    if let Ok(target) = std::fs::read_link(format!("/sys/class/block/{}", name)) {
-        if let Some(parent) = target.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
-            if let Ok(s) = std::fs::read_to_string(format!("/sys/block/{}/queue/rotational", parent)) {
+    if let Ok(target) = std::fs::read_link(format!("/sys/class/block/{}", name))
+        && let Some(parent) = target.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str())
+            && let Ok(s) = std::fs::read_to_string(format!("/sys/block/{}/queue/rotational", parent)) {
                 return s.trim() == "1";
             }
-        }
-    }
     true
 }
 
@@ -1840,9 +1835,7 @@ pub fn start_self_test(device: &str, kind: &str) -> Result<(), String> {
     };
     Err(text
         .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .next_back()
+        .map(str::trim).rfind(|l| !l.is_empty())
         .unwrap_or("smartctl refused the self-test")
         .to_string())
 }
@@ -1880,11 +1873,10 @@ pub fn self_test_due(
     let interval_h = self_test_interval_hours(smart.power_on_hours, cfg);
     {
         let log = smart_read_log().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&started) = log.last_test_at.get(device) {
-            if now_secs().saturating_sub(started) < interval_h * 3_600 {
+        if let Some(&started) = log.last_test_at.get(device)
+            && now_secs().saturating_sub(started) < interval_h * 3_600 {
                 return false;
             }
-        }
     }
     match (smart.power_on_hours, status.last_test_hours) {
         (Some(current), Some(last)) => current.saturating_sub(last) >= interval_h,
@@ -2118,20 +2110,18 @@ pub fn diagnose() -> ArrayDiagnostics {
              For mdadm: `sudo modprobe md_mod`. For NoNRAID: `sudo modprobe nonraid`.".into(),
         );
     }
-    if let Some(ref ev) = nmdctl_env {
-        if !nmdctl_env_exists {
+    if let Some(ref ev) = nmdctl_env
+        && !nmdctl_env_exists {
             hints.push(format!(
                 "WOLFSTACK_NMDCTL is set to '{}' but no file exists at that path.", ev
             ));
         }
-    }
-    if let Some(ref ev) = mdcmd_env {
-        if !mdcmd_env_exists {
+    if let Some(ref ev) = mdcmd_env
+        && !mdcmd_env_exists {
             hints.push(format!(
                 "WOLFSTACK_MDCMD is set to '{}' but no file exists at that path.", ev
             ));
         }
-    }
     if backend == "mdadm" && nmdstat_present {
         // Shouldn't happen because detect_backend() prioritises
         // /proc/nmdstat, but if it does it's worth flagging.

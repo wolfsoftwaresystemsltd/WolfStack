@@ -694,8 +694,8 @@ pub async fn tui_node_networking(
     }
     body.push_str("</div>");
 
-    if let Some(ref m) = node.metrics {
-        if !m.network.is_empty() {
+    if let Some(ref m) = node.metrics
+        && !m.network.is_empty() {
             body.push_str("<h2>Interfaces</h2>");
             body.push_str("<table>");
             body.push_str("<tr><th>Interface</th><th>RX</th><th>TX</th></tr>");
@@ -707,7 +707,6 @@ pub async fn tui_node_networking(
             }
             body.push_str("</table>");
         }
-    }
 
     let nav = node_nav(&node_id, "networking");
     let html = page(&format!("{} — Networking", node.hostname), &nav, &username, &body);

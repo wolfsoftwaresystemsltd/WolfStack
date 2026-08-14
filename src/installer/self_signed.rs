@@ -374,11 +374,10 @@ pub fn detect_local_ips() -> Vec<IpAddr> {
                 Some(s) => s,
                 None => continue,
             };
-            if let Ok(ip) = local.parse::<IpAddr>() {
-                if !ip.is_loopback() {
+            if let Ok(ip) = local.parse::<IpAddr>()
+                && !ip.is_loopback() {
                     out.push(ip);
                 }
-            }
         }
     }
     out

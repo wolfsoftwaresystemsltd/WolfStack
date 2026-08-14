@@ -372,9 +372,6 @@ pub struct Inventory {
     pub kernel_unidentified: Option<String>,
 }
 
-impl Default for EcosystemResolution {
-    fn default() -> Self { EcosystemResolution::Unknown }
-}
 
 impl Inventory {
     /// Convenience: the ecosystem string when resolution succeeded.
@@ -389,14 +386,13 @@ impl Inventory {
 /// Owned variant — keeps `Inventory` cheap to clone without lifetime
 /// gymnastics through the analyzer pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum ScanTargetOwned {
+    #[default]
     Host,
     Lxc(String),
 }
 
-impl Default for ScanTargetOwned {
-    fn default() -> Self { ScanTargetOwned::Host }
-}
 
 impl ScanTargetOwned {
     pub fn as_target(&self) -> ScanTarget {
@@ -809,6 +805,7 @@ fn parse_debian_csv(text: &str) -> HashMap<String, u32> {
 /// recognise a derivative but can't map its codename — turning a
 /// silent miss into an actionable inbox entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum EcosystemResolution {
     /// Successfully mapped to an OSV ecosystem string.
     Mapped(String),
@@ -825,6 +822,7 @@ pub enum EcosystemResolution {
     /// Caller defers to the pocket scanner.
     Unsupported { id: String },
     /// `/etc/os-release` was missing or malformed — no ID found.
+    #[default]
     Unknown,
 }
 
@@ -1008,11 +1006,10 @@ pub fn resolve_ecosystem(
         }
         // No codename at all but ID_LIKE=debian — version_id may be
         // numeric (Devuan tags this).
-        if let Some(v) = version_id.as_deref() {
-            if v.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if let Some(v) = version_id.as_deref()
+            && v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 return EcosystemResolution::Mapped(format!("Debian:{}", major_only(v)));
             }
-        }
         return EcosystemResolution::UnrecognizedDerivative {
             id,
             parent: ParentDistro::Debian,
@@ -1038,11 +1035,10 @@ fn ecosystem_from_os_release(text: &str) -> Option<String> {
 fn map_debian(version_id: &Option<String>, codename: &Option<String>) -> String {
     // Numeric major if we have it; codename otherwise. OSV accepts
     // both ("Debian:12" and "Debian:bookworm" resolve identically).
-    if let Some(v) = version_id.as_deref() {
-        if !v.is_empty() {
+    if let Some(v) = version_id.as_deref()
+        && !v.is_empty() {
             return format!("Debian:{}", major_only(v));
         }
-    }
     if let Some(c) = codename.as_deref() {
         return format!("Debian:{}", c);
     }
@@ -1055,7 +1051,7 @@ fn map_ubuntu(version_id: &Option<String>, pretty_name: &Option<String>) -> Stri
     let is_lts = pretty_name.as_deref().map(|p| p.contains("LTS")).unwrap_or(false);
     let major: u32 = ymm.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = ymm.split('.').nth(1).unwrap_or("");
-    let lts_by_pattern = major % 2 == 0 && minor == "04";
+    let lts_by_pattern = major.is_multiple_of(2) && minor == "04";
     if is_lts || lts_by_pattern {
         format!("Ubuntu:{}:LTS", ymm)
     } else {
@@ -1847,7 +1843,7 @@ fn parse_vector(vector: &str) -> Option<HashMap<String, String>> {
         }
         if let Some((k, v)) = part.split_once(':') {
             // Skip the version segment captured above ("3.1", "4.0").
-            if k.chars().next().map_or(false, |c| c.is_ascii_digit()) { continue; }
+            if k.chars().next().is_some_and(|c| c.is_ascii_digit()) { continue; }
             out.insert(k.to_string(), v.to_string());
         }
     }
@@ -2743,8 +2739,7 @@ fn pick_reference_links(f: &OsvFinding) -> Vec<EvidenceLink> {
 /// get a friendly name (e.g. `security-tracker.debian.org` → "Debian");
 /// anything else falls back to the URL host or the OSV type.
 fn label_for_reference(ty: &str, url: &str) -> String {
-    let host = url
-        .splitn(2, "://").nth(1).unwrap_or(url)
+    let host = url.split_once("://").map(|x| x.1).unwrap_or(url)
         .split('/').next().unwrap_or("")
         .trim_start_matches("www.")
         .to_ascii_lowercase();
@@ -3888,7 +3883,7 @@ mod tests {
             kev_listed: true,
             fix_available: false,
         };
-        let f = vec![warn_finding, critical_kev_finding];
+        let f = [warn_finding, critical_kev_finding];
         let g = TargetGroup { target: ScanTargetOwned::Host, findings: f.iter().collect() };
         let prop = build_target_proposal(&g, &ctx, 0);
         assert_eq!(prop.severity, Severity::Critical,
@@ -4186,7 +4181,7 @@ mod tests {
             ..mk_finding(Some(8.0), true, true) };
         let patchable_norm = mk_finding(Some(7.5), false, true);
         let awaiting_kev = mk_finding(Some(8.0), true, false);
-        let f = vec![patchable_kev, patchable_norm, awaiting_kev];
+        let f = [patchable_kev, patchable_norm, awaiting_kev];
         let g = TargetGroup { target: ScanTargetOwned::Host, findings: f.iter().collect() };
         let prop = build_target_proposal(&g, &ctx, /*suppressed_no_fix=*/0);
         let labels: Vec<&str> = prop.evidence.iter().map(|e| e.label.as_str()).collect();
@@ -4210,7 +4205,7 @@ mod tests {
     #[test]
     fn target_proposal_surfaces_suppressed_no_fix_count() {
         let ctx = Context::for_node("n");
-        let f = vec![mk_finding(Some(7.5), false, true)];
+        let f = [mk_finding(Some(7.5), false, true)];
         let g = TargetGroup { target: ScanTargetOwned::Host, findings: f.iter().collect() };
         let prop = build_target_proposal(&g, &ctx, /*suppressed_no_fix=*/42);
         let row = prop.evidence.iter()

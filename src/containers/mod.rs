@@ -303,11 +303,10 @@ pub static WOLFNET_ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<S
     std::sync::LazyLock::new(|| {
         // Seed from existing routes file on startup
         let mut map = std::collections::HashMap::new();
-        if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
-            if let Ok(existing) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+        if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json")
+            && let Ok(existing) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
                 map = existing;
             }
-        }
         Mutex::new(map)
     });
 
@@ -596,11 +595,10 @@ impl<T: Clone + Default> CoalescedProbe<T> {
             Err(e) => e.into_inner(),
         };
 
-        if let Some((v, ts)) = &g.value {
-            if ts.elapsed() < ttl {
+        if let Some((v, ts)) = &g.value
+            && ts.elapsed() < ttl {
                 return v.clone();
             }
-        }
 
         if let Some(started) = g.refresh_started {
             // Another caller owns the refresh.
@@ -911,11 +909,10 @@ pub fn invalidate_docker_list_cache() {
 pub fn docker_count() -> u32 {
     {
         let cache = DOCKER_COUNT_CACHE.lock().unwrap();
-        if let Some((val, ts)) = &*cache {
-            if ts.elapsed().as_secs() < COUNT_CACHE_TTL_SECS {
+        if let Some((val, ts)) = &*cache
+            && ts.elapsed().as_secs() < COUNT_CACHE_TTL_SECS {
                 return *val;
             }
-        }
     } // release lock before subprocess
     let val = docker_count_inner();
     *DOCKER_COUNT_CACHE.lock().unwrap() = Some((val, Instant::now()));
@@ -926,11 +923,10 @@ pub fn docker_count() -> u32 {
 pub fn lxc_count() -> u32 {
     {
         let cache = LXC_COUNT_CACHE.lock().unwrap();
-        if let Some((val, ts)) = &*cache {
-            if ts.elapsed().as_secs() < COUNT_CACHE_TTL_SECS {
+        if let Some((val, ts)) = &*cache
+            && ts.elapsed().as_secs() < COUNT_CACHE_TTL_SECS {
                 return *val;
             }
-        }
     } // release lock before subprocess
     let val = lxc_count_inner();
     *LXC_COUNT_CACHE.lock().unwrap() = Some((val, Instant::now()));
@@ -950,11 +946,10 @@ const RUNTIME_CACHE_TTL_SECS: u64 = 120;
 /// Check if Docker is installed (cached for 120s).
 pub fn has_docker_cached() -> bool {
     let mut cache = HAS_DOCKER_CACHE.lock().unwrap();
-    if let Some((val, ts)) = &*cache {
-        if ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+    if let Some((val, ts)) = &*cache
+        && ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
             return *val;
         }
-    }
     let val = Command::new("which").arg("docker").output()
         .map(|o| o.status.success()).unwrap_or(false);
     *cache = Some((val, Instant::now()));
@@ -964,11 +959,10 @@ pub fn has_docker_cached() -> bool {
 /// Check if LXC is installed (cached for 120s).
 pub fn has_lxc_cached() -> bool {
     let mut cache = HAS_LXC_CACHE.lock().unwrap();
-    if let Some((val, ts)) = &*cache {
-        if ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+    if let Some((val, ts)) = &*cache
+        && ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
             return *val;
         }
-    }
     let val = Command::new("which").arg("lxc-ls").output()
         .map(|o| o.status.success()).unwrap_or(false);
     *cache = Some((val, Instant::now()));
@@ -978,11 +972,10 @@ pub fn has_lxc_cached() -> bool {
 /// Check if KVM/QEMU is installed (cached for 120s).
 pub fn has_kvm_cached() -> bool {
     let mut cache = HAS_KVM_CACHE.lock().unwrap();
-    if let Some((val, ts)) = &*cache {
-        if ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+    if let Some((val, ts)) = &*cache
+        && ts.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
             return *val;
         }
-    }
     let val = kvm_installed();
     *cache = Some((val, Instant::now()));
     val
@@ -999,11 +992,10 @@ const WOLFNET_IPS_CACHE_TTL_SECS: u64 = 5;
 /// Get WolfNet IPs with caching (TTL 5s).
 pub fn wolfnet_used_ips_cached() -> Vec<String> {
     let mut cache = WOLFNET_IPS_CACHE.lock().unwrap();
-    if let Some((ref val, ts)) = *cache {
-        if ts.elapsed().as_secs() < WOLFNET_IPS_CACHE_TTL_SECS {
+    if let Some((ref val, ts)) = *cache
+        && ts.elapsed().as_secs() < WOLFNET_IPS_CACHE_TTL_SECS {
             return val.clone();
         }
-    }
     let val = wolfnet_used_ips();
     *cache = Some((val.clone(), Instant::now()));
     val
@@ -1028,15 +1020,14 @@ fn lxc_paths_file() -> String { crate::paths::get().lxc_paths }
 pub static LXC_STORAGE_PATHS: std::sync::LazyLock<Mutex<Vec<String>>> =
     std::sync::LazyLock::new(|| {
         let mut paths = vec![LXC_DEFAULT_PATH.to_string()];
-        if let Ok(content) = std::fs::read_to_string(&lxc_paths_file()) {
-            if let Ok(saved) = serde_json::from_str::<Vec<String>>(&content) {
+        if let Ok(content) = std::fs::read_to_string(lxc_paths_file())
+            && let Ok(saved) = serde_json::from_str::<Vec<String>>(&content) {
                 for p in saved {
                     if p != LXC_DEFAULT_PATH && !paths.contains(&p) && std::path::Path::new(&p).is_dir() {
                         paths.push(p);
                     }
                 }
             }
-        }
         Mutex::new(paths)
     });
 
@@ -1055,7 +1046,7 @@ pub fn lxc_register_path(path: &str) -> bool {
         return false;
     }
     paths.push(path.to_string());
-    let _ = std::fs::write(&lxc_paths_file(), serde_json::to_string_pretty(&*paths).unwrap_or_default());
+    let _ = std::fs::write(lxc_paths_file(), serde_json::to_string_pretty(&*paths).unwrap_or_default());
     true
 }
 
@@ -1276,7 +1267,6 @@ pub fn cleanup_stale_wolfnet_routes() {
     };
     let text = String::from_utf8_lossy(&output.stdout);
 
-    let mut removed = 0;
     for line in text.lines() {
         let ip = match line.split_whitespace().next() {
             Some(ip) if ip.starts_with(&prefix) && !ip.contains('/') => ip,
@@ -1289,23 +1279,16 @@ pub fn cleanup_stale_wolfnet_routes() {
         // Remove if: IP not in local used IPs, OR route has linkdown (container stopped)
         let is_linkdown = line.contains("linkdown");
         if !local_ips.contains(ip) || is_linkdown {
-            let del_result = Command::new("ip")
+            // Best-effort: whichever form the route was added with succeeds,
+            // the other fails harmlessly.
+            let _ = Command::new("ip")
                 .args(["route", "del", &format!("{}/32", ip)])
                 .output();
             // Also try without /32 in case the route was added without it
-            let del_result2 = Command::new("ip")
+            let _ = Command::new("ip")
                 .args(["route", "del", ip])
                 .output();
-            if del_result.map(|o| o.status.success()).unwrap_or(false)
-                || del_result2.map(|o| o.status.success()).unwrap_or(false)
-            {
-
-                removed += 1;
-            }
         }
-    }
-    if removed > 0 {
-
     }
 
     // Ensure Docker containers with WolfNet IPs have correct host routes
@@ -1591,12 +1574,12 @@ pub fn cleanup_stale_wolfnet_routes() {
 /// choose their own subnet when they set up WolfNet.
 pub fn wolfnet_subnet_prefix() -> Option<String> {
     // Primary: read wolfnet0 interface IP
-    if let Ok(out) = Command::new("ip").args(["addr", "show", "wolfnet0"]).output() {
-        if out.status.success() {
+    if let Ok(out) = Command::new("ip").args(["addr", "show", "wolfnet0"]).output()
+        && out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
             if let Some(ip) = text.lines()
                 .find(|l| l.contains("inet "))
-                .and_then(|l| l.trim().split_whitespace().nth(1))
+                .and_then(|l| l.split_whitespace().nth(1))
                 .and_then(|s| s.split('/').next())
             {
                 let parts: Vec<&str> = ip.split('.').collect();
@@ -1605,20 +1588,18 @@ pub fn wolfnet_subnet_prefix() -> Option<String> {
                 }
             }
         }
-    }
     // Fallback: config file
     if let Ok(content) = std::fs::read_to_string("/etc/wolfnet/config.toml") {
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("address") && trimmed.contains('=') {
-                if let Some(val) = trimmed.split('=').nth(1) {
+            if trimmed.starts_with("address") && trimmed.contains('=')
+                && let Some(val) = trimmed.split('=').nth(1) {
                     let addr = val.trim().trim_matches('"').trim();
                     let parts: Vec<&str> = addr.split('.').collect();
                     if parts.len() >= 3 {
                         return Some(format!("{}.{}.{}", parts[0], parts[1], parts[2]));
                     }
                 }
-            }
         }
     }
     None
@@ -1647,7 +1628,7 @@ pub fn wolfnet_status(extra_used: &[u8]) -> WolfNetStatus {
             // Parse IP from wolfnet0 interface
             let ip = text.lines()
                 .find(|l| l.contains("inet "))
-                .and_then(|l| l.trim().split_whitespace().nth(1))
+                .and_then(|l| l.split_whitespace().nth(1))
                 .and_then(|s| s.split('/').next())
                 .unwrap_or("")
                 .to_string();
@@ -1716,27 +1697,24 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         let cache = WOLFNET_ROUTES.lock().unwrap();
         for ip_str in cache.keys() {
             let ip_parts: Vec<&str> = ip_str.split('.').collect();
-            if ip_parts.len() == 4 {
-                if let Ok(last) = ip_parts[3].parse::<u8>() {
+            if ip_parts.len() == 4
+                && let Ok(last) = ip_parts[3].parse::<u8>() {
                     used_ips.insert(last);
                 }
-            }
         }
     }
 
     // Also check routes.json as fallback
-    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
-        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json")
+        && let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
             for ip_str in routes.keys() {
                 let ip_parts: Vec<&str> = ip_str.split('.').collect();
-                if ip_parts.len() == 4 {
-                    if let Ok(last) = ip_parts[3].parse::<u8>() {
+                if ip_parts.len() == 4
+                    && let Ok(last) = ip_parts[3].parse::<u8>() {
                         used_ips.insert(last);
                     }
-                }
             }
         }
-    }
 
     // Check Docker containers with WolfNet IPs (override file or label)
     if let Ok(output) = Command::new("docker")
@@ -1747,11 +1725,10 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         for name in text.lines().filter(|l| !l.is_empty()) {
             if let Some(ip) = docker_effective_wolfnet_ip(name) {
                 let ip_parts: Vec<&str> = ip.split('.').collect();
-                if ip_parts.len() == 4 {
-                    if let Ok(last) = ip_parts[3].parse::<u8>() {
+                if ip_parts.len() == 4
+                    && let Ok(last) = ip_parts[3].parse::<u8>() {
                         used_ips.insert(last);
                     }
-                }
             }
         }
     }
@@ -1764,11 +1741,10 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
                 if let Ok(ip_str) = std::fs::read_to_string(&ip_file) {
                     let ip_str = ip_str.trim();
                     let ip_parts: Vec<&str> = ip_str.split('.').collect();
-                    if ip_parts.len() == 4 {
-                        if let Ok(last) = ip_parts[3].parse::<u8>() {
+                    if ip_parts.len() == 4
+                        && let Ok(last) = ip_parts[3].parse::<u8>() {
                             used_ips.insert(last);
                         }
-                    }
                 }
             }
         }
@@ -1779,20 +1755,16 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
     if let Ok(entries) = std::fs::read_dir(vm_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(ip_str) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
+            if path.extension().and_then(|e| e.to_str()) == Some("json")
+                && let Ok(content) = std::fs::read_to_string(&path)
+                    && let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content)
+                        && let Some(ip_str) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
                             let ip_parts: Vec<&str> = ip_str.split('.').collect();
-                            if ip_parts.len() == 4 {
-                                if let Ok(last) = ip_parts[3].parse::<u8>() {
+                            if ip_parts.len() == 4
+                                && let Ok(last) = ip_parts[3].parse::<u8>() {
                                     used_ips.insert(last);
                                 }
-                            }
                         }
-                    }
-                }
-            }
         }
     }
 
@@ -1805,30 +1777,27 @@ pub fn wolfnet_allocate_ip(host_ip: &str, extra_used: &[u8]) -> String {
         for line in text.lines() {
             if let Some(ip) = line.split_whitespace().next() {
                 let ip_parts: Vec<&str> = ip.split('.').collect();
-                if ip_parts.len() == 4 {
-                    if let Ok(last) = ip_parts[3].parse::<u8>() {
+                if ip_parts.len() == 4
+                    && let Ok(last) = ip_parts[3].parse::<u8>() {
                         used_ips.insert(last);
                     }
-                }
             }
         }
     }
 
     // WolfRun service VIPs — reserve these so containers don't collide
-    if let Ok(data) = std::fs::read_to_string(&crate::paths::get().wolfrun_services) {
-        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
+    if let Ok(data) = std::fs::read_to_string(&crate::paths::get().wolfrun_services)
+        && let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
             for svc in &services {
                 if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
                     let ip_parts: Vec<&str> = vip.split('.').collect();
-                    if ip_parts.len() == 4 {
-                        if let Ok(last) = ip_parts[3].parse::<u8>() {
+                    if ip_parts.len() == 4
+                        && let Ok(last) = ip_parts[3].parse::<u8>() {
                             used_ips.insert(last);
                         }
-                    }
                 }
             }
         }
-    }
 
     // Allocate from 100-254 range (reserving 1-99 for hosts)
     for i in 100..=254u8 {
@@ -1916,7 +1885,7 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
         if output.status.success() && !text.is_empty() {
             if let Some(ip) = text.lines()
                 .find(|l| l.contains("inet "))
-                .and_then(|l| l.trim().split_whitespace().nth(1))
+                .and_then(|l| l.split_whitespace().nth(1))
                 .and_then(|s| s.split('/').next())
             {
                 ips.push(ip.to_string());
@@ -1936,11 +1905,10 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for addr in text.split_whitespace() {
-            if let Some(ip) = addr.split('/').next() {
-                if !ip.is_empty() && !ips.contains(&ip.to_string()) {
+            if let Some(ip) = addr.split('/').next()
+                && !ip.is_empty() && !ips.contains(&ip.to_string()) {
                     ips.push(ip.to_string());
                 }
-            }
         }
     }
 
@@ -1961,11 +1929,10 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for name in text.lines().filter(|l| !l.is_empty()) {
-            if let Some(ip) = docker_effective_wolfnet_ip(name) {
-                if !ips.contains(&ip) {
+            if let Some(ip) = docker_effective_wolfnet_ip(name)
+                && !ips.contains(&ip) {
                     ips.push(ip);
                 }
-            }
         }
     }
 
@@ -2008,9 +1975,9 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(vm_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
+            if path.extension().and_then(|e| e.to_str()) == Some("json")
+                && let Ok(content) = std::fs::read_to_string(&path)
+                    && let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
                         if let Some(running) = vm_running.as_ref() {
                             // Gate only when the config names the VM (it
                             // always does — VmConfig serializes `name`);
@@ -2024,41 +1991,34 @@ fn wolfnet_ips_internal(running_only: bool) -> Vec<String> {
                             ips.push(ip_str.to_string());
                         }
                     }
-                }
-            }
         }
     }
     // WolfRun service VIPs (load-balanced virtual IPs)
-    if let Ok(data) = std::fs::read_to_string(&crate::paths::get().wolfrun_services) {
-        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
+    if let Ok(data) = std::fs::read_to_string(&crate::paths::get().wolfrun_services)
+        && let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
             for svc in &services {
-                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
-                    if !vip.is_empty() && !ips.contains(&vip.to_string()) {
+                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str())
+                    && !vip.is_empty() && !ips.contains(&vip.to_string()) {
                         ips.push(vip.to_string());
                     }
-                }
             }
         }
-    }
 
     // Kubernetes WolfNet route IPs (k8s deployments with allocated WolfNet addresses)
-    if let Ok(data) = std::fs::read_to_string(&crate::paths::get().kubernetes_config) {
-        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&data) {
-            if let Some(clusters) = config.get("clusters").and_then(|c| c.as_array()) {
+    if let Ok(data) = std::fs::read_to_string(&crate::paths::get().kubernetes_config)
+        && let Ok(config) = serde_json::from_str::<serde_json::Value>(&data)
+            && let Some(clusters) = config.get("clusters").and_then(|c| c.as_array()) {
                 for cluster in clusters {
                     if let Some(routes) = cluster.get("wolfnet_routes").and_then(|r| r.as_array()) {
                         for route in routes {
-                            if let Some(ip) = route.get("wolfnet_ip").and_then(|v| v.as_str()) {
-                                if !ip.is_empty() && !ips.contains(&ip.to_string()) {
+                            if let Some(ip) = route.get("wolfnet_ip").and_then(|v| v.as_str())
+                                && !ip.is_empty() && !ips.contains(&ip.to_string()) {
                                     ips.push(ip.to_string());
                                 }
-                            }
                         }
                     }
                 }
             }
-        }
-    }
 
     ips
 }
@@ -2121,16 +2081,13 @@ pub async fn sync_wolfnet_peer_routes() {
                     let url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(hostname), port, path);
                     if let Ok(resp) = client.get(&url)
                         .header("X-WolfStack-Secret", &cluster_secret)
-                        .send().await {
-                        if resp.status().is_success() {
-                            if let Ok(ips) = resp.json::<Vec<String>>().await {
-                                if !ips.is_empty() {
+                        .send().await
+                        && resp.status().is_success()
+                            && let Ok(ips) = resp.json::<Vec<String>>().await
+                                && !ips.is_empty() {
                                     used_ips = ips;
                                     break 'byname;
                                 }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -2142,16 +2099,13 @@ pub async fn sync_wolfnet_peer_routes() {
                     let url = format!("http://{}:{}{}", allowed_ip, port, path);
                     if let Ok(resp) = client.get(&url)
                         .header("X-WolfStack-Secret", &cluster_secret)
-                        .send().await {
-                        if resp.status().is_success() {
-                            if let Ok(ips) = resp.json::<Vec<String>>().await {
-                                if !ips.is_empty() {
+                        .send().await
+                        && resp.status().is_success()
+                            && let Ok(ips) = resp.json::<Vec<String>>().await
+                                && !ips.is_empty() {
                                     used_ips = ips;
                                     break 'byip;
                                 }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -2363,9 +2317,7 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
 
                 } else if stderr.contains("EEXIST") || stderr.contains("File exists") {
 
-                } else {
-
-                }
+                } 
             }
             Err(_e) => {},
         }
@@ -2421,7 +2373,7 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
         if let Ok(output) = Command::new("ip").args(["neigh", "show", &container_bridge_ip, "dev", &bridge_dev]).output() {
             let line = String::from_utf8_lossy(&output.stdout);
             // Parse: "172.17.0.2 lladdr 02:42:ac:11:00:02 REACHABLE"
-            let parts: Vec<&str> = line.trim().split_whitespace().collect();
+            let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 && parts[1] == "lladdr" {
                 let mac = parts[2];
 
@@ -2429,9 +2381,7 @@ pub fn docker_connect_wolfnet(container: &str, ip: &str) -> Result<String, Strin
                     .args(["neigh", "replace", ip, "lladdr", mac, "dev", &bridge_dev, "nud", "permanent"])
                     .output();
 
-            } else {
-
-            }
+            } 
         }
     }
 
@@ -2508,15 +2458,14 @@ fn ensure_lxc_bridge_checked() -> Result<(), String> {
     } else {
         &["enable", "--now", "lxc-net"]
     };
-    if let Ok(o) = Command::new("systemctl").args(svc_args).output() {
-        if o.status.success() {
+    if let Ok(o) = Command::new("systemctl").args(svc_args).output()
+        && o.status.success() {
             used_lxc_net = true;
             for _ in 0..10 {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 if bridge_has_ip("lxcbr0", "10.0.3.1") { break; }
             }
         }
-    }
 
     let needs_create = !bridge_exists("lxcbr0");
     let needs_ip = !bridge_has_ip("lxcbr0", "10.0.3.1");
@@ -3038,12 +2987,11 @@ pub fn lxc_attach_wolfnet(container: &str, ip: &str) -> Result<String, String> {
     //   so we just make sure lxcbr0 is present — no separate wn0 needed.
     if !is_proxmox() {
         let config_path = format!("{}/{}/config", base, container);
-        if let Ok(cfg) = std::fs::read_to_string(&config_path) {
-            if !cfg.contains("lxcbr0") {
+        if let Ok(cfg) = std::fs::read_to_string(&config_path)
+            && !cfg.contains("lxcbr0") {
                 // Point the existing eth0 (net.0) to lxcbr0
                 lxc_ensure_network_config(container);
             }
-        }
     }
 
     // If the container is already running, apply immediately (no restart needed)
@@ -3080,13 +3028,11 @@ fn get_container_bridge_ip(container: &str, iface: &str) -> String {
         // Parse "inet 10.0.3.x/24" from ip addr output
         for line in stdout.lines() {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("inet ") {
-                if let Some(addr) = rest.split('/').next() {
-                    if addr.starts_with("10.0.3.") {
+            if let Some(rest) = trimmed.strip_prefix("inet ")
+                && let Some(addr) = rest.split('/').next()
+                    && addr.starts_with("10.0.3.") {
                         return addr.to_string();
                     }
-                }
-            }
         }
     }
     // Derive from WolfNet IP so the last octet matches (10.10.10.X → 10.0.3.X)
@@ -3762,11 +3708,10 @@ fn find_free_bridge_ip() -> u8 {
             let net_file = entry.path().join("rootfs/etc/systemd/network/eth0.network");
             if let Ok(content) = std::fs::read_to_string(&net_file) {
                 for line in content.lines() {
-                    if let Some(addr) = line.strip_prefix("Address=10.0.3.") {
-                        if let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
+                    if let Some(addr) = line.strip_prefix("Address=10.0.3.")
+                        && let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
                             used.push(last);
                         }
-                    }
                 }
             }
             // Netplan
@@ -3774,11 +3719,10 @@ fn find_free_bridge_ip() -> u8 {
             if let Ok(content) = std::fs::read_to_string(&netplan_file) {
                 for line in content.lines() {
                     let trimmed = line.trim().trim_start_matches("- ");
-                    if let Some(addr) = trimmed.strip_prefix("10.0.3.") {
-                        if let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
+                    if let Some(addr) = trimmed.strip_prefix("10.0.3.")
+                        && let Some(last) = addr.split('/').next().and_then(|s| s.parse::<u8>().ok()) {
                             used.push(last);
                         }
-                    }
                 }
             }
             // /etc/network/interfaces
@@ -3786,13 +3730,11 @@ fn find_free_bridge_ip() -> u8 {
             if let Ok(content) = std::fs::read_to_string(&ifaces_file) {
                 for line in content.lines() {
                     let trimmed = line.trim();
-                    if trimmed.starts_with("address 10.0.3.") {
-                        if let Some(addr) = trimmed.strip_prefix("address 10.0.3.") {
-                            if let Ok(last) = addr.trim().parse::<u8>() {
+                    if trimmed.starts_with("address 10.0.3.")
+                        && let Some(addr) = trimmed.strip_prefix("address 10.0.3.")
+                            && let Ok(last) = addr.trim().parse::<u8>() {
                                 used.push(last);
                             }
-                        }
-                    }
                 }
             }
         }
@@ -3803,11 +3745,10 @@ fn find_free_bridge_ip() -> u8 {
     for c in lxc_list_all() {
         for ip_str in c.ip_address.split(',') {
             let ip = ip_str.trim().replace(" (lxcbr0)", "").replace(" (eth0)", "");
-            if let Some(last) = ip.strip_prefix("10.0.3.") {
-                if let Ok(n) = last.trim().parse::<u8>() {
+            if let Some(last) = ip.strip_prefix("10.0.3.")
+                && let Ok(n) = last.trim().parse::<u8>() {
                     used.push(n);
                 }
-            }
         }
     }
 
@@ -3815,11 +3756,10 @@ fn find_free_bridge_ip() -> u8 {
     for c in docker_list_all() {
         for ip_str in c.ip_address.split(',') {
             let ip = ip_str.trim();
-            if let Some(last) = ip.strip_prefix("10.0.3.") {
-                if let Ok(n) = last.trim().parse::<u8>() {
+            if let Some(last) = ip.strip_prefix("10.0.3.")
+                && let Ok(n) = last.trim().parse::<u8>() {
                     used.push(n);
                 }
-            }
         }
     }
 
@@ -3827,65 +3767,56 @@ fn find_free_bridge_ip() -> u8 {
     //    The heartbeat sync writes container data to /etc/wolfstack/cluster-containers/
     if let Ok(entries) = std::fs::read_dir(&crate::paths::get().cluster_containers_dir) {
         for entry in entries.flatten() {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if let Ok(containers) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+            if let Ok(content) = std::fs::read_to_string(entry.path())
+                && let Ok(containers) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
                     for c in &containers {
                         if let Some(ips) = c.get("ip_address").and_then(|v| v.as_str()) {
                             for ip_str in ips.split(',') {
                                 let ip = ip_str.trim()
                                     .replace(" (lxcbr0)", "").replace(" (eth0)", "");
-                                if let Some(last) = ip.strip_prefix("10.0.3.") {
-                                    if let Ok(n) = last.trim().parse::<u8>() {
+                                if let Some(last) = ip.strip_prefix("10.0.3.")
+                                    && let Ok(n) = last.trim().parse::<u8>() {
                                         used.push(n);
                                     }
-                                }
                             }
                         }
                     }
                 }
-            }
         }
     }
 
     // 5. GLOBAL: Scan WolfRun services for all instance IPs across the cluster
-    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().wolfrun_services) {
-        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().wolfrun_services)
+        && let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
             for svc in &services {
                 if let Some(instances) = svc.get("instances").and_then(|v| v.as_array()) {
                     for inst in instances {
                         // Check bridge_ip field if tracked
-                        if let Some(ip) = inst.get("bridge_ip").and_then(|v| v.as_str()) {
-                            if let Some(last) = ip.strip_prefix("10.0.3.") {
-                                if let Ok(n) = last.trim().parse::<u8>() {
+                        if let Some(ip) = inst.get("bridge_ip").and_then(|v| v.as_str())
+                            && let Some(last) = ip.strip_prefix("10.0.3.")
+                                && let Ok(n) = last.trim().parse::<u8>() {
                                     used.push(n);
                                 }
-                            }
-                        }
                     }
                 }
             }
         }
-    }
 
     // 6. GLOBAL: Scan IP mappings (port forward destinations may use bridge IPs)
-    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().ip_mappings) {
-        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(mappings) = wrapper.get("mappings").and_then(|v| v.as_array()) {
+    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().ip_mappings)
+        && let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(mappings) = wrapper.get("mappings").and_then(|v| v.as_array()) {
                 for m in mappings {
                     // Check all IP fields for bridge IPs
                     for key in &["container_ip", "bridge_ip", "ip"] {
-                        if let Some(ip) = m.get(*key).and_then(|v| v.as_str()) {
-                            if let Some(last) = ip.strip_prefix("10.0.3.") {
-                                if let Ok(n) = last.trim().parse::<u8>() {
+                        if let Some(ip) = m.get(*key).and_then(|v| v.as_str())
+                            && let Some(last) = ip.strip_prefix("10.0.3.")
+                                && let Ok(n) = last.trim().parse::<u8>() {
                                     used.push(n);
                                 }
-                            }
-                        }
                     }
                 }
             }
-        }
-    }
 
     // 7. Randomize and check for collision, retry if needed
     used.sort();
@@ -4743,11 +4674,10 @@ fn parse_cgroup_stat(text: &str) -> std::collections::HashMap<String, u64> {
     let mut map = std::collections::HashMap::new();
     for line in text.lines() {
         let mut parts = line.split_whitespace();
-        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-            if let Ok(n) = v.parse::<u64>() {
+        if let (Some(k), Some(v)) = (parts.next(), parts.next())
+            && let Ok(n) = v.parse::<u64>() {
                 map.insert(k.to_string(), n);
             }
-        }
     }
     map
 }
@@ -5341,9 +5271,9 @@ fn docker_batched_inspect(ids: &[String])
             let mut gws = Vec::new();
             let mut macs = Vec::new();
             for (_, n) in networks {
-                if let Some(s) = n.get("IPAddress").and_then(|v| v.as_str()) { if !s.is_empty() { ips.push(s.to_string()); } }
-                if let Some(s) = n.get("Gateway").and_then(|v| v.as_str()) { if !s.is_empty() { gws.push(s.to_string()); } }
-                if let Some(s) = n.get("MacAddress").and_then(|v| v.as_str()) { if !s.is_empty() { macs.push(s.to_string()); } }
+                if let Some(s) = n.get("IPAddress").and_then(|v| v.as_str()) && !s.is_empty() { ips.push(s.to_string()); }
+                if let Some(s) = n.get("Gateway").and_then(|v| v.as_str()) && !s.is_empty() { gws.push(s.to_string()); }
+                if let Some(s) = n.get("MacAddress").and_then(|v| v.as_str()) && !s.is_empty() { macs.push(s.to_string()); }
             }
             fields.network_ips = ips.join(" ");
             fields.network_gateways = gws.join(" ");
@@ -5480,11 +5410,10 @@ pub fn parse_port_mappings(
         // `ports:`, where Docker emits `{"5000/tcp": null, ...}` —
         // identical in shape to a real silent-publish failure on a
         // bridge.
-        if let Some(driver) = net_drivers.get(network_mode) {
-            if driver == "macvlan" || driver == "ipvlan" {
+        if let Some(driver) = net_drivers.get(network_mode)
+            && (driver == "macvlan" || driver == "ipvlan") {
                 return Vec::new();
             }
-        }
         // Fallback for when the driver lookup missed (docker network ls
         // failed, or the network was removed between calls). Same
         // heuristic as v22.10.2: a truly empty `{}` Ports on a
@@ -5809,13 +5738,11 @@ fn docker_container_pids() -> std::collections::HashMap<String, u32> {
     if let Ok(o) = Command::new("docker").args(&args).output() {
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             let mut parts = line.split_whitespace();
-            if let (Some(name), Some(pid)) = (parts.next(), parts.next()) {
-                if let Ok(pid) = pid.parse::<u32>() {
-                    if pid > 0 {
+            if let (Some(name), Some(pid)) = (parts.next(), parts.next())
+                && let Ok(pid) = pid.parse::<u32>()
+                    && pid > 0 {
                         map.insert(name.trim_start_matches('/').to_string(), pid);
                     }
-                }
-            }
         }
     }
     map
@@ -6122,14 +6049,13 @@ pub fn docker_recreate_with_env(container: &str, new_env: &[String]) -> Result<S
     // and delegate to the generalised recreate path — single
     // implementation for both "change env" and "edit raw inspect".
     let mut inspect = docker_inspect(container)?;
-    if let Some(cfg) = inspect.pointer_mut("/Config") {
-        if let Some(obj) = cfg.as_object_mut() {
+    if let Some(cfg) = inspect.pointer_mut("/Config")
+        && let Some(obj) = cfg.as_object_mut() {
             let env_arr: Vec<serde_json::Value> = new_env.iter()
                 .map(|e| serde_json::Value::String(e.clone()))
                 .collect();
             obj.insert("Env".to_string(), serde_json::Value::Array(env_arr));
         }
-    }
     docker_recreate_from_inspect(container, &inspect)
 }
 
@@ -6488,13 +6414,11 @@ pub fn docker_inspect(container: &str) -> Result<serde_json::Value, String> {
 
     // Inject WolfNet IP override from config file into the labels
     // so the frontend always sees the effective WolfNet IP
-    if let Some(override_ip) = docker_get_wolfnet_ip(container) {
-        if let Some(labels) = obj.pointer_mut("/Config/Labels") {
-            if let Some(map) = labels.as_object_mut() {
+    if let Some(override_ip) = docker_get_wolfnet_ip(container)
+        && let Some(labels) = obj.pointer_mut("/Config/Labels")
+            && let Some(map) = labels.as_object_mut() {
                 map.insert("wolfnet.ip".to_string(), serde_json::Value::String(override_ip));
             }
-        }
-    }
 
     Ok(obj)
 }
@@ -6558,9 +6482,7 @@ pub fn docker_effective_wolfnet_ip(container: &str) -> Option<String> {
 pub fn docker_set_wolfnet_ip(container: &str, ip: Option<&str>) -> Result<String, String> {
     // Validate that we're not setting WolfNet IP on a container with incompatible network config
     if ip.is_some() && ip.map(|i| !i.trim().is_empty()).unwrap_or(false) {
-        if let Err(e) = validate_docker_wolfnet_compatible(container) {
-            return Err(e);
-        }
+        validate_docker_wolfnet_compatible(container)?;
     }
 
     // Read existing overrides
@@ -6581,11 +6503,10 @@ pub fn docker_set_wolfnet_ip(container: &str, ip: Option<&str>) -> Result<String
             std::fs::write(DOCKER_WOLFNET_CONFIG, data).map_err(|e| e.to_string())?;
 
             // Apply live if running: remove old routes, apply new
-            if let Some(ref old) = old_ip {
-                if old != new_ip {
+            if let Some(ref old) = old_ip
+                && old != new_ip {
                     let _ = Command::new("ip").args(["route", "del", &format!("{}/32", old), "dev", "docker0"]).output();
                 }
-            }
             // Connect to WolfNet (idempotent)
             let _ = docker_connect_wolfnet(container, new_ip);
 
@@ -6779,8 +6700,8 @@ fn build_lxc_container_info(
     // address (CIDR suffix stripped) — parity with the PVE path, which
     // reads `ip=` from the config for stopped CTs. Without this a freshly
     // migrated/cloned container displays no IP at all until first start.
-    if ip.is_empty() {
-        if let Some(addr) = config_content.lines()
+    if ip.is_empty()
+        && let Some(addr) = config_content.lines()
             .find(|l| l.trim().starts_with("lxc.net.0.ipv4.address"))
             .and_then(|l| l.split('=').nth(1))
         {
@@ -6789,7 +6710,6 @@ fn build_lxc_container_info(
                 ip = addr.to_string();
             }
         }
-    }
 
     // Method 3: Check for WolfNet IP marker
     let wolfnet_ip_file = format!("{}/{}/.wolfnet/ip", base_path, name);
@@ -7065,8 +6985,8 @@ fn pct_list_all() -> Vec<ContainerInfo> {
 
                 // Get IP addresses for running containers
                 let mut ip = String::new();
-                if state == "running" {
-                    if let Ok(info_out) = Command::new("timeout").args(["5", "lxc-info", "-n", &vmid, "-iH"])
+                if state == "running"
+                    && let Ok(info_out) = Command::new("timeout").args(["5", "lxc-info", "-n", &vmid, "-iH"])
                         .output()
                     {
                         let info_ip = String::from_utf8_lossy(&info_out.stdout)
@@ -7078,7 +6998,6 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                             ip = info_ip;
                         }
                     }
-                }
 
                 // Parse config for hostname, autostart, rootfs, gateway, MAC
                 let mut hostname = pct_name.clone();
@@ -7094,10 +7013,10 @@ fn pct_list_all() -> Vec<ContainerInfo> {
                     } else if cline.starts_with("onboot:") {
                         autostart = cline.split(':').nth(1).unwrap_or("").trim() == "1";
                     } else if cline.starts_with("rootfs:") {
-                        rootfs_storage = cline.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
+                        rootfs_storage = cline.split_once(':').map(|x| x.1).unwrap_or("").trim().to_string();
                     }
                     if cline.starts_with("net") && cline.contains('=') {
-                        let net_value = cline.splitn(2, ':').nth(1).unwrap_or("").trim();
+                        let net_value = cline.split_once(':').map(|x| x.1).unwrap_or("").trim();
                         for part in net_value.split(',') {
                             let part = part.trim();
                             if part.starts_with("ip=") && ip.is_empty() {
@@ -7227,9 +7146,8 @@ fn lxc_read_os_version(rootfs_path: &str) -> Option<String> {
                     .trim_matches('"').to_string());
             }
         }
-        if let Some(pn) = pretty_name {
-            if !pn.is_empty() { return Some(pn); }
-        }
+        if let Some(pn) = pretty_name
+            && !pn.is_empty() { return Some(pn); }
         if let (Some(n), Some(v)) = (name, version) {
             return Some(format!("{} {}", n, v));
         }
@@ -7430,23 +7348,19 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
         .unwrap_or(0);
 
     // Fallback: if cgroup reports 0 (unlimited/"max"), try Proxmox pct config
-    if memory_limit == 0 {
-        if let Ok(out) = Command::new("pct").args(["config", name]).output() {
-            if out.status.success() {
+    if memory_limit == 0
+        && let Ok(out) = Command::new("pct").args(["config", name]).output()
+            && out.status.success() {
                 let cfg = String::from_utf8_lossy(&out.stdout);
                 for line in cfg.lines() {
                     let line = line.trim();
-                    if line.starts_with("memory:") {
-                        if let Some(mb_str) = line.split(':').nth(1) {
-                            if let Ok(mb) = mb_str.trim().parse::<u64>() {
+                    if line.starts_with("memory:")
+                        && let Some(mb_str) = line.split(':').nth(1)
+                            && let Ok(mb) = mb_str.trim().parse::<u64>() {
                                 memory_limit = mb * 1024 * 1024; // MB → bytes
                             }
-                        }
-                    }
                 }
             }
-        }
-    }
 
     // Fallback: if still 0, try reading /proc/meminfo inside the container
     if memory_limit == 0 {
@@ -7457,8 +7371,7 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
         if let Ok(out) = Command::new("timeout")
             .args(&attach_args)
             .output()
-        {
-            if out.status.success() {
+            && out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
                 for line in text.lines() {
                     if line.starts_with("MemTotal:") {
@@ -7473,7 +7386,6 @@ fn lxc_info(name: &str) -> LxcDetailInfo {
                     }
                 }
             }
-        }
     }
 
     // CPU — use lxc-attach to read /proc/stat quickly
@@ -7795,9 +7707,7 @@ fn lxc_post_start_setup(container: &str) {
              systemctl enable sshd 2>/dev/null || update-rc.d ssh enable 2>/dev/null || true"]);
         let _ = Command::new("lxc-attach").args(&args).output();
 
-    } else {
-
-    }
+    } 
 
     // Create WolfStack MOTD — write directly to rootfs (avoids shell escaping issues)
     let motd_path = format!("{}/{}/rootfs/etc/motd", base, container);
@@ -8028,9 +7938,7 @@ pub fn lxc_save_config(container: &str, content: &str) -> Result<String, String>
     }
 
     // Validate that this config doesn't have conflicting WolfNet + VLAN settings
-    if let Err(e) = validate_wolfnet_vlan_conflict(content) {
-        return Err(e);
-    }
+    validate_wolfnet_vlan_conflict(content)?;
 
     let backup = format!("{}.bak", path);
     let _ = std::fs::copy(&path, &backup);
@@ -8177,8 +8085,8 @@ fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str
         };
 
         // Network interfaces: net0, net1, etc.
-        if key.starts_with("net") {
-            if let Ok(idx) = key[3..].parse::<u32>() {
+        if key.starts_with("net")
+            && let Ok(idx) = key[3..].parse::<u32>() {
                 let nic = net_map.entry(idx).or_insert_with(|| LxcNetInterface {
                     index: idx,
                     ..Default::default()
@@ -8221,7 +8129,6 @@ fn parse_proxmox_config(mut cfg: LxcParsedConfig, content: &str, container: &str
                 nic.flags = "up".to_string();
                 continue;
             }
-        }
 
         match key {
             "hostname" => cfg.hostname = val.to_string(),
@@ -8517,10 +8424,9 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         let val = parts[1].trim();
 
         // Parse lxc.net.N.* keys for all network interfaces
-        if key.starts_with("lxc.net.") {
-            let remainder = &key["lxc.net.".len()..];
-            if let Some(dot_pos) = remainder.find('.') {
-                if let Ok(idx) = remainder[..dot_pos].parse::<u32>() {
+        if let Some(remainder) = key.strip_prefix("lxc.net.") {
+            if let Some(dot_pos) = remainder.find('.')
+                && let Ok(idx) = remainder[..dot_pos].parse::<u32>() {
                     let field = &remainder[dot_pos + 1..];
                     let nic = net_map.entry(idx).or_insert_with(|| LxcNetInterface {
                         index: idx,
@@ -8545,7 +8451,6 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
                         _ => {}
                     }
                 }
-            }
             continue;
         }
 
@@ -8800,12 +8705,11 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
     let mut args: Vec<String> = vec!["set".to_string(), container.to_string()];
 
     // Hostname
-    if let Some(ref h) = settings.hostname {
-        if !h.is_empty() {
+    if let Some(ref h) = settings.hostname
+        && !h.is_empty() {
             args.push("--hostname".to_string());
             args.push(h.clone());
         }
-    }
 
     // Memory (Proxmox uses MB as integer)
     let mem = settings.memory_limit.as_deref().unwrap_or(&current.memory_limit);
@@ -9083,7 +8987,7 @@ fn parse_mem_to_mb(mem: &str) -> u64 {
     if let Some(v) = stripped.strip_suffix('k') {
         // kB → MB (rounded up — 1 kB still counts as 1 MB of allowance).
         let kb = v.trim().parse::<u64>().unwrap_or(0);
-        return (kb + 1023) / 1024;
+        return kb.div_ceil(1024);
     }
     // Plain number. This field is always MB in the WolfStack UI —
     // previous code had a "if val > 10000 treat as bytes" heuristic
@@ -9599,19 +9503,17 @@ fn wolfnet_used_ip_set() -> Option<(String, std::collections::HashSet<String>)> 
     if let Ok(content) = std::fs::read_to_string("/etc/wolfnet/config.toml") {
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("address") && trimmed.contains('=') {
-                if let Some(val) = trimmed.split('=').nth(1) {
+            if trimmed.starts_with("address") && trimmed.contains('=')
+                && let Some(val) = trimmed.split('=').nth(1) {
                     let ip = val.trim().trim_matches('"').trim().to_string();
                     if !ip.is_empty() { used.insert(ip); }
                 }
-            }
             // Peer allowed_ip: allowed_ip = "10.10.10.1"
-            if trimmed.starts_with("allowed_ip") && trimmed.contains('=') {
-                if let Some(val) = trimmed.split('=').nth(1) {
+            if trimmed.starts_with("allowed_ip") && trimmed.contains('=')
+                && let Some(val) = trimmed.split('=').nth(1) {
                     let ip = val.trim().trim_matches('"').trim().to_string();
                     if !ip.is_empty() { used.insert(ip); }
                 }
-            }
         }
     }
 
@@ -9628,14 +9530,13 @@ fn wolfnet_used_ip_set() -> Option<(String, std::collections::HashSet<String>)> 
         for line in stdout.lines() {
             let trimmed = line.trim();
             // Lines like: "inet 10.10.10.3/24 ..." or "inet 10.10.10.40/32 ..."
-            if trimmed.starts_with("inet ") {
-                if let Some(cidr) = trimmed.split_whitespace().nth(1) {
+            if trimmed.starts_with("inet ")
+                && let Some(cidr) = trimmed.split_whitespace().nth(1) {
                     let ip = cidr.split('/').next().unwrap_or("").to_string();
                     if !ip.is_empty() {
                         used.insert(ip);
                     }
                 }
-            }
         }
     }
 
@@ -9661,15 +9562,12 @@ fn wolfnet_used_ip_set() -> Option<(String, std::collections::HashSet<String>)> 
     // allocator call could hand out a colliding address.
     if let Ok(entries) = std::fs::read_dir("/var/lib/wolfstack/vms") {
         for entry in entries.flatten() {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(ip) = vm.get("wolfnet_ip").and_then(|v| v.as_str()) {
-                        if !ip.is_empty() {
+            if let Ok(content) = std::fs::read_to_string(entry.path())
+                && let Ok(vm) = serde_json::from_str::<serde_json::Value>(&content)
+                    && let Some(ip) = vm.get("wolfnet_ip").and_then(|v| v.as_str())
+                        && !ip.is_empty() {
                             used.insert(ip.to_string());
                         }
-                    }
-                }
-            }
         }
     }
 
@@ -9688,43 +9586,37 @@ fn wolfnet_used_ip_set() -> Option<(String, std::collections::HashSet<String>)> 
 
     // Scan WolfRun services for service VIPs and all instance WolfNet IPs
     // This prevents VIP or remote-node container IPs from being re-allocated
-    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().wolfrun_services) {
-        if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().wolfrun_services)
+        && let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
             for svc in &services {
                 // Service VIP
-                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str()) {
-                    if !vip.is_empty() {
+                if let Some(vip) = svc.get("service_ip").and_then(|v| v.as_str())
+                    && !vip.is_empty() {
                         used.insert(vip.to_string());
                     }
-                }
                 // All instance WolfNet IPs (may be on remote nodes)
                 if let Some(instances) = svc.get("instances").and_then(|v| v.as_array()) {
                     for inst in instances {
-                        if let Some(ip) = inst.get("wolfnet_ip").and_then(|v| v.as_str()) {
-                            if !ip.is_empty() {
+                        if let Some(ip) = inst.get("wolfnet_ip").and_then(|v| v.as_str())
+                            && !ip.is_empty() {
                                 used.insert(ip.to_string());
                             }
-                        }
                     }
                 }
             }
         }
-    }
 
     // Scan IP mappings to avoid colliding with port-forward destinations
-    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().ip_mappings) {
-        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(mappings) = wrapper.get("mappings").and_then(|v| v.as_array()) {
+    if let Ok(content) = std::fs::read_to_string(&crate::paths::get().ip_mappings)
+        && let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(mappings) = wrapper.get("mappings").and_then(|v| v.as_array()) {
                 for m in mappings {
-                    if let Some(ip) = m.get("wolfnet_ip").and_then(|v| v.as_str()) {
-                        if !ip.is_empty() {
+                    if let Some(ip) = m.get("wolfnet_ip").and_then(|v| v.as_str())
+                        && !ip.is_empty() {
                             used.insert(ip.to_string());
                         }
-                    }
                 }
             }
-        }
-    }
 
     // Cluster-wide: check in-memory route cache (populated by poll_remote_nodes)
     // This is more up-to-date than routes.json since it's updated on every poll cycle
@@ -9736,13 +9628,12 @@ fn wolfnet_used_ip_set() -> Option<(String, std::collections::HashSet<String>)> 
     }
 
     // Also check routes.json as fallback (in case cache was reset on restart)
-    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
-        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json")
+        && let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
             for ip in routes.keys() {
                 used.insert(ip.clone());
             }
         }
-    }
 
     Some((prefix, used))
 }
@@ -10140,7 +10031,7 @@ fn lxc_list_templates_proxmox() -> Vec<LxcTemplate> {
             2 => {
                 // Could be "archlinux-base" or "distro-release"
                 let s1 = segments[1];
-                if s1.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                if s1.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                     (segments[0], s1, "default")
                 } else {
                     (segments[0], "latest", s1)
@@ -10423,14 +10314,12 @@ pub fn pvesm_resolve_path(storage_id: &str) -> Option<String> {
                     if let Ok(output) = Command::new("zfs")
                         .args(["get", "-H", "-o", "value", "mountpoint", &pool])
                         .output()
-                    {
-                        if output.status.success() {
+                        && output.status.success() {
                             let mp = String::from_utf8_lossy(&output.stdout).trim().to_string();
                             if !mp.is_empty() && mp.starts_with('/') {
                                 return Some(mp);
                             }
                         }
-                    }
                     // Fallback: ZFS default mountpoint is /<pool>
                     return Some(format!("/{}", pool));
                 }
@@ -10438,14 +10327,12 @@ pub fn pvesm_resolve_path(storage_id: &str) -> Option<String> {
                 if let Ok(output) = Command::new("zfs")
                     .args(["get", "-H", "-o", "value", "mountpoint", storage_id])
                     .output()
-                {
-                    if output.status.success() {
+                    && output.status.success() {
                         let mp = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if !mp.is_empty() && mp.starts_with('/') {
                             return Some(mp);
                         }
                     }
-                }
                 return Some(format!("/{}", storage_id));
             }
         }
@@ -10764,7 +10651,7 @@ fn pick_default_container_storage(pvesm_status: &str) -> String {
         })
         .collect();
     for pref in ["local-lvm", "local-zfs"] {
-        if active.iter().any(|n| *n == pref) {
+        if active.contains(&pref) {
             return pref.to_string();
         }
     }
@@ -10830,29 +10717,26 @@ pub fn pct_create_api(name: &str, distribution: &str, release: &str, architectur
         args.push(net0);
     }
 
-    if let Some(pw) = root_password {
-        if !pw.is_empty() {
+    if let Some(pw) = root_password
+        && !pw.is_empty() {
             args.push("--password".to_string());
             args.push(pw.to_string());
         }
-    }
 
-    if let Some(mem) = memory_mb {
-        if mem > 0 {
+    if let Some(mem) = memory_mb
+        && mem > 0 {
             args.push("--memory".to_string());
             args.push(mem.to_string());
         }
-    }
 
     // Override default cores if user specified
-    if let Some(cores) = cpu_cores {
-        if cores > 0 {
+    if let Some(cores) = cpu_cores
+        && cores > 0 {
             // Remove the default --cores 1 and replace
             if let Some(pos) = args.iter().position(|a| a == "--cores") {
                 args[pos + 1] = cores.to_string();
             }
         }
-    }
 
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -10947,12 +10831,11 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>, vmid
             "--hostname".to_string(), new_name.to_string(),
             "--full".to_string(), "1".to_string(),  // full clone, not linked
         ];
-        if let Some(s) = storage {
-            if !s.is_empty() {
+        if let Some(s) = storage
+            && !s.is_empty() {
                 args.push("--storage".to_string());
                 args.push(s.to_string());
             }
-        }
     
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("pct").args(&args_ref).output()
@@ -10980,23 +10863,21 @@ pub fn lxc_clone_local(source: &str, new_name: &str, storage: Option<&str>, vmid
         // Standalone: lxc-copy
         let mut args = vec!["-n", source, "-N", new_name];
         let path_str;
-        if let Some(s) = storage {
-            if !s.is_empty() && s != LXC_DEFAULT_PATH {
+        if let Some(s) = storage
+            && !s.is_empty() && s != LXC_DEFAULT_PATH {
                 path_str = s.to_string();
                 args.push("-P");
                 args.push(&path_str);
             }
-        }
         let output = Command::new("lxc-copy").args(&args).output()
             .map_err(|e| format!("Failed to run lxc-copy: {}", e))?;
 
         if output.status.success() {
             // Register the storage path if non-default
-            if let Some(s) = storage {
-                if !s.is_empty() && s != LXC_DEFAULT_PATH {
+            if let Some(s) = storage
+                && !s.is_empty() && s != LXC_DEFAULT_PATH {
                     lxc_register_path(s);
                 }
-            }
             lxc_clone_fixup_ip(new_name);
             Ok(format!("Container '{}' cloned to '{}'", source, new_name))
         } else {
@@ -11111,34 +10992,28 @@ pub fn lxc_export(container: &str) -> Result<(std::path::PathBuf, ContainerExpor
 fn find_vzdump_archive(stdout: &str, export_dir: &std::path::Path, vmid: &str) -> Result<std::path::PathBuf, String> {
     // vzdump prints the archive path: "creating vzdump archive '/tmp/.../vzdump-lxc-100-...tar.zst'"
     for line in stdout.lines() {
-        if line.contains("creating") && line.contains("vzdump") {
-            if let Some(start) = line.find('\'') {
-                if let Some(end) = line.rfind('\'') {
-                    if start < end {
+        if line.contains("creating") && line.contains("vzdump")
+            && let Some(start) = line.find('\'')
+                && let Some(end) = line.rfind('\'')
+                    && start < end {
                         let path = &line[start+1..end];
                         let p = std::path::PathBuf::from(path);
                         if p.exists() {
                             return Ok(p);
                         }
                     }
-                }
-            }
-        }
     }
     // Fallback: search the export dir for the newest vzdump file matching this vmid
     if let Ok(entries) = std::fs::read_dir(export_dir) {
         let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("vzdump-lxc-{}-", vmid)) {
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        if best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
+            if name.starts_with(&format!("vzdump-lxc-{}-", vmid))
+                && let Ok(meta) = entry.metadata()
+                    && let Ok(modified) = meta.modified()
+                        && best.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
                             best = Some((entry.path(), modified));
                         }
-                    }
-                }
-            }
         }
         if let Some((path, _)) = best {
             return Ok(path);
@@ -11581,18 +11456,16 @@ fn lxc_limits_from_pct_conf(pct_conf: &str) -> Vec<String> {
         let (k, v) = (k.trim(), v.trim());
         match k {
             "memory" => {
-                if let Ok(mb) = v.parse::<u64>() {
-                    if mb > 0 {
+                if let Ok(mb) = v.parse::<u64>()
+                    && mb > 0 {
                         out.push(format!("lxc.cgroup2.memory.max = {}", mb * 1024 * 1024));
                     }
-                }
             }
             "swap" => {
-                if let Ok(mb) = v.parse::<u64>() {
-                    if mb > 0 {
+                if let Ok(mb) = v.parse::<u64>()
+                    && mb > 0 {
                         out.push(format!("lxc.cgroup2.memory.swap.max = {}", mb * 1024 * 1024));
                     }
-                }
             }
             "cores" => {
                 if let Some(limit) = lxc_parse_cpu_input(v) {
@@ -11600,11 +11473,10 @@ fn lxc_limits_from_pct_conf(pct_conf: &str) -> Vec<String> {
                     out.push(format!("{} = {}", key, value));
                 }
             }
-            "onboot" => {
-                if v == "1" {
+            "onboot"
+                if v == "1" => {
                     out.push("lxc.start.auto = 1".to_string());
                 }
-            }
             _ => {}
         }
     }
@@ -11832,7 +11704,7 @@ fn lxc_config_cpu_cores(cfg: &str) -> Option<u64> {
         let Some((k, v)) = line.trim().split_once('=') else { continue };
         match k.trim() {
             "lxc.cgroup2.cpu.max" => {
-                let mut parts = v.trim().split_whitespace();
+                let mut parts = v.split_whitespace();
                 let quota: u64 = parts.next()?.parse().ok()?;
                 let period: u64 = parts.next().unwrap_or("100000").parse().ok()?;
                 if period == 0 { return None; }
@@ -12301,13 +12173,12 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
 
     // Custom storage path
     let path_str;
-    if let Some(path) = storage_path {
-        if !path.is_empty() && path != LXC_DEFAULT_PATH {
+    if let Some(path) = storage_path
+        && !path.is_empty() && path != LXC_DEFAULT_PATH {
             path_str = path.to_string();
             args.push("-P");
             args.push(&path_str);
         }
-    }
 
     args.extend_from_slice(&["--", "-d", distribution, "-r", release, "-a", architecture]);
 
@@ -12315,13 +12186,12 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
     // stash the downloaded tarball. Defaults to /var/cache/lxc when
     // unset; the UI's template-storage picker funnels into this.
     let mut cmd = Command::new("lxc-create");
-    if let Some(cache) = template_cache_path {
-        if !cache.is_empty() {
+    if let Some(cache) = template_cache_path
+        && !cache.is_empty() {
             // Let the template land on the chosen storage (it'll live
             // in <cache>/lxc/cache/download/...).
             cmd.env("LXC_CACHE_PATH", format!("{}/lxc/cache", cache.trim_end_matches('/')));
         }
-    }
     let output = cmd
         .args(&args)
         .output()
@@ -12330,11 +12200,10 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
     if output.status.success() {
 
         // Register the storage path if non-default
-        if let Some(path) = storage_path {
-            if !path.is_empty() && path != LXC_DEFAULT_PATH {
+        if let Some(path) = storage_path
+            && !path.is_empty() && path != LXC_DEFAULT_PATH {
                 lxc_register_path(path);
             }
-        }
 
         // Set sane defaults: swap=0 and 1 CPU core so containers start reliably
         let base = if let Some(p) = storage_path.filter(|p| !p.is_empty() && *p != LXC_DEFAULT_PATH) {
@@ -12374,8 +12243,8 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
         // (Settings → Nesting + lxc.apparmor.profile = unconfined).
         let rootfs = format!("{}/{}/rootfs", base, name);
         let is_systemd = rootfs_uses_systemd(&rootfs);
-        if is_systemd {
-            if let Ok(mut cfg) = std::fs::read_to_string(&cfg_path) {
+        if is_systemd
+            && let Ok(mut cfg) = std::fs::read_to_string(&cfg_path) {
                 let mut additions: Vec<&str> = Vec::new();
                 if !cfg.contains("nesting.conf") {
                     additions.push("lxc.include = /usr/share/lxc/config/nesting.conf");
@@ -12402,7 +12271,6 @@ pub fn lxc_create(name: &str, distribution: &str, release: &str, architecture: &
                     info!("LXC '{}': detected systemd init, applied nesting + apparmor unconfined", name);
                 }
             }
-        }
 
         let storage_info = storage_path.filter(|p| !p.is_empty() && *p != LXC_DEFAULT_PATH)
             .map(|p| format!(" on {}", p))
@@ -12473,8 +12341,8 @@ fn docker_search_hub_api(query: &str) -> Vec<DockerSearchResult> {
     match output {
         Ok(o) if o.status.success() => {
             let body = String::from_utf8_lossy(&o.stdout);
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                && let Some(results) = json.get("results").and_then(|r| r.as_array()) {
                     return results.iter().filter_map(|r| {
                         let name = r.get("repo_name")
                             .or_else(|| r.get("slug"))
@@ -12498,7 +12366,6 @@ fn docker_search_hub_api(query: &str) -> Vec<DockerSearchResult> {
                         })
                     }).collect();
                 }
-            }
             vec![]
         }
         _ => {
@@ -12524,8 +12391,7 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
         if let Ok(manifest_out) = Command::new("docker")
             .args(["manifest", "inspect", image])
             .output()
-        {
-            if manifest_out.status.success() {
+            && manifest_out.status.success() {
                 let manifest = String::from_utf8_lossy(&manifest_out.stdout);
                 // Check if our architecture appears in the manifest
                 if !manifest.contains(docker_arch) && !manifest.contains(host_arch) {
@@ -12539,7 +12405,6 @@ pub fn docker_pull(image: &str) -> Result<String, String> {
                 }
             }
             // If manifest inspect fails (e.g. private image), proceed with pull anyway
-        }
     }
 
     let output = Command::new("docker")
@@ -12585,9 +12450,7 @@ pub fn docker_create_with_cmd(name: &str, image: &str, ports: &[String], env: &[
     // reported) sometimes silently as an unbound port instead of an
     // error. Failing at create time means the operator gets a clear
     // error in the UI before they even try to start the service.
-    if let Err(msg) = validate_host_ports_free(ports, name) {
-        return Err(msg);
-    }
+    validate_host_ports_free(ports, name)?;
 
     let mut args = vec![
         "create".to_string(),
@@ -12597,18 +12460,16 @@ pub fn docker_create_with_cmd(name: &str, image: &str, ports: &[String], env: &[
     ];
 
     // Add resource limits
-    if let Some(mem) = memory {
-        if !mem.is_empty() {
+    if let Some(mem) = memory
+        && !mem.is_empty() {
             args.push("--memory".to_string());
             args.push(mem.to_string());
         }
-    }
-    if let Some(cpu) = cpus {
-        if !cpu.is_empty() {
+    if let Some(cpu) = cpus
+        && !cpu.is_empty() {
             args.push("--cpus".to_string());
             args.push(cpu.to_string());
         }
-    }
 
     // Inject real DNS servers — on systemd-resolved hosts,
     // /etc/resolv.conf points at 127.0.0.53 which is unreachable
@@ -13044,7 +12905,7 @@ fn lxc_quota_cores_from_cpu_max(val: &str) -> Option<u32> {
     let period: u32 = it.next()?.parse().ok()?;
     if it.next().is_some() { return None; }
     if period != LXC_CPU_PERIOD_US { return None; }
-    if max == 0 || max % period != 0 { return None; }
+    if max == 0 || !max.is_multiple_of(period) { return None; }
     Some(max / period)
 }
 
@@ -13132,8 +12993,8 @@ pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Opti
     };
     let mut modified = false;
 
-    if let Some(mem) = memory {
-        if !mem.is_empty() {
+    if let Some(mem) = memory
+        && !mem.is_empty() {
             let mb = parse_mem_to_mb(mem);
             if mb > 0 {
                 let bytes = mb * 1024 * 1024;
@@ -13143,7 +13004,6 @@ pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Opti
                 }
             }
         }
-    }
 
     if let Some(limit) = cpus.and_then(lxc_parse_cpu_input) {
         // Strip both possible old CPU keys so a switch between
@@ -13160,11 +13020,10 @@ pub fn lxc_set_resource_limits(container: &str, memory: Option<&str>, cpus: Opti
         }
     }
 
-    if modified {
-        if let Err(e) = std::fs::write(&config_path, config) {
+    if modified
+        && let Err(e) = std::fs::write(&config_path, config) {
             return Err(format!("Failed to write config: {}", e));
         }
-    }
 
     if messages.is_empty() {
         Ok(None)
@@ -14939,9 +14798,8 @@ fn pct_add_mount(vmid: u64, opts: &LxcMountOptions) -> Result<String, String> {
     if opts.shared { parts.push("shared=1".to_string()); }
     if opts.backup { parts.push("backup=1".to_string()); }
     if opts.quota { parts.push("quota=1".to_string()); }
-    if let Some(sz) = opts.size_gb {
-        if !opts.host_path.starts_with('/') { parts.push(format!("size={}G", sz)); }
-    }
+    if let Some(sz) = opts.size_gb
+        && !opts.host_path.starts_with('/') { parts.push(format!("size={}G", sz)); }
     let mp_value = parts.join(",");
 
     let out = Command::new("pct")
@@ -15076,11 +14934,7 @@ pub fn lxc_remove_mount(container: &str, host_path: &str) -> Result<String, Stri
 
     let filtered: Vec<&str> = config.lines()
         .filter(|line| {
-            if line.trim().starts_with("lxc.mount.entry") && line.contains(host_path) {
-                false
-            } else {
-                true
-            }
+            !(line.trim().starts_with("lxc.mount.entry") && line.contains(host_path))
         })
         .collect();
 

@@ -227,12 +227,11 @@ fn purge_by_comment(comment: &str) {
             };
             let mut found = None;
             for line in text.lines().rev() {
-                if line.contains(comment) {
-                    if let Some(n) = line.split_whitespace().next().and_then(|x| x.parse::<u32>().ok()) {
+                if line.contains(comment)
+                    && let Some(n) = line.split_whitespace().next().and_then(|x| x.parse::<u32>().ok()) {
                         found = Some(n);
                         break;
                     }
-                }
             }
             match found {
                 Some(n) => {
@@ -288,8 +287,8 @@ fn purge_nft_for_entry(id: &str) {
         let out = Command::new("nft")
             .args(["-a", "list", "chain", "ip", NFT_TABLE, root])
             .output();
-        if let Ok(o) = out {
-            if o.status.success() {
+        if let Ok(o) = out
+            && o.status.success() {
                 let text = String::from_utf8_lossy(&o.stdout);
                 let needle = format!("jump {}", chain);
                 for line in text.lines() {
@@ -305,7 +304,6 @@ fn purge_nft_for_entry(id: &str) {
                     }
                 }
             }
-        }
     }
 }
 
@@ -466,8 +464,8 @@ fn detect_snat_source(public_ip: &str) -> String {
     // the backend — the kernel picks this anyway, but asking explicitly
     // lets us bake it into the SNAT rule so conntrack has a fixed answer.
     let out = Command::new("ip").args(["-4", "route", "get", public_ip]).output();
-    if let Ok(o) = out {
-        if o.status.success() {
+    if let Ok(o) = out
+        && o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout);
             // Expected format: "1.2.3.4 dev eth0 src 1.2.3.5 uid 0"
             if let Some(idx) = s.find(" src ") {
@@ -477,7 +475,6 @@ fn detect_snat_source(public_ip: &str) -> String {
                 }
             }
         }
-    }
     public_ip.to_string()
 }
 

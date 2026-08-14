@@ -216,6 +216,7 @@ pub struct StatusPage {
 
 /// Top-level configuration: global monitors + multiple status pages
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct StatusPageConfig {
     /// Global pool of monitors (shared across all pages)
     #[serde(default)]
@@ -228,15 +229,6 @@ pub struct StatusPageConfig {
     pub pages: Vec<StatusPage>,
 }
 
-impl Default for StatusPageConfig {
-    fn default() -> Self {
-        Self {
-            monitors: Vec::new(),
-            incidents: Vec::new(),
-            pages: Vec::new(),
-        }
-    }
-}
 
 impl StatusPageConfig {
     pub fn load() -> Self {
@@ -422,7 +414,7 @@ impl StatusPageState {
     }
 
     fn load_daily_uptime() -> HashMap<String, VecDeque<DailyUptime>> {
-        match std::fs::read_to_string(&uptime_file()) {
+        match std::fs::read_to_string(uptime_file()) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => HashMap::new(),
         }

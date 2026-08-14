@@ -622,8 +622,8 @@ impl ClusterState {
 
     /// Load saved remote nodes from disk
     fn load_nodes(&self) {
-        if let Ok(data) = std::fs::read_to_string(&Self::nodes_file()) {
-            if let Ok(saved) = serde_json::from_str::<Vec<Node>>(&data) {
+        if let Ok(data) = std::fs::read_to_string(Self::nodes_file())
+            && let Ok(saved) = serde_json::from_str::<Vec<Node>>(&data) {
                 let mut nodes = self.nodes_write();
                 for mut node in saved {
                     node.online = false; // Will be updated by polling
@@ -636,7 +636,6 @@ impl ClusterState {
                     nodes.insert(node.id.clone(), node);
                 }
             }
-        }
     }
 
     /// Save remote nodes to disk
@@ -721,7 +720,7 @@ impl ClusterState {
         // Fetch existing cluster_name: in-memory first, then persisted file, then default
         let cluster_name = nodes.get(&self.self_id)
             .and_then(|n| n.cluster_name.clone())
-            .or_else(|| Self::load_self_cluster_name())
+            .or_else(Self::load_self_cluster_name)
             .or_else(|| Some("WolfStack".to_string()));
 
         let now = now_unix();
@@ -775,7 +774,7 @@ impl ClusterState {
             has_docker,
             has_lxc,
             has_kvm,
-            login_disabled: prev_login_disabled.or_else(|| Self::load_self_login_disabled()).unwrap_or(false),
+            login_disabled: prev_login_disabled.or_else(Self::load_self_login_disabled).unwrap_or(false),
             tls: tls_enabled,
             update_script: prev_update_script,
             // Self's id IS the self_id by construction; the field is for
@@ -1245,15 +1244,14 @@ impl ClusterState {
 
     /// Load tombstoned node IDs from disk
     fn load_deleted_ids(&self) {
-        if let Ok(data) = std::fs::read_to_string(&Self::deleted_file()) {
-            if let Ok(ids) = serde_json::from_str::<Vec<String>>(&data) {
+        if let Ok(data) = std::fs::read_to_string(Self::deleted_file())
+            && let Ok(ids) = serde_json::from_str::<Vec<String>>(&data) {
                 let mut deleted = self.deleted_write();
                 for id in ids {
                     deleted.insert(id);
                 }
 
             }
-        }
     }
 
     /// Save tombstoned node IDs to disk
@@ -1364,7 +1362,7 @@ impl ProxmoxCleanupNotice {
             std::fs::create_dir_all(dir)?;
         }
         let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&path, json)
     }
 
@@ -1459,13 +1457,11 @@ impl ClusterState {
     }
 
     fn load_self_cluster_name() -> Option<String> {
-        if let Ok(data) = std::fs::read_to_string(&Self::self_cluster_file()) {
-            if let Ok(name) = serde_json::from_str::<String>(&data) {
-                if !name.is_empty() {
+        if let Ok(data) = std::fs::read_to_string(Self::self_cluster_file())
+            && let Ok(name) = serde_json::from_str::<String>(&data)
+                && !name.is_empty() {
                     return Some(name);
                 }
-            }
-        }
         None
     }
 
@@ -1475,11 +1471,10 @@ impl ClusterState {
         if let Some(dir) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(json) = serde_json::to_string(name) {
-            if let Err(e) = std::fs::write(&path, json) {
+        if let Ok(json) = serde_json::to_string(name)
+            && let Err(e) = std::fs::write(&path, json) {
                 warn!("Failed to save self cluster name: {}", e);
             }
-        }
     }
 
     /// Load persisted self site tag from disk. Same path/format as
@@ -1487,13 +1482,11 @@ impl ClusterState {
     /// `None` for missing/empty/malformed files; callers fall through
     /// to the auto-derived site.
     fn load_self_site() -> Option<String> {
-        if let Ok(data) = std::fs::read_to_string(Self::self_site_file()) {
-            if let Ok(name) = serde_json::from_str::<String>(&data) {
-                if !name.is_empty() {
+        if let Ok(data) = std::fs::read_to_string(Self::self_site_file())
+            && let Ok(name) = serde_json::from_str::<String>(&data)
+                && !name.is_empty() {
                     return Some(name);
                 }
-            }
-        }
         None
     }
 
@@ -1509,11 +1502,10 @@ impl ClusterState {
             let _ = std::fs::remove_file(&path);
             return;
         }
-        if let Ok(json) = serde_json::to_string(site) {
-            if let Err(e) = std::fs::write(&path, json) {
+        if let Ok(json) = serde_json::to_string(site)
+            && let Err(e) = std::fs::write(&path, json) {
                 warn!("Failed to save self site: {}", e);
             }
-        }
     }
 
     fn self_roles_file() -> String { crate::paths::get().self_roles_config }
@@ -1551,13 +1543,11 @@ impl ClusterState {
     /// site tag. `None` for missing/empty/malformed — UI then shows the
     /// hostname.
     fn load_self_display_name() -> Option<String> {
-        if let Ok(data) = std::fs::read_to_string(Self::self_display_name_file()) {
-            if let Ok(name) = serde_json::from_str::<String>(&data) {
-                if !name.is_empty() {
+        if let Ok(data) = std::fs::read_to_string(Self::self_display_name_file())
+            && let Ok(name) = serde_json::from_str::<String>(&data)
+                && !name.is_empty() {
                     return Some(name);
                 }
-            }
-        }
         None
     }
 
@@ -1573,11 +1563,10 @@ impl ClusterState {
             let _ = std::fs::remove_file(&path);
             return;
         }
-        if let Ok(json) = serde_json::to_string(name) {
-            if let Err(e) = std::fs::write(&path, json) {
+        if let Ok(json) = serde_json::to_string(name)
+            && let Err(e) = std::fs::write(&path, json) {
                 warn!("Failed to save self display name: {}", e);
             }
-        }
     }
 
     /// Load persisted login_disabled for self node
@@ -1737,9 +1726,8 @@ fn save_identity_intents(map: &HashMap<String, IdentityIntent>) {
     let path = identity_intents_file();
     if let Some(dir) = std::path::Path::new(&path).parent() { let _ = std::fs::create_dir_all(dir); }
     if map.is_empty() { let _ = std::fs::remove_file(&path); return; }
-    if let Ok(json) = serde_json::to_string_pretty(map) {
-        if let Err(e) = std::fs::write(&path, json) { warn!("Failed to save identity intents: {}", e); }
-    }
+    if let Ok(json) = serde_json::to_string_pretty(map)
+        && let Err(e) = std::fs::write(&path, json) { warn!("Failed to save identity intents: {}", e); }
 }
 
 /// Record (merge) an intent to push `display_name`/`cluster_name` to node `id`
@@ -2209,8 +2197,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         let _ = resp.bytes().await;
                         continue;
                     }
-                    if let Ok(msg) = resp.json::<AgentMessage>().await {
-                        if let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, site: peer_site, display_name: peer_display_name, roles: peer_roles, license_key } = msg {
+                    if let Ok(msg) = resp.json::<AgentMessage>().await
+                        && let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, site: peer_site, display_name: peer_display_name, roles: peer_roles, license_key } = msg {
                             let now = now_unix();
                             // Detect TLS by the URL scheme that actually
                             // answered. v23.12 chain is HTTPS → HTTP-over-
@@ -2327,8 +2315,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
 
                             // Enterprise license propagation: if a remote node has a
                             // valid license and we don't, save it locally.
-                            if let Some(ref lk) = license_key {
-                                if !lk.is_empty() && !crate::compat::platform_ready() {
+                            if let Some(ref lk) = license_key
+                                && !lk.is_empty() && !crate::compat::platform_ready() {
                                     let dm_path = crate::compat::dm_path();
                                     if std::fs::read_to_string(&dm_path).map(|s| s.trim().is_empty()).unwrap_or(true) {
                                         if let Some(parent) = std::path::Path::new(&dm_path).parent() {
@@ -2339,7 +2327,6 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         }
                                     }
                                 }
-                            }
 
                             // Merge tombstones first — so we don't re-add deleted nodes
                             cluster.merge_tombstones(&deleted_ids);
@@ -2585,12 +2572,11 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // Same validity guard as above — never cache
                             // a bogus "host IP" that's actually a
                             // container address.
-                            if let Some(host_wn_ip) = wolfnet_ips.first() {
-                                if !host_wn_ip.is_empty()
+                            if let Some(host_wn_ip) = wolfnet_ips.first()
+                                && !host_wn_ip.is_empty()
                                     && host_wn_ip.parse::<std::net::Ipv4Addr>().is_ok() {
                                     crate::api::record_node_wolfnet_ip(&node.address, host_wn_ip);
                                 }
-                            }
                             // Only mark this poll as successful when we
                             // actually parsed a StatusReport. A 200 with
                             // a non-StatusReport body (corrupt agent, mid-
@@ -2601,7 +2587,6 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // routes.
                             poll_ok = true;
                         }
-                    }
                     if poll_ok { break; }
                     // Body wasn't a StatusReport — try the next URL in
                     // the fallback chain rather than declaring success.
@@ -2755,11 +2740,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         // line — between the two, recipients have both
                         // observer and subject context.
                         let (subject, body) = crate::alerting::decorate_local(&raw_subject, &raw_body);
-                        if lifecycle_allowed {
-                            if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
+                        if lifecycle_allowed
+                            && let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
                                 warn!("Failed to send node-offline email for {}: {}", display_name, e);
                             }
-                        }
                         // Send to webhook channels
                         if alert_config.enabled && alert_config.alert_node_offline {
                             let ac = alert_config.clone();
@@ -2789,11 +2773,10 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         // Decorate with observer cluster + host — same shape as
                         // every other WolfStack alert.
                         let (subject, body) = crate::alerting::decorate_local(&raw_subject, &raw_body);
-                        if lifecycle_allowed {
-                            if let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
+                        if lifecycle_allowed
+                            && let Err(e) = crate::ai::send_alert_email(&config, &subject, &body) {
                                 warn!("Failed to send node-restored email for {}: {}", display_name, e);
                             }
-                        }
                         // Send to webhook channels
                         if alert_config.enabled && alert_config.alert_node_restored {
                             let ac = alert_config.clone();

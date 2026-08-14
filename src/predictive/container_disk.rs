@@ -209,11 +209,10 @@ pub fn maybe_reset_history(history: &mut MetricsHistory, fact: &ContainerDiskFac
         .and_then(|s| s.back())
         .map(|s| (s.value as u32) != current_hash)
         .unwrap_or(false);
-    if needs_reset {
-        if let Some(per_resource) = history.by_resource.get_mut(&resource) {
+    if needs_reset
+        && let Some(per_resource) = history.by_resource.get_mut(&resource) {
             per_resource.clear();
         }
-    }
     // Always (re)write the id sentinel so the next tick's check is
     // valid even on the first encounter.
     history.record(&resource, ID_SENTINEL_METRIC, current_hash as f64);

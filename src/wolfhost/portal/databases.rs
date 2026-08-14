@@ -18,11 +18,10 @@ fn hash_password(password: &str) -> Result<String, String> {
 async fn container_exec(container: &str, command: &str, node_id: &str) -> Result<serde_json::Value, String> {
     // Try local first
     let local = format!("/api/containers/lxc/{}/exec", container);
-    if let Ok(r) = crate::wolfhost::api::servers::wolfstack_post_pub(&local, &serde_json::json!({"command": command})).await {
-        if r["ok"].as_bool() == Some(true) || r.get("exit_code").is_some() {
+    if let Ok(r) = crate::wolfhost::api::servers::wolfstack_post_pub(&local, &serde_json::json!({"command": command})).await
+        && (r["ok"].as_bool() == Some(true) || r.get("exit_code").is_some()) {
             return Ok(r);
         }
-    }
     // Fall back to node proxy
     if !node_id.is_empty() {
         let remote = format!("/api/nodes/{}/proxy/containers/lxc/{}/exec", node_id, container);

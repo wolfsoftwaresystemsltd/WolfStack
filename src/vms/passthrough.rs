@@ -210,8 +210,8 @@ fn extract_last_id(s: &str) -> Option<(String, String)> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'[' {
-            if let Some(close) = s[i + 1..].find(']') {
+        if bytes[i] == b'['
+            && let Some(close) = s[i + 1..].find(']') {
                 let inner = &s[i + 1..i + 1 + close];
                 if inner.len() == 9 && &inner[4..5] == ":" {
                     let v = inner[..4].to_lowercase();
@@ -225,7 +225,6 @@ fn extract_last_id(s: &str) -> Option<(String, String)> {
                 i = i + 1 + close + 1;
                 continue;
             }
-        }
         i += 1;
     }
     last
@@ -540,11 +539,10 @@ fn bind_vfio_pci(bdf: &str) -> Result<(), String> {
     }
 
     // If already bound to vfio-pci, nothing to do
-    if let Ok(target) = std::fs::read_link(format!("{}/driver", dev_path)) {
-        if target.file_name().and_then(|s| s.to_str()) == Some("vfio-pci") {
+    if let Ok(target) = std::fs::read_link(format!("{}/driver", dev_path))
+        && target.file_name().and_then(|s| s.to_str()) == Some("vfio-pci") {
             return Ok(());
         }
-    }
 
     // Read vendor:device for the driver_override
     let vendor = std::fs::read_to_string(format!("{}/vendor", dev_path))
@@ -817,7 +815,7 @@ pub fn parse_proxmox_passthrough(cfg_text: &str) -> (Vec<UsbDevice>, Vec<PciDevi
         let line = line.trim();
         // usbN: host=VID:PID[,usb3=1]  or  host=1-4
         if line.starts_with("usb") && line.contains(':') {
-            if let Some(rest) = line.splitn(2, ':').nth(1) {
+            if let Some(rest) = line.split_once(':').map(|x| x.1) {
                 let rest = rest.trim();
                 let host_val = rest
                     .split(',')
@@ -845,8 +843,8 @@ pub fn parse_proxmox_passthrough(cfg_text: &str) -> (Vec<UsbDevice>, Vec<PciDevi
                     });
                 }
             }
-        } else if line.starts_with("hostpci") && line.contains(':') {
-            if let Some(rest) = line.splitn(2, ':').nth(1) {
+        } else if line.starts_with("hostpci") && line.contains(':')
+            && let Some(rest) = line.split_once(':').map(|x| x.1) {
                 let rest = rest.trim();
                 // First token (before a comma) is the BDF
                 let first = rest.split(',').next().unwrap_or("").trim();
@@ -863,7 +861,6 @@ pub fn parse_proxmox_passthrough(cfg_text: &str) -> (Vec<UsbDevice>, Vec<PciDevi
                     });
                 }
             }
-        }
     }
     (usb, pci)
 }
@@ -1266,11 +1263,10 @@ fn check_pci_steals_host_iface(
     bdf_resolver: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     for dev in pci_devices {
-        if let Some(net_iface) = bdf_resolver(&dev.bdf) {
-            if net_iface == host_default_iface {
+        if let Some(net_iface) = bdf_resolver(&dev.bdf)
+            && net_iface == host_default_iface {
                 return Some(host_default_iface.to_string());
             }
-        }
     }
     None
 }
@@ -1286,11 +1282,10 @@ fn check_pci_steals_host_iface(
 pub fn bridge_passthrough_uses_default_route_iface(vm: &VmConfig) -> Option<String> {
     let host_default_iface = host_default_route_interface()?;
     for nic in &vm.extra_nics {
-        if let Some(iface) = &nic.passthrough_interface {
-            if iface == &host_default_iface {
+        if let Some(iface) = &nic.passthrough_interface
+            && iface == &host_default_iface {
                 return Some(host_default_iface);
             }
-        }
     }
     None
 }

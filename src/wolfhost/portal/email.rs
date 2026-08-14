@@ -284,9 +284,8 @@ pub async fn update(req: HttpRequest, state: web::Data<Arc<AppState>>, path: web
 
     let result = state.email_accounts.update_with(|items| {
         if let Some(a) = items.iter_mut().find(|a| a.id == id && a.customer_id == customer_id) {
-            if let Some(pw) = &r.password {
-                if let Ok(h) = hash_password(pw) { a.password_hash = h; }
-            }
+            if let Some(pw) = &r.password
+                && let Ok(h) = hash_password(pw) { a.password_hash = h; }
             if let Some(v) = r.quota_mb { a.quota_mb = v; }
             if let Some(v) = r.forwarding { a.forwarding = v; }
             if let Some(v) = r.status { a.status = v; }
@@ -319,11 +318,10 @@ pub async fn delete(req: HttpRequest, state: web::Data<Arc<AppState>>, path: web
                     let da_pass = crate::wolfhost::provisioning::directadmin::deobfuscate_password(&da_inst.admin_password_enc);
                     let da = crate::wolfhost::provisioning::directadmin::DaClient::new(&da_inst.url, &da_inst.admin_user, &da_pass);
                     let parts: Vec<&str> = acct.address.splitn(2, '@').collect();
-                    if parts.len() == 2 {
-                        if let Err(e) = da.delete_email(parts[1], parts[0]).await {
+                    if parts.len() == 2
+                        && let Err(e) = da.delete_email(parts[1], parts[0]).await {
                             log::error!("DA delete email failed: {}", e);
                         }
-                    }
                 }
             } else if !svc.container_name.is_empty() {
                 let cn = svc.container_name.clone();

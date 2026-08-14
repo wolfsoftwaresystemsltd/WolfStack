@@ -694,9 +694,9 @@ async fn console_session(
                 match msg {
                     Message::Text(text) => {
                         // Check for resize command: {"type":"resize","cols":N,"rows":N}
-                        if text.starts_with('{') {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                                if v.get("type").and_then(|t| t.as_str()) == Some("resize") {
+                        if text.starts_with('{')
+                            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+                                && v.get("type").and_then(|t| t.as_str()) == Some("resize") {
                                     if let (Some(cols), Some(rows)) = (
                                         v.get("cols").and_then(|c| c.as_u64()),
                                         v.get("rows").and_then(|r| r.as_u64()),
@@ -710,8 +710,6 @@ async fn console_session(
                                     }
                                     continue;
                                 }
-                            }
-                        }
                         if let Ok(mut w) = writer.lock() {
                             let _ = w.write_all(text.as_bytes());
                         }

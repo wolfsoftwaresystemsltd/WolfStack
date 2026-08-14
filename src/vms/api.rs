@@ -475,11 +475,10 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     }
 
     // If importing a disk image, set it on the config
-    if let Some(ref img) = body.import_image {
-        if !img.is_empty() {
+    if let Some(ref img) = body.import_image
+        && !img.is_empty() {
             config.import_image = Some(img.clone());
         }
-    }
 
     // Convert extra disks from request to StorageVolume structs
     for disk in &body.extra_disks {
@@ -562,13 +561,12 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
     if let Err(resp) = validate_media_path(body.drivers_iso.as_deref(), "VirtIO drivers ISO path") { return resp; }
 
     // Validate network_mode at the boundary (same as CreateVmRequest).
-    if let Some(ref nm) = body.network_mode {
-        if !matches!(nm.as_str(), "" | "wolfnet" | "bridge" | "nat") {
+    if let Some(ref nm) = body.network_mode
+        && !matches!(nm.as_str(), "" | "wolfnet" | "bridge" | "nat") {
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": format!("invalid network_mode '{}': expected wolfnet | bridge | nat", nm)
             }));
         }
-    }
 
     let manager = state.vms.lock().unwrap();
     match manager.update_vm(&name, body.cpus, body.memory_mb, body.iso_path.clone(),
@@ -944,8 +942,7 @@ async fn vm_add_serial(req: HttpRequest, state: web::Data<AppState>, path: web::
             .output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default()
-            .trim()
-            .to_string() == "running";
+            .trim() == "running";
 
         let xml_dump = std::process::Command::new("virsh")
             .args(["dumpxml", &name])
@@ -1764,15 +1761,14 @@ fn scan_pve_percent(
     // Format: "transferred 4.0 GiB of 32.0 GiB (12.50%)" — we only
     // care about the bracketed percent. Avoid pulling in regex for
     // one pattern; a tiny hand-rolled scan is faster and clearer.
-    if let Some(open) = line.rfind('(') {
-        if let Some(close) = line[open..].find('%') {
+    if let Some(open) = line.rfind('(')
+        && let Some(close) = line[open..].find('%') {
             let inside = &line[open + 1..open + close];
             if let Ok(p) = inside.trim().parse::<f64>() {
                 let overall = (slot_index as f64 + p / 100.0) / slot_count.max(1) as f64 * 100.0;
                 migration_progress(tasks, tid, None, None, Some(overall));
             }
         }
-    }
 }
 
 /// POST /api/vms/{name}/migrate-external — migrate VM to another cluster.
@@ -1847,8 +1843,8 @@ async fn vm_migrate_external(
         // Free-space check (best-effort — skip silently if we can't
         // resolve the storage id; the upload will fail loudly if
         // there really is no room).
-        if let (Some(expected), false) = (expected_total, storage_val.is_empty()) {
-            if let Some(body) = storage_body.as_ref() {
+        if let (Some(expected), false) = (expected_total, storage_val.is_empty())
+            && let Some(body) = storage_body.as_ref() {
                 let storages = body.get("storages").and_then(|s| s.as_array()).cloned().unwrap_or_default();
                 if let Some(entry) = storages.iter().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(storage_val.as_str())) {
                     let avail = entry.get("available_bytes").and_then(|a| a.as_u64()).unwrap_or(0);
@@ -1860,7 +1856,6 @@ async fn vm_migrate_external(
                     }
                 }
             }
-        }
 
         // Name-collision pre-flight is deliberately NOT done for
         // external migrations. `/api/vms` is guarded by `require_auth`,
@@ -2117,11 +2112,10 @@ async fn vm_import_external(
                 };
                 use std::io::Write;
                 while let Some(chunk) = field.next().await {
-                    if let Ok(data) = chunk {
-                        if let Err(e) = file.write_all(&data) {
+                    if let Ok(data) = chunk
+                        && let Err(e) = file.write_all(&data) {
                             return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Write failed: {}", e)}));
                         }
-                    }
                 }
                 archive_path = Some(dest);
             }

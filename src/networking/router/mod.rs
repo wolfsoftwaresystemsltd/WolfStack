@@ -167,18 +167,17 @@ pub struct DhcpReservation {
 /// clients there.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DnsMode {
     /// WolfRouter's dnsmasq binds port `listen_port` on the LAN
     /// interface and DHCP option 6 advertises the router IP.
+    #[default]
     WolfRouter,
     /// WolfRouter's dnsmasq runs DHCP only (port=0 = DNS off) and DHCP
     /// option 6 advertises `external_server` to clients.
     External,
 }
 
-impl Default for DnsMode {
-    fn default() -> Self { DnsMode::WolfRouter }
-}
 
 /// DNS resolver config for one LAN. dnsmasq handles both DHCP and DNS,
 /// so this is applied to the same per-LAN instance.
@@ -937,11 +936,10 @@ fn try_auto_recover_from_backup(
             Ok(n) => n,
             Err(_) => continue,
         };
-        if let Some(ts_str) = name.strip_prefix("config.json.bak.") {
-            if let Ok(ts) = ts_str.parse::<u64>() {
+        if let Some(ts_str) = name.strip_prefix("config.json.bak.")
+            && let Ok(ts) = ts_str.parse::<u64>() {
                 backups.push((ts, entry.path()));
             }
-        }
     }
     // Newest first — we want the closest-to-live-state backup that
     // parses, not the oldest one we still have lying around.
@@ -1032,11 +1030,10 @@ fn prune_old_backups(keep: usize) {
             Ok(n) => n,
             Err(_) => continue,
         };
-        if let Some(ts_str) = name.strip_prefix("config.json.bak.") {
-            if let Ok(ts) = ts_str.parse::<u64>() {
+        if let Some(ts_str) = name.strip_prefix("config.json.bak.")
+            && let Ok(ts) = ts_str.parse::<u64>() {
                 backups.push((ts, entry.path()));
             }
-        }
     }
     if backups.len() <= keep { return; }
     backups.sort_by_key(|(ts, _)| *ts);
@@ -2280,7 +2277,7 @@ pub fn validate_local_configs(state: &RouterState, self_node_id: &str) -> Valida
 
     // ── Zones ───────────────────────────────────────────────────────
     if let Some(node_zones) = cfg.zones.assignments.get(self_node_id) {
-        for (iface, _zone) in node_zones {
+        for iface in node_zones.keys() {
             let exists = std::path::Path::new(&format!("/sys/class/net/{}", iface)).exists();
             if !exists {
                 findings.push(ValidationFinding {
@@ -2321,8 +2318,8 @@ pub fn validate_local_configs(state: &RouterState, self_node_id: &str) -> Valida
                         });
                     }
                 }
-                Endpoint::Interface { name } => {
-                    if !std::path::Path::new(&format!("/sys/class/net/{}", name)).exists() {
+                Endpoint::Interface { name }
+                    if !std::path::Path::new(&format!("/sys/class/net/{}", name)).exists() => {
                         findings.push(ValidationFinding {
                             category: "firewall",
                             item_id: rule.id.clone(),
@@ -2334,7 +2331,6 @@ pub fn validate_local_configs(state: &RouterState, self_node_id: &str) -> Valida
                             ),
                         });
                     }
-                }
                 _ => {}
             }
         }
@@ -2516,7 +2512,7 @@ pub fn spawn_dnsmasq_watchdog(state: std::sync::Arc<RouterState>, self_node_id: 
             // still sane" / "this node has drifted" without each page
             // load triggering its own scan.
             tick = tick.wrapping_add(1);
-            if tick % 5 == 0 {
+            if tick.is_multiple_of(5) {
                 run_validation_and_store(&state, &self_node_id);
             }
             std::thread::sleep(std::time::Duration::from_secs(60));
@@ -2535,8 +2531,8 @@ pub fn spawn_rollback_watcher(state: std::sync::Arc<RouterState>) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs()).unwrap_or(0);
             let deadline = *state.rollback_deadline.read().unwrap();
-            if let Some(d) = deadline {
-                if now >= d {
+            if let Some(d) = deadline
+                && now >= d {
                     // Time's up — revert and clear the deadline.
                     let prev = state.last_applied_rules.read().unwrap().clone();
                     if let Some(p) = prev {
@@ -2548,7 +2544,6 @@ pub fn spawn_rollback_watcher(state: std::sync::Arc<RouterState>) {
                     }
                     *state.rollback_deadline.write().unwrap() = None;
                 }
-            }
         }
     });
 }
@@ -2774,7 +2769,7 @@ pub fn apply_subnet_route(route: &SubnetRoute, previous_gateway: Option<&str>) -
         // Already exactly what we want — no-op.
         Some(gw) if gw == route.gateway => Ok(()),
         // It's our previous entry — atomic swap with `ip route replace`.
-        Some(gw) if previous_gateway.map_or(false, |pgw| pgw == gw) => {
+        Some(gw) if previous_gateway.is_some_and(|pgw| pgw == gw) => {
             let output = Command::new("ip")
                 .arg("route").arg("replace")
                 .arg(&route.subnet_cidr).arg("via").arg(&route.gateway)
@@ -3390,18 +3385,17 @@ pub fn disable_subnet_routes_via_gateway(state: &RouterState, gateway_ip: &str) 
             if r.enabled && r.gateway == gateway_ip {
                 r.enabled = false;
                 r.description = if r.description.is_empty() {
-                    format!("auto-disabled: gateway peer removed")
+                    "auto-disabled: gateway peer removed".to_string()
                 } else {
                     format!("{} (auto-disabled: gateway peer removed)", r.description)
                 };
                 disabled.push(r.clone());
             }
         }
-        if !disabled.is_empty() {
-            if let Err(e) = cfg.save() {
+        if !disabled.is_empty()
+            && let Err(e) = cfg.save() {
                 tracing::warn!("Failed to persist disabled-subnet-routes change: {}", e);
             }
-        }
     }
     // Tear down kernel routes outside the config lock. `remove_subnet_route`
     // is idempotent (treats "no such process" as success) so a route the
@@ -3661,7 +3655,7 @@ pub fn auto_apply_missing_workload_routes(state: &RouterState, self_node_id: &st
             cfg.subnet_routes.push(SubnetRoute {
                 id: format!("auto-wolfnet-{}-{}-{}",
                     peer_name.replace(|c: char| !c.is_ascii_alphanumeric(), ""),
-                    cidr.replace('/', "_").replace('.', "_"),
+                    cidr.replace(['/', '.'], "_"),
                     SystemTime::now().duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs()).unwrap_or(0),
                 ),
@@ -4467,13 +4461,11 @@ fn parse_route_gateway(raw: &str) -> Option<String> {
     let line = raw.lines().find(|l| !l.trim().is_empty())?;
     let mut tokens = line.split_whitespace();
     while let Some(t) = tokens.next() {
-        if t == "via" {
-            if let Some(gw) = tokens.next() {
-                if gw.parse::<std::net::Ipv4Addr>().is_ok() {
+        if t == "via"
+            && let Some(gw) = tokens.next()
+                && gw.parse::<std::net::Ipv4Addr>().is_ok() {
                     return Some(gw.to_string());
                 }
-            }
-        }
     }
     None
 }

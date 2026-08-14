@@ -597,11 +597,10 @@ fn validate_segment(seg: &LanSegment) -> Result<(), String> {
     if seg.router_ip.trim().is_empty() {
         return Err("Router IP is required".into());
     }
-    if seg.dhcp.enabled {
-        if seg.dhcp.pool_start.trim().is_empty() || seg.dhcp.pool_end.trim().is_empty() {
+    if seg.dhcp.enabled
+        && (seg.dhcp.pool_start.trim().is_empty() || seg.dhcp.pool_end.trim().is_empty()) {
             return Err("DHCP pool start and end are required when DHCP is enabled".into());
         }
-    }
     check("name", &seg.name)?;
     check("interface", &seg.interface)?;
     check("subnet_cidr", &seg.subnet_cidr)?;
@@ -641,9 +640,8 @@ fn validate_segment(seg: &LanSegment) -> Result<(), String> {
         // how the field arrived.
         if r.mac.contains(',') { return Err(format!("reservations[{}].mac contains comma", i)); }
         if r.ip.contains(',')  { return Err(format!("reservations[{}].ip contains comma", i)); }
-        if let Some(h) = &r.hostname {
-            if h.contains(',') { return Err(format!("reservations[{}].hostname contains comma", i)); }
-        }
+        if let Some(h) = &r.hostname
+            && h.contains(',') { return Err(format!("reservations[{}].hostname contains comma", i)); }
     }
     for (i, opt) in seg.dhcp.extra_options.iter().enumerate() {
         check(&format!("extra_options[{}]", i), opt)?;
@@ -1220,9 +1218,9 @@ pub async fn preflight(
         .output();
     let mut ipv4_interface_count = 0;
     let mut iface_list: Vec<String> = Vec::new();
-    if let Ok(o) = ip_addr_out {
-        if o.status.success() {
-            if let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout) {
+    if let Ok(o) = ip_addr_out
+        && o.status.success()
+            && let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout) {
                 for i in arr {
                     let ifname = i["ifname"].as_str().unwrap_or("");
                     let is_up = i["operstate"].as_str() == Some("UP")
@@ -1241,8 +1239,6 @@ pub async fn preflight(
                     }
                 }
             }
-        }
-    }
     if ipv4_interface_count == 0 {
         checks.push(PreflightCheck {
             id: "network_interfaces",
@@ -1376,8 +1372,8 @@ pub async fn preflight(
 
     // 5) If the requested cluster differs from self's cluster, surface
     // that as an info hint so the user knows WHY topology looks thin.
-    if let Some(w) = &requested {
-        if &self_cluster_norm != w {
+    if let Some(w) = &requested
+        && &self_cluster_norm != w {
             checks.push(PreflightCheck {
                 id: "cluster_scope",
                 name: "Viewing remote cluster",
@@ -1390,7 +1386,6 @@ pub async fn preflight(
                 fix: None,
             });
         }
-    }
 
     // 6) IPv6 — WolfStack is IPv4-only end-to-end. An IPv6 stack on
     // the host doesn't strictly break us (all our reqwest clients
@@ -1411,9 +1406,9 @@ pub async fn preflight(
         .args(["-j", "-6", "addr"])
         .output();
     let mut ipv6_routable_ifaces: Vec<String> = Vec::new();
-    if let Ok(o) = ip6_addr_out {
-        if o.status.success() {
-            if let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout) {
+    if let Ok(o) = ip6_addr_out
+        && o.status.success()
+            && let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout) {
                 for i in arr {
                     let ifname = i["ifname"].as_str().unwrap_or("").to_string();
                     if ifname == "lo" { continue; }
@@ -1430,8 +1425,6 @@ pub async fn preflight(
                     if has_routable { ipv6_routable_ifaces.push(ifname); }
                 }
             }
-        }
-    }
     if ipv6_global_disabled {
         checks.push(PreflightCheck {
             id: "ipv6_stack",
@@ -1624,9 +1617,8 @@ pub async fn preflight(
         if let Ok(out) = std::process::Command::new("ip")
             .args(["-j", "-4", "addr"])
             .output()
-        {
-            if out.status.success() {
-                if let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
+            && out.status.success()
+                && let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
                     for entry in arr {
                         if let Some(addrs) = entry.get("addr_info").and_then(|v| v.as_array()) {
                             for ai in addrs {
@@ -1639,8 +1631,6 @@ pub async fn preflight(
                         }
                     }
                 }
-            }
-        }
         // Walk each default route line; flag any whose `via` is local.
         let mut self_loops: Vec<(String, String)> = Vec::new(); // (via_ip, full_line)
         for line in default_route_text.lines() {
@@ -2042,11 +2032,10 @@ pub async fn create_segment(req: HttpRequest, state: S, body: web::Json<LanSegme
         }
     }
     // Start dnsmasq if this LAN is ours.
-    if segment.node_id == crate::agent::self_node_id() {
-        if let Err(e) = dhcp::start(&segment) {
+    if segment.node_id == crate::agent::self_node_id()
+        && let Err(e) = dhcp::start(&segment) {
             return HttpResponse::InternalServerError().body(format!("dnsmasq start failed: {}", e));
         }
-    }
     replicate_config_to_cluster(state);
     HttpResponse::Ok().json(&segment)
 }
@@ -2102,11 +2091,10 @@ pub async fn delete_segment(req: HttpRequest, state: S, path: web::Path<String>,
         }
         r
     };
-    if let Some(seg) = removed {
-        if seg.node_id == crate::agent::self_node_id() {
+    if let Some(seg) = removed
+        && seg.node_id == crate::agent::self_node_id() {
             let _ = dhcp::purge(&seg);
         }
-    }
     replicate_config_to_cluster(state);
     HttpResponse::Ok().body("deleted")
 }
@@ -2313,11 +2301,10 @@ pub async fn create_rule(req: HttpRequest, state: S, body: web::Json<FirewallRul
             Some(firewall::build_ruleset(&cfg, &crate::agent::self_node_id()))
         } else { None }
     };
-    if let Some(ruleset) = ruleset_opt {
-        if let Err(e) = firewall::apply(&ruleset, false) {
+    if let Some(ruleset) = ruleset_opt
+        && let Err(e) = firewall::apply(&ruleset, false) {
             return HttpResponse::InternalServerError().body(format!("firewall apply failed: {}", e));
         }
-    }
     replicate_config_to_cluster(state);
     HttpResponse::Ok().json(&rule)
 }
@@ -2583,7 +2570,7 @@ pub async fn list_connections(req: HttpRequest, state: S) -> HttpResponse {
     let result = web::block(|| {
         std::process::Command::new("conntrack").args(["-L"]).output()
     }).await.unwrap_or_else(|e|
-        Err(std::io::Error::new(std::io::ErrorKind::Other, format!("blocking task: {}", e)))
+        Err(std::io::Error::other(format!("blocking task: {}", e)))
     );
     let out = match result {
         Ok(o) if o.status.success() => o,
@@ -2646,7 +2633,7 @@ pub async fn list_firewall_logs(req: HttpRequest, state: S) -> HttpResponse {
             .args(["-k", "--no-pager", "-n", "300", "-g", "wolfrouter"])
             .output()
     }).await.unwrap_or_else(|e|
-        Err(std::io::Error::new(std::io::ErrorKind::Other, format!("blocking task: {}", e)))
+        Err(std::io::Error::other(format!("blocking task: {}", e)))
     );
     let lines: Vec<String> = match out {
         Ok(o) if o.status.success() => {
@@ -2797,9 +2784,7 @@ fn list_dnsmasq_processes() -> Vec<serde_json::Value> {
         let cmd = parts.next().unwrap_or("").to_string();
         // Pull --conf-file=... or -C ... if present
         let conf_file = cmd.split_whitespace().find_map(|tok| {
-            if let Some(rest) = tok.strip_prefix("--conf-file=") {
-                Some(rest.to_string())
-            } else { None }
+            tok.strip_prefix("--conf-file=").map(|rest| rest.to_string())
         }).unwrap_or_default();
         let interface = cmd.split_whitespace().find_map(|tok| {
             tok.strip_prefix("--interface=").map(|s| s.to_string())
@@ -2904,13 +2889,12 @@ fn parse_dhclient_leases(content: &str) -> Vec<serde_json::Value> {
         }
         if !in_block { continue; }
         if line.starts_with('}') {
-            if let Some((iface, ip, server, expire)) = cur.take() {
-                if !ip.is_empty() {
+            if let Some((iface, ip, server, expire)) = cur.take()
+                && !ip.is_empty() {
                     out.push(serde_json::json!({
                         "interface": iface, "ip": ip, "server": server, "expires": expire,
                     }));
                 }
-            }
             in_block = false;
             continue;
         }
@@ -2983,8 +2967,8 @@ pub async fn packet_capture(
     // Cluster proxy: if the user picked a remote node, forward the
     // capture request to that node's WolfStack via the cluster secret.
     let self_id = crate::agent::self_node_id();
-    if let Some(target) = r.node_id.as_ref() {
-        if !target.is_empty() && target != &self_id {
+    if let Some(target) = r.node_id.as_ref()
+        && !target.is_empty() && target != &self_id {
             let nodes = state.cluster.get_all_nodes();
             let target_node = match nodes.into_iter().find(|n| &n.id == target) {
                 Some(n) => n,
@@ -3029,7 +3013,6 @@ pub async fn packet_capture(
                 "lines": [], "error": format!("couldn't reach node '{}' (tried HTTPS then HTTP)", target_node.id)
             }));
         }
-    }
 
     // Interface allowlist: alnum + . _ -. Any other character means a
     // shell metachar attempt or an unsupported iface name; reject.
@@ -3234,9 +3217,8 @@ pub async fn list_wan(req: HttpRequest, state: S, query: web::Query<TopologyQuer
         })
         .map(|c| {
             let mut clone = c;
-            if let wan::WanMode::Pppoe(ref mut p) = clone.mode {
-                if !p.password.is_empty() { p.password = "***".into(); }
-            }
+            if let wan::WanMode::Pppoe(ref mut p) = clone.mode
+                && !p.password.is_empty() { p.password = "***".into(); }
             clone
         })
         .collect();
@@ -3282,9 +3264,8 @@ pub async fn create_wan(req: HttpRequest, state: S, body: web::Json<wan::WanConn
     replicate_config_to_cluster(state);
     // Mask password before returning — never echo plaintext back to UI.
     let mut response = conn.clone();
-    if let wan::WanMode::Pppoe(ref mut p) = response.mode {
-        if !p.password.is_empty() { p.password = "***".into(); }
-    }
+    if let wan::WanMode::Pppoe(ref mut p) = response.mode
+        && !p.password.is_empty() { p.password = "***".into(); }
     HttpResponse::Ok().json(&response)
 }
 
@@ -3308,15 +3289,12 @@ pub async fn update_wan(
     // sentinel (PUT bodies don't carry plaintext passwords back).
     {
         let mut cfg = state.router.config.write().unwrap();
-        if let wan::WanMode::Pppoe(ref mut new_p) = updated.mode {
-            if new_p.password == "***" {
-                if let Some(existing) = cfg.wan_connections.iter().find(|c| c.id == id) {
-                    if let wan::WanMode::Pppoe(ref old_p) = existing.mode {
+        if let wan::WanMode::Pppoe(ref mut new_p) = updated.mode
+            && new_p.password == "***"
+                && let Some(existing) = cfg.wan_connections.iter().find(|c| c.id == id)
+                    && let wan::WanMode::Pppoe(ref old_p) = existing.mode {
                         new_p.password = old_p.password.clone();
                     }
-                }
-            }
-        }
         let idx = match cfg.wan_connections.iter().position(|c| c.id == id) {
             Some(i) => i,
             None => return HttpResponse::NotFound().body("not found"),
@@ -3342,9 +3320,8 @@ pub async fn update_wan(
     replicate_config_to_cluster(state);
     // Mask password before returning — never echo plaintext back to UI.
     let mut response = updated.clone();
-    if let wan::WanMode::Pppoe(ref mut p) = response.mode {
-        if !p.password.is_empty() { p.password = "***".into(); }
-    }
+    if let wan::WanMode::Pppoe(ref mut p) = response.mode
+        && !p.password.is_empty() { p.password = "***".into(); }
     HttpResponse::Ok().json(&response)
 }
 
@@ -3361,11 +3338,10 @@ pub async fn delete_wan(req: HttpRequest, state: S, path: web::Path<String>, que
         }
         r
     };
-    if let Some(c) = removed {
-        if matches!(c.mode, wan::WanMode::Pppoe(_)) {
+    if let Some(c) = removed
+        && matches!(c.mode, wan::WanMode::Pppoe(_)) {
             let _ = wan::pppoe_purge(&c);
         }
-    }
     replicate_config_to_cluster(state);
     HttpResponse::Ok().body("deleted")
 }
@@ -3464,8 +3440,8 @@ pub async fn interface_up(
 
     // Proxy to remote node when requested.
     let self_id = crate::agent::self_node_id();
-    if let Some(target) = r.node_id.as_ref() {
-        if !target.is_empty() && target != &self_id {
+    if let Some(target) = r.node_id.as_ref()
+        && !target.is_empty() && target != &self_id {
             let nodes = state.cluster.get_all_nodes();
             let target_node = match nodes.into_iter().find(|n| &n.id == target) {
                 Some(n) => n,
@@ -3501,7 +3477,6 @@ pub async fn interface_up(
                 "error": "couldn't reach target node (tried HTTPS then HTTP)"
             }));
         }
-    }
 
     // Local: run `ip link set <iface> up`.
     let out = tokio::process::Command::new("ip")
@@ -3605,7 +3580,7 @@ pub async fn test_dns(
             ])
             .output()
     }).await.unwrap_or_else(|e|
-        Err(std::io::Error::new(std::io::ErrorKind::Other, format!("blocking task: {}", e)))
+        Err(std::io::Error::other(format!("blocking task: {}", e)))
     );
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -3973,9 +3948,8 @@ pub async fn export_config(
 
     // Mask PPPoE passwords in-place.
     for w in cfg.wan_connections.iter_mut() {
-        if let wan::WanMode::Pppoe(ref mut p) = w.mode {
-            if !p.password.is_empty() { p.password = "***".into(); }
-        }
+        if let wan::WanMode::Pppoe(ref mut p) = w.mode
+            && !p.password.is_empty() { p.password = "***".into(); }
     }
     let body = match serde_json::to_string_pretty(&cfg) {
         Ok(s) => s,
@@ -4080,8 +4054,8 @@ pub async fn import_config(
     {
         let cur = state.router.config.read().unwrap();
         for new_w in new_cfg.wan_connections.iter_mut() {
-            if let wan::WanMode::Pppoe(ref mut np) = new_w.mode {
-                if np.password == "***" {
+            if let wan::WanMode::Pppoe(ref mut np) = new_w.mode
+                && np.password == "***" {
                     // Find the same connection id in the current config.
                     if let Some(old) = cur.wan_connections.iter().find(|c| c.id == new_w.id) {
                         if let wan::WanMode::Pppoe(op) = &old.mode {
@@ -4093,7 +4067,6 @@ pub async fn import_config(
                         np.password = String::new();
                     }
                 }
-            }
         }
     }
 
@@ -5357,11 +5330,10 @@ pub async fn update_subnet_route(
             // changed, the gateway IP changed (which can shift the
             // gateway role onto a different node), or the new route
             // doesn't apply here at all.
-            if (cidr_changed || gateway_changed || !new_should_apply) && new_apply_ok {
-                if let Err(e) = super::remove_subnet_route(old) {
+            if (cidr_changed || gateway_changed || !new_should_apply) && new_apply_ok
+                && let Err(e) = super::remove_subnet_route(old) {
                     tracing::warn!("update_subnet_route: remove old failed: {}", e);
                 }
-            }
         }
     }
 
@@ -5421,11 +5393,10 @@ pub async fn delete_subnet_route(req: HttpRequest, state: S, path: web::Path<Str
         // their kernel entries installed at apply time but never
         // cleaned up on delete — stale `ip route` entries persisted
         // until reboot, and traffic kept getting forwarded.
-        if super::node_handles_route(&route, &self_id) {
-            if let Err(e) = super::remove_subnet_route(&route) {
+        if super::node_handles_route(&route, &self_id)
+            && let Err(e) = super::remove_subnet_route(&route) {
                 tracing::warn!("delete_subnet_route: remove failed: {}", e);
             }
-        }
     }
 
     {
@@ -6518,7 +6489,7 @@ pub async fn get_cluster_preflight(
     // miss.
     let self_id = crate::agent::self_node_id();
     let self_node = nodes.iter().find(|n| n.is_self).cloned();
-    if include_self { if let Some(sn) = self_node {
+    if include_self && let Some(sn) = self_node {
         let host = resolve_node_address(&sn.address);
         // v23.12: self-loopback over HTTPS on the api port (cert bypass
         // on ROUTER_RPC_CLIENT covers our own self-signed cert if any).
@@ -6552,15 +6523,14 @@ pub async fn get_cluster_preflight(
             }
         }
         let _ = host; // resolve_node_address result not needed for the loopback URL
-    } } // close `if include_self {` and `if let Some(sn)`
+    } // close `if include_self {` and `if let Some(sn)`
 
     for node in &nodes {
         if node.is_self { continue; }
         // Skip peers whose cluster doesn't match the filter.
         let node_cluster = normalize(node.cluster_name.as_deref());
-        if let Some(want) = &cluster_filter {
-            if &node_cluster != want { continue; }
-        }
+        if let Some(want) = &cluster_filter
+            && &node_cluster != want { continue; }
         let host = resolve_node_address(&node.address);
         let urls = crate::api::build_node_urls(&host, node.port, "/api/router/preflight");
         let secret = state.cluster_secret.clone();
@@ -6693,9 +6663,8 @@ pub async fn get_cluster_validation(
         }
         // Skip peers whose cluster doesn't match the filter.
         let node_cluster = normalize(node.cluster_name.as_deref());
-        if let Some(want) = &cluster_filter {
-            if &node_cluster != want { continue; }
-        }
+        if let Some(want) = &cluster_filter
+            && &node_cluster != want { continue; }
         let host = resolve_node_address(&node.address);
         let urls = crate::api::build_node_urls(&host, node.port, "/api/router/validation");
         let secret = state.cluster_secret.clone();
@@ -6793,11 +6762,10 @@ fn cluster_node_id_set(
             // the codebase actually does (see `ClusterState::get_node`
             // which already falls back to a self_id scan).
             set.insert(n.id.clone());
-            if let Some(sid) = n.self_id.as_ref() {
-                if !sid.is_empty() {
+            if let Some(sid) = n.self_id.as_ref()
+                && !sid.is_empty() {
                     set.insert(sid.clone());
                 }
-            }
         }
     }
     Some(set)
@@ -7373,7 +7341,7 @@ async fn preview_artifact_reconstruction(
     state: actix_web::web::Data<crate::api::AppState>,
 ) -> actix_web::HttpResponse {
     if let Err(resp) = crate::api::require_auth(&req, &state) { return resp; }
-    let r = tokio::task::spawn_blocking(|| super::reconstruct_from_artifacts())
+    let r = tokio::task::spawn_blocking(super::reconstruct_from_artifacts)
         .await.unwrap_or_else(|_| super::ArtifactReconstruction {
             config: super::RouterConfig::default(),
             recovered_items: Vec::new(),
@@ -7605,13 +7573,13 @@ async fn set_lan_dns_port(
     // but in-memory drift isn't).
     let candidate = {
         let cfg = state.router.config.read().unwrap();
-        let seg = match cfg.lans.iter().find(|l| l.id == body.lan_id) {
+        
+        match cfg.lans.iter().find(|l| l.id == body.lan_id) {
             Some(s) => s.clone(),
             None => return actix_web::HttpResponse::NotFound().json(serde_json::json!({
                 "ok": false, "error": "LAN not found",
             })),
-        };
-        seg
+        }
     };
     let mut candidate = candidate;
     candidate.dns.listen_port = body.new_port;
@@ -7647,13 +7615,12 @@ async fn set_lan_dns_port(
         }
         candidate
     };
-    if updated_lan.node_id == crate::agent::self_node_id() {
-        if let Err(e) = dhcp::start(&updated_lan) {
+    if updated_lan.node_id == crate::agent::self_node_id()
+        && let Err(e) = dhcp::start(&updated_lan) {
             return actix_web::HttpResponse::InternalServerError().json(serde_json::json!({
                 "ok": false, "error": format!("restart dnsmasq: {}", e),
             }));
         }
-    }
     replicate_config_to_cluster(state.clone());
     let msg = if body.new_port == 53 {
         format!("LAN '{}' dnsmasq DNS is back on port 53. Clients will resolve via WolfRouter directly again.", updated_lan.name)

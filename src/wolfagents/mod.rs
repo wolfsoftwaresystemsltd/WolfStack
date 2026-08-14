@@ -105,9 +105,11 @@ pub struct WhatsAppBinding {
 /// operator with a write by accident.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AccessLevel {
     /// Safe tools only (list/get/metrics). Any mutating or
     /// destructive tool call is refused before it runs.
+    #[default]
     ReadOnly,
     /// Safe + mutating tools run freely. Destructive tools need
     /// operator approval via the confirmation queue.
@@ -121,9 +123,6 @@ pub enum AccessLevel {
     Trusted,
 }
 
-impl Default for AccessLevel {
-    fn default() -> Self { AccessLevel::ReadOnly }
-}
 
 /// Per-agent target scope — where the agent is allowed to look and
 /// act. Every mutating tool checks its arguments against this before

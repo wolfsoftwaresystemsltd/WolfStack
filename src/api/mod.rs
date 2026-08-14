@@ -815,22 +815,21 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     // Check if direct login is disabled on this node
     {
         let nodes = state.cluster.nodes_read();
-        if let Some(self_node) = nodes.get(&state.cluster.self_id) {
-            if self_node.login_disabled {
+        if let Some(self_node) = nodes.get(&state.cluster.self_id)
+            && self_node.login_disabled {
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "success": false,
                     "error": "Direct login is disabled on this server. Access it via the primary dashboard."
                 }));
             }
-        }
     }
 
     let auth_config = crate::auth::users::AuthConfig::load();
     let mode = auth_config.auth_mode.as_str();
 
     // Try WolfStack users first (if mode is "wolfstack" or "both")
-    if mode == "wolfstack" || mode == "both" {
-        if let Some(user) = crate::auth::users::authenticate_wolfstack_user(&body.username, &body.password) {
+    if (mode == "wolfstack" || mode == "both")
+        && let Some(user) = crate::auth::users::authenticate_wolfstack_user(&body.username, &body.password) {
             // Check 2FA if enabled
             if user.totp_enabled {
                 if body.totp_code.is_empty() {
@@ -874,11 +873,10 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
                     "username": body.username
                 }));
         }
-    }
 
     // Try Linux system auth (if mode is "linux" or "both")
-    if mode == "linux" || mode == "both" {
-        if crate::auth::authenticate_user(&body.username, &body.password) {
+    if (mode == "linux" || mode == "both")
+        && crate::auth::authenticate_user(&body.username, &body.password) {
             state.login_limiter.clear_with(&client_ip, &body.username);
             crate::auth::record_admin_ip(&client_ip);
             let token = state.sessions.create_session(&body.username);
@@ -903,7 +901,6 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
                     "username": body.username
                 }));
         }
-    }
 
     // record_failure_with fires the limiter's propagation hook
     // automatically when the threshold is hit — installed by main.rs
@@ -1994,13 +1991,12 @@ pub async fn passkey_login_finish(req: HttpRequest, state: web::Data<AppState>, 
     // Same direct-login-disabled check the password endpoint does.
     {
         let nodes = state.cluster.nodes_read();
-        if let Some(self_node) = nodes.get(&state.cluster.self_id) {
-            if self_node.login_disabled {
+        if let Some(self_node) = nodes.get(&state.cluster.self_id)
+            && self_node.login_disabled {
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Direct login is disabled on this server. Access it via the primary dashboard."
                 }));
             }
-        }
     }
     let (rp_id, origin) = match passkey_rp_origin(&req, &state) {
         Ok(p) => p, Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
@@ -2124,14 +2120,13 @@ fn ti_normalize_cluster(name: &str) -> String {
 fn ti_target_cluster(req: &HttpRequest, state: &web::Data<AppState>) -> String {
     if let Some(q) = req.uri().query() {
         for pair in q.split('&') {
-            if let Some(rest) = pair.strip_prefix("cluster=") {
-                if let Ok(decoded) = urlencoding::decode(rest) {
+            if let Some(rest) = pair.strip_prefix("cluster=")
+                && let Ok(decoded) = urlencoding::decode(rest) {
                     let val = decoded.into_owned();
                     if !val.is_empty() {
                         return val;
                     }
                 }
-            }
         }
     }
     state.cluster.get_self_cluster_name()
@@ -2345,7 +2340,7 @@ async fn ti_propagate_config_to_peers(state: &web::Data<AppState>, target_cluste
 /// stay empty; non-empty fields become "***" so the UI knows a key is
 /// configured without seeing the value.
 fn ti_mask_keys(mut cfg: crate::threat_intel::ThreatIntelConfig) -> crate::threat_intel::ThreatIntelConfig {
-    for (_, p) in cfg.providers.iter_mut() {
+    for p in cfg.providers.values_mut() {
         if !p.api_key.is_empty() {
             p.api_key = "***".to_string();
         }
@@ -3425,8 +3420,8 @@ pub async fn list_services(req: HttpRequest, state: web::Data<AppState>) -> Http
             .args(["list-units", "--type=service", "--all", "--no-pager", "--output=json"])
             .output();
         let mut result = Vec::new();
-        if let Ok(out) = output {
-            if let Ok(units) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
+        if let Ok(out) = output
+            && let Ok(units) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
                 for u in &units {
                     let name = u["unit"].as_str().unwrap_or("").trim_end_matches(".service").to_string();
                     if name.is_empty() { continue; }
@@ -3444,7 +3439,6 @@ pub async fn list_services(req: HttpRequest, state: web::Data<AppState>) -> Http
                     });
                 }
             }
-        }
         // Get enabled/disabled status
         let enabled_output = std::process::Command::new("systemctl")
             .args(["list-unit-files", "--type=service", "--no-pager", "--no-legend"])
@@ -3604,15 +3598,13 @@ pub async fn get_node(req: HttpRequest, state: web::Data<AppState>, path: web::P
             // Refuse if the caller can't see this cluster — same rule
             // as /api/nodes, applied to the single-node view.
             let store = crate::auth::users::UserStore::load();
-            if caller != "cluster-node" {
-                if let Some(user) = store.find(&caller) {
-                    if !user.can_access_cluster(node.cluster_name.as_deref()) {
+            if caller != "cluster-node"
+                && let Some(user) = store.find(&caller)
+                    && !user.can_access_cluster(node.cluster_name.as_deref()) {
                         return HttpResponse::Forbidden().json(serde_json::json!({
                             "error": "You don't have access to this cluster"
                         }));
                     }
-                }
-            }
             HttpResponse::Ok().json(node)
         },
         None => HttpResponse::NotFound().json(serde_json::json!({
@@ -4426,13 +4418,12 @@ pub async fn cluster_leave(
                 let report = web::block(move || {
                     crate::secret_rotation::reencrypt_all_at_rest(&old_secret, &new_secret)
                 }).await;
-                if let Ok(r) = report {
-                    if !r.errors.is_empty() {
+                if let Ok(r) = report
+                    && !r.errors.is_empty() {
                         tracing::warn!(target: "secret_rotation",
                             "cluster-leave rotation: {} store(s) failed re-encrypt: {}",
                             r.errors.len(), r.errors.join("; "));
                     }
-                }
             }
             Err(e) => secret_error = Some(e),
         }
@@ -4895,8 +4886,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                 .timeout(std::time::Duration::from_secs(5))
                 .header("X-WolfStack-Secret", secret)
                 .send().await
-            {
-                if resp.status().is_success() {
+                && resp.status().is_success() {
                     if let Ok(data) = resp.json::<serde_json::Value>().await {
                         // `/api/agent/status` returns an externally-tagged
                         // AgentMessage — every field lives under "StatusReport"
@@ -4925,7 +4915,6 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                     }
                     break;
                 }
-            }
         }
         if !remote_wolfnet_ips.is_empty() { break; }
     }
@@ -5205,11 +5194,10 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         "cluster_name": cluster_name,
         "cluster_fingerprint": cluster_fingerprint,
     });
-    if let Some(warning) = cap_warning {
-        if let Some(obj) = response.as_object_mut() {
+    if let Some(warning) = cap_warning
+        && let Some(obj) = response.as_object_mut() {
             obj.insert("warning".to_string(), warning);
         }
-    }
     HttpResponse::Ok().json(response)
 }
 
@@ -5321,13 +5309,12 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
     // Same length cap as the inter-node `set_site` endpoint. Admins
     // editing via PATCH must not be able to write a longer value
     // than the propagation push will accept.
-    if let Some(ref s) = body.site {
-        if s.len() > 64 {
+    if let Some(ref s) = body.site
+        && s.len() > 64 {
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "site tag too long (max 64 chars)"
             }));
         }
-    }
 
     let fp = if body.pve_fingerprint.is_some() {
         Some(body.pve_fingerprint.clone())
@@ -5339,13 +5326,12 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
     let cluster_name = body.cluster_name.clone().or(body.pve_cluster_name.clone());
 
     // Length cap on the display name (same as the agent receiver).
-    if let Some(ref dn) = body.display_name {
-        if dn.len() > 64 {
+    if let Some(ref dn) = body.display_name
+        && dn.len() > 64 {
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "display name too long (max 64 chars)"
             }));
         }
-    }
 
     if state.cluster.update_node_settings(
         &id,
@@ -5384,8 +5370,8 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         // total failure so operators have a trace; no retry queue.
         if let Some(ref site) = body.site {
             let node = state.cluster.get_node(&id);
-            if let Some(node) = node {
-                if !node.is_self && node.node_type == "wolfstack" {
+            if let Some(node) = node
+                && !node.is_self && node.node_type == "wolfstack" {
                     let secret = state.cluster_secret.clone();
                     let address = node.address.clone();
                     let port = node.port;
@@ -5418,7 +5404,6 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         }
                     });
                 }
-            }
         }
         // Roles: authoritative on the OWNING node, exactly like site. Update
         // the master's in-memory view immediately (so tier fan-outs from the
@@ -5445,8 +5430,8 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
             } else { false };
             if is_self {
                 crate::agent::ClusterState::save_self_roles(&roles);
-            } else if is_wolfstack {
-                if let Some(node) = state.cluster.get_node(&id) {
+            } else if is_wolfstack
+                && let Some(node) = state.cluster.get_node(&id) {
                     let secret = state.cluster_secret.clone();
                     let (address, port, hostname) = (node.address.clone(), node.port, node.hostname.clone());
                     let payload = serde_json::json!({ "roles": roles });
@@ -5475,13 +5460,12 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         }
                     });
                 }
-            }
         }
         // Propagate login_disabled to remote node so it takes effect on their login page
         if let Some(disabled) = body.login_disabled {
             let node = state.cluster.get_node(&id);
-            if let Some(node) = node {
-                if !node.is_self && node.node_type == "wolfstack" {
+            if let Some(node) = node
+                && !node.is_self && node.node_type == "wolfstack" {
                     let secret = state.cluster_secret.clone();
                     let address = node.address.clone();
                     let port = node.port;
@@ -5504,7 +5488,6 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         }
                     });
                 }
-            }
         }
         // Reliable propagation of identity edits (display name + cluster move)
         // to the OWNING remote node. The owner's self-report is authoritative,
@@ -5515,9 +5498,9 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         let mut queued = false;
         let want_display = body.display_name.clone();
         let want_cluster = body.cluster_name.clone().or(body.pve_cluster_name.clone());
-        if want_display.is_some() || want_cluster.is_some() {
-            if let Some(node) = state.cluster.get_node(&id) {
-                if !node.is_self && node.node_type == "wolfstack" {
+        if (want_display.is_some() || want_cluster.is_some())
+            && let Some(node) = state.cluster.get_node(&id)
+                && !node.is_self && node.node_type == "wolfstack" {
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                     // Record the durable intent first (so an offline/unreachable
@@ -5538,8 +5521,6 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         let _ = crate::agent::push_identity_to_node(&node, &intent, &secret).await;
                     });
                 }
-            }
-        }
         HttpResponse::Ok().json(serde_json::json!({ "updated": true, "queued": queued }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
@@ -6907,8 +6888,7 @@ fn parse_crontab_line(line: &str, index: usize) -> Option<CronEntry> {
     if trimmed.is_empty() { return None; }
 
     // Check for disabled entries
-    if trimmed.starts_with("# DISABLED: ") {
-        let rest = &trimmed["# DISABLED: ".len()..];
+    if let Some(rest) = trimmed.strip_prefix("# DISABLED: ") {
         if let Some(entry) = parse_cron_expression(rest, index) {
             return Some(CronEntry { enabled: false, ..entry });
         }
@@ -7508,17 +7488,15 @@ pub async fn local_ca_status(req: HttpRequest, state: web::Data<AppState>) -> Ht
         use openssl::nid::Nid;
         let exists = crate::local_ca::ca_exists();
         let mut info = serde_json::json!({ "exists": exists, "cert_path": crate::local_ca::ca_cert_path() });
-        if exists {
-            if let Ok(pem) = crate::local_ca::ca_cert_pem() {
-                if let Ok(cert) = openssl::x509::X509::from_pem(&pem) {
+        if exists
+            && let Ok(pem) = crate::local_ca::ca_cert_pem()
+                && let Ok(cert) = openssl::x509::X509::from_pem(&pem) {
                     let cn = cert.subject_name().entries_by_nid(Nid::COMMONNAME).next()
                         .and_then(|e| e.data().as_utf8().ok().map(|s| s.to_string()))
                         .unwrap_or_default();
                     info["subject"] = serde_json::json!(cn);
                     info["not_after"] = serde_json::json!(cert.not_after().to_string());
                 }
-            }
-        }
         info
     }).await.unwrap_or_else(|_| serde_json::json!({ "exists": false }));
     HttpResponse::Ok().json(info)
@@ -7692,11 +7670,10 @@ pub async fn agent_status(req: HttpRequest, state: web::Data<AppState>) -> HttpR
     if let Err(e) = require_cluster_auth(&req, &state) { return e; }
 
     // Return cached status if available (sub-millisecond response)
-    if let Ok(cache) = state.cached_status.read() {
-        if let Some(ref json) = *cache {
+    if let Ok(cache) = state.cached_status.read()
+        && let Some(ref json) = *cache {
             return HttpResponse::Ok().json(json);
         }
-    }
 
     // Cache miss. Do NOT collect here.
     //
@@ -8015,12 +7992,11 @@ pub async fn traceroute_handler(
         let mut rtt_ms: Option<f64> = None;
         let tokens: Vec<&str> = trimmed.split_whitespace().collect();
         for window in tokens.windows(2) {
-            if window[1] == "ms" {
-                if let Ok(v) = window[0].parse::<f64>() {
+            if window[1] == "ms"
+                && let Ok(v) = window[0].parse::<f64>() {
                     rtt_ms = Some(v);
                     break;
                 }
-            }
         }
 
         hops.push(serde_json::json!({
@@ -8534,13 +8510,10 @@ pub async fn containers_cluster(req: HttpRequest, state: web::Data<AppState>) ->
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(5))
                         .header("X-WolfStack-Secret", &secret).send().await
-                    {
-                        if resp.status().is_success() {
-                            if let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
+                        && resp.status().is_success()
+                            && let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
                                 return v;
                             }
-                        }
-                    }
                 }
                 Vec::new()
             };
@@ -8549,13 +8522,10 @@ pub async fn containers_cluster(req: HttpRequest, state: web::Data<AppState>) ->
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(5))
                         .header("X-WolfStack-Secret", &secret).send().await
-                    {
-                        if resp.status().is_success() {
-                            if let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
+                        && resp.status().is_success()
+                            && let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
                                 return v;
                             }
-                        }
-                    }
                 }
                 Vec::new()
             };
@@ -8566,7 +8536,7 @@ pub async fn containers_cluster(req: HttpRequest, state: web::Data<AppState>) ->
     }
     for h in handles {
         if let Ok((pid, host, docker_v, lxc_v)) = h.await {
-            for mut entry in docker_v.into_iter().chain(lxc_v.into_iter()) {
+            for mut entry in docker_v.into_iter().chain(lxc_v) {
                 if let Some(obj) = entry.as_object_mut() {
                     obj.insert("node_id".into(), serde_json::json!(pid));
                     obj.insert("node_hostname".into(), serde_json::json!(host));
@@ -8771,14 +8741,13 @@ pub async fn lxc_create(
             let mut messages = vec![msg];
 
             // Set root password if provided
-            if let Some(ref password) = body.root_password {
-                if !password.is_empty() {
+            if let Some(ref password) = body.root_password
+                && !password.is_empty() {
                     match containers::lxc_set_root_password(&body.name, password) {
                         Ok(pw_msg) => messages.push(pw_msg),
                         Err(e) => messages.push(format!("Password warning: {}", e)),
                     }
                 }
-            }
 
             // Set resource limits if provided
             let memory = body.memory_limit.as_deref();
@@ -8816,9 +8785,9 @@ pub async fn lxc_create(
                         .filter(|l| !l.trim().starts_with("lxc.net.0."))
                         .map(|s| s.to_string())
                         .collect();
-                    lines.push(format!("lxc.net.0.type = veth"));
+                    lines.push("lxc.net.0.type = veth".to_string());
                     lines.push(format!("lxc.net.0.link = {}", bridge));
-                    lines.push(format!("lxc.net.0.flags = up"));
+                    lines.push("lxc.net.0.flags = up".to_string());
                     // Generate a random MAC so each container has a unique one.
                     let mac = format!("00:16:3e:{:02x}:{:02x}:{:02x}",
                         rand_byte(), rand_byte(), rand_byte());
@@ -8852,12 +8821,11 @@ pub async fn lxc_create(
                     } else {
                         messages.push(format!("Network: veth on {} ({})", bridge,
                             if static_cidr.is_some() { "static" } else { "DHCP" }));
-                        if let Some(ref cidr) = static_cidr {
-                            if let Err(e) = containers::write_lxc_bridge_static_config(&body.name, cidr, static_gw) {
+                        if let Some(ref cidr) = static_cidr
+                            && let Err(e) = containers::write_lxc_bridge_static_config(&body.name, cidr, static_gw) {
                                 messages.push(format!(
                                     "Static IP warning: in-container network config not fully written ({}) — the container may still come up via DHCP", e));
                             }
-                        }
                     }
                 }
                 "host" => {
@@ -9079,11 +9047,10 @@ pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>
                 if let Ok(ips) = resp.json::<Vec<String>>().await {
                     for ip_str in ips {
                         let parts: Vec<&str> = ip_str.split('.').collect();
-                        if parts.len() == 4 {
-                            if let Ok(last) = parts[3].parse::<u8>() {
+                        if parts.len() == 4
+                            && let Ok(last) = parts[3].parse::<u8>() {
                                 remote_used.push(last);
                             }
-                        }
                     }
                 }
                 break; // Success on this node
@@ -10792,13 +10759,12 @@ async fn fetch_one_node_inventory(
             let pve_client = crate::proxmox::PveClient::new(&node.address, node.port, &token, fp, &pve_name);
             match pve_client.list_all_guests().await {
                 Ok(guests) => {
-                    if let Ok(val) = serde_json::to_value(&guests) {
-                        if let Some(arr) = val.as_array() {
+                    if let Ok(val) = serde_json::to_value(&guests)
+                        && let Some(arr) = val.as_array() {
                             for g in arr {
                                 items.push(shape_pve_item(&base_entry, g));
                             }
                         }
-                    }
                 }
                 Err(e) => errors.push(serde_json::json!({
                     "node_id": node.id,
@@ -11256,11 +11222,10 @@ pub async fn cluster_browser_list(req: HttpRequest, state: web::Data<AppState>) 
                 .await
             {
                 Ok(resp) => {
-                    if let Ok(bytes) = resp.bytes().await {
-                        if let Ok(remote_sessions) = serde_json::from_slice::<Vec<crate::cluster_browser::BrowserSession>>(&bytes) {
+                    if let Ok(bytes) = resp.bytes().await
+                        && let Ok(remote_sessions) = serde_json::from_slice::<Vec<crate::cluster_browser::BrowserSession>>(&bytes) {
                             sessions.extend(remote_sessions);
                         }
-                    }
                     break; // Got a response, don't try other URLs for this node
                 }
                 Err(_) => continue, // Try next URL
@@ -11713,9 +11678,9 @@ pub async fn announce_wolfnet_routes_to_peers(
     // This is the primary mechanism — it works even when the cluster
     // node list has stale cluster_names or the peer is temporarily
     // marked offline.
-    if let Ok(config_str) = std::fs::read_to_string("/etc/wolfnet/config.toml") {
-        if let Ok(config) = config_str.parse::<toml::Value>() {
-            if let Some(peers) = config.get("peers").and_then(|p| p.as_array()) {
+    if let Ok(config_str) = std::fs::read_to_string("/etc/wolfnet/config.toml")
+        && let Ok(config) = config_str.parse::<toml::Value>()
+            && let Some(peers) = config.get("peers").and_then(|p| p.as_array()) {
                 for peer in peers {
                     let endpoint = match peer.get("endpoint").and_then(|v| v.as_str()) {
                         Some(e) => e,
@@ -11749,21 +11714,16 @@ pub async fn announce_wolfnet_routes_to_peers(
                             .json(&payload)
                             .send()
                             .await;
-                        match r {
-                            Ok(resp) => {
-                                let success = resp.status().is_success();
-                                let _ = resp.bytes().await;
-                                if success {
-                                    break;
-                                }
+                        if let Ok(resp) = r {
+                            let success = resp.status().is_success();
+                            let _ = resp.bytes().await;
+                            if success {
+                                break;
                             }
-                            Err(_) => {}
                         }
                     }
                 }
             }
-        }
-    }
 }
 
 /// GET /api/wolfnet/routes — returns the full WOLFNET_ROUTES cache + local used IPs for debugging
@@ -13471,7 +13431,7 @@ pub async fn wolfha_enable(
         wolfha_protect_note(&container, "Creating live rootfs snapshot…");
         let (rootfs_c, archive_c) = (rootfs.clone(), archive.clone());
         let tar_res = tokio::task::spawn_blocking(move || crate::wolfha::tar_full_rootfs(&rootfs_c, &archive_c)).await;
-        if let Err(e) = tar_res.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e)) {
+        if let Err(e) = tar_res.map_err(|e| e.to_string()).and_then(|r| r) {
             let _ = std::fs::remove_file(&archive);
             wolfha_protect_fail(&container, &format!("Seed snapshot failed: {}", e));
             migration_fail(&tasks, &tid, &format!("Seed snapshot failed: {}", e));
@@ -13980,9 +13940,8 @@ pub async fn lxc_import_external(
         .map(validate_transfer_token)
         .unwrap_or(false);
 
-    if !has_secret && !has_token {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    if !has_secret && !has_token
+        && let Err(resp) = require_auth(&req, &state) { return resp; }
 
     // Delegate to the standard import logic
     lxc_import_endpoint_inner(&mut payload).await
@@ -14085,11 +14044,10 @@ async fn lxc_import_endpoint_inner(
                 };
                 use std::io::Write;
                 while let Some(chunk) = field.next().await {
-                    if let Ok(data) = chunk {
-                        if let Err(e) = file.write_all(&data) {
+                    if let Ok(data) = chunk
+                        && let Err(e) = file.write_all(&data) {
                             return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Write error: {}", e)}));
                         }
-                    }
                 }
                 archive_path = Some(dest);
             }
@@ -14251,15 +14209,14 @@ pub type MigrationTasks = Arc<std::sync::RwLock<std::collections::HashMap<String
 /// with a blank progress bar rather than showing the previous stage's
 /// percentage.
 pub fn migration_update(tasks: &MigrationTasks, id: &str, stage: &str, message: &str) {
-    if let Ok(mut map) = tasks.write() {
-        if let Some(task) = map.get_mut(id) {
+    if let Ok(mut map) = tasks.write()
+        && let Some(task) = map.get_mut(id) {
             task.stage = stage.to_string();
             task.message = message.to_string();
             task.percent = None;
             task.bytes_done = None;
             task.bytes_total = None;
         }
-    }
 }
 
 /// Update the per-stage progress indicators without changing the
@@ -14273,41 +14230,37 @@ pub fn migration_progress(
     bytes_total: Option<u64>,
     percent: Option<f64>,
 ) {
-    if let Ok(mut map) = tasks.write() {
-        if let Some(task) = map.get_mut(id) {
+    if let Ok(mut map) = tasks.write()
+        && let Some(task) = map.get_mut(id) {
             if let Some(b) = bytes_done { task.bytes_done = Some(b); }
             if let Some(b) = bytes_total { task.bytes_total = Some(b); }
             if let Some(p) = percent {
                 task.percent = Some(p.clamp(0.0, 100.0));
-            } else if let (Some(d), Some(t)) = (task.bytes_done, task.bytes_total) {
-                if t > 0 {
+            } else if let (Some(d), Some(t)) = (task.bytes_done, task.bytes_total)
+                && t > 0 {
                     task.percent = Some(((d as f64 / t as f64) * 100.0).clamp(0.0, 100.0));
                 }
-            }
         }
-    }
 }
 
 pub fn migration_fail(tasks: &MigrationTasks, id: &str, error: &str) {
-    if let Ok(mut map) = tasks.write() {
-        if let Some(task) = map.get_mut(id) {
+    if let Ok(mut map) = tasks.write()
+        && let Some(task) = map.get_mut(id) {
             task.stage = "failed".to_string();
             task.message = error.to_string();
             task.error = Some(error.to_string());
             task.completed = true;
         }
-    }
 }
 
 pub fn migration_done(tasks: &MigrationTasks, id: &str, message: &str) {
-    if let Ok(mut map) = tasks.write() {
-        if let Some(task) = map.get_mut(id) {
+    if let Ok(mut map) = tasks.write()
+        && let Some(task) = map.get_mut(id) {
             task.stage = "done".to_string();
             task.message = message.to_string();
             task.completed = true;
             task.percent = Some(100.0);
         }
-    }
 }
 
 /// Create a new migration task entry and return the generated id. The
@@ -14316,7 +14269,7 @@ pub fn migration_done(tasks: &MigrationTasks, id: &str, message: &str) {
 pub fn migration_create(tasks: &MigrationTasks) -> String {
     let id = format!(
         "mig_{}",
-        uuid::Uuid::new_v4().to_string().replace('-', "")[..12].to_string()
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
     );
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -14368,11 +14321,10 @@ pub async fn migration_status(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let id = path.into_inner();
-    if let Ok(map) = state.migration_tasks.read() {
-        if let Some(task) = map.get(&id) {
+    if let Ok(map) = state.migration_tasks.read()
+        && let Some(task) = map.get(&id) {
             return HttpResponse::Ok().json(task);
         }
-    }
     HttpResponse::NotFound().json(serde_json::json!({"error": "Task not found"}))
 }
 
@@ -15135,13 +15087,12 @@ pub async fn wolfnet_next_ip(
     }
 
     // Add IPs from routes.json
-    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json") {
-        if let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+    if let Ok(content) = std::fs::read_to_string("/var/run/wolfnet/routes.json")
+        && let Ok(routes) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
             for ip in routes.keys() {
                 all_used.insert(ip.clone());
             }
         }
-    }
 
     // Find next available IP that isn't in the combined used set
     let prefix = containers::wolfnet_subnet_prefix().unwrap_or_default();
@@ -15367,9 +15318,8 @@ pub async fn docker_import_spec(
     body: web::Json<serde_json::Value>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if require_cluster_auth(&req, &state).is_err() {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    if require_cluster_auth(&req, &state).is_err()
+        && let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = match query.get("name") {
         Some(n) if crate::auth::is_safe_name(n) => n.clone(),
         _ => return HttpResponse::BadRequest().json(serde_json::json!({
@@ -15393,9 +15343,8 @@ pub async fn docker_import_volume(
     mut payload: web::Payload,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if require_cluster_auth(&req, &state).is_err() {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    if require_cluster_auth(&req, &state).is_err()
+        && let Err(resp) = require_auth(&req, &state) { return resp; }
     // Two restore modes: a named volume (by name) or a bind mount (by absolute
     // path). The bind path is validated again in docker_restore_bind — this is
     // a sending node's input, so it is checked at both ends.
@@ -15487,9 +15436,8 @@ pub async fn docker_import(
         .map(validate_transfer_token)
         .unwrap_or(false);
 
-    if !has_secret && !has_token {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    if !has_secret && !has_token
+        && let Err(resp) = require_auth(&req, &state) { return resp; }
 
     let container_name = query.get("name")
         .cloned()
@@ -15648,7 +15596,7 @@ async fn container_component_version(
     let result = web::block(move || exec_target.exec(&cmd)).await;
     match result {
         Ok(Ok(output)) => {
-            let version = output.trim().split_whitespace()
+            let version = output.split_whitespace()
                 .find(|w| w.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
                 .unwrap_or("")
                 .to_string();
@@ -15706,39 +15654,33 @@ pub async fn ai_save_config(
         if let Some(v) = body.get("cloudflare_account_id").and_then(|v| v.as_str()) {
             config.cloudflare_account_id = v.trim().to_string();
         }
-        if let Some(v) = body.get("cloudflare_api_key").and_then(|v| v.as_str()) {
-            if !v.contains("••••") && !v.is_empty() {
+        if let Some(v) = body.get("cloudflare_api_key").and_then(|v| v.as_str())
+            && !v.contains("••••") && !v.is_empty() {
                 config.cloudflare_api_key = v.to_string();
             }
-        }
-        if let Some(v) = body.get("claude_api_key").and_then(|v| v.as_str()) {
-            if !v.contains("••••") && !v.is_empty() {
+        if let Some(v) = body.get("claude_api_key").and_then(|v| v.as_str())
+            && !v.contains("••••") && !v.is_empty() {
                 config.claude_api_key = v.to_string();
             }
-        }
-        if let Some(v) = body.get("gemini_api_key").and_then(|v| v.as_str()) {
-            if !v.contains("••••") && !v.is_empty() {
+        if let Some(v) = body.get("gemini_api_key").and_then(|v| v.as_str())
+            && !v.contains("••••") && !v.is_empty() {
                 config.gemini_api_key = v.to_string();
             }
-        }
-        if let Some(v) = body.get("openrouter_api_key").and_then(|v| v.as_str()) {
-            if !v.contains("••••") && !v.is_empty() {
+        if let Some(v) = body.get("openrouter_api_key").and_then(|v| v.as_str())
+            && !v.contains("••••") && !v.is_empty() {
                 config.openrouter_api_key = v.to_string();
             }
-        }
-        if let Some(v) = body.get("openai_api_key").and_then(|v| v.as_str()) {
-            if !v.contains("••••") && !v.is_empty() {
+        if let Some(v) = body.get("openai_api_key").and_then(|v| v.as_str())
+            && !v.contains("••••") && !v.is_empty() {
                 config.openai_api_key = v.to_string();
             }
-        }
         if let Some(v) = body.get("local_url").and_then(|v| v.as_str()) {
             config.local_url = v.to_string();
         }
-        if let Some(v) = body.get("local_api_key").and_then(|v| v.as_str()) {
-            if !v.contains("••••") && !v.is_empty() {
+        if let Some(v) = body.get("local_api_key").and_then(|v| v.as_str())
+            && !v.contains("••••") && !v.is_empty() {
                 config.local_api_key = v.to_string();
             }
-        }
         if let Some(v) = body.get("model").and_then(|v| v.as_str()) {
             config.model = v.to_string();
         }
@@ -15760,11 +15702,10 @@ pub async fn ai_save_config(
         if let Some(v) = body.get("smtp_user").and_then(|v| v.as_str()) {
             config.smtp_user = v.to_string();
         }
-        if let Some(v) = body.get("smtp_pass").and_then(|v| v.as_str()) {
-            if !v.contains("••••") && !v.is_empty() {
+        if let Some(v) = body.get("smtp_pass").and_then(|v| v.as_str())
+            && !v.contains("••••") && !v.is_empty() {
                 config.smtp_pass = v.to_string();
             }
-        }
         if let Some(v) = body.get("smtp_tls").and_then(|v| v.as_str()) {
             config.smtp_tls = v.to_string();
         }
@@ -16090,11 +16031,10 @@ pub async fn ai_accepted_risks_remove(
         let before = config.accepted_risks.len();
         config.accepted_risks.retain(|r| !r.eq_ignore_ascii_case(phrase));
         removed = before - config.accepted_risks.len();
-        if removed > 0 {
-            if let Err(e) = config.save() {
+        if removed > 0
+            && let Err(e) = config.save() {
                 return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
             }
-        }
     }
     HttpResponse::Ok().json(serde_json::json!({
         "removed": removed,
@@ -16225,16 +16165,14 @@ pub async fn ai_chat(
             } else {
                 ctx.push_str("\n\nUSER IS CURRENTLY VIEWING: Datacenter overview (all nodes)");
             }
-            if let Some(ref view) = body.view {
-                if !view.is_empty() {
+            if let Some(ref view) = body.view
+                && !view.is_empty() {
                     ctx.push_str(&format!(", Page: {}", view));
                 }
-            }
-            if let Some(ref name) = body.context_name {
-                if !name.is_empty() {
+            if let Some(ref name) = body.context_name
+                && !name.is_empty() {
                     ctx.push_str(&format!(", Context: {}", name));
                 }
-            }
             // Enumerate containers/VMs on the viewed node (reuse already-fetched local data)
             if body.node_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
                 let is_self_node = nodes.iter().any(|n| n.is_self && Some(&n.id) == body.node_id.as_ref());
@@ -19245,14 +19183,12 @@ fn any_authorized_keys_present() -> bool {
         if !shell.ends_with("sh") { continue; } // skip nologin / false
         let _ = user;
         let path = format!("{}/.ssh/authorized_keys", home);
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.len() > 0 { return true; }
-        }
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() > 0 { return true; }
     }
     // Check /root specifically (might not be in /etc/passwd loop above).
-    if let Ok(meta) = std::fs::metadata("/root/.ssh/authorized_keys") {
-        if meta.len() > 0 { return true; }
-    }
+    if let Ok(meta) = std::fs::metadata("/root/.ssh/authorized_keys")
+        && meta.len() > 0 { return true; }
     false
 }
 
@@ -20594,18 +20530,14 @@ async fn fetch_peer_ips_in_subnet(
                     .header("X-WolfStack-Secret", &secret)
                     .send()
                     .await
-                {
-                    if resp.status().is_success() {
-                        if let Ok(body) = resp.json::<serde_json::Value>().await {
-                            if let Some(arr) = body.get("ips").and_then(|v| v.as_array()) {
+                    && resp.status().is_success()
+                        && let Ok(body) = resp.json::<serde_json::Value>().await
+                            && let Some(arr) = body.get("ips").and_then(|v| v.as_array()) {
                                 let ips: Vec<String> = arr.iter()
                                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                                     .collect();
                                 return Some((id, ips));
                             }
-                        }
-                    }
-                }
             }
             None
         });
@@ -20704,20 +20636,17 @@ pub async fn backup_create(
     // `..` segments defence-in-depth, but we want the operator to
     // get a clear 400 rather than a backup that ran to a different
     // directory than they asked for.
-    if matches!(storage.storage_type, backup::StorageType::Wolfdisk) {
-        if let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
+    if matches!(storage.storage_type, backup::StorageType::Wolfdisk)
+        && let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
         }
-    }
     // Validate a system-folder target's path up front (absolute, exists, not
     // a dangerous root) so the operator gets a clear 400 immediately.
-    if let Some(t) = &body.target {
-        if t.target_type == backup::BackupTargetType::SystemPath {
-            if let Err(e) = backup::validate_system_path(&t.system_path) {
+    if let Some(t) = &body.target
+        && t.target_type == backup::BackupTargetType::SystemPath
+            && let Err(e) = backup::validate_system_path(&t.system_path) {
                 return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
             }
-        }
-    }
     backup::merge_pbs_secrets(&mut storage);
     // W6 fix: backup::create_backup runs `qemu-img convert` for VM
     // disks — potentially many minutes for a multi-GB image. Wrap in
@@ -20752,18 +20681,15 @@ pub async fn backup_stream(
     // path is the one most operators hit from the UI, so a 400 here
     // surfaces the error in the streaming console rather than letting
     // the run silently retarget a sanitized path.
-    if matches!(storage.storage_type, backup::StorageType::Wolfdisk) {
-        if let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
+    if matches!(storage.storage_type, backup::StorageType::Wolfdisk)
+        && let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
         }
-    }
-    if let Some(t) = &body.target {
-        if t.target_type == backup::BackupTargetType::SystemPath {
-            if let Err(e) = backup::validate_system_path(&t.system_path) {
+    if let Some(t) = &body.target
+        && t.target_type == backup::BackupTargetType::SystemPath
+            && let Err(e) = backup::validate_system_path(&t.system_path) {
                 return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
             }
-        }
-    }
     backup::merge_pbs_secrets(&mut storage);
 
     let target = body.target.clone();
@@ -20841,8 +20767,8 @@ pub async fn backup_restore_stream(
     // Check for container existence before streaming (to return 409 synchronously)
     {
         let config = backup::load_config();
-        if let Some(entry) = config.entries.iter().find(|e| e.id == id) {
-            if entry.target.target_type == backup::BackupTargetType::Docker && !overwrite {
+        if let Some(entry) = config.entries.iter().find(|e| e.id == id)
+            && entry.target.target_type == backup::BackupTargetType::Docker && !overwrite {
                 let check = std::process::Command::new("docker")
                     .args(["container", "inspect", &entry.target.name])
                     .output();
@@ -20854,7 +20780,6 @@ pub async fn backup_restore_stream(
                     }));
                 }
             }
-        }
     }
 
     let (std_tx, std_rx) = std::sync::mpsc::channel::<String>();
@@ -21758,9 +21683,7 @@ async fn publish_record_to_dns_tier(
                     .header("Content-Type", "application/json")
                     .body(body.to_string())
                     .send().await
-                {
-                    if resp.status().is_success() { let _ = resp.bytes().await; done = true; break; }
-                }
+                    && resp.status().is_success() { let _ = resp.bytes().await; done = true; break; }
             }
             if done { ok += 1; } else { errs.push(format!("{}: unreachable", n.id)); }
         }
@@ -22357,11 +22280,10 @@ pub async fn backup_schedule_create(
     // Validate the WolfDisk subpath at the schedule-save boundary
     // too — a recurring schedule that resolves to a sanitized path
     // would silently write to the wrong place every night.
-    if matches!(storage.storage_type, backup::StorageType::Wolfdisk) {
-        if let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
+    if matches!(storage.storage_type, backup::StorageType::Wolfdisk)
+        && let Err(e) = backup::BackupStorage::validate_wolfdisk_subpath(&storage.wolfdisk_subpath) {
             return HttpResponse::BadRequest().json(serde_json::json!({ "error": e }));
         }
-    }
     // Edit vs create: when the body carries an existing id, update that schedule in
     // place and PRESERVE its created_at + last_run (otherwise an edit would reset the
     // freshness clock and lose "last ran" history). Absent id = brand-new schedule.
@@ -23234,7 +23156,7 @@ pub async fn ceph_install(
     state: web::Data<AppState>,
 ) -> HttpResponse {
     if let Err(e) = require_auth(&req, &state) { return e; }
-    match web::block(|| crate::ceph::install_ceph()).await {
+    match web::block(crate::ceph::install_ceph).await {
         Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({"ok": true, "message": msg})),
         Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": e})),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"ok": false, "error": format!("{}", e)})),
@@ -24617,8 +24539,8 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
     if has_smartctl {
         let mut smart_map: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
         for entry in &entries {
-            if entry.get("type").and_then(|v| v.as_str()) == Some("disk") {
-                if let Some(dev) = entry.get("device").and_then(|v| v.as_str()) {
+            if entry.get("type").and_then(|v| v.as_str()) == Some("disk")
+                && let Some(dev) = entry.get("device").and_then(|v| v.as_str()) {
                     if dev.starts_with("/dev/loop") { continue; }
                     // Shared evaluator — same parse + failing verdict the Issues
                     // watcher uses, so the Storage badge and the Issues alert can
@@ -24634,15 +24556,13 @@ pub async fn storage_disk_info(req: HttpRequest, state: web::Data<AppState>) -> 
                         smart_map.insert(dev.to_string(), sj);
                     }
                 }
-            }
         }
         // Attach SMART data to disk entries
         for entry in &mut entries {
-            if let Some(dev) = entry.get("device").and_then(|v| v.as_str()).map(|s| s.to_string()) {
-                if let Some(smart) = smart_map.get(&dev) {
+            if let Some(dev) = entry.get("device").and_then(|v| v.as_str()).map(|s| s.to_string())
+                && let Some(smart) = smart_map.get(&dev) {
                     entry.as_object_mut().map(|m| m.insert("smart".to_string(), smart.clone()));
                 }
-            }
         }
     }
 
@@ -24889,7 +24809,7 @@ pub async fn zfs_datasets(req: HttpRequest, state: web::Data<AppState>, query: w
                 .map(|line| {
                     let parts: Vec<&str> = line.split('\t').collect();
                     serde_json::json!({
-                        "name": parts.get(0).unwrap_or(&""),
+                        "name": parts.first().unwrap_or(&""),
                         "used": parts.get(1).unwrap_or(&""),
                         "available": parts.get(2).unwrap_or(&""),
                         "refer": parts.get(3).unwrap_or(&""),
@@ -24933,7 +24853,7 @@ pub async fn zfs_snapshots(req: HttpRequest, state: web::Data<AppState>, query: 
                 .map(|line| {
                     let parts: Vec<&str> = line.split('\t').collect();
                     serde_json::json!({
-                        "name": parts.get(0).unwrap_or(&""),
+                        "name": parts.first().unwrap_or(&""),
                         "creation": parts.get(1).unwrap_or(&""),
                         "used": parts.get(2).unwrap_or(&""),
                         "refer": parts.get(3).unwrap_or(&""),
@@ -25023,7 +24943,7 @@ fn zfs_get_pools() -> Vec<serde_json::Value> {
                 .map(|line| {
                     let parts: Vec<&str> = line.split('\t').collect();
                     serde_json::json!({
-                        "name": parts.get(0).unwrap_or(&""),
+                        "name": parts.first().unwrap_or(&""),
                         "size": parts.get(1).unwrap_or(&""),
                         "alloc": parts.get(2).unwrap_or(&""),
                         "free": parts.get(3).unwrap_or(&""),
@@ -25042,8 +24962,7 @@ fn zfs_get_pools() -> Vec<serde_json::Value> {
                 if let Ok(status_out) = std::process::Command::new("zpool")
                     .args(["status", &pool_name])
                     .output()
-                {
-                    if status_out.status.success() {
+                    && status_out.status.success() {
                         let status_text = String::from_utf8_lossy(&status_out.stdout).to_string();
                         // Extract scan line
                         let scan_line = status_text.lines()
@@ -25059,7 +24978,6 @@ fn zfs_get_pools() -> Vec<serde_json::Value> {
                         pool["scan"] = serde_json::json!(scan_line);
                         pool["errors"] = serde_json::json!(errors_line);
                     }
-                }
             }
 
             pools
@@ -25829,7 +25747,7 @@ pub async fn files_search(
                 .take(100) // cap results
                 .map(|line| {
                     let parts: Vec<&str> = line.splitn(5, '\t').collect();
-                    let file_type = parts.get(0).unwrap_or(&"f");
+                    let file_type = parts.first().unwrap_or(&"f");
                     let size: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                     let modified: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                     let permissions = parts.get(3).unwrap_or(&"").to_string();
@@ -26028,7 +25946,7 @@ pub async fn files_docker_browse(
                 .filter(|l| !l.is_empty())
                 .map(|line| {
                     let parts: Vec<&str> = line.splitn(5, '\t').collect();
-                    let file_type = parts.get(0).unwrap_or(&"f");
+                    let file_type = parts.first().unwrap_or(&"f");
                     let size: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                     let modified: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
                     let permissions = parts.get(3).unwrap_or(&"");
@@ -26842,11 +26760,10 @@ pub async fn agent_storage_apply(
     // server. Only loopback hosts are touched, and a loopback source can
     // never work on a peer anyway, so a correctly-addressed mount is never
     // changed.
-    if matches!(mount.mount_type, storage::MountType::Nfs) {
-        if let Some(sender) = req.peer_addr().map(|a| a.ip()) {
+    if matches!(mount.mount_type, storage::MountType::Nfs)
+        && let Some(sender) = req.peer_addr().map(|a| a.ip()) {
             mount.source = rewrite_loopback_nfs_source(&mount.source, sender);
         }
-    }
     // Idempotent upsert (NOT create_mount): a re-synced global mount that
     // already exists on this peer must UPDATE + re-attempt the mount, not
     // fail with "Mount point already in use" before ever creating the dir or
@@ -26984,15 +26901,14 @@ pub fn build_config_bundle() -> serde_json::Value {
         bundle.insert("storage_config".into(), v);
     }
     // Backup config (schedules only — strip entries to keep it small)
-    if let Some(v) = read_json_file("/etc/wolfstack/backups.json") {
-        if let Some(obj) = v.as_object() {
+    if let Some(v) = read_json_file("/etc/wolfstack/backups.json")
+        && let Some(obj) = v.as_object() {
             let mut cleaned = serde_json::Map::new();
             if let Some(schedules) = obj.get("schedules") {
                 cleaned.insert("schedules".into(), schedules.clone());
             }
             bundle.insert("backup_config".into(), serde_json::Value::Object(cleaned));
         }
-    }
     // IP mappings
     if let Some(v) = read_json_file(&crate::paths::get().ip_mappings) {
         bundle.insert("ip_mappings".into(), v);
@@ -27097,8 +27013,8 @@ fn apply_config_bundle(
     if let Some(val) = obj.get("backup_config") {
         // Merge schedules into existing config, keeping existing entries
         let mut config = backup::load_config();
-        if let Some(schedules) = val.get("schedules").and_then(|v| v.as_array()) {
-            if let Ok(imported_schedules) = serde_json::from_value::<Vec<backup::BackupSchedule>>(
+        if let Some(schedules) = val.get("schedules").and_then(|v| v.as_array())
+            && let Ok(imported_schedules) = serde_json::from_value::<Vec<backup::BackupSchedule>>(
                 serde_json::Value::Array(schedules.clone())
             ) {
                 let existing_ids: std::collections::HashSet<String> =
@@ -27116,7 +27032,6 @@ fn apply_config_bundle(
                     imported.push(format!("{} backup schedules", added));
                 }
             }
-        }
     }
 
     // PBS config
@@ -27736,8 +27651,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
                     .timeout(std::time::Duration::from_secs(5))
                     .header("X-WolfStack-Secret", &cluster_secret)
                     .send().await
-                {
-                    if let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
+                    && let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
                         node_data["docker"] = serde_json::json!(containers.iter().map(|c| {
                             serde_json::json!({
                                 "name": c.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -27746,7 +27660,6 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
                         }).collect::<Vec<_>>());
                         break;
                     }
-                }
             }
             let urls = build_node_urls(&node.address, node.port, "/api/containers/lxc");
             for url in &urls {
@@ -27754,8 +27667,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
                     .timeout(std::time::Duration::from_secs(5))
                     .header("X-WolfStack-Secret", &cluster_secret)
                     .send().await
-                {
-                    if let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
+                    && let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
                         node_data["lxc"] = serde_json::json!(containers.iter().map(|c| {
                             serde_json::json!({
                                 "name": c.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -27764,7 +27676,6 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
                         }).collect::<Vec<_>>());
                         break;
                     }
-                }
             }
             let urls = build_node_urls(&node.address, node.port, "/api/vms");
             for url in &urls {
@@ -27772,8 +27683,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
                     .timeout(std::time::Duration::from_secs(5))
                     .header("X-WolfStack-Secret", &cluster_secret)
                     .send().await
-                {
-                    if let Ok(vms) = resp.json::<Vec<serde_json::Value>>().await {
+                    && let Ok(vms) = resp.json::<Vec<serde_json::Value>>().await {
                         node_data["vms"] = serde_json::json!(vms.iter().map(|v| {
                             serde_json::json!({
                                 "name": v.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -27782,18 +27692,16 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
                         }).collect::<Vec<_>>());
                         break;
                     }
-                }
             }
         } else if node.online && node.node_type == "proxmox" {
             // PVE nodes — fetch guests
             // PVE guests fetched via the local /pve/resources endpoint below
             let pve_url = format!("/api/nodes/{}/pve/resources", node.id);
-            if let Ok(resp) = http_client.get(&format!("https://{}:{}{}", "127.0.0.1", 8553, pve_url))
+            if let Ok(resp) = http_client.get(format!("https://{}:{}{}", "127.0.0.1", 8553, pve_url))
                 .timeout(std::time::Duration::from_secs(5))
                 .header("X-WolfStack-Secret", &cluster_secret)
                 .send().await
-            {
-                if let Ok(guests) = resp.json::<Vec<serde_json::Value>>().await {
+                && let Ok(guests) = resp.json::<Vec<serde_json::Value>>().await {
                     let lxc: Vec<_> = guests.iter()
                         .filter(|g| g.get("guest_type").and_then(|v| v.as_str()) == Some("lxc"))
                         .map(|g| serde_json::json!({
@@ -27811,7 +27719,6 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
                     node_data["lxc"] = serde_json::json!(lxc);
                     node_data["vms"] = serde_json::json!(vms);
                 }
-            }
         }
 
         clusters.entry(cluster_name).or_default().push(node_data);
@@ -28509,20 +28416,18 @@ pub async fn wolfusb_devices(req: HttpRequest, state: web::Data<AppState>) -> Ht
 /// it stored as a bind wildcard (0.0.0.0), which isn't routable from peers.
 fn pick_routable_address() -> Option<String> {
     // Try tailscale first since wolfstack clusters usually use it.
-    if let Ok(out) = std::process::Command::new("tailscale").arg("ip").arg("-4").output() {
-        if out.status.success() {
+    if let Ok(out) = std::process::Command::new("tailscale").arg("ip").arg("-4").output()
+        && out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !s.is_empty() && !s.starts_with("127.") {
                 return Some(s.lines().next().unwrap_or("").to_string());
             }
         }
-    }
     // Fall back to `ip -4 route get 1.1.1.1` to find the egress interface's IP.
     if let Ok(out) = std::process::Command::new("ip")
         .args(["-4", "route", "get", "1.1.1.1"])
         .output()
-    {
-        if out.status.success() {
+        && out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             if let Some(src) = s.split("src ").nth(1) {
                 let addr = src.split_whitespace().next().unwrap_or("");
@@ -28531,7 +28436,6 @@ fn pick_routable_address() -> Option<String> {
                 }
             }
         }
-    }
     None
 }
 
@@ -29114,15 +29018,14 @@ pub async fn wolfusb_reattach(
                         // leaves source_bus_addr as None and the target
                         // falls back to local sysfs (the old broken
                         // behaviour, but no regression).
-                        if let Some(arr) = v.get("bus_addr").and_then(|x| x.as_array()) {
-                            if arr.len() == 2 {
+                        if let Some(arr) = v.get("bus_addr").and_then(|x| x.as_array())
+                            && arr.len() == 2 {
                                 let b = arr[0].as_u64().and_then(|n| u8::try_from(n).ok());
                                 let a_ = arr[1].as_u64().and_then(|n| u8::try_from(n).ok());
                                 if let (Some(b), Some(a_)) = (b, a_) {
                                     source_bus_addr = Some((b, a_));
                                 }
                             }
-                        }
                     }
                     break;
                 } else {
@@ -31325,12 +31228,8 @@ pub async fn k8s_join_token(req: HttpRequest, state: web::Data<AppState>) -> Htt
     // timing on the secret. Behaviour is unchanged; the leak is gone.
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     // Try k3s token
-    if std::path::Path::new("/var/lib/rancher/k3s/server/node-token").exists() {
-        match crate::kubernetes::get_k3s_token("/etc/rancher/k3s/k3s.yaml") {
-            Ok(token) => return HttpResponse::Ok().json(serde_json::json!({ "token": token, "type": "k3s" })),
-            Err(_) => {}
-        }
-    }
+    if std::path::Path::new("/var/lib/rancher/k3s/server/node-token").exists()
+        && let Ok(token) = crate::kubernetes::get_k3s_token("/etc/rancher/k3s/k3s.yaml") { return HttpResponse::Ok().json(serde_json::json!({ "token": token, "type": "k3s" })) }
     // Try microk8s join
     if let Ok(join) = crate::kubernetes::get_microk8s_join_command() {
         return HttpResponse::Ok().json(serde_json::json!({ "token": join, "type": "microk8s" }));
@@ -31631,7 +31530,7 @@ fn generate_jail_local(cluster_ips: &[String]) -> String {
     let get_field = |key: &str| -> String {
         for line in os_release.lines() {
             if line.starts_with(key) {
-                return line.splitn(2, '=').nth(1).unwrap_or("").trim_matches('"').to_string();
+                return line.split_once('=').map(|x| x.1).unwrap_or("").trim_matches('"').to_string();
             }
         }
         String::new()
@@ -31724,7 +31623,7 @@ pub async fn security_fail2ban_install(
     if let Err(resp) = require_auth(&_req, &state) { return resp; }
 
     // Install fail2ban + python3-systemd (needed for systemd backend)
-    if let Err(_) = run_shell("apt-get update && apt-get install -y fail2ban python3-systemd") {
+    if run_shell("apt-get update && apt-get install -y fail2ban python3-systemd").is_err() {
         // Try without python3-systemd (may not exist on all distros)
         if let Err(e) = run_shell("apt-get install -y fail2ban") {
             return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
@@ -31874,7 +31773,7 @@ pub async fn security_fail2ban_section_save(
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             if !current_section.is_empty() {
-                section_lines.entry(current_section.clone()).or_insert_with(Vec::new).push(line.to_string());
+                section_lines.entry(current_section.clone()).or_default().push(line.to_string());
             }
             continue;
         }
@@ -31883,9 +31782,9 @@ pub async fn security_fail2ban_section_save(
             if !section_order.contains(&current_section) {
                 section_order.push(current_section.clone());
             }
-            section_lines.entry(current_section.clone()).or_insert_with(Vec::new).push(line.to_string());
+            section_lines.entry(current_section.clone()).or_default().push(line.to_string());
         } else if !current_section.is_empty() {
-            section_lines.entry(current_section.clone()).or_insert_with(Vec::new).push(line.to_string());
+            section_lines.entry(current_section.clone()).or_default().push(line.to_string());
         }
     }
 
@@ -32384,8 +32283,8 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(unit) = parts.first() {
-                if !unit.is_empty() {
+            if let Some(unit) = parts.first()
+                && !unit.is_empty() {
                     issues.push(Issue {
                         severity: "warning".into(),
                         category: "service".into(),
@@ -32393,7 +32292,6 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
                         detail: format!("systemd unit {} is in failed state", unit),
                     });
                 }
-            }
         }
     }
 
@@ -32494,7 +32392,7 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
                     severity: "info".into(),
                     category: "disk".into(),
                     title: format!("Journal logs using {}", size_str),
-                    detail: format!("Run 'journalctl --vacuum-size=200M' to reclaim space"),
+                    detail: "Run 'journalctl --vacuum-size=200M' to reclaim space".to_string(),
                 });
             }
         }
@@ -32504,8 +32402,7 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
     if let Ok(output) = std::process::Command::new("du")
         .args(["-sh", "/var/cache/apt/archives"])
         .output()
-    {
-        if output.status.success() {
+        && output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(size_str) = stdout.split_whitespace().next() {
                 let size_mb = parse_size_to_mb(size_str);
@@ -32519,14 +32416,12 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
                 }
             }
         }
-    }
 
     // Package cache (dnf/yum)
     if let Ok(output) = std::process::Command::new("du")
         .args(["-sh", "/var/cache/dnf"])
         .output()
-    {
-        if output.status.success() {
+        && output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(size_str) = stdout.split_whitespace().next() {
                 let size_mb = parse_size_to_mb(size_str);
@@ -32540,14 +32435,12 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
                 }
             }
         }
-    }
 
     // /tmp usage
     if let Ok(output) = std::process::Command::new("du")
         .args(["-sh", "/tmp"])
         .output()
-    {
-        if output.status.success() {
+        && output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(size_str) = stdout.split_whitespace().next() {
                 let size_mb = parse_size_to_mb(size_str);
@@ -32561,14 +32454,12 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
                 }
             }
         }
-    }
 
     // Docker unused images
     if let Ok(output) = std::process::Command::new("docker")
         .args(["system", "df", "--format", "{{.Reclaimable}}"])
         .output()
-    {
-        if output.status.success() {
+        && output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             // Sum up any reclaimable amounts
             let mut total_mb = 0.0f64;
@@ -32590,7 +32481,6 @@ pub fn collect_issues(metrics: &crate::monitoring::SystemMetrics) -> Vec<Issue> 
                 });
             }
         }
-    }
 
     issues
 }
@@ -32619,11 +32509,10 @@ pub async fn scan_issues(
     // simply omit the field and the frontend treats them as non-repairable.
     let issues_json: Vec<serde_json::Value> = issues.iter().map(|i| {
         let mut v = serde_json::to_value(i).unwrap_or_else(|_| serde_json::json!({}));
-        if let Some(rep) = repair_for(i) {
-            if let Ok(rv) = serde_json::to_value(&rep) {
+        if let Some(rep) = repair_for(i)
+            && let Ok(rv) = serde_json::to_value(&rep) {
                 v["repair"] = rv;
             }
-        }
         v
     }).collect();
 
@@ -32718,7 +32607,7 @@ pub async fn get_alert_history(
     // a different format but is bounded to 200 rows so the imperfect
     // ordering near the boundary is acceptable).
     let mut all: Vec<AlertLogEntry> = legacy_rows.into_iter()
-        .chain(history_rows.into_iter())
+        .chain(history_rows)
         .collect();
     all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -32774,7 +32663,7 @@ pub async fn update_file_locations(
 /// lockstep if the target size or journalctl output format ever changes.
 fn reclaim_journal_mb() -> f64 {
     let read_mb = || run_shell("journalctl --disk-usage 2>/dev/null").ok()
-        .and_then(|o| o.split("take up ").nth(1).and_then(|s| s.split(' ').next()).map(|s| parse_size_to_mb(s)));
+        .and_then(|o| o.split("take up ").nth(1).and_then(|s| s.split(' ').next()).map(parse_size_to_mb));
     let before = read_mb().unwrap_or(0.0);
     let _ = run_shell("journalctl --vacuum-size=200M 2>/dev/null");
     let after = read_mb().unwrap_or(before);
@@ -32858,15 +32747,14 @@ pub async fn clean_system(
     if command_exists("docker") {
         let out = run_shell("docker system prune -f 2>/dev/null").ok().unwrap_or_default();
         // Parse "Total reclaimed space: 1.23GB" from output
-        if let Some(line) = out.lines().find(|l| l.contains("reclaimed space")) {
-            if let Some(size_str) = line.split(": ").nth(1) {
+        if let Some(line) = out.lines().find(|l| l.contains("reclaimed space"))
+            && let Some(size_str) = line.split(": ").nth(1) {
                 let mb = parse_size_to_mb(size_str.trim());
                 if mb > 1.0 {
                     total_freed_mb += mb;
                     cleaned.push(format!("Docker prune: freed {}", size_str.trim()));
                 }
             }
-        }
     }
 
     // ── /tmp old files (>7 days) ──
@@ -33412,7 +33300,7 @@ async fn build_cluster_response(
         is_self: true,
         responded: true,
         error: None,
-        cluster_name: self_node.as_ref().map(|n| resolve_cluster_label(n)).unwrap_or_default(),
+        cluster_name: self_node.as_ref().map(resolve_cluster_label).unwrap_or_default(),
     };
 
     // Peers — only online wolfstack nodes that aren't ourselves.
@@ -34146,14 +34034,11 @@ pub async fn predictive_proposal_autofix_command(
 /// surfaced via `get_node` yet — e.g. very early in startup).
 /// Returns `node_id` verbatim only as a last resort.
 fn resolve_node_hostname(state: &web::Data<AppState>, node_id: &str) -> String {
-    if let Some(n) = state.cluster.get_node(node_id) {
-        if !n.hostname.is_empty() { return n.hostname; }
-    }
-    if node_id == state.node_id {
-        if let Some(n) = state.cluster.get_all_nodes().into_iter().find(|n| n.is_self) {
-            if !n.hostname.is_empty() { return n.hostname; }
-        }
-    }
+    if let Some(n) = state.cluster.get_node(node_id)
+        && !n.hostname.is_empty() { return n.hostname; }
+    if node_id == state.node_id
+        && let Some(n) = state.cluster.get_all_nodes().into_iter().find(|n| n.is_self)
+            && !n.hostname.is_empty() { return n.hostname; }
     node_id.to_string()
 }
 
@@ -35152,12 +35037,15 @@ pub async fn whatsapp_webhook(
     // (scheme + host + path + query). Reconstruct from actix's
     // connection_info which respects X-Forwarded-* when a proxy is
     // in front of us.
-    let conn = req.connection_info();
-    let scheme = conn.scheme();
-    let host = conn.host();
     let path = req.uri().path();
     let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
-    let webhook_url = format!("{}://{}{}{}", scheme, host, path, query);
+    // Scope the `Ref` that connection_info() hands out so it is released
+    // before the `.await` further down — a RefCell borrow must not span a
+    // suspend point.
+    let webhook_url = {
+        let conn = req.connection_info();
+        format!("{}://{}{}{}", conn.scheme(), conn.host(), path, query)
+    };
 
     let signature = req.headers().get("X-Twilio-Signature")
         .and_then(|v| v.to_str().ok())
@@ -35380,11 +35268,10 @@ pub async fn agents_create(req: HttpRequest, state: web::Data<AppState>, body: w
     if let Some(n) = v.get("memory_max_lines").and_then(|x| x.as_u64()) {
         agent.memory_max_lines = (n as usize).clamp(4, 4096);
     }
-    if let Some(d) = v.get("discord") {
-        if let Ok(parsed) = serde_json::from_value::<crate::wolfagents::DiscordBinding>(d.clone()) {
+    if let Some(d) = v.get("discord")
+        && let Ok(parsed) = serde_json::from_value::<crate::wolfagents::DiscordBinding>(d.clone()) {
             agent.discord = Some(parsed);
         }
-    }
     apply_access_fields(&mut agent, &v);
     match crate::wolfagents::upsert(agent.clone()) {
         Ok(()) => HttpResponse::Ok().json(agent),
@@ -35431,11 +35318,10 @@ fn apply_access_fields(agent: &mut crate::wolfagents::Agent, v: &serde_json::Val
             _ => agent.access_level, // unknown value: keep existing
         };
     }
-    if let Some(scope_v) = v.get("target_scope") {
-        if let Ok(parsed) = serde_json::from_value::<crate::wolfagents::TargetScope>(scope_v.clone()) {
+    if let Some(scope_v) = v.get("target_scope")
+        && let Ok(parsed) = serde_json::from_value::<crate::wolfagents::TargetScope>(scope_v.clone()) {
             agent.target_scope = parsed;
         }
-    }
     if let Some(b) = v.get("include_cluster_context").and_then(|x| x.as_bool()) {
         agent.include_cluster_context = b;
     }
@@ -35475,7 +35361,7 @@ pub async fn agents_update(
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "agent not found"})),
     };
     let v = body.into_inner();
-    if let Some(n) = v.get("name").and_then(|x| x.as_str()) { if !n.trim().is_empty() { agent.name = n.trim().to_string(); } }
+    if let Some(n) = v.get("name").and_then(|x| x.as_str()) && !n.trim().is_empty() { agent.name = n.trim().to_string(); }
     if let Some(s) = v.get("system_prompt").and_then(|x| x.as_str()) { agent.system_prompt = s.to_string(); }
     if let Some(m) = v.get("model").and_then(|x| x.as_str()) { agent.model = m.to_string(); }
     if let Some(p) = v.get("provider").and_then(|x| x.as_str()) { agent.provider = p.to_string(); }
@@ -36262,9 +36148,8 @@ pub async fn statuspage_config_get(req: HttpRequest, state: web::Data<AppState>)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // Stage 5 — gate default-secret acceptance via the shared helper.
-    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req)) {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req))
+        && let Err(resp) = require_auth(&req, &state) { return resp; }
     let config = state.statuspage.config.read().unwrap().clone();
     HttpResponse::Ok().json(config)
 }
@@ -36554,9 +36439,8 @@ pub async fn statuspage_sync(req: HttpRequest, state: web::Data<AppState>, body:
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     // Stage 5 — gate default-secret acceptance via the shared helper.
-    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req)) {
-        if let Err(resp) = require_auth(&req, &state) { return resp; }
-    }
+    if !crate::auth::validate_inter_node_secret_from(secret, &state.cluster_secret, peer_ip(&req))
+        && let Err(resp) = require_auth(&req, &state) { return resp; }
 
     let peer_config = body.into_inner();
     tracing::info!("StatusPage sync: received {} pages, {} monitors, {} incidents from peer",
@@ -38008,11 +37892,10 @@ async fn value_receipt(req: HttpRequest, state: web::Data<AppState>) -> HttpResp
 /// never fail loud on a goodwill feature).
 fn install_date_epoch() -> Option<u64> {
     const MARKER: &str = "/etc/wolfstack/install_date";
-    if let Ok(s) = std::fs::read_to_string(MARKER) {
-        if let Ok(v) = s.trim().parse::<u64>() {
+    if let Ok(s) = std::fs::read_to_string(MARKER)
+        && let Ok(v) = s.trim().parse::<u64>() {
             return Some(v);
         }
-    }
     let oldest = ["/etc/wolfstack/node_id", "/etc/wolfstack/ports.json", "/etc/wolfstack/join-token"]
         .iter()
         .filter_map(|p| std::fs::metadata(p).ok())
@@ -38500,11 +38383,10 @@ async fn compose_create_stack(
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to write compose file: {}", e) }));
     }
 
-    if !body.env_content.is_empty() {
-        if let Err(e) = std::fs::write(dir.join(".env"), &body.env_content) {
+    if !body.env_content.is_empty()
+        && let Err(e) = std::fs::write(dir.join(".env"), &body.env_content) {
             return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("Failed to write .env: {}", e) }));
         }
-    }
 
     HttpResponse::Ok().json(serde_json::json!({ "message": "Stack created", "name": name }))
 }
@@ -38854,15 +38736,14 @@ async fn compose_logs(
 
     // Validate service name to prevent argument injection
     let service_owned: String;
-    if let Some(service) = query.get("service") {
-        if !service.is_empty() {
+    if let Some(service) = query.get("service")
+        && !service.is_empty() {
             if !service.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
                 return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid service name" }));
             }
             service_owned = service.clone();
             cmd_args.push(&service_owned);
         }
-    }
 
     let output = match crate::containers::compose_cmd() {
         Ok(mut c) => c
@@ -39256,16 +39137,14 @@ pub async fn wolfnote_config_save(
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let mut config = crate::wolfnote::WolfNoteConfig::load();
 
-    if let Some(features) = body.get("features") {
-        if let Ok(f) = serde_json::from_value::<crate::wolfnote::WolfNoteFeatures>(features.clone()) {
+    if let Some(features) = body.get("features")
+        && let Ok(f) = serde_json::from_value::<crate::wolfnote::WolfNoteFeatures>(features.clone()) {
             config.features = f;
         }
-    }
-    if let Some(url) = body.get("url").and_then(|v| v.as_str()) {
-        if !url.is_empty() {
+    if let Some(url) = body.get("url").and_then(|v| v.as_str())
+        && !url.is_empty() {
             config.url = url.to_string();
         }
-    }
 
     match config.save() {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "saved": true })),
@@ -40001,8 +39880,12 @@ pub async fn oidc_login(
         None => return HttpResponse::NotFound().json(serde_json::json!({ "error": "Provider not found" })),
     };
 
-    let conn = req.connection_info();
-    let redirect_uri_base = format!("{}://{}", conn.scheme(), conn.host());
+    // Scoped so the `Ref` from connection_info() is released before the
+    // `.await` below — a RefCell borrow must not span a suspend point.
+    let redirect_uri_base = {
+        let conn = req.connection_info();
+        format!("{}://{}", conn.scheme(), conn.host())
+    };
 
     match crate::auth::oidc::build_auth_url(&provider, &redirect_uri_base).await {
         Ok((auth_url, pending)) => {
@@ -40050,8 +39933,12 @@ pub async fn oidc_callback(
         })),
     };
 
-    let conn = req.connection_info();
-    let redirect_uri_base = format!("{}://{}", conn.scheme(), conn.host());
+    // Scoped so the `Ref` from connection_info() is released before the
+    // `.await` below — a RefCell borrow must not span a suspend point.
+    let redirect_uri_base = {
+        let conn = req.connection_info();
+        format!("{}://{}", conn.scheme(), conn.host())
+    };
 
     // Exchange the authorization code for claims
     let claims = match crate::auth::oidc::exchange_code(
@@ -41224,10 +41111,10 @@ pub async fn gateways_discover_sources(req: HttpRequest, state: web::Data<AppSta
                 .args(["5", "ceph", "fs", "ls", "--format=json"])
                 .output()
         }).await;
-        if let Ok(Ok(out)) = ceph_result {
-            if out.status.success() {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if let Some(arr) = v.as_array() {
+        if let Ok(Ok(out)) = ceph_result
+            && out.status.success()
+                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                    && let Some(arr) = v.as_array() {
                         for f in arr {
                             if let Some(name) = f.get("name").and_then(|x| x.as_str()) {
                                 entries.push(serde_json::json!({
@@ -41239,9 +41126,6 @@ pub async fn gateways_discover_sources(req: HttpRequest, state: web::Data<AppSta
                             }
                         }
                     }
-                }
-            }
-        }
     }
     // Docker named volumes — each named volume has its data directory
     // at `/var/lib/docker/volumes/<name>/_data`. Surface them as
@@ -41426,15 +41310,14 @@ pub async fn gateways_cluster(req: HttpRequest, state: web::Data<AppState>) -> H
     // Cache hit?
     {
         let cache = state.gateway_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((value, ts)) = &*cache {
-            if ts.elapsed().as_secs() < GATEWAY_CLUSTER_CACHE_TTL_SECS {
+        if let Some((value, ts)) = &*cache
+            && ts.elapsed().as_secs() < GATEWAY_CLUSTER_CACHE_TTL_SECS {
                 let mut response = value.clone();
                 if let Some(obj) = response.as_object_mut() {
                     obj.insert("cached_for_seconds".into(), serde_json::json!(ts.elapsed().as_secs()));
                 }
                 return HttpResponse::Ok().json(response);
             }
-        }
     }
 
     let mut all: Vec<serde_json::Value> = {
@@ -41468,13 +41351,11 @@ pub async fn gateways_cluster(req: HttpRequest, state: web::Data<AppState>) -> H
                     .timeout(std::time::Duration::from_secs(5))
                     .header("X-WolfStack-Secret", &secret)
                     .send().await;
-                if let Ok(resp) = res {
-                    if resp.status().is_success() {
-                        if let Ok(list) = resp.json::<Vec<serde_json::Value>>().await {
+                if let Ok(resp) = res
+                    && resp.status().is_success()
+                        && let Ok(list) = resp.json::<Vec<serde_json::Value>>().await {
                             return Some((peer_id, peer_host, cluster_label, list));
                         }
-                    }
-                }
             }
             None
         });
@@ -41699,15 +41580,14 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
     // Cache hit?
     {
         let cache = state.array_cluster_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((value, ts)) = &*cache {
-            if ts.elapsed().as_secs() < ARRAY_CLUSTER_CACHE_TTL_SECS {
+        if let Some((value, ts)) = &*cache
+            && ts.elapsed().as_secs() < ARRAY_CLUSTER_CACHE_TTL_SECS {
                 let mut response = value.clone();
                 if let Some(obj) = response.as_object_mut() {
                     obj.insert("cached_for_seconds".into(), serde_json::json!(ts.elapsed().as_secs()));
                 }
                 return HttpResponse::Ok().json(response);
             }
-        }
     }
 
     // Self — both mdadm/NoNRAID arrays AND any Ceph cluster this
@@ -41740,11 +41620,10 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
     // see the same Ceph cluster. First-occurrence wins.
     let mut seen_ceph_fsids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let self_ceph = tokio::task::spawn_blocking(crate::ceph::get_cluster_status).await.ok();
-    if let Some(ceph) = self_ceph {
-        if let Some(entry) = ceph_to_array_entry(&ceph, &self_node_id, &self_hostname, &self_cluster, true, &mut seen_ceph_fsids) {
+    if let Some(ceph) = self_ceph
+        && let Some(entry) = ceph_to_array_entry(&ceph, &self_node_id, &self_hostname, &self_cluster, true, &mut seen_ceph_fsids) {
             all.push(entry);
         }
-    }
 
     // Peers — every online wolfstack node that isn't us. We also
     // fan out to each peer's `/api/ceph/status` so Ceph clusters
@@ -41770,11 +41649,8 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(8))
                         .header("X-WolfStack-Secret", &secret).send().await
-                    {
-                        if resp.status().is_success() {
-                            if let Ok(v) = resp.json::<serde_json::Value>().await { return Some(v); }
-                        }
-                    }
+                        && resp.status().is_success()
+                            && let Ok(v) = resp.json::<serde_json::Value>().await { return Some(v); }
                 }
                 None
             };
@@ -41783,11 +41659,8 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(8))
                         .header("X-WolfStack-Secret", &secret).send().await
-                    {
-                        if resp.status().is_success() {
-                            if let Ok(v) = resp.json::<serde_json::Value>().await { return Some(v); }
-                        }
-                    }
+                        && resp.status().is_success()
+                            && let Ok(v) = resp.json::<serde_json::Value>().await { return Some(v); }
                 }
                 None
             };
@@ -41816,13 +41689,11 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
                 }
             }
             // Ceph status from this peer (deduped by fsid across all peers).
-            if let Some(v) = ceph_v {
-                if let Ok(ceph) = serde_json::from_value::<crate::ceph::CephClusterStatus>(v) {
-                    if let Some(entry) = ceph_to_array_entry(&ceph, &pid, &host, &cluster, false, &mut seen_ceph_fsids) {
+            if let Some(v) = ceph_v
+                && let Ok(ceph) = serde_json::from_value::<crate::ceph::CephClusterStatus>(v)
+                    && let Some(entry) = ceph_to_array_entry(&ceph, &pid, &host, &cluster, false, &mut seen_ceph_fsids) {
                         all.push(entry);
                     }
-                }
-            }
         }
     }
 
@@ -43558,11 +43429,10 @@ pub async fn federation_status(req: HttpRequest, state: web::Data<AppState>) -> 
     let mut cpu_pct: f32 = 0.0;
 
     // Cluster nodes
-    if let Some(cluster) = state.cached_status.read().ok().and_then(|c| c.clone()) {
-        if let Some(nodes) = cluster.get("nodes").and_then(|n| n.as_array()) {
+    if let Some(cluster) = state.cached_status.read().ok().and_then(|c| c.clone())
+        && let Some(nodes) = cluster.get("nodes").and_then(|n| n.as_array()) {
             host_count = nodes.len() as u32;
         }
-    }
 
     // Self metrics from SystemMonitor.collect — same call the
     // dashboard uses, refreshes CPU + memory in place. Holding
@@ -43577,15 +43447,14 @@ pub async fn federation_status(req: HttpRequest, state: web::Data<AppState>) -> 
 
     // Containers / VMs aren't free to compute on demand, so we
     // cheap them: read from cached cluster status if present.
-    if let Some(cluster) = state.cached_status.read().ok().and_then(|c| c.clone()) {
-        if let Some(arr) = cluster.get("nodes").and_then(|n| n.as_array()) {
+    if let Some(cluster) = state.cached_status.read().ok().and_then(|c| c.clone())
+        && let Some(arr) = cluster.get("nodes").and_then(|n| n.as_array()) {
             for n in arr {
                 container_count += n.get("lxc_count").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 container_count += n.get("docker_count").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 vm_count += n.get("kvm_count").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
             }
         }
-    }
 
     let snap = FederationStatus {
         host_count, vm_count, container_count,
@@ -43708,16 +43577,14 @@ static SETUP_SH_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(String, std:
 /// above for rationale).
 pub async fn install_setup_sh(_req: HttpRequest) -> HttpResponse {
     // Serve from cache when fresh.
-    if let Ok(guard) = SETUP_SH_CACHE.lock() {
-        if let Some((body, fetched)) = guard.as_ref() {
-            if fetched.elapsed() < std::time::Duration::from_secs(300) {
+    if let Ok(guard) = SETUP_SH_CACHE.lock()
+        && let Some((body, fetched)) = guard.as_ref()
+            && fetched.elapsed() < std::time::Duration::from_secs(300) {
                 return HttpResponse::Ok()
                     .content_type("text/x-shellscript; charset=utf-8")
                     .insert_header(("X-WolfStack-Install-Cache", "hit"))
                     .body(body.clone());
             }
-        }
-    }
     let client = &*API_HTTP_CLIENT;
     let resp = match client.get(SETUP_SH_UPSTREAM)
         .timeout(std::time::Duration::from_secs(20))
@@ -44698,11 +44565,10 @@ async fn logs_config_put(
         .and_then(|v| v.to_str().ok())
         .map(|s| crate::auth::validate_inter_node_secret_from(s, &state.cluster_secret, peer_ip(&req)))
         .unwrap_or(false);
-    if !is_internal {
-        if let Err(resp) = require_auth(&req, &state) {
+    if !is_internal
+        && let Err(resp) = require_auth(&req, &state) {
             return resp;
         }
-    }
     if !fleet_logs_entitled(&state) {
         return fleet_logs_locked();
     }
@@ -46403,8 +46269,8 @@ pub async fn sql_connections_query(
     if username != "cluster-node" {
         let enterprise = crate::compat::platform_ready();
         let cfg = crate::sql_connections::load();
-        if let Some(conn) = cfg.connections.iter().find(|c| c.id == id) {
-            if !conn.user_permitted(&username, enterprise) {
+        if let Some(conn) = cfg.connections.iter().find(|c| c.id == id)
+            && !conn.user_permitted(&username, enterprise) {
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "error": format!(
                         "user '{}' is not in the allowed_users list for connection '{}'",
@@ -46412,7 +46278,6 @@ pub async fn sql_connections_query(
                     )
                 }));
             }
-        }
     }
 
     let perm = match body.permission.as_deref().unwrap_or("read") {
@@ -46492,13 +46357,12 @@ pub async fn sql_connections_query_multi(
     if username != "cluster-node" {
         let enterprise = crate::compat::platform_ready();
         let cfg = crate::sql_connections::load();
-        if let Some(conn) = cfg.connections.iter().find(|c| c.id == id) {
-            if !conn.user_permitted(&username, enterprise) {
+        if let Some(conn) = cfg.connections.iter().find(|c| c.id == id)
+            && !conn.user_permitted(&username, enterprise) {
                 return HttpResponse::Forbidden().json(serde_json::json!({
                     "error": format!("user '{}' is not in the allowed_users list for connection '{}'", username, id)
                 }));
             }
-        }
     }
 
     let perm = match body.permission.as_deref().unwrap_or("read") {
@@ -46739,8 +46603,8 @@ async fn enumerate_local_ips(state: &web::Data<AppState>) -> Vec<serde_json::Val
     let mut out: Vec<serde_json::Value> = Vec::new();
 
     // Host-side interfaces via `ip -4 -o addr`. One line per interface.
-    if let Ok(o) = std::process::Command::new("ip").args(["-4", "-o", "addr"]).output() {
-        if o.status.success() {
+    if let Ok(o) = std::process::Command::new("ip").args(["-4", "-o", "addr"]).output()
+        && o.status.success() {
             let text = String::from_utf8_lossy(&o.stdout);
             for line in text.lines() {
                 // Format: "2: eth0    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0"
@@ -46757,7 +46621,6 @@ async fn enumerate_local_ips(state: &web::Data<AppState>) -> Vec<serde_json::Val
                 }));
             }
         }
-    }
 
     // Docker containers
     for c in crate::containers::docker_list_all_cached() {
@@ -46792,15 +46655,14 @@ async fn enumerate_local_ips(state: &web::Data<AppState>) -> Vec<serde_json::Val
     // which is fine for DB hosting (typically one WolfNet IP per VM).
     let vms = state.vms.lock().unwrap().list_vms();
     for vm in vms {
-        if let Some(ip) = &vm.wolfnet_ip {
-            if !ip.trim().is_empty() {
+        if let Some(ip) = &vm.wolfnet_ip
+            && !ip.trim().is_empty() {
                 out.push(serde_json::json!({
                     "address": ip,
                     "source": format!("vm:{}", vm.name),
                     "label": format!("{} — vm:{}", ip, vm.name),
                 }));
             }
-        }
     }
 
     // Deduplicate by address while keeping the first source tag.

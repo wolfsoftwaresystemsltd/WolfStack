@@ -516,12 +516,10 @@ impl XoClient {
                 }
                 return Err(format!("XO returned an unexpected create_vm body: {}", candidate));
             }
-            if let Some(s) = v.get("uuid").and_then(|x| x.as_str()) {
-                if looks_like_uuid(s) { return Ok(s.to_string()); }
-            }
-            if let Some(s) = v.get("id").and_then(|x| x.as_str()) {
-                if looks_like_uuid(s) { return Ok(s.to_string()); }
-            }
+            if let Some(s) = v.get("uuid").and_then(|x| x.as_str())
+                && looks_like_uuid(s) { return Ok(s.to_string()); }
+            if let Some(s) = v.get("id").and_then(|x| x.as_str())
+                && looks_like_uuid(s) { return Ok(s.to_string()); }
             return Err(format!(
                 "XO returned a JSON body without a UUID-shaped uuid/id field: {}",
                 body_text.chars().take(300).collect::<String>(),
@@ -813,12 +811,10 @@ pub mod cloud_init {
             )
         };
 
-        let runcmds = vec![
-            format!("hostnamectl set-hostname '{}'", hostname),
+        let runcmds = [format!("hostnamectl set-hostname '{}'", hostname),
             install_cmd,
             "systemctl enable wolfstack || true".to_string(),
-            "systemctl restart wolfstack || true".to_string(),
-        ];
+            "systemctl restart wolfstack || true".to_string()];
         let runcmd_yaml = runcmds.iter()
             .map(|c| format!("  - bash -lc '{}'", c.replace('\'', "'\\''")))
             .collect::<Vec<_>>()

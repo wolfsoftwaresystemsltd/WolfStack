@@ -424,6 +424,56 @@ pub fn validate_toml(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Convert a TOML value to a JSON value
+fn toml_to_json(value: &toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Integer(i) => serde_json::json!(*i),
+        toml::Value::Float(f) => serde_json::json!(*f),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
+        toml::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(table) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in table {
+                map.insert(k.clone(), toml_to_json(v));
+            }
+            serde_json::Value::Object(map)
+        }
+    }
+}
+
+/// Convert a JSON value to a TOML value
+fn json_to_toml(value: &serde_json::Value) -> Option<toml::Value> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(toml::Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(toml::Value::Integer(i))
+            } else { n.as_f64().map(toml::Value::Float) }
+        }
+        serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<toml::Value> = arr.iter()
+                .filter_map(json_to_toml)
+                .collect();
+            Some(toml::Value::Array(items))
+        }
+        serde_json::Value::Object(obj) => {
+            let mut table = toml::map::Map::new();
+            for (k, v) in obj {
+                if let Some(tv) = json_to_toml(v) {
+                    table.insert(k.clone(), tv);
+                }
+            }
+            Some(toml::Value::Table(table))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,59 +632,5 @@ mod tests {
         let missing = missing_keys_against(&tpl, &actual_json, "");
         assert!(missing.iter().any(|k| k == "server.host"),
             "expected server.host in missing list, got {:?}", missing);
-    }
-}
-
-/// Convert a TOML value to a JSON value
-fn toml_to_json(value: &toml::Value) -> serde_json::Value {
-    match value {
-        toml::Value::String(s) => serde_json::Value::String(s.clone()),
-        toml::Value::Integer(i) => serde_json::json!(*i),
-        toml::Value::Float(f) => serde_json::json!(*f),
-        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
-        toml::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(toml_to_json).collect())
-        }
-        toml::Value::Table(table) => {
-            let mut map = serde_json::Map::new();
-            for (k, v) in table {
-                map.insert(k.clone(), toml_to_json(v));
-            }
-            serde_json::Value::Object(map)
-        }
-    }
-}
-
-/// Convert a JSON value to a TOML value
-fn json_to_toml(value: &serde_json::Value) -> Option<toml::Value> {
-    match value {
-        serde_json::Value::Null => None,
-        serde_json::Value::Bool(b) => Some(toml::Value::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Some(toml::Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Some(toml::Value::Float(f))
-            } else {
-                None
-            }
-        }
-        serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
-        serde_json::Value::Array(arr) => {
-            let items: Vec<toml::Value> = arr.iter()
-                .filter_map(json_to_toml)
-                .collect();
-            Some(toml::Value::Array(items))
-        }
-        serde_json::Value::Object(obj) => {
-            let mut table = toml::map::Map::new();
-            for (k, v) in obj {
-                if let Some(tv) = json_to_toml(v) {
-                    table.insert(k.clone(), tv);
-                }
-            }
-            Some(toml::Value::Table(table))
-        }
     }
 }

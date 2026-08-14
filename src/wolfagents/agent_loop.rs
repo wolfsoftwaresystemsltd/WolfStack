@@ -453,9 +453,8 @@ async fn gemini_tool_loop(
         let mut text_pieces: Vec<String> = Vec::new();
         let mut function_calls: Vec<(String, serde_json::Value)> = Vec::new();
         for part in &parts {
-            if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                if !t.is_empty() { text_pieces.push(t.to_string()); }
-            }
+            if let Some(t) = part.get("text").and_then(|v| v.as_str())
+                && !t.is_empty() { text_pieces.push(t.to_string()); }
             if let Some(fc) = part.get("functionCall") {
                 let name = fc.get("name").and_then(|v| v.as_str())
                     .unwrap_or("").to_string();
@@ -570,8 +569,8 @@ fn normalise_schema_for_gemini(mut v: serde_json::Value) -> serde_json::Value {
     // `items` only on ARRAY types. Otherwise take the first non-null type.
     // `["string","null"]` → "string" + nullable; `["string","array","null"]`
     // with items → "array" + nullable.
-    if let Some(t) = v.get("type").cloned() {
-        if let Some(arr) = t.as_array() {
+    if let Some(t) = v.get("type").cloned()
+        && let Some(arr) = t.as_array() {
             let non_null: Vec<&serde_json::Value> = arr.iter()
                 .filter(|x| x.as_str() != Some("null")).collect();
             let has_null = arr.iter().any(|x| x.as_str() == Some("null"));
@@ -591,15 +590,13 @@ fn normalise_schema_for_gemini(mut v: serde_json::Value) -> serde_json::Value {
                 v["nullable"] = serde_json::Value::Bool(true);
             }
         }
-    }
     // Gemini accepts `items` ONLY on ARRAY types. A non-array schema carrying a
     // stray `items` — e.g. the SendEmail `to` union narrowed to "string" while
     // keeping its items — fails with
     // "properties[to].items: field predicate failed: $type == Type.ARRAY"
     // (Tor 2026-06-05). Drop `items` unless the (now single) type is array.
-    if v.get("type").and_then(|t| t.as_str()) != Some("array") {
-        if let Some(obj) = v.as_object_mut() { obj.remove("items"); }
-    }
+    if v.get("type").and_then(|t| t.as_str()) != Some("array")
+        && let Some(obj) = v.as_object_mut() { obj.remove("items"); }
     // Recurse into `properties`.
     if let Some(props) = v.get_mut("properties").and_then(|p| p.as_object_mut()) {
         let keys: Vec<String> = props.keys().cloned().collect();

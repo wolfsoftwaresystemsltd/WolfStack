@@ -261,11 +261,10 @@ pub fn classify_bind(bind: IpAddr, snap: &NetworkSnapshot) -> NetworkReachabilit
         iface.addresses.iter().any(|a| a.address == bind.to_string())
     });
 
-    if let Some(iface) = owning_iface {
-        if is_overlay_vpn_interface(&iface.name) {
+    if let Some(iface) = owning_iface
+        && is_overlay_vpn_interface(&iface.name) {
             return NetworkReachability::OverlayOnly { network: iface.name.clone() };
         }
-    }
 
     // Address-class checks irrespective of interface — this catches
     // the case where the interface is a bridge or unusual driver but
@@ -399,14 +398,12 @@ fn collect_public_addrs(interfaces: &[NetworkInterface]) -> (Vec<Ipv4Addr>, Vec<
         for addr in &iface.addresses {
             match addr.family.as_str() {
                 "inet" => {
-                    if let Ok(ip) = addr.address.parse::<Ipv4Addr>() {
-                        if is_publicly_routable_v4(ip) { v4.push(ip); }
-                    }
+                    if let Ok(ip) = addr.address.parse::<Ipv4Addr>()
+                        && is_publicly_routable_v4(ip) { v4.push(ip); }
                 }
                 "inet6" => {
-                    if let Ok(ip) = addr.address.parse::<Ipv6Addr>() {
-                        if is_publicly_routable_v6(ip) { v6.push(ip); }
-                    }
+                    if let Ok(ip) = addr.address.parse::<Ipv6Addr>()
+                        && is_publicly_routable_v6(ip) { v6.push(ip); }
                 }
                 _ => {}
             }

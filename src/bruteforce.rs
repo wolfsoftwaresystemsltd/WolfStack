@@ -162,8 +162,8 @@ impl BruteforceState {
                     status: "watching".into(),
                 });
             }
-            if cfg.watch_web {
-                if let Some(logs) = container_web_logs(&ct) {
+            if cfg.watch_web
+                && let Some(logs) = container_web_logs(&ct) {
                     out.push(WatchSource {
                         kind: "container-web".into(),
                         location: format!("lxc:{}", ct),
@@ -171,7 +171,6 @@ impl BruteforceState {
                         status: "watching".into(),
                     });
                 }
-            }
         }
         out
     }
@@ -362,13 +361,12 @@ fn parse_ssh_failure(line: &str) -> Option<(String, String, &'static str)> {
             return Some((ip, user, "ssh"));
         }
     }
-    if let Some(rest) = line.find("Invalid user ").map(|i| &line[i + 13..]) {
-        if let Some((user_part, after)) = rest.split_once(" from ") {
+    if let Some(rest) = line.find("Invalid user ").map(|i| &line[i + 13..])
+        && let Some((user_part, after)) = rest.split_once(" from ") {
             let user = user_part.trim().to_string();
             let ip = after.split_whitespace().next()?.to_string();
             return Some((ip, user, "ssh"));
         }
-    }
     None
 }
 
@@ -409,7 +407,7 @@ fn extract_client_ip(line: &str) -> Option<String> {
     if let Some(i) = line.find("client: ") {
         let rest = &line[i + 8..];
         let ip = rest
-            .split(|c| c == ',' || c == ' ')
+            .split([',', ' '])
             .next()
             .unwrap_or("")
             .trim();
@@ -431,7 +429,7 @@ fn extract_web_user(line: &str) -> String {
     }
     if let Some(i) = line.find("user ") {
         let rest = &line[i + 5..];
-        let tok = rest.split(|c| c == ':' || c == ' ').next().unwrap_or("");
+        let tok = rest.split([':', ' ']).next().unwrap_or("");
         if !tok.is_empty() {
             return tok.trim_matches('"').to_string();
         }

@@ -24,16 +24,15 @@ fn config_path() -> String { crate::paths::get().ceph_config }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CephHealthStatus {
     Ok,
     Warn,
     Error,
+    #[default]
     Unknown,
 }
 
-impl Default for CephHealthStatus {
-    fn default() -> Self { CephHealthStatus::Unknown }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CephClusterStatus {
@@ -230,7 +229,7 @@ pub struct CephConfig {
 
 #[allow(dead_code)]
 pub fn load_config() -> CephConfig {
-    match std::fs::read_to_string(&config_path()) {
+    match std::fs::read_to_string(config_path()) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
             error!("Failed to parse ceph config: {}", e);
             CephConfig::default()
@@ -358,15 +357,14 @@ pub fn get_cluster_status() -> CephClusterStatus {
         // Manager info — ceph status only has a summary (available, num_standbys),
         // so we need "ceph mgr dump" for the actual active_name and standbys list
         if let Ok(mgr_dump) = ceph_json(&["mgr", "dump"]) {
-            if let Some(active_name) = mgr_dump.get("active_name").and_then(|n| n.as_str()) {
-                if !active_name.is_empty() {
+            if let Some(active_name) = mgr_dump.get("active_name").and_then(|n| n.as_str())
+                && !active_name.is_empty() {
                     status.mgrs.push(CephManager {
                         name: active_name.to_string(),
                         active: true,
                         available: true,
                     });
                 }
-            }
             if let Some(standbys) = mgr_dump.get("standbys").and_then(|s| s.as_array()) {
                 for sb in standbys {
                     if let Some(name) = sb.get("name").and_then(|n| n.as_str()) {
@@ -442,8 +440,8 @@ pub fn get_cluster_status() -> CephClusterStatus {
     }
 
     // Get OSD details
-    if let Ok(val) = ceph_json(&["osd", "tree"]) {
-        if let Some(nodes) = val.get("nodes").and_then(|n| n.as_array()) {
+    if let Ok(val) = ceph_json(&["osd", "tree"])
+        && let Some(nodes) = val.get("nodes").and_then(|n| n.as_array()) {
             for node in nodes {
                 let type_name = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if type_name != "osd" { continue; }
@@ -479,11 +477,10 @@ pub fn get_cluster_status() -> CephClusterStatus {
                 let _ = name; // used for debug only
             }
         }
-    }
 
     // Get OSD usage (df)
-    if let Ok(val) = ceph_json(&["osd", "df"]) {
-        if let Some(nodes) = val.get("nodes").and_then(|n| n.as_array()) {
+    if let Ok(val) = ceph_json(&["osd", "df"])
+        && let Some(nodes) = val.get("nodes").and_then(|n| n.as_array()) {
             for node in nodes {
                 let id = node.get("id").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
                 if let Some(osd) = status.osds.iter_mut().find(|o| o.id == id) {
@@ -494,11 +491,10 @@ pub fn get_cluster_status() -> CephClusterStatus {
                 }
             }
         }
-    }
 
     // Get pools
-    if let Ok(val) = ceph_json(&["osd", "pool", "ls", "detail"]) {
-        if let Some(pools) = val.as_array() {
+    if let Ok(val) = ceph_json(&["osd", "pool", "ls", "detail"])
+        && let Some(pools) = val.as_array() {
             for p in pools {
                 let pool_name = p.get("pool_name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                 let pool_id = p.get("pool").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
@@ -531,29 +527,26 @@ pub fn get_cluster_status() -> CephClusterStatus {
                 });
             }
         }
-    }
 
     // Get pool usage stats
-    if let Ok(val) = ceph_json(&["df", "detail"]) {
-        if let Some(pools) = val.get("pools").and_then(|p| p.as_array()) {
+    if let Ok(val) = ceph_json(&["df", "detail"])
+        && let Some(pools) = val.get("pools").and_then(|p| p.as_array()) {
             for p in pools {
                 let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                if let Some(pool) = status.pools.iter_mut().find(|pl| pl.name == name) {
-                    if let Some(stats) = p.get("stats") {
+                if let Some(pool) = status.pools.iter_mut().find(|pl| pl.name == name)
+                    && let Some(stats) = p.get("stats") {
                         pool.stored_bytes = stats.get("stored").and_then(|b| b.as_u64()).unwrap_or(0);
                         pool.used_bytes = stats.get("bytes_used").and_then(|b| b.as_u64()).unwrap_or(0);
                         pool.objects = stats.get("objects").and_then(|n| n.as_u64()).unwrap_or(0);
                         pool.percent_used = stats.get("percent_used").and_then(|p| p.as_f64()).unwrap_or(0.0);
                         pool.max_avail = stats.get("max_avail").and_then(|m| m.as_u64()).unwrap_or(0);
                     }
-                }
             }
         }
-    }
 
     // Get CRUSH rules
-    if let Ok(val) = ceph_json(&["osd", "crush", "rule", "dump"]) {
-        if let Some(rules) = val.as_array() {
+    if let Ok(val) = ceph_json(&["osd", "crush", "rule", "dump"])
+        && let Some(rules) = val.as_array() {
             for rule in rules {
                 let id = rule.get("rule_id").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
                 let name = rule.get("rule_name").and_then(|n| n.as_str()).unwrap_or("").to_string();
@@ -565,18 +558,16 @@ pub fn get_cluster_status() -> CephClusterStatus {
             // Update pool crush_rule names
             let rules_clone: Vec<CrushRule> = status.crush_rules.clone();
             for pool in &mut status.pools {
-                if let Ok(rid) = pool.crush_rule.parse::<u32>() {
-                    if let Some(rule) = rules_clone.iter().find(|r| r.id == rid) {
+                if let Ok(rid) = pool.crush_rule.parse::<u32>()
+                    && let Some(rule) = rules_clone.iter().find(|r| r.id == rid) {
                         pool.crush_rule = rule.name.clone();
                     }
-                }
             }
         }
-    }
 
     // Get CephFS
-    if let Ok(val) = ceph_json(&["fs", "ls"]) {
-        if let Some(filesystems) = val.as_array() {
+    if let Ok(val) = ceph_json(&["fs", "ls"])
+        && let Some(filesystems) = val.as_array() {
             for fs in filesystems {
                 let name = fs.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                 let metadata_pool = fs.get("metadata_pool").and_then(|p| p.as_str()).unwrap_or("").to_string();
@@ -592,7 +583,6 @@ pub fn get_cluster_status() -> CephClusterStatus {
                 });
             }
         }
-    }
 
     // MDS daemons (only relevant once a CephFS exists). `ceph fs dump` lists each
     // filesystem's active MDS map (info) plus a global standbys array. We build a
@@ -661,26 +651,23 @@ pub fn create_pool(name: &str, pg_num: u32, pool_type: &str, size: Option<u32>, 
     ceph_text(&args)?;
 
     // Set replication size
-    if let Some(s) = size {
-        if pool_type != "erasure" {
+    if let Some(s) = size
+        && pool_type != "erasure" {
             let size_str = s.to_string();
             let _ = ceph_text(&["osd", "pool", "set", name, "size", &size_str]);
         }
-    }
 
     // Set CRUSH rule
-    if let Some(r) = rule {
-        if !r.is_empty() {
+    if let Some(r) = rule
+        && !r.is_empty() {
             let _ = ceph_text(&["osd", "pool", "set", name, "crush_rule", r]);
         }
-    }
 
     // Enable application
-    if let Some(app) = application {
-        if !app.is_empty() {
+    if let Some(app) = application
+        && !app.is_empty() {
             let _ = ceph_text(&["osd", "pool", "application", "enable", name, app, "--yes-i-really-mean-it"]);
         }
-    }
 
     info!("Created Ceph pool: {}", name);
     Ok(format!("Pool '{}' created successfully", name))

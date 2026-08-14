@@ -602,7 +602,7 @@ impl DaClient {
                 if let Some(name) = item.as_str() {
                     dbs.push(DaDatabase {
                         name: name.to_string(),
-                        user: format!("{}_{}", user, name.split('_').last().unwrap_or(name)),
+                        user: format!("{}_{}", user, name.split('_').next_back().unwrap_or(name)),
                     });
                 }
             }
@@ -760,30 +760,27 @@ impl DaClient {
         // DA's `cert` field varies version to version, but when it's
         // there it's the authoritative source — the metadata fields
         // can be missing or stale, the X509's notAfter never lies.
-        if expires.is_empty() && !cert_pem.is_empty() {
-            if let Some(pem_block) = cert_pem.find("-----BEGIN CERTIFICATE-----")
-                .map(|i| &cert_pem[i..]) {
-                if let Ok(x509) = openssl::x509::X509::from_pem(pem_block.as_bytes()) {
+        if expires.is_empty() && !cert_pem.is_empty()
+            && let Some(pem_block) = cert_pem.find("-----BEGIN CERTIFICATE-----")
+                .map(|i| &cert_pem[i..])
+                && let Ok(x509) = openssl::x509::X509::from_pem(pem_block.as_bytes()) {
                     // ASN1 time prints in DA's preferred format
                     // ("MMM DD HH:MM:SS YYYY GMT"). The portal
                     // formats with formatDate() so any parseable
                     // string works.
                     expires = x509.not_after().to_string();
                 }
-            }
-        }
 
         // Last-resort: if DA only gives us "expires_in_days", roll
         // that forward from now so the operator at least sees a
         // ballpark date instead of "—".
-        if expires.is_empty() {
-            if let Some(days) = data.get("expires_in_days").and_then(|v| v.as_str())
+        if expires.is_empty()
+            && let Some(days) = data.get("expires_in_days").and_then(|v| v.as_str())
                 .and_then(|s| s.trim().parse::<i64>().ok())
                 .filter(|d| *d > 0) {
                 let when = chrono::Utc::now() + chrono::Duration::days(days);
                 expires = when.to_rfc3339();
             }
-        }
 
         let expiry_implies_cert = !expires.is_empty()
             || data.get("expires_in_days").and_then(|v| v.as_str())
@@ -1049,22 +1046,19 @@ impl DaClient {
         check_da_error(&resp)?;
         // DA returns either {"key":"..."} or a `text=...` URL. Build a
         // canonical URL the caller can redirect to.
-        if let Some(url) = resp.get("url").and_then(|v| v.as_str()) {
-            if url.starts_with("http") { return Ok(url.to_string()); }
-        }
-        if let Some(key) = resp.get("key").and_then(|v| v.as_str()) {
-            if !key.is_empty() {
+        if let Some(url) = resp.get("url").and_then(|v| v.as_str())
+            && url.starts_with("http") { return Ok(url.to_string()); }
+        if let Some(key) = resp.get("key").and_then(|v| v.as_str())
+            && !key.is_empty() {
                 return Ok(format!(
                     "{}/CMD_LOGIN?username={}&key={}",
                     self.base_url, urlencoding::encode(user), urlencoding::encode(key),
                 ));
             }
-        }
         // Fallback: parse the URL out of a `text` field that some DA
         // builds emit with the URL embedded.
-        if let Some(text) = resp.get("text").and_then(|v| v.as_str()) {
-            if text.starts_with("http") { return Ok(text.to_string()); }
-        }
+        if let Some(text) = resp.get("text").and_then(|v| v.as_str())
+            && text.starts_with("http") { return Ok(text.to_string()); }
         // Surface DA's actual response so the operator can debug.
         // Truncate to keep the error toast readable.
         Err(format!(
@@ -2144,12 +2138,10 @@ impl DaClient {
             if let Some(n) = v.as_u64()    { return n > 0; }
             if let Some(o) = v.as_object() {
                 for k in &["running", "status", "state"] {
-                    if let Some(inner) = o.get(*k).and_then(|x| x.as_str()) {
-                        if to_bool(inner) { return true; }
-                    }
-                    if let Some(b) = o.get(*k).and_then(|x| x.as_bool()) {
-                        if b { return true; }
-                    }
+                    if let Some(inner) = o.get(*k).and_then(|x| x.as_str())
+                        && to_bool(inner) { return true; }
+                    if let Some(b) = o.get(*k).and_then(|x| x.as_bool())
+                        && b { return true; }
                 }
             }
             false
@@ -2398,7 +2390,7 @@ fn parse_uptime_human(s: &str) -> Option<u64> {
     let lower = s.to_ascii_lowercase();
     let mut total: u64 = 0;
     let mut found_anything = false;
-    let parts = lower.split(|c: char| c == ',' || c == ';');
+    let parts = lower.split([',', ';']);
     for p in parts {
         let p = p.trim();
         let words: Vec<&str> = p.split_whitespace().collect();
@@ -2418,8 +2410,8 @@ fn parse_uptime_human(s: &str) -> Option<u64> {
         found_anything = true;
     }
     // Also handle the "HH:MM" form some uptime outputs use.
-    if !found_anything {
-        if let Some(hhmm) = s.split_whitespace().find(|w| w.contains(':')) {
+    if !found_anything
+        && let Some(hhmm) = s.split_whitespace().find(|w| w.contains(':')) {
             let parts: Vec<&str> = hhmm.split(':').collect();
             if parts.len() >= 2 {
                 let h: u64 = parts[0].parse().ok()?;
@@ -2428,7 +2420,6 @@ fn parse_uptime_human(s: &str) -> Option<u64> {
                 found_anything = true;
             }
         }
-    }
     if found_anything { Some(total) } else { None }
 }
 

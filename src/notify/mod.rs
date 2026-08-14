@@ -555,11 +555,10 @@ fn cached_rules() -> NotifyRules {
     static CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(NotifyRules, std::time::Instant)>>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
     let mut guard = match CACHE.lock() { Ok(g) => g, Err(p) => p.into_inner() };
-    if let Some((val, at)) = &*guard {
-        if at.elapsed() < CONFIG_CACHE_TTL {
+    if let Some((val, at)) = &*guard
+        && at.elapsed() < CONFIG_CACHE_TTL {
             return val.clone();
         }
-    }
     let val = NotifyRules::load();
     *guard = Some((val.clone(), std::time::Instant::now()));
     val
@@ -570,11 +569,10 @@ fn cached_alert_config() -> crate::alerting::AlertConfig {
     static CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(crate::alerting::AlertConfig, std::time::Instant)>>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
     let mut guard = match CACHE.lock() { Ok(g) => g, Err(p) => p.into_inner() };
-    if let Some((val, at)) = &*guard {
-        if at.elapsed() < CONFIG_CACHE_TTL {
+    if let Some((val, at)) = &*guard
+        && at.elapsed() < CONFIG_CACHE_TTL {
             return val.clone();
         }
-    }
     let val = crate::alerting::AlertConfig::load();
     *guard = Some((val.clone(), std::time::Instant::now()));
     val

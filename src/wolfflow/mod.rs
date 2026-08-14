@@ -426,10 +426,12 @@ fn default_agent_chat_timeout() -> u64 { 180 }
 /// What to do when a step fails
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum OnFailure {
     /// Continue to the next step
     Continue,
     /// Abort the entire workflow
+    #[default]
     Abort,
     /// Log an alert and continue
     Alert,
@@ -439,9 +441,6 @@ pub enum OnFailure {
     NotifyAndContinue,
 }
 
-impl Default for OnFailure {
-    fn default() -> Self { OnFailure::Abort }
-}
 
 /// Target scope for workflow execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,38 +594,36 @@ impl WolfFlowState {
     // ─── Persistence ───
 
     fn load_workflows(&self) {
-        if let Ok(data) = std::fs::read_to_string(&workflows_file()) {
-            if let Ok(wfs) = serde_json::from_str::<Vec<Workflow>>(&data) {
+        if let Ok(data) = std::fs::read_to_string(workflows_file())
+            && let Ok(wfs) = serde_json::from_str::<Vec<Workflow>>(&data) {
                 let mut workflows = self.workflows.write().unwrap();
                 *workflows = wfs;
             }
-        }
     }
 
     fn save_workflows(&self) {
         let wfs = self.workflows.read().unwrap();
         if let Ok(json) = serde_json::to_string_pretty(&*wfs) {
-            let _ = std::fs::create_dir_all(&wolfflow_dir());
-            if let Err(e) = std::fs::write(&workflows_file(), json) {
+            let _ = std::fs::create_dir_all(wolfflow_dir());
+            if let Err(e) = std::fs::write(workflows_file(), json) {
                 warn!("WolfFlow: failed to save workflows: {}", e);
             }
         }
     }
 
     fn load_runs(&self) {
-        if let Ok(data) = std::fs::read_to_string(&runs_file()) {
-            if let Ok(runs) = serde_json::from_str::<Vec<WorkflowRun>>(&data) {
+        if let Ok(data) = std::fs::read_to_string(runs_file())
+            && let Ok(runs) = serde_json::from_str::<Vec<WorkflowRun>>(&data) {
                 let mut r = self.runs.write().unwrap();
                 *r = runs;
             }
-        }
     }
 
     fn save_runs(&self) {
         let runs = self.runs.read().unwrap();
         if let Ok(json) = serde_json::to_string_pretty(&*runs) {
-            let _ = std::fs::create_dir_all(&wolfflow_dir());
-            if let Err(e) = std::fs::write(&runs_file(), json) {
+            let _ = std::fs::create_dir_all(wolfflow_dir());
+            if let Err(e) = std::fs::write(runs_file(), json) {
                 warn!("WolfFlow: failed to save runs: {}", e);
             }
         }
@@ -834,7 +831,7 @@ fn single_field_matches(part: &str, value: u32, min: u32, max: u32) -> bool {
         if value < range_min || value > range_max {
             return false;
         }
-        return (value - range_min) % step == 0;
+        return (value - range_min).is_multiple_of(step);
     }
 
     // Wildcard
@@ -1078,11 +1075,10 @@ pub async fn execute_action_local(action: &ActionType) -> Result<StepOutput, Str
                 }
                 "lxc" => {
                     let stop_result = run_command("lxc-stop", &["-n", name], 60).await;
-                    if let Err(e) = &stop_result {
-                        if !e.contains("not running") {
+                    if let Err(e) = &stop_result
+                        && !e.contains("not running") {
                             warn!("WolfFlow: lxc-stop failed for {}: {}", name, e);
                         }
-                    }
                     run_command("lxc-start", &["-n", name], 60).await.map(plain_output)
                 }
                 _ => Err(format!("Unknown runtime: {}", runtime)),
@@ -1848,12 +1844,11 @@ pub async fn execute_action_in_container(
     }
 
     // For DockerPrune targeting a docker container — run docker system prune in context
-    if let ActionType::DockerPrune = action {
-        if ct.runtime == "docker" {
+    if let ActionType::DockerPrune = action
+        && ct.runtime == "docker" {
             // Prune unused resources on the host (not inside the container)
             return execute_action_local(action).await;
         }
-    }
 
     // For other actions that don't make sense inside a container, run on the host
     // (UpdatePackages inside a container, CleanLogs, etc.)
@@ -2031,13 +2026,12 @@ pub async fn execute_workflow(
 
     while step_idx < workflow.steps.len() && !aborted {
         // Check max runtime
-        if let Some(max) = max_runtime {
-            if run_start.elapsed() > max {
+        if let Some(max) = max_runtime
+            && run_start.elapsed() > max {
                 error!("WolfFlow: workflow '{}' exceeded max runtime of {}s — aborting", workflow.name, workflow.max_runtime_secs);
                 aborted = true;
                 break;
             }
-        }
 
         let step = &workflow.steps[step_idx];
 
@@ -2409,8 +2403,8 @@ pub async fn execute_workflow(
     // Send email with results BEFORE persisting final status — the frontend stops
     // polling as soon as it sees a non-running status, so email_status must already
     // be set by the time the run is saved as completed/failed.
-    if let Some(ref email) = workflow.email_results {
-        if !email.is_empty() {
+    if let Some(ref email) = workflow.email_results
+        && !email.is_empty() {
             info!("WolfFlow: sending email results to {}", email);
             let subject = format!("[WolfFlow] {} — {:?}", workflow.name, run.status);
             let mut config = ai_config.clone().unwrap_or_else(crate::ai::AiConfig::load);
@@ -2444,7 +2438,6 @@ pub async fn execute_workflow(
                 }
             }
         }
-    }
 
     // Persist final run state (with email_status already set)
     state.update_run(&run_id, run.clone());

@@ -414,19 +414,18 @@ pub fn finish_authentication(
         .identify_discoverable_authentication(&auth_response)
         .map_err(|e| format!("identify_discoverable_authentication: {}", e))?;
 
-    let cred_id_b64 = base64_url(cred_id.as_ref());
+    let cred_id_b64 = base64_url(cred_id);
 
     // Find the matching stored credential.
     let mut idx = None;
     let mut passkey: Option<Passkey> = None;
     for (i, c) in config.credentials.iter().enumerate() {
-        if c.credential_id == cred_id_b64 && !c.passkey_data.is_empty() {
-            if let Ok(pk) = serde_json::from_str::<Passkey>(&c.passkey_data) {
+        if c.credential_id == cred_id_b64 && !c.passkey_data.is_empty()
+            && let Ok(pk) = serde_json::from_str::<Passkey>(&c.passkey_data) {
                 idx = Some(i);
                 passkey = Some(pk);
                 break;
             }
-        }
     }
     let idx = idx.ok_or_else(|| "Unknown credential — passkey not registered on this server".to_string())?;
     let passkey = passkey.unwrap();

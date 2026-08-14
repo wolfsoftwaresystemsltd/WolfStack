@@ -194,13 +194,10 @@ fn next_lxc_net_index(cfg: &str) -> u32 {
     let mut max_seen: i32 = -1;
     for line in cfg.lines() {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("lxc.net.") {
-            if let Some(num_str) = rest.split('.').next() {
-                if let Ok(n) = num_str.parse::<i32>() {
-                    if n > max_seen { max_seen = n; }
-                }
-            }
-        }
+        if let Some(rest) = t.strip_prefix("lxc.net.")
+            && let Some(num_str) = rest.split('.').next()
+                && let Ok(n) = num_str.parse::<i32>()
+                    && n > max_seen { max_seen = n; }
     }
     (max_seen + 1) as u32
 }
@@ -322,13 +319,10 @@ fn next_pct_net_index(vmid: &str) -> Result<u32, String> {
     let cfg = String::from_utf8_lossy(&out.stdout);
     let mut max_seen: i32 = -1;
     for line in cfg.lines() {
-        if let Some(rest) = line.trim().strip_prefix("net") {
-            if let Some((num_str, _)) = rest.split_once(':') {
-                if let Ok(n) = num_str.parse::<i32>() {
-                    if n > max_seen { max_seen = n; }
-                }
-            }
-        }
+        if let Some(rest) = line.trim().strip_prefix("net")
+            && let Some((num_str, _)) = rest.split_once(':')
+                && let Ok(n) = num_str.parse::<i32>()
+                    && n > max_seen { max_seen = n; }
     }
     Ok((max_seen + 1) as u32)
 }
@@ -344,13 +338,11 @@ pub fn detach_lxc_proxmox(target_id: &str, bridge: &str) -> Result<AttachOutcome
     let mut to_remove: Vec<String> = Vec::new();
     for line in cfg.lines() {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("net") {
-            if let Some((num_str, val)) = rest.split_once(':') {
-                if val.contains(&format!("bridge={}", bridge)) {
+        if let Some(rest) = t.strip_prefix("net")
+            && let Some((num_str, val)) = rest.split_once(':')
+                && val.contains(&format!("bridge={}", bridge)) {
                     to_remove.push(format!("net{}", num_str));
                 }
-            }
-        }
     }
     if to_remove.is_empty() {
         return Ok(AttachOutcome {

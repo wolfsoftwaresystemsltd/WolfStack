@@ -36,11 +36,10 @@ impl PortalSessionManager {
 
     pub async fn validate(&self, token: &str) -> Option<String> {
         let sessions = self.sessions.read().await;
-        if let Some(session) = sessions.get(token) {
-            if session.created.elapsed().as_secs() < SESSION_LIFETIME_SECS {
+        if let Some(session) = sessions.get(token)
+            && session.created.elapsed().as_secs() < SESSION_LIFETIME_SECS {
                 return Some(session.customer_id.clone());
             }
-        }
         None
     }
 
@@ -61,13 +60,11 @@ pub fn get_session_token(req: &HttpRequest) -> Option<String> {
         return Some(cookie.value().to_string());
     }
     // Then check Authorization header
-    if let Some(auth) = req.headers().get("Authorization") {
-        if let Ok(val) = auth.to_str() {
-            if let Some(token) = val.strip_prefix("Bearer ") {
+    if let Some(auth) = req.headers().get("Authorization")
+        && let Ok(val) = auth.to_str()
+            && let Some(token) = val.strip_prefix("Bearer ") {
                 return Some(token.to_string());
             }
-        }
-    }
     None
 }
 

@@ -136,14 +136,13 @@ pub fn detect_local_kube() -> Option<String> {
         if Path::new(path).exists() {
             return Some(path.to_string());
         }
-        if let Ok(out) = Command::new("k0s").args(["kubeconfig", "admin"]).output() {
-            if out.status.success() {
+        if let Ok(out) = Command::new("k0s").args(["kubeconfig", "admin"]).output()
+            && out.status.success() {
                 let _ = std::fs::create_dir_all("/etc/k0s");
                 if std::fs::write(path, &out.stdout).is_ok() {
                     return Some(path.to_string());
                 }
             }
-        }
     }
     None
 }
@@ -499,7 +498,7 @@ fn spawn_container(user: &str, homepage: &str, tls: bool) -> Result<BrowserSessi
     if !reachable {
         // Port is not reachable — clean up the container and fail
         let _ = Command::new("docker")
-            .args(&["rm", "-f", &container_name])
+            .args(["rm", "-f", &container_name])
             .output();
         return Err(format!("Port {} is not reachable on 127.0.0.1 (possible network policy blocking)", web_port));
     }

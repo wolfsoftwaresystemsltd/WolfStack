@@ -281,8 +281,8 @@ pub fn ensure_docker_outbound() {
 /// enumeration itself failed — used as a safety gate before pruning.
 fn live_interface_names() -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
-    if let Ok(o) = Command::new("ip").args(["-o", "link", "show"]).output() {
-        if o.status.success() {
+    if let Ok(o) = Command::new("ip").args(["-o", "link", "show"]).output()
+        && o.status.success() {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 // "3: br-abc123def456@if7: <BROADCAST,...>" or "1: lo: <...>"
                 if let Some(field) = line.split_whitespace().nth(1) {
@@ -294,7 +294,6 @@ fn live_interface_names() -> std::collections::HashSet<String> {
                 }
             }
         }
-    }
     set
 }
 

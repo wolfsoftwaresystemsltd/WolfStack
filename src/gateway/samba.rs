@@ -639,21 +639,17 @@ pub fn status() -> SmbStatus {
                 .map(|s| s.success())
                 .unwrap_or(false)
         });
-        if let Ok(out) = Command::new("smbd").arg("--version").output() {
-            if out.status.success() {
+        if let Ok(out) = Command::new("smbd").arg("--version").output()
+            && out.status.success() {
                 st.version = Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
             }
-        }
         // smbstatus -j is JSON — count sessions.
-        if let Ok(out) = Command::new("smbstatus").arg("-j").output() {
-            if out.status.success() {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if let Some(sessions) = v.get("sessions").and_then(|s| s.as_object()) {
+        if let Ok(out) = Command::new("smbstatus").arg("-j").output()
+            && out.status.success()
+                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                    && let Some(sessions) = v.get("sessions").and_then(|s| s.as_object()) {
                         st.sessions = sessions.len() as u32;
                     }
-                }
-            }
-        }
     }
     st
 }

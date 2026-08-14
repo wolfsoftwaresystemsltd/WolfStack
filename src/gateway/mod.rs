@@ -316,7 +316,7 @@ impl GatewayStore {
         let json = serde_json::to_string_pretty(&list)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         crate::paths::write_secure(&path.to_string_lossy(), json)
-            .map_err(|e| std::io::Error::other(e))?;
+            .map_err(std::io::Error::other)?;
         Ok(())
     }
 
@@ -527,6 +527,140 @@ pub fn performance_tier(g: &Gateway) -> &'static str {
 /// Snapshot of the local gateways for peer sync.
 pub fn snapshot_for_sync(store: &GatewayStore) -> Vec<Gateway> {
     store.gateways.values().cloned().collect()
+}
+
+/// Reconcile on-disk daemon configuration with the current gateway
+/// store. Removes:
+///
+///   1. Orphaned Samba snippets / NFS exports / mount trees whose ID
+///      isn't in `gateways.json` (failed creates from before the
+///      apply-then-teardown landed, or a peer-pushed delete that
+///      arrived while this node was offline).
+///   2. Snippets/exports for gateways owned by *another* node — only
+///      the owner serves in v1.0. Pre-v22.9 multi-node clusters where
+///      every peer applied every gateway leave stale serving state on
+///      non-owner peers; this purges it.
+///
+/// Called once on startup with the local `node_id` so we can tell
+/// whether each known gateway is "ours to serve" or "a peer's".
+pub fn reconcile_on_startup(store: &GatewayStore, local_node_id: &str) {
+    // Set of IDs that this node should leave configs in place for —
+    // i.e. the gateways this node owns. Peer-owned gateways are still
+    // "known" but their configs must be purged from this node.
+    let owned: std::collections::HashSet<String> = store.gateways.values()
+        .filter(|g| g.origin_node_id.is_empty() || g.origin_node_id == local_node_id)
+        .map(|g| g.id.clone())
+        .collect();
+    let known = &owned;
+
+    // Samba snippets — match by filename stem.
+    let snippets_dir = std::path::Path::new("/etc/samba/wolfstack-gateways.d");
+    if let Ok(rd) = std::fs::read_dir(snippets_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("conf") { continue; }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if !known.contains(&stem) {
+                let _ = std::fs::remove_file(&path);
+                tracing::info!(target: "wolfstack::gateway", "reconciled orphan samba snippet: {}", path.display());
+            }
+        }
+    }
+
+    // NFS exports — match by `wolfstack-<id>.exports`.
+    let exports_dir = std::path::Path::new("/etc/exports.d");
+    if let Ok(rd) = std::fs::read_dir(exports_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|x| x.to_str()) { Some(s) => s, None => continue };
+            if !name.starts_with("wolfstack-") || !name.ends_with(".exports") { continue; }
+            let id = name.trim_start_matches("wolfstack-").trim_end_matches(".exports");
+            if !known.contains(id) {
+                let _ = std::fs::remove_file(&path);
+                tracing::info!(target: "wolfstack::gateway", "reconciled orphan nfs export: {}", path.display());
+            }
+        }
+    }
+
+    // Per-gateway mount roots.
+    let mount_root = std::path::Path::new("/var/lib/wolfstack/gateways");
+    if let Ok(rd) = std::fs::read_dir(mount_root) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let id = match path.file_name().and_then(|x| x.to_str()) { Some(s) => s, None => continue };
+            if !known.contains(id) {
+                // Best-effort unmount everything inside, then drop.
+                if let Ok(inside) = std::fs::read_dir(&path) {
+                    for e in inside.flatten() {
+                        let p = e.path();
+                        if p.file_name().and_then(|x| x.to_str()) == Some("share")
+                           || p.file_name().and_then(|x| x.to_str()).map(|s| s.starts_with("source-")).unwrap_or(false)
+                        {
+                            let _ = std::process::Command::new("umount").arg("-l").arg(&p).status();
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&path);
+                tracing::info!(target: "wolfstack::gateway", "reconciled orphan mount tree: {}", path.display());
+            }
+        }
+    }
+
+    // After purging snippets, rebuild the Samba aggregator and reload
+    // smbd so the changes take effect. Best-effort — fail silently if
+    // smbd isn't running yet (it'll pick up the new aggregator on
+    // next start).
+    let _ = std::fs::write(
+        "/etc/samba/wolfstack-gateways.conf",
+        rebuild_aggregator_for_reconcile(store),
+    );
+    let _ = std::process::Command::new("smbcontrol").args(["smbd", "reload-config"]).status();
+    let _ = std::process::Command::new("exportfs").arg("-ra").status();
+}
+
+/// Same content as `samba::render_aggregator` but without recursion
+/// into the gateway store (we already hold the snapshot).
+fn rebuild_aggregator_for_reconcile(store: &GatewayStore) -> String {
+    let workgroup = store.gateways.values()
+        .find(|g| g.protocols.contains(&Protocol::Smb)
+            && !g.options.smb_workgroup.trim().is_empty())
+        .map(|g| g.options.smb_workgroup.trim().to_string())
+        .unwrap_or_else(|| "WORKGROUP".to_string());
+    let mut out = String::new();
+    out.push_str("# Auto-generated by WolfStack — do not edit\n");
+    out.push_str("# Per-gateway snippets live in /etc/samba/wolfstack-gateways.d/*.conf\n\n");
+    out.push_str("[global]\n");
+    out.push_str(&format!("    workgroup = {}\n", workgroup));
+    out.push_str("    server string = WolfStack Gateway %h\n");
+    out.push_str("    server role = standalone server\n");
+    out.push_str("    log file = /var/log/samba/log.%m\n");
+    out.push_str("    max log size = 1000\n");
+    out.push_str("    map to guest = bad user\n");
+    out.push_str("    passdb backend = tdbsam\n");
+    out.push_str("    smb encrypt = auto\n");
+    out.push_str("    server min protocol = SMB2_10\n");
+    out.push_str("    client min protocol = SMB2_10\n");
+    out.push_str("    panic action = /usr/share/samba/panic-action %d\n");
+    out.push_str("    obey pam restrictions = no\n");
+    out.push_str("    unix password sync = no\n\n");
+    if let Ok(entries) = std::fs::read_dir("/etc/samba/wolfstack-gateways.d") {
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("conf"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            if let Ok(s) = std::fs::read_to_string(&p) {
+                out.push_str(&s);
+                if !s.ends_with('\n') { out.push('\n'); }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -881,138 +1015,4 @@ mod tests {
         let g = ok_gateway("ops");
         assert_eq!(performance_tier(&g), performance_tier(&g));
     }
-}
-
-/// Reconcile on-disk daemon configuration with the current gateway
-/// store. Removes:
-///
-///   1. Orphaned Samba snippets / NFS exports / mount trees whose ID
-///      isn't in `gateways.json` (failed creates from before the
-///      apply-then-teardown landed, or a peer-pushed delete that
-///      arrived while this node was offline).
-///   2. Snippets/exports for gateways owned by *another* node — only
-///      the owner serves in v1.0. Pre-v22.9 multi-node clusters where
-///      every peer applied every gateway leave stale serving state on
-///      non-owner peers; this purges it.
-///
-/// Called once on startup with the local `node_id` so we can tell
-/// whether each known gateway is "ours to serve" or "a peer's".
-pub fn reconcile_on_startup(store: &GatewayStore, local_node_id: &str) {
-    // Set of IDs that this node should leave configs in place for —
-    // i.e. the gateways this node owns. Peer-owned gateways are still
-    // "known" but their configs must be purged from this node.
-    let owned: std::collections::HashSet<String> = store.gateways.values()
-        .filter(|g| g.origin_node_id.is_empty() || g.origin_node_id == local_node_id)
-        .map(|g| g.id.clone())
-        .collect();
-    let known = &owned;
-
-    // Samba snippets — match by filename stem.
-    let snippets_dir = std::path::Path::new("/etc/samba/wolfstack-gateways.d");
-    if let Ok(rd) = std::fs::read_dir(snippets_dir) {
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("conf") { continue; }
-            let stem = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if !known.contains(&stem) {
-                let _ = std::fs::remove_file(&path);
-                tracing::info!(target: "wolfstack::gateway", "reconciled orphan samba snippet: {}", path.display());
-            }
-        }
-    }
-
-    // NFS exports — match by `wolfstack-<id>.exports`.
-    let exports_dir = std::path::Path::new("/etc/exports.d");
-    if let Ok(rd) = std::fs::read_dir(exports_dir) {
-        for entry in rd.flatten() {
-            let path = entry.path();
-            let name = match path.file_name().and_then(|x| x.to_str()) { Some(s) => s, None => continue };
-            if !name.starts_with("wolfstack-") || !name.ends_with(".exports") { continue; }
-            let id = name.trim_start_matches("wolfstack-").trim_end_matches(".exports");
-            if !known.contains(id) {
-                let _ = std::fs::remove_file(&path);
-                tracing::info!(target: "wolfstack::gateway", "reconciled orphan nfs export: {}", path.display());
-            }
-        }
-    }
-
-    // Per-gateway mount roots.
-    let mount_root = std::path::Path::new("/var/lib/wolfstack/gateways");
-    if let Ok(rd) = std::fs::read_dir(mount_root) {
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if !path.is_dir() { continue; }
-            let id = match path.file_name().and_then(|x| x.to_str()) { Some(s) => s, None => continue };
-            if !known.contains(id) {
-                // Best-effort unmount everything inside, then drop.
-                if let Ok(inside) = std::fs::read_dir(&path) {
-                    for e in inside.flatten() {
-                        let p = e.path();
-                        if p.file_name().and_then(|x| x.to_str()) == Some("share")
-                           || p.file_name().and_then(|x| x.to_str()).map(|s| s.starts_with("source-")).unwrap_or(false)
-                        {
-                            let _ = std::process::Command::new("umount").arg("-l").arg(&p).status();
-                        }
-                    }
-                }
-                let _ = std::fs::remove_dir_all(&path);
-                tracing::info!(target: "wolfstack::gateway", "reconciled orphan mount tree: {}", path.display());
-            }
-        }
-    }
-
-    // After purging snippets, rebuild the Samba aggregator and reload
-    // smbd so the changes take effect. Best-effort — fail silently if
-    // smbd isn't running yet (it'll pick up the new aggregator on
-    // next start).
-    let _ = std::fs::write(
-        "/etc/samba/wolfstack-gateways.conf",
-        rebuild_aggregator_for_reconcile(store),
-    );
-    let _ = std::process::Command::new("smbcontrol").args(["smbd", "reload-config"]).status();
-    let _ = std::process::Command::new("exportfs").arg("-ra").status();
-}
-
-/// Same content as `samba::render_aggregator` but without recursion
-/// into the gateway store (we already hold the snapshot).
-fn rebuild_aggregator_for_reconcile(store: &GatewayStore) -> String {
-    let workgroup = store.gateways.values()
-        .find(|g| g.protocols.contains(&Protocol::Smb)
-            && !g.options.smb_workgroup.trim().is_empty())
-        .map(|g| g.options.smb_workgroup.trim().to_string())
-        .unwrap_or_else(|| "WORKGROUP".to_string());
-    let mut out = String::new();
-    out.push_str("# Auto-generated by WolfStack — do not edit\n");
-    out.push_str("# Per-gateway snippets live in /etc/samba/wolfstack-gateways.d/*.conf\n\n");
-    out.push_str("[global]\n");
-    out.push_str(&format!("    workgroup = {}\n", workgroup));
-    out.push_str("    server string = WolfStack Gateway %h\n");
-    out.push_str("    server role = standalone server\n");
-    out.push_str("    log file = /var/log/samba/log.%m\n");
-    out.push_str("    max log size = 1000\n");
-    out.push_str("    map to guest = bad user\n");
-    out.push_str("    passdb backend = tdbsam\n");
-    out.push_str("    smb encrypt = auto\n");
-    out.push_str("    server min protocol = SMB2_10\n");
-    out.push_str("    client min protocol = SMB2_10\n");
-    out.push_str("    panic action = /usr/share/samba/panic-action %d\n");
-    out.push_str("    obey pam restrictions = no\n");
-    out.push_str("    unix password sync = no\n\n");
-    if let Ok(entries) = std::fs::read_dir("/etc/samba/wolfstack-gateways.d") {
-        let mut paths: Vec<std::path::PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("conf"))
-            .collect();
-        paths.sort();
-        for p in paths {
-            if let Ok(s) = std::fs::read_to_string(&p) {
-                out.push_str(&s);
-                if !s.ends_with('\n') { out.push('\n'); }
-            }
-        }
-    }
-    out
 }

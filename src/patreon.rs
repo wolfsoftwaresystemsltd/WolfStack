@@ -40,7 +40,9 @@ const REDIRECT_URI: &str = "https://wolfscale.org/patreon-proxy.php";
 /// Support tier levels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PatreonTier {
+    #[default]
     None,
     Free,
     Basic,
@@ -49,11 +51,6 @@ pub enum PatreonTier {
     Enterprise,
 }
 
-impl Default for PatreonTier {
-    fn default() -> Self {
-        PatreonTier::None
-    }
-}
 
 impl PatreonTier {
     /// Whether this tier reflects an actual paid pledge — excludes `None`
@@ -144,7 +141,7 @@ impl Default for PatreonConfig {
 
 impl PatreonConfig {
     pub fn load() -> Self {
-        match std::fs::read_to_string(&config_path()) {
+        match std::fs::read_to_string(config_path()) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => Self::default(),
         }

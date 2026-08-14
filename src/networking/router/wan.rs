@@ -172,15 +172,14 @@ fn default_enabled() -> bool { true }
 /// the frontend — `{ "mode": "pppoe", "config": { ... } }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", content = "config", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WanMode {
+    #[default]
     Dhcp,
     Static(StaticConfig),
     Pppoe(PppoeConfig),
 }
 
-impl Default for WanMode {
-    fn default() -> Self { WanMode::Dhcp }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StaticConfig {

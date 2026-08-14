@@ -195,7 +195,7 @@ fn delta_bps(map: &mut HashMap<String, BpsSample>, iface: &str, bytes: u64, now:
             let dt = now.saturating_duration_since(p.at);
             if dt.as_millis() < 100 { return 0; } // avoid division spikes
             let dbytes = bytes.saturating_sub(p.bytes);
-            (dbytes * 8 * 1000 / dt.as_millis().max(1) as u64) as u64
+            dbytes * 8 * 1000 / dt.as_millis().max(1) as u64
         }
         None => 0,
     }
@@ -270,8 +270,8 @@ pub fn ensure_default_zones(state: &RouterState, node_id: &str) -> bool {
         // Snapshot under the read lock so save() doesn't hold the
         // write lock during disk I/O.
         let snapshot = state.config.read().map(|g| g.clone()).ok();
-        if let Some(s) = snapshot {
-            if let Err(e) = s.save() {
+        if let Some(s) = snapshot
+            && let Err(e) = s.save() {
                 tracing::warn!(
                     "WolfRouter: ensure_default_zones could not persist \
                      auto-zones for node {}: {}. In-memory state has the \
@@ -279,7 +279,6 @@ pub fn ensure_default_zones(state: &RouterState, node_id: &str) -> bool {
                     node_id, e,
                 );
             }
-        }
     } else if changed && !state.may_save() {
         // Loud, but only once per process — the watchdog tick logs
         // at debug to avoid spamming logs while the user is in the
@@ -394,22 +393,21 @@ fn probe_router(ip: &str) -> DiscoveredRouter {
     }
 
     // If HTTP didn't work, try a quick ping for reachability.
-    if !router.reachable {
-        if let Ok(o) = std::process::Command::new("ping")
+    if !router.reachable
+        && let Ok(o) = std::process::Command::new("ping")
             .args(["-c", "1", "-W", "1", ip])
             .output()
         {
             router.reachable = o.status.success();
         }
-    }
 
     // Reverse DNS as a last-resort name. Filter out dig error
     // messages (lines starting with ";;") which leak through as the
     // router name when the DNS server is unreachable — the user was
     // seeing ";; communications error to xxx ;; no servers could be
     // reached" as the router label in the rack view.
-    if router.name == router.ip {
-        if let Ok(o) = std::process::Command::new("dig")
+    if router.name == router.ip
+        && let Ok(o) = std::process::Command::new("dig")
             .args(["+short", "-x", ip, "+time=1", "+tries=1"])
             .output()
         {
@@ -425,7 +423,6 @@ fn probe_router(ip: &str) -> DiscoveredRouter {
                 router.name = rdns;
             }
         }
-    }
 
     router
 }
@@ -538,9 +535,8 @@ fn identify_vendor(text: &str, router: &mut DiscoveredRouter) {
     // Fallback: use title or server as-is if we got anything.
     if let Some(t) = &title {
         if !t.is_empty() { router.name = t.clone(); }
-    } else if let Some(s) = &server {
-        if !s.is_empty() { router.name = s.clone(); }
-    }
+    } else if let Some(s) = &server
+        && !s.is_empty() { router.name = s.clone(); }
 }
 
 /// Compute the local node's topology. API handlers on the master node
@@ -636,9 +632,8 @@ fn cached_discover_routers() -> Vec<DiscoveredRouter> {
     // Check cache under lock — return immediately if fresh.
     {
         let guard = CACHE.lock().unwrap();
-        if let Some((ts, ref data)) = *guard {
-            if ts.elapsed() < ttl { return data.clone(); }
-        }
+        if let Some((ts, ref data)) = *guard
+            && ts.elapsed() < ttl { return data.clone(); }
     } // lock dropped before the expensive probe
 
     // Cache miss — probe outside the lock.
@@ -846,8 +841,7 @@ fn walk_containers(_node_id: &str) -> Vec<DeviceAttachment> {
     if let Ok(o) = Command::new("docker")
         .args(["ps", "--format", "{{.Names}}\t{{.Networks}}"])
         .output()
-    {
-        if o.status.success() {
+        && o.status.success() {
             let mut entries: Vec<(String, String)> = Vec::new();
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 let parts: Vec<&str> = line.splitn(2, '\t').collect();
@@ -899,10 +893,9 @@ fn walk_containers(_node_id: &str) -> Vec<DeviceAttachment> {
                 });
             }
         }
-    }
     // LXC — `lxc-info -iH` returns IPs only.
-    if let Ok(o) = Command::new("lxc-ls").args(["--running"]).output() {
-        if o.status.success() {
+    if let Ok(o) = Command::new("lxc-ls").args(["--running"]).output()
+        && o.status.success() {
             for name in String::from_utf8_lossy(&o.stdout).split_whitespace() {
                 let ip = Command::new("lxc-info")
                     .args(["-n", name, "-iH"])
@@ -922,7 +915,6 @@ fn walk_containers(_node_id: &str) -> Vec<DeviceAttachment> {
                 });
             }
         }
-    }
     out
 }
 

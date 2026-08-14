@@ -106,19 +106,20 @@ async fn send_and_drain(req: reqwest::RequestBuilder) -> Option<bool> {
 
 /// Container runtime for a service
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default)]
 pub enum Runtime {
+    #[default]
     Docker,
     Lxc,
 }
 
-impl Default for Runtime {
-    fn default() -> Self { Runtime::Docker }
-}
 
 /// Placement strategy for a service
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Placement {
     /// Schedule on any eligible node (default — spread across nodes)
+    #[default]
     Any,
     /// Prefer a specific node but allow others if unavailable
     PreferNode(String),
@@ -126,21 +127,17 @@ pub enum Placement {
     RequireNode(String),
 }
 
-impl Default for Placement {
-    fn default() -> Self { Placement::Any }
-}
 
 /// Restart policy for containers
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RestartPolicy {
+    #[default]
     Always,
     OnFailure,
     Never,
 }
 
-impl Default for RestartPolicy {
-    fn default() -> Self { RestartPolicy::Always }
-}
 
 /// A single running instance of a service
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,21 +292,20 @@ impl WolfRunState {
 
     /// Load services from disk
     fn load(&self) {
-        if let Ok(data) = std::fs::read_to_string(&services_file()) {
-            if let Ok(services) = serde_json::from_str::<Vec<WolfRunService>>(&data) {
+        if let Ok(data) = std::fs::read_to_string(services_file())
+            && let Ok(services) = serde_json::from_str::<Vec<WolfRunService>>(&data) {
                 let mut svcs = self.services.write().unwrap();
                 *svcs = services;
 
             }
-        }
     }
 
     /// Save services to disk
     fn save(&self) {
         let svcs = self.services.read().unwrap();
         if let Ok(json) = serde_json::to_string_pretty(&*svcs) {
-            let _ = std::fs::create_dir_all(&services_dir());
-            if let Err(e) = std::fs::write(&services_file(), json) {
+            let _ = std::fs::create_dir_all(services_dir());
+            if let Err(e) = std::fs::write(services_file(), json) {
                 warn!("WolfRun: failed to save services: {}", e);
             }
         }
@@ -317,20 +313,19 @@ impl WolfRunState {
 
     /// Load failover events from disk
     fn load_failover_events(&self) {
-        if let Ok(data) = std::fs::read_to_string(&failover_events_file()) {
-            if let Ok(events) = serde_json::from_str::<Vec<FailoverEvent>>(&data) {
+        if let Ok(data) = std::fs::read_to_string(failover_events_file())
+            && let Ok(events) = serde_json::from_str::<Vec<FailoverEvent>>(&data) {
                 let mut evts = self.failover_events.write().unwrap();
                 *evts = events;
             }
-        }
     }
 
     /// Save failover events to disk
     fn save_failover_events(&self) {
         let evts = self.failover_events.read().unwrap();
         if let Ok(json) = serde_json::to_string_pretty(&*evts) {
-            let _ = std::fs::create_dir_all(&services_dir());
-            if let Err(e) = std::fs::write(&failover_events_file(), json) {
+            let _ = std::fs::create_dir_all(services_dir());
+            if let Err(e) = std::fs::write(failover_events_file(), json) {
                 warn!("WolfRun: failed to save failover events: {}", e);
             }
         }
@@ -557,9 +552,8 @@ impl WolfRunState {
             if let Some(mn) = min { svc.min_replicas = mn; }
             if let Some(mx) = max { svc.max_replicas = mx; }
             if let Some(d) = desired { svc.replicas = d; }
-            if let Some(p) = lb_policy {
-                if p == "ip_hash" || p == "round_robin" { svc.lb_policy = p; }
-            }
+            if let Some(p) = lb_policy
+                && (p == "ip_hash" || p == "round_robin") { svc.lb_policy = p; }
             if let Some(nodes) = allowed_nodes {
                 svc.allowed_nodes = nodes;
             }
@@ -1329,13 +1323,11 @@ pub fn schedule(
     }
 
     // Prefer preferred node if specified
-    if let Placement::PreferNode(preferred) = &service.placement {
-        if let Some(n) = eligible.iter().find(|n| node_matches_id(n, preferred)) {
-            if n.online {
+    if let Placement::PreferNode(preferred) = &service.placement
+        && let Some(n) = eligible.iter().find(|n| node_matches_id(n, preferred))
+            && n.online {
                 return Some(n.id.clone());
             }
-        }
-    }
 
     // Spread: penalise nodes that already run instances of this service
     let instance_counts: HashMap<String, usize> = {
@@ -1778,7 +1770,7 @@ pub async fn reconcile(
                         env.push(format!("WOLFRUN_SERVICE={}", service.id));
                         env.push(format!("WOLFRUN_SERVICE_NAME={}", service.name));
 
-                        deploy_docker(&client, cluster_secret, &node, &container_name, service, &env, wolfrun, &node_id).await;
+                        deploy_docker(client, cluster_secret, &node, &container_name, service, &env, wolfrun, &node_id).await;
                     }
                     Runtime::Lxc => {
                         // LXC: clone from template, deploy to scheduler's target node
@@ -2869,7 +2861,7 @@ pub fn rebuild_lb_rules(vip: &str, backend_ips: &[String], ports: &[String], lb_
                 let text = String::from_utf8_lossy(&o.stdout).to_string();
                 text.lines()
                     .find(|l| l.contains("inet "))
-                    .and_then(|l| l.trim().split_whitespace().nth(1))
+                    .and_then(|l| l.split_whitespace().nth(1))
                     .and_then(|s| s.split('/').next())
                     .map(|s| s.to_string())
             })
@@ -3149,10 +3141,10 @@ mod reconcile_list_fetch_tests {
         for (node, count) in instances_per_node {
             for _inst in 0..*count {
                 let key = (node.to_string(), "docker");
-                if !cache.contains_key(&key) {
+                cache.entry(key).or_insert_with(|| {
                     fetches += 1; // the expensive part: enumerate the node
-                    cache.insert(key, 1);
-                }
+                    1
+                });
             }
         }
         fetches

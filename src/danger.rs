@@ -135,7 +135,7 @@ pub fn confirm(id: &str) -> Result<String, String> {
     entry.meta.status = "confirmed".to_string();
     entry.rollback = None;  // drop the closure — we're keeping the change
     info!("danger: confirmed op {} ({})", id, entry.meta.op_type);
-    Ok(format!("Change committed — auto-rollback cancelled."))
+    Ok("Change committed — auto-rollback cancelled.".to_string())
 }
 
 /// Manually roll back a pending op right now. Same effect as letting

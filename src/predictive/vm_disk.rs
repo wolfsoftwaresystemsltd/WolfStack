@@ -222,8 +222,7 @@ fn build_proposal(fact: &VmDiskFact, scope: &ProposalScope, severity: Severity) 
         },
     ];
     let remediation = RemediationPlan::Manual {
-        instructions: format!(
-            "If guest filesystem usage is genuinely high, expand the \
+        instructions: "If guest filesystem usage is genuinely high, expand the \
              VM's disk via `qemu-img resize` (offline) or the live-\
              resize feature in the dashboard. If the qcow2 has \
              ballooned but the guest reports plenty of free space, \
@@ -231,8 +230,7 @@ fn build_proposal(fact: &VmDiskFact, scope: &ProposalScope, severity: Severity) 
              guest will let the qcow2 shrink. Installing \
              qemu-guest-agent gives the dashboard direct visibility \
              into in-guest usage so this finding gets fine-grained \
-             attribution."
-        ),
+             attribution.".to_string(),
         commands: vec![
             format!("qemu-img info {}", fact.disk_path.display()),
             format!("ls -la {}", fact.disk_path.display()),

@@ -40,6 +40,7 @@ impl CloudflareCreds {
 /// fields — id (for delete/update), content (the IP), proxied flag,
 /// ttl. Other fields are tolerated via `#[serde(default)]`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Default)]
 pub struct DnsRecord {
     pub id: String,
     #[serde(default)]
@@ -176,11 +177,6 @@ struct SingleRecordEnvelope {
     errors: Vec<CfError>,
     #[serde(default)]
     result: DnsRecord,
-}
-impl Default for DnsRecord {
-    fn default() -> Self {
-        DnsRecord { id: String::new(), name: String::new(), record_type: String::new(), content: String::new(), proxied: false, ttl: 0 }
-    }
 }
 
 #[derive(Deserialize)]

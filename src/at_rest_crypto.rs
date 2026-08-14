@@ -322,14 +322,13 @@ pub fn file_has_legacy_v1_entries(path: &str) -> bool {
     for line in raw.lines() {
         let trimmed = line.trim();
         if !trimmed.contains("_enc") || !trimmed.contains(':') { continue; }
-        if let Some(end_quote) = trimmed.rfind('"') {
-            if let Some(start_quote) = trimmed[..end_quote].rfind('"') {
+        if let Some(end_quote) = trimmed.rfind('"')
+            && let Some(start_quote) = trimmed[..end_quote].rfind('"') {
                 let value = &trimmed[start_quote + 1..end_quote];
                 if !value.is_empty() && !value.starts_with(V2_PREFIX) {
                     return true;
                 }
             }
-        }
     }
     false
 }

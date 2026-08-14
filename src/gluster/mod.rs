@@ -320,11 +320,10 @@ pub fn get_status() -> GlusterStatus {
     }
     status.glusterd_running = glusterd_running();
     // Version (`gluster --version` → first line "glusterfs 11.1").
-    if let Ok(out) = Command::new("gluster").arg("--version").output() {
-        if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
+    if let Ok(out) = Command::new("gluster").arg("--version").output()
+        && let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
             status.version = line.trim().to_string();
         }
-    }
     if !status.glusterd_running {
         status.health = GlusterHealth::Error;
         status.health_detail = "glusterd is not running".to_string();
@@ -696,7 +695,7 @@ pub fn create_volume(name: &str, vol_type: &str, count: u32, bricks: &[String]) 
             if count < 2 {
                 return Err("Replicate volumes need a replica count of at least 2.".to_string());
             }
-            if bricks.len() as u32 % count != 0 {
+            if !(bricks.len() as u32).is_multiple_of(count) {
                 return Err(format!(
                     "Brick count ({}) must be a multiple of the replica count ({}).",
                     bricks.len(),

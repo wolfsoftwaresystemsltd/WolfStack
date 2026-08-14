@@ -384,8 +384,8 @@ impl ProposalStore {
             // Was this (finding, scope) under the analyzer's eye
             // this tick but NOT re-emitted? If so, the condition has
             // cleared — auto-resolve.
-            let was_considered = covered.iter().any(|c| *c == key);
-            let was_emitted = emitted.iter().any(|e| *e == key);
+            let was_considered = covered.contains(&key);
+            let was_emitted = emitted.contains(&key);
             if was_considered && !was_emitted {
                 p.status = ProposalStatus::Approved {
                     applied_at: Utc::now(),

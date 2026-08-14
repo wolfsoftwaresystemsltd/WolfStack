@@ -232,7 +232,7 @@ fn compute_verdict(
     let rapid = rapid.unwrap_or(0);
     let sustained = sustained.unwrap_or(0);
 
-    let actively_restarting = state.to_ascii_lowercase() == "restarting";
+    let actively_restarting = state.eq_ignore_ascii_case("restarting");
 
     // Tier the rapid first; if rapid doesn't trip but sustained does,
     // fall through to Warn. If neither trips, no proposal.

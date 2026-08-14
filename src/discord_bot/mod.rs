@@ -236,7 +236,7 @@ pub async fn run_once(bot_token: String, state: AppData) -> Result<(), String> {
     // Separate task so the recv loop doesn't block on writer I/O.
     tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
-            if ws_tx.send(WsMessage::Text(frame.into())).await.is_err() {
+            if ws_tx.send(WsMessage::Text(frame)).await.is_err() {
                 break;
             }
         }
@@ -523,12 +523,11 @@ fn desired_token_set() -> std::collections::HashSet<String> {
         out.insert(cfg.discord_bot_token.clone());
     }
     for agent in crate::wolfagents::load_all() {
-        if let Some(d) = &agent.discord {
-            if let Some(t) = &d.bot_token {
+        if let Some(d) = &agent.discord
+            && let Some(t) = &d.bot_token {
                 let t = t.trim();
                 if !t.is_empty() { out.insert(t.to_string()); }
             }
-        }
     }
     out
 }
