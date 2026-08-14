@@ -7014,6 +7014,7 @@
                             <button class="btn btn-primary" onclick="saveAiConfig()"><span class="ws-icon-clean-wrap" data-icon="save"></span> Save Settings</button>
                             <button class="btn btn-sm" onclick="testAiConnection()"><span class="ws-icon-clean-wrap" data-icon="lab"></span> Test Connection</button>
                             <button class="btn btn-sm" onclick="sendTestEmail()"><span class="ws-icon-clean-wrap" data-icon="email"></span> Send Test Email</button>
+                            <button class="btn btn-sm" id="ai-push-nodes-btn" onclick="pushAiConfigToNodes()" title="Re-send these settings to every online node in this cluster. Needed for nodes that joined after you last saved."><span class="ws-icon-clean-wrap" data-icon="cluster"></span> <span id="ai-push-nodes-label">Push to all nodes</span></button>
                         </div>
                     </div>
 

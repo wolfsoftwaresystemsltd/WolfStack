@@ -15744,26 +15744,126 @@ pub async fn ai_save_config(
         config_json = serde_json::to_value(&*config).unwrap_or_default();
     }
 
-    // Broadcast to all online cluster nodes in the background
-    let cluster_secret = state.cluster_secret.clone();
+    // Push to same-cluster peers and report what actually happened. The
+    // results ride back on the save response so a peer that rejected or was
+    // unreachable is visible immediately, rather than surfacing days later as
+    // "the mail relay on node 3 uses the wrong SMTP host".
+    let peers = ai_propagate_config_to_peers(&state, &config_json, 5).await;
+    let failed: Vec<&AiConfigPeerResult> = peers.iter().filter(|p| !p.ok).collect();
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "saved",
+        "peers": peers,
+        "peers_failed": failed.len(),
+    }))
+}
+
+#[derive(serde::Serialize)]
+struct AiConfigPeerResult {
+    hostname: String,
+    address: String,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Push the AI/email config to every online peer in THIS node's cluster.
+///
+/// Cluster-scoped deliberately: this payload carries the SMTP password and
+/// every AI provider key, so a multi-cluster bastion must not hand them to a
+/// different operator's fleet.
+///
+/// `timeout_secs` is short on the save path (the operator is waiting on a form
+/// submit) and longer for the explicit push (they pressed a button meaning
+/// "reach them", and a slow-but-alive peer is worth waiting for).
+async fn ai_propagate_config_to_peers(
+    state: &web::Data<AppState>,
+    config_json: &serde_json::Value,
+    timeout_secs: u64,
+) -> Vec<AiConfigPeerResult> {
     let nodes = state.cluster.get_all_nodes();
-    let client = API_HTTP_CLIENT.clone();
-    for node in nodes.iter().filter(|n| !n.is_self && n.online) {
-        let url = format!("http://{}:{}/api/ai/config/sync", crate::netaddr::bracket_host(&node.address), node.port);
-        let secret = cluster_secret.clone();
-        let cfg = config_json.clone();
-        let c = client.clone();
-        tokio::spawn(async move {
-            let _ = c.post(&url)
-                .header("X-WolfStack-Secret", secret)
-                .json(&cfg)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await;
+    let self_cluster = nodes.iter().find(|n| n.is_self)
+        .and_then(|n| n.cluster_name.clone());
+    let peers: Vec<(String, String, u16)> = nodes.iter()
+        .filter(|n| !n.is_self && n.online && n.node_type == "wolfstack"
+                    && crate::agent::same_display_cluster(
+                        n.cluster_name.as_deref(), self_cluster.as_deref()))
+        .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
+        .collect();
+    if peers.is_empty() { return Vec::new(); }
+
+    let secret = state.cluster_secret.clone();
+    let client = &*API_HTTP_CLIENT;
+    let mut futures = Vec::with_capacity(peers.len());
+    for (hostname, address, port) in peers {
+        let secret = secret.clone();
+        let client = client.clone();
+        let payload = config_json.clone();
+        futures.push(async move {
+            let urls = build_node_urls(&address, port, "/api/ai/config/sync");
+            for url in &urls {
+                match client.post(url)
+                    .timeout(std::time::Duration::from_secs(timeout_secs))
+                    .header("X-WolfStack-Secret", &secret)
+                    .json(&payload)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let _ = resp.bytes().await;
+                        tracing::info!("ai_config: settings propagated to peer '{}' ({})", hostname, address);
+                        return AiConfigPeerResult { hostname, address, ok: true, error: None };
+                    }
+                    Ok(resp) => {
+                        // Reachable peer gave a definitive (non-2xx) answer —
+                        // don't retry the other URL candidates for this peer.
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        let snippet: String = body.chars().take(200).collect();
+                        tracing::warn!("ai_config: peer '{}' ({}) rejected settings: HTTP {}", hostname, address, status);
+                        return AiConfigPeerResult {
+                            hostname, address, ok: false,
+                            error: Some(format!("HTTP {}: {}", status, snippet)),
+                        };
+                    }
+                    Err(_) => continue, // connection failed — try next candidate URL
+                }
+            }
+            tracing::warn!("ai_config: could not reach peer '{}' ({}) to propagate settings", hostname, address);
+            AiConfigPeerResult {
+                hostname, address, ok: false,
+                error: Some("unreachable on all known addresses".to_string()),
+            }
         });
     }
+    futures::future::join_all(futures).await
+}
 
-    HttpResponse::Ok().json(serde_json::json!({"status": "saved"}))
+/// POST /api/ai/config/propagate — force-push this node's saved AI/email
+/// settings to every online peer in the cluster.
+///
+/// The save-time push only reaches nodes that were online at that moment, so a
+/// node that joined later — or was down for the save — keeps loading defaults
+/// forever. That is what makes the host mail relay come up pointing at the
+/// placeholder SMTP host. This is the operator's manual reconcile.
+pub async fn ai_config_propagate(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if !crate::ai::config_saved_on_this_node() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "This node has no saved email/AI settings to push. Configure them here first, \
+                      or run this from the node where they were configured."
+        }));
+    }
+    let config_json = {
+        let config = state.ai_agent.config.lock().unwrap();
+        serde_json::to_value(&*config).unwrap_or_default()
+    };
+    let peers = ai_propagate_config_to_peers(&state, &config_json, 15).await;
+    let failed = peers.iter().filter(|p| !p.ok).count();
+    HttpResponse::Ok().json(serde_json::json!({
+        "pushed": peers.len(),
+        "failed": failed,
+        "peers": peers,
+    }))
 }
 
 /// POST /api/ai/config/sync — receive AI config from another cluster node
@@ -40028,16 +40128,15 @@ async fn image_watcher_propagate_config_to_peers(
     let nodes = state.cluster.get_all_nodes();
     // Confine propagation to this node's own cluster — a multi-cluster
     // bastion must not flip the watcher on for a different operator's fleet.
-    // Normalise cluster names (None / "" / whitespace all collapse to the
-    // same key) so a slightly-inconsistently-named but genuinely-single
-    // cluster still fans out to every member.
-    let norm_cluster = |c: &Option<String>| c.as_deref().unwrap_or("").trim().to_string();
+    // `same_display_cluster` rather than a name comparison: an unassigned node
+    // reports `None` while its peers report Some("WolfStack"), and treating
+    // those as different clusters silently drops it from every push.
     let self_cluster = nodes.iter().find(|n| n.is_self)
-        .map(|n| norm_cluster(&n.cluster_name))
-        .unwrap_or_default();
+        .and_then(|n| n.cluster_name.clone());
     let peers: Vec<(String, String, u16)> = nodes.iter()
         .filter(|n| !n.is_self && n.online && n.node_type == "wolfstack"
-                    && norm_cluster(&n.cluster_name) == self_cluster)
+                    && crate::agent::same_display_cluster(
+                        n.cluster_name.as_deref(), self_cluster.as_deref()))
         .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
         .collect();
     if peers.is_empty() { return Vec::new(); }
@@ -45028,6 +45127,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/ai/action/command", web::get().to(ai_action_command))
         .route("/api/ai/action/exec", web::post().to(ai_action_exec))
         .route("/api/ai/config/sync", web::post().to(ai_sync_config))
+        .route("/api/ai/config/propagate", web::post().to(ai_config_propagate))
         .route("/api/ai/test-email", web::post().to(ai_test_email))
         .route("/api/ai/test-connection", web::post().to(ai_test_connection))
         // Gateway (universal SMB/NFS share) — see src/gateway/.

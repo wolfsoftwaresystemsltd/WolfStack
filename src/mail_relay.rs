@@ -101,9 +101,15 @@ fn classify_sendmail() -> (SendmailKind, Option<String>) {
 pub struct MailRelayStatus {
     pub msmtp_installed: bool,
     pub msmtp_path: Option<String>,
-    /// SMTP relay is configured (a host is set) so we have something to
-    /// point msmtp at.
+    /// This node has an on-disk email config at all. False means settings
+    /// were saved elsewhere in the cluster and never reached here — a
+    /// different problem from "configured but incomplete", and one the
+    /// operator fixes by pushing settings out rather than re-typing them.
+    pub settings_present: bool,
+    /// SMTP relay is configured on THIS node (settings were saved here and
+    /// carry a host) so we have something real to point msmtp at.
     pub smtp_configured: bool,
+    /// Empty when `settings_present` is false — never the default placeholder.
     pub smtp_host: String,
     /// "none" | "ours" | "other" — what currently owns /usr/sbin/sendmail.
     pub sendmail: String,
@@ -120,6 +126,10 @@ pub struct MailRelayStatus {
 
 pub fn status() -> MailRelayStatus {
     let cfg = crate::ai::AiConfig::load();
+    // Settings that were never saved on this node load as `Default`, whose
+    // `smtp_host` is a placeholder. Report that node as unconfigured rather
+    // than advertising a relay host the operator never chose.
+    let settings_present = crate::ai::config_saved_on_this_node();
     let msmtp_path = which("msmtp");
     let (kind, target) = classify_sendmail();
     let relay_active = kind == SendmailKind::Ours && Path::new(MSMTPRC).exists();
@@ -128,8 +138,9 @@ pub fn status() -> MailRelayStatus {
     MailRelayStatus {
         msmtp_installed: msmtp_path.is_some(),
         msmtp_path,
-        smtp_configured: !cfg.smtp_host.trim().is_empty(),
-        smtp_host: cfg.smtp_host.clone(),
+        settings_present,
+        smtp_configured: settings_present && !cfg.smtp_host.trim().is_empty(),
+        smtp_host: if settings_present { cfg.smtp_host.clone() } else { String::new() },
         sendmail: match kind {
             SendmailKind::None => "none",
             SendmailKind::Ours => "ours",
@@ -223,6 +234,22 @@ pub fn enable(force: bool) -> Result<EnableResult, String> {
     if !crate::deps::is_root() {
         return Err("Enabling the host mail relay needs root.".into());
     }
+    // "Has this node got SMTP settings" must be answered by the filesystem,
+    // not by the loaded struct: `AiConfig::default()` carries a non-empty
+    // `smtp_host` placeholder, so an unconfigured node would otherwise sail
+    // past the check below and write an msmtprc pointing at the placeholder
+    // host with no credentials — a relay that reports success and then fails
+    // every send.
+    if !crate::ai::config_saved_on_this_node() {
+        return Err(
+            "This node has no email settings yet. SMTP settings are per-node and are \
+             pushed out from the node you saved them on — a node that was offline or \
+             joined the cluster later never received them. Open Settings → AI on the \
+             node where you configured email and press 'Push to all nodes', then enable \
+             the relay here."
+                .into(),
+        );
+    }
     let cfg = crate::ai::AiConfig::load();
     if cfg.smtp_host.trim().is_empty() {
         return Err(
@@ -293,9 +320,18 @@ pub fn enable(force: bool) -> Result<EnableResult, String> {
     Ok(EnableResult {
         ok: true,
         message: format!(
-            "Host mail relay enabled. Services can now send email via {} through {}.",
+            "Host mail relay enabled. Services can now send email via {} through {} ({}).",
             SENDMAIL,
-            cfg.smtp_host.trim()
+            cfg.smtp_host.trim(),
+            // Name the auth state explicitly. An unauthenticated relay is a
+            // legitimate setup for an internal MTA but a guaranteed failure
+            // against a public provider, and it is the single most useful
+            // thing to know when sends start bouncing.
+            if cfg.smtp_user.trim().is_empty() {
+                "no authentication".to_string()
+            } else {
+                format!("authenticating as {}", cfg.smtp_user.trim())
+            },
         ),
         install_output,
         status: status(),
@@ -384,4 +420,57 @@ fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "this host".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The trap that produced the sponsor report: a node that never had
+    /// settings saved loads `AiConfig::default()`, whose `smtp_host` is a
+    /// *non-empty* placeholder. Any "is SMTP configured?" check written as
+    /// `!smtp_host.is_empty()` therefore answers yes on a node that has
+    /// never been configured. `config_saved_on_this_node()` exists because
+    /// of this; if anyone empties the default, this test says so.
+    #[test]
+    fn default_config_smtp_host_is_not_a_usable_configured_sentinel() {
+        let cfg = crate::ai::AiConfig::default();
+        assert!(
+            !cfg.smtp_host.trim().is_empty(),
+            "default smtp_host is now empty — the emptiness check in enable() \
+             is a valid configured-sentinel again and the file-existence guard \
+             can be reconsidered",
+        );
+        assert!(cfg.smtp_user.trim().is_empty(), "default config must carry no credentials");
+        assert!(cfg.smtp_pass.trim().is_empty(), "default config must carry no credentials");
+    }
+
+    /// What the unguarded path actually wrote on an unconfigured node: a
+    /// relay pointed at the placeholder host with authentication *off*.
+    /// Gmail rejects it, which the operator sees as "the credentials don't
+    /// work". Pins the artifact so the guard in `enable()` keeps earning
+    /// its place.
+    #[test]
+    fn default_config_builds_an_unauthenticated_relay() {
+        let rc = build_msmtprc(&crate::ai::AiConfig::default());
+        assert!(rc.contains("auth off"), "expected auth off, got:\n{rc}");
+        assert!(!rc.contains("user "), "default config must not emit a user line:\n{rc}");
+        assert!(!rc.contains("password "), "default config must not emit a password line:\n{rc}");
+    }
+
+    /// A configured relay emits credentials and turns auth on.
+    #[test]
+    fn configured_relay_authenticates() {
+        let mut cfg = crate::ai::AiConfig::default();
+        cfg.smtp_host = "mail.example.net".to_string();
+        cfg.smtp_user = "relay@example.net".to_string();
+        cfg.smtp_pass = "hunter2".to_string();
+        let rc = build_msmtprc(&cfg);
+        assert!(rc.contains("auth on"), "expected auth on, got:\n{rc}");
+        assert!(rc.contains("host mail.example.net"));
+        assert!(rc.contains("user relay@example.net"));
+        assert!(rc.contains("password hunter2"));
+        // No smtp_from set — falls back to smtp_user, matching send_alert_email.
+        assert!(rc.contains("from relay@example.net"));
+    }
 }

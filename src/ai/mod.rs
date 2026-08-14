@@ -86,6 +86,18 @@ pub enum HealthOutcome {
 
 fn ai_config_path() -> String { crate::paths::get().ai_config }
 
+/// True when this node has an on-disk AI/email config — i.e. settings were
+/// actually saved here, either by an operator or by a cluster sync.
+///
+/// This cannot be inferred from the config values themselves. `Default`
+/// carries a non-empty `smtp_host` placeholder ("smtp.gmail.com"), so a node
+/// that has never been configured still *looks* like it has an SMTP relay.
+/// Callers that need "did anyone configure this node" — the host mail relay
+/// especially — must ask the filesystem, not the struct.
+pub fn config_saved_on_this_node() -> bool {
+    std::path::Path::new(&ai_config_path()).exists()
+}
+
 // ─── Configuration ───
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
