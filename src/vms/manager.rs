@@ -1154,9 +1154,23 @@ impl VmManager {
     fn vm_config_path(&self, name: &str) -> PathBuf {
         self.base_dir.join(format!("{}.json", name))
     }
+
+    /// Public form of [`Self::vm_config_path`] — WolfHA writes a replica's
+    /// copy of the VM definition here so the standby can actually start
+    /// the VM after a failover.
+    pub fn config_path_for(&self, name: &str) -> PathBuf {
+        self.vm_config_path(name)
+    }
     
     fn vm_disk_path(&self, name: &str) -> PathBuf {
         self.base_dir.join(format!("{}.qcow2", name))
+    }
+
+    /// Get the OS disk path, respecting custom storage_path if set
+    /// Public form of [`Self::vm_os_disk_path`] — WolfHA needs the disk
+    /// path to attach a dirty bitmap to it and to seed a replica.
+    pub fn os_disk_path_for(&self, config: &VmConfig) -> PathBuf {
+        self.vm_os_disk_path(config)
     }
 
     /// Get the OS disk path, respecting custom storage_path if set
@@ -4880,6 +4894,36 @@ impl VmManager {
     /// existing qm/virsh calls). Returns Ok on a QMP `return`, Err on a QMP
     /// `error` or any I/O failure.
     fn qmp_execute(&self, name: &str, command: &str) -> Result<(), String> {
+        qmp_command(name, command, None).map(|_| ())
+    }
+
+}
+
+/// Send one QMP command, with optional arguments, and hand back its
+/// `return` value.
+///
+/// A free function because the monitor socket path is derived entirely
+/// from the VM name — none of this needs a [`VmManager`]. `wolfha`'s
+/// dirty-bitmap replication driver therefore talks to QEMU without
+/// holding the VM-manager lock, which it must not do: a replication round
+/// lasts as long as a backup job, and that mutex serialises every VM
+/// operation on the node.
+///
+/// `args` is the QMP `arguments` object, omitted entirely when `None` —
+/// some commands reject an empty object where they accept no member.
+///
+/// One connection per command is deliberate: the chardev is created as
+/// `server,nowait`, which serves one client at a time and accepts the
+/// next once it closes, so sequential short-lived connections are the
+/// safe pattern (and the one the existing pause/resume calls already rely
+/// on). Capabilities are renegotiated each time — mandatory per
+/// connection, not per session.
+pub(crate) fn qmp_command(
+    name: &str,
+    command: &str,
+    args: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    {
         use std::os::unix::net::UnixStream;
         use std::io::{BufRead, BufReader, Write};
         use std::time::Duration;
@@ -4900,7 +4944,7 @@ impl VmManager {
 
         // Read QMP replies until a `return`/`error` object — skipping the
         // `{"QMP":…}` greeting and any async `{"event":…}` lines.
-        let await_reply = |reader: &mut BufReader<UnixStream>| -> Result<(), String> {
+        let await_reply = |reader: &mut BufReader<UnixStream>| -> Result<serde_json::Value, String> {
             let mut line = String::new();
             loop {
                 line.clear();
@@ -4916,8 +4960,8 @@ impl VmManager {
                     let desc = err.get("desc").and_then(|d| d.as_str()).unwrap_or("unknown QMP error");
                     return Err(format!("QMP error: {}", desc));
                 }
-                if v.get("return").is_some() {
-                    return Ok(());
+                if let Some(r) = v.get("return") {
+                    return Ok(r.clone());
                 }
                 // greeting / event — keep reading.
             }
@@ -4928,10 +4972,24 @@ impl VmManager {
         writer.write_all(b"{\"execute\":\"qmp_capabilities\"}\n")
             .map_err(|e| format!("QMP write: {}", e))?;
         await_reply(&mut reader)?;
-        writer.write_all(format!("{{\"execute\":\"{}\"}}\n", command).as_bytes())
+
+        // Build the request with serde rather than string interpolation: a
+        // bitmap or node name reaching the monitor unescaped would break the
+        // frame (and QMP names are operator-influenced via the VM name).
+        let mut req = serde_json::json!({ "execute": command });
+        if let Some(a) = args {
+            req["arguments"] = a;
+        }
+        let mut wire = serde_json::to_string(&req)
+            .map_err(|e| format!("QMP encode: {}", e))?;
+        wire.push('\n');
+        writer.write_all(wire.as_bytes())
             .map_err(|e| format!("QMP write: {}", e))?;
         await_reply(&mut reader)
     }
+}
+
+impl VmManager {
 
     /// Restart (reboot) a running VM. Proxmox/libvirt issue a clean guest
     /// reboot; native QEMU has no single ACPI-reboot command, so we QMP

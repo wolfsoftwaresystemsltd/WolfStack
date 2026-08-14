@@ -82236,11 +82236,18 @@ async function loadWolfHa() {
                 <span style="display:flex;gap:6px;">${actions}</span>
             </div>`;
         }).join('');
+        const isVm = copies.some(c => c.kind === 'vm');
         const warn = primary ? '' :
-            '<div style="margin-top:6px;font-size:11px;color:var(--warning);">No active primary is reachable for this container — promote the freshest standby to bring it back.</div>';
+            `<div style="margin-top:6px;font-size:11px;color:var(--warning);">No active primary is reachable for this ${isVm ? 'VM' : 'container'} — promote the freshest standby to bring it back.</div>`;
+        // Theme tokens only, same rule as the badges above: a hardcoded
+        // colour here reads as a wash on light/arctic/fruit.
+        const kindBadge = isVm
+            ? '<span title="Virtual machine — replicated with QEMU dirty bitmaps (crash-consistent)" style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--info-bg);color:var(--info);border:1px solid var(--info);">VM</span>'
+            : '<span title="LXC container — replicated from the rootfs" style="font-size:10px;padding:1px 6px;border-radius:3px;background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border);">CT</span>';
         return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:var(--bg-secondary);">
             <div style="display:flex;align-items:center;gap:8px;">
                 <span style="font-weight:700;">${vlanEsc(name)}</span>
+                ${kindBadge}
                 <span style="font-size:10px;color:var(--text-muted);">${copies.length} cop${copies.length === 1 ? 'y' : 'ies'}</span>
             </div>
             ${rows}${warn}
@@ -82443,14 +82450,20 @@ function wolfHaOpenProtectModal() {
     modal.id = 'wolfha-protect-modal';
     modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;backdrop-filter:blur(4px);';
     modal.innerHTML = `<div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:24px 30px;min-width:420px;max-width:520px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
-        <h3 style="margin:0 0 12px;">Protect a container</h3>
+        <h3 style="margin:0 0 12px;">Protect a container or VM</h3>
         <div style="display:flex;flex-direction:column;gap:10px;">
-            <div><label style="font-size:13px;color:var(--text-muted);">Node the container runs on</label>
-                <select id="wolfha-node" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;" onchange="wolfHaLoadContainers()">
+            <div><label style="font-size:13px;color:var(--text-muted);">What to protect</label>
+                <select id="wolfha-kind" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;" onchange="wolfHaLoadSubjects()">
+                    <option value="container">Container (native LXC)</option>
+                    <option value="vm">Virtual machine (native QEMU)</option>
+                </select>
+                <span id="wolfha-kind-hint" style="font-size:11px;color:var(--text-muted);">Replicated as a file-level copy of the rootfs, using block deltas where the files are large.</span></div>
+            <div><label style="font-size:13px;color:var(--text-muted);" id="wolfha-node-label">Node the container runs on</label>
+                <select id="wolfha-node" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;" onchange="wolfHaLoadSubjects()">
                     <option value="">— select node —</option>
                     ${nodes.map(n => `<option value="${vlanEsc(n.id)}">${vlanEsc(n.hostname || n.id)}</option>`).join('')}
                 </select></div>
-            <div><label style="font-size:13px;color:var(--text-muted);">Container (native LXC)</label>
+            <div><label style="font-size:13px;color:var(--text-muted);" id="wolfha-subject-label">Container (native LXC)</label>
                 <select id="wolfha-container" onchange="wolfHaSuggestWitness()" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
                     <option value="">— select node first —</option>
                 </select></div>
@@ -82458,10 +82471,10 @@ function wolfHaOpenProtectModal() {
                 <div id="wolfha-replicas" style="display:flex;flex-direction:column;gap:4px;margin-top:4px;font-size:13px;">
                     ${nodes.map(n => `<label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" class="wolfha-replica-cb" value="${vlanEsc(n.id)}" onchange="wolfHaReplicaTick(this)"> ${vlanEsc(n.hostname || n.id)} <span class="wolfha-prio" data-node="${vlanEsc(n.id)}" style="font-size:10px;color:var(--text-muted);"></span></label>`).join('')}
                 </div>
-                <span style="font-size:11px;color:var(--text-muted);">The container's own node is ignored if ticked. The first-ticked standby is preferred at failover.</span></div>
+                <span style="font-size:11px;color:var(--text-muted);">The subject's own node is ignored if ticked. The first-ticked standby is preferred at failover.</span></div>
             <div><label style="font-size:13px;color:var(--text-muted);">Sync interval (minutes)</label>
                 <input id="wolfha-interval" type="number" min="1" value="5" style="width:100%;padding:8px 12px;background:var(--bg-primary,#111);border:1px solid var(--border,#444);border-radius:6px;color:var(--text,#fff);margin-top:4px;">
-                <span style="font-size:11px;color:var(--text-muted);">A failover can lose up to this much recent change — containers running databases should use the database's own replication instead.</span></div>
+                <span id="wolfha-interval-hint" style="font-size:11px;color:var(--text-muted);">A failover can lose up to this much recent change — anything running a database should use the database's own replication instead.</span></div>
             <div style="border:1px solid var(--border,#444);border-radius:8px;padding:10px 12px;">
                 <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
                     <input type="checkbox" id="wolfha-auto" onchange="document.getElementById('wolfha-auto-fields').style.display=this.checked?'block':'none'">
@@ -82513,23 +82526,46 @@ async function wolfHaSuggestWitness() {
     } catch (_) { hintEl.textContent = ''; }
 }
 
-async function wolfHaLoadContainers() {
+// Load the protectable subjects for the chosen node, for whichever kind
+// the operator picked. Also retitles the surrounding labels so the modal
+// never says "container" while listing VMs.
+async function wolfHaLoadSubjects() {
     const nodeId = document.getElementById('wolfha-node')?.value;
+    const kind = document.getElementById('wolfha-kind')?.value || 'container';
     const sel = document.getElementById('wolfha-container');
+    const isVm = kind === 'vm';
+
+    const nodeLabel = document.getElementById('wolfha-node-label');
+    if (nodeLabel) nodeLabel.textContent = isVm ? 'Node the VM runs on' : 'Node the container runs on';
+    const subjLabel = document.getElementById('wolfha-subject-label');
+    if (subjLabel) subjLabel.textContent = isVm ? 'Virtual machine (native QEMU)' : 'Container (native LXC)';
+    const kindHint = document.getElementById('wolfha-kind-hint');
+    if (kindHint) {
+        kindHint.textContent = isVm
+            ? 'Replicated with QEMU dirty bitmaps — only the disk blocks the guest changed are sent, and the copy is crash-consistent. The VM keeps running throughout.'
+            : 'Replicated as a file-level copy of the rootfs, using block deltas where the files are large.';
+    }
+
     if (!sel) return;
     sel.innerHTML = '<option value="">loading…</option>';
     if (!nodeId) { sel.innerHTML = '<option value="">— select node first —</option>'; return; }
     try {
-        const resp = await fetch(nodeApiUrl(nodeId, '/api/containers/lxc'));
+        const resp = await fetch(nodeApiUrl(nodeId, isVm ? '/api/vms' : '/api/containers/lxc'));
         const list = resp.ok ? await resp.json() : [];
-        const cts = (Array.isArray(list) ? list : []).filter(c => !c.ha_replica);
-        sel.innerHTML = cts.length
-            ? '<option value="">— select container —</option>' + cts.map(c => `<option value="${vlanEsc(c.name)}">${vlanEsc(c.hostname || c.name)}</option>`).join('')
-            : '<option value="">no LXC containers on this node</option>';
+        const items = (Array.isArray(list) ? list : []).filter(c => !c.ha_replica);
+        if (!items.length) {
+            sel.innerHTML = `<option value="">no ${isVm ? 'VMs' : 'LXC containers'} on this node</option>`;
+            return;
+        }
+        sel.innerHTML = `<option value="">— select ${isVm ? 'VM' : 'container'} —</option>`
+            + items.map(c => `<option value="${vlanEsc(c.name)}">${vlanEsc(c.hostname || c.name)}</option>`).join('');
     } catch (e) {
-        sel.innerHTML = '<option value="">could not list containers</option>';
+        sel.innerHTML = `<option value="">could not list ${isVm ? 'VMs' : 'containers'}</option>`;
     }
 }
+
+// Kept because older markup and any cached page may still call it.
+async function wolfHaLoadContainers() { return wolfHaLoadSubjects(); }
 
 // Tick-order tracking: the sequence replicas are ticked IS the failover
 // priority the backend stores. Unticking removes; re-ticking re-appends.
@@ -82552,14 +82588,15 @@ async function wolfHaSubmitProtect() {
     const autoFailover = document.getElementById('wolfha-auto')?.checked || false;
     const witness = document.getElementById('wolfha-witness')?.value.trim() || '';
     const after = parseInt(document.getElementById('wolfha-after')?.value, 10) || 90;
-    if (!nodeId || !container) { showToast('Pick a node and a container', 'error'); return; }
-    if (replicas.length === 0) { showToast('Pick at least one replica node (not the container\'s own node)', 'error'); return; }
+    const kind = document.getElementById('wolfha-kind')?.value || 'container';
+    if (!nodeId || !container) { showToast(`Pick a node and a ${kind === 'vm' ? 'VM' : 'container'}`, 'error'); return; }
+    if (replicas.length === 0) { showToast('Pick at least one replica node (not the subject\'s own node)', 'error'); return; }
     if (autoFailover && !witness) { showToast('Automatic failover needs a witness IP (usually your gateway)', 'error'); return; }
     document.getElementById('wolfha-protect-modal')?.remove();
     try {
         const resp = await fetch(nodeApiUrl(nodeId, '/api/wolfha/enable'), {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ container, replica_node_ids: replicas, interval_minutes: interval, auto_failover: autoFailover, witness, failover_after_secs: after }),
+            body: JSON.stringify({ container, kind, replica_node_ids: replicas, interval_minutes: interval, auto_failover: autoFailover, witness, failover_after_secs: after }),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || !data.task_id) {
