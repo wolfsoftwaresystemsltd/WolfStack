@@ -114,7 +114,7 @@ impl Allow {
             }
         }
         let needle = ip.to_string();
-        let nodes = self.cluster.nodes.read().unwrap();
+        let nodes = self.cluster.nodes_read();
         for n in nodes.values() {
             if n.address == needle { return true; }
             if n.public_ip.as_deref() == Some(needle.as_str()) { return true; }

@@ -814,7 +814,7 @@ pub async fn login(req: HttpRequest, state: web::Data<AppState>, body: web::Json
 
     // Check if direct login is disabled on this node
     {
-        let nodes = state.cluster.nodes.read().unwrap();
+        let nodes = state.cluster.nodes_read();
         if let Some(self_node) = nodes.get(&state.cluster.self_id) {
             if self_node.login_disabled {
                 return HttpResponse::Forbidden().json(serde_json::json!({
@@ -990,7 +990,7 @@ pub async fn propagate_kernel_block_to_peers(
     source_node: String,
 ) {
     let nodes: Vec<crate::agent::Node> = {
-        let n = cluster.nodes.read().unwrap();
+        let n = cluster.nodes_read();
         n.values()
             .filter(|p| p.id != cluster.self_id && p.node_type == "wolfstack")
             .cloned()
@@ -1506,7 +1506,7 @@ pub async fn propagate_kernel_unblock_to_peers(
     ip: String,
 ) {
     let nodes: Vec<crate::agent::Node> = {
-        let n = cluster.nodes.read().unwrap();
+        let n = cluster.nodes_read();
         n.values()
             .filter(|p| p.id != cluster.self_id && p.node_type == "wolfstack")
             .cloned()
@@ -1572,7 +1572,7 @@ fn strip_port(addr: &str) -> String {
 /// GET /api/settings/login-disabled — check if direct login is disabled (no auth needed)
 pub async fn login_disabled_status(state: web::Data<AppState>) -> HttpResponse {
     let disabled = {
-        let nodes = state.cluster.nodes.read().unwrap();
+        let nodes = state.cluster.nodes_read();
         nodes.get(&state.cluster.self_id).map(|n| n.login_disabled).unwrap_or(false)
     };
     HttpResponse::Ok().json(serde_json::json!({ "login_disabled": disabled }))
@@ -1597,7 +1597,7 @@ pub async fn set_site(req: HttpRequest, state: web::Data<AppState>, body: web::J
     }
     let new_site = if site_raw.is_empty() { None } else { Some(site_raw.clone()) };
     {
-        let mut nodes = state.cluster.nodes.write().unwrap();
+        let mut nodes = state.cluster.nodes_write();
         if let Some(node) = nodes.get_mut(&state.cluster.self_id) {
             node.site = new_site.clone();
         }
@@ -1625,7 +1625,7 @@ pub async fn set_roles(req: HttpRequest, state: web::Data<AppState>, body: web::
         .into_iter()
         .collect();
     {
-        let mut nodes = state.cluster.nodes.write().unwrap();
+        let mut nodes = state.cluster.nodes_write();
         if let Some(node) = nodes.get_mut(&state.cluster.self_id) {
             node.roles = roles.clone();
         }
@@ -1765,7 +1765,7 @@ pub async fn set_login_disabled(req: HttpRequest, state: web::Data<AppState>, bo
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let disabled = body.get("login_disabled").and_then(|v| v.as_bool()).unwrap_or(false);
     {
-        let mut nodes = state.cluster.nodes.write().unwrap();
+        let mut nodes = state.cluster.nodes_write();
         if let Some(node) = nodes.get_mut(&state.cluster.self_id) {
             node.login_disabled = disabled;
         }
@@ -1993,7 +1993,7 @@ pub async fn passkey_login_finish(req: HttpRequest, state: web::Data<AppState>, 
     }
     // Same direct-login-disabled check the password endpoint does.
     {
-        let nodes = state.cluster.nodes.read().unwrap();
+        let nodes = state.cluster.nodes_read();
         if let Some(self_node) = nodes.get(&state.cluster.self_id) {
             if self_node.login_disabled {
                 return HttpResponse::Forbidden().json(serde_json::json!({
@@ -4483,13 +4483,12 @@ static BOOTSTRAP_RESTART_SCHEDULED: std::sync::atomic::AtomicBool =
 /// map's self-exclusion is the right "do I have any OTHER peers"
 /// signal.
 fn has_no_other_peers(state: &AppState) -> bool {
-    match state.cluster.nodes.read() {
-        Ok(nodes) => {
-            let self_id = state.cluster.self_id.as_str();
-            !nodes.values().any(|n| n.id != self_id)
-        }
-        Err(_) => false,  // Lock poisoned → safer to assume NOT fresh.
-    }
+    // nodes_read recovers from poisoning, so there is no longer a
+    // "lock is unusable" arm to fall back on — we always get to answer
+    // from real membership rather than guessing "not fresh".
+    let nodes = state.cluster.nodes_read();
+    let self_id = state.cluster.self_id.as_str();
+    !nodes.values().any(|n| n.id != self_id)
 }
 
 /// POST /api/cluster/secret/receive — receive a new cluster secret
@@ -5438,7 +5437,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                 .map(|n| n.node_type == "wolfstack")
                 .unwrap_or(false);
             let is_self = if is_wolfstack {
-                let mut nodes = state.cluster.nodes.write().unwrap();
+                let mut nodes = state.cluster.nodes_write();
                 if let Some(node) = nodes.get_mut(&id) {
                     node.roles = roles.clone();
                     node.is_self
@@ -5551,7 +5550,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
 pub async fn agent_set_cluster_name(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
     if let Err(e) = require_cluster_auth(&req, &state) { return e; }
     if let Some(name) = body.get("cluster_name").and_then(|v| v.as_str()) {
-        let mut nodes = state.cluster.nodes.write().unwrap();
+        let mut nodes = state.cluster.nodes_write();
         let old = nodes.get(&state.cluster.self_id).and_then(|n| n.cluster_name.clone());
         if let Some(n) = nodes.get_mut(&state.cluster.self_id) {
             n.cluster_name = Some(name.to_string());
@@ -5588,7 +5587,7 @@ pub async fn agent_set_display_name(req: HttpRequest, state: web::Data<AppState>
             if name.len() > 64 {
                 return HttpResponse::BadRequest().json(serde_json::json!({ "error": "display name too long (max 64 chars)" }));
             }
-            let mut nodes = state.cluster.nodes.write().unwrap();
+            let mut nodes = state.cluster.nodes_write();
             if let Some(n) = nodes.get_mut(&state.cluster.self_id) {
                 n.display_name = if name.is_empty() { None } else { Some(name.to_string()) };
             }
@@ -11238,7 +11237,7 @@ pub async fn cluster_browser_list(req: HttpRequest, state: web::Data<AppState>) 
     let mut sessions = crate::cluster_browser::list_sessions();
     
     // Try to fetch sessions from all remote nodes (timeout per node)
-    let nodes: Vec<_> = state.cluster.nodes.read().unwrap()
+    let nodes: Vec<_> = state.cluster.nodes_read()
         .values()
         .filter(|n| !n.is_self && n.online)
         .cloned()
@@ -11671,7 +11670,7 @@ pub async fn announce_wolfnet_routes_to_peers(
     // Push to every online wolfstack peer in OUR cluster.
     let self_cluster = cluster.get_self_cluster_name();
     let cluster_peers: Vec<(String, u16)> = {
-        let nodes = cluster.nodes.read().unwrap();
+        let nodes = cluster.nodes_read();
         nodes
             .values()
             .filter(|n| !n.is_self)
@@ -11893,25 +11892,23 @@ pub(crate) async fn wolfnet_ip_active_elsewhere(state: &web::Data<AppState>, ip:
     // DIFFERENT mesh (operator, 2026-06-10). cluster_eq is case-insensitive
     // and treats None==None, so an unnamed/standalone fleet keeps the old
     // behaviour rather than becoming more permissive than its mesh.
-    let targets: Vec<(String, String, u16)> = match state.cluster.nodes.read() {
-        Ok(nodes) => {
-            let self_cluster: Option<String> = nodes
-                .get(&state.cluster.self_id)
-                .and_then(|n| n.cluster_name.clone());
-            nodes.values()
-                .filter(|n| !n.is_self && n.online)
-                .filter(|n| crate::agent::cluster_eq(
-                    self_cluster.as_deref(),
-                    n.cluster_name.as_deref(),
-                ))
-                .map(|n| (
-                    if n.hostname.is_empty() { n.address.clone() } else { n.hostname.clone() },
-                    n.address.clone(),
-                    n.port,
-                ))
-                .collect()
-        }
-        Err(_) => return None,
+    let targets: Vec<(String, String, u16)> = {
+        let nodes = state.cluster.nodes_read();
+        let self_cluster: Option<String> = nodes
+            .get(&state.cluster.self_id)
+            .and_then(|n| n.cluster_name.clone());
+        nodes.values()
+            .filter(|n| !n.is_self && n.online)
+            .filter(|n| crate::agent::cluster_eq(
+                self_cluster.as_deref(),
+                n.cluster_name.as_deref(),
+            ))
+            .map(|n| (
+                if n.hostname.is_empty() { n.address.clone() } else { n.hostname.clone() },
+                n.address.clone(),
+                n.port,
+            ))
+            .collect()
     };
 
     let client = &*API_HTTP_CLIENT;
@@ -15297,7 +15294,7 @@ pub async fn notify_targets(req: HttpRequest, state: web::Data<AppState>) -> Htt
     };
 
     let nodes: Vec<serde_json::Value> = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         n.values()
             .map(|node| serde_json::json!({ "id": node.id, "name": node.hostname }))
             .collect()
@@ -18023,7 +18020,7 @@ pub async fn security_rotate_fleet(
 
     // Snapshot the cluster state so we don't hold the lock across async work.
     let (self_id, nodes) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         (state.cluster.self_id.clone(), n.values().cloned().collect::<Vec<_>>())
     };
 
@@ -18165,7 +18162,7 @@ where
     Local: FnOnce() -> T,
 {
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values().cloned().collect();
         (self_id, peers)
@@ -18816,7 +18813,7 @@ pub async fn fleet_security_push_lockout_policy(
 
     // Fan out to peers.
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values()
             .filter(|p| p.id != self_id && p.node_type == "wolfstack")
@@ -18874,7 +18871,7 @@ pub async fn fleet_security_force_logout_all(
     state.sessions.destroy_all();
     // Fan out.
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values()
             .filter(|p| p.id != self_id && p.node_type == "wolfstack")
@@ -19029,7 +19026,7 @@ pub async fn fleet_security_rotate_cluster_secret(
     // change the secret elsewhere, this fanout would fail — operator
     // would see partial success and need to rotate manually.
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values()
             .filter(|p| p.id != self_id && p.node_type == "wolfstack")
@@ -19284,7 +19281,7 @@ pub async fn fleet_security_ssh_hardening(
     }
 
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values()
             .filter(|p| p.id != self_id && p.node_type == "wolfstack")
@@ -19435,7 +19432,7 @@ pub async fn fleet_security_push_scan_detector(
         }));
     }
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values()
             .filter(|p| p.id != self_id && p.node_type == "wolfstack")
@@ -19558,7 +19555,7 @@ where
     Resp: serde::de::DeserializeOwned + Serialize + Send + 'static,
 {
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values().cloned().collect();
         (self_id, peers)
@@ -20066,7 +20063,7 @@ pub async fn fleet_antivirus_push_config(
         }));
     }
     let (self_id, peers) = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         let self_id = state.cluster.self_id.clone();
         let peers: Vec<crate::agent::Node> = n.values()
             .filter(|p| p.id != self_id && p.node_type == "wolfstack")
@@ -27184,8 +27181,7 @@ fn import_nodes(nodes_val: &serde_json::Value, state: &web::Data<AppState>) -> R
     let mut added = 0;
 
     {
-        let mut nodes = state.cluster.nodes.write()
-            .map_err(|_| "Failed to acquire lock".to_string())?;
+        let mut nodes = state.cluster.nodes_write();
         for mut node in import_nodes {
             // Never import ourselves — match BOTH the local key id and the
             // global self_id the record carries (the exporting node lists us as
@@ -37209,7 +37205,7 @@ pub async fn wolffunctions_public_trigger(
 
 /// Get the local cluster name from cluster state
 fn local_cluster_name(cluster: &crate::agent::ClusterState) -> String {
-    let nodes = cluster.nodes.read().unwrap();
+    let nodes = cluster.nodes_read();
     nodes.get(&cluster.self_id)
         .and_then(|n| n.cluster_name.clone())
         .unwrap_or_else(|| "WolfStack".to_string())
@@ -37974,7 +37970,7 @@ async fn value_receipt(req: HttpRequest, state: web::Data<AppState>) -> HttpResp
     let install_days = install_epoch.map(|e| now.saturating_sub(e) / 86_400);
 
     let (nodes_total, nodes_online, docker, lxc, vms, compose) = {
-        let nodes = state.cluster.nodes.read().unwrap();
+        let nodes = state.cluster.nodes_read();
         let mut online = 0u32;
         let (mut d, mut l, mut v, mut c) = (0u32, 0u32, 0u32, 0u32);
         for n in nodes.values() {
