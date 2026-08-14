@@ -29,6 +29,8 @@
 //! Phase 1 scope: native LXC on native nodes only (Proxmox-managed
 //! containers have LVM/ZFS-backed rootfs that isn't a stable host dir).
 
+pub mod replication;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
@@ -52,6 +54,57 @@ fn now_unix() -> u64 {
 pub enum HaRole {
     Primary,
     Replica,
+}
+
+/// What kind of thing is being protected.
+///
+/// `Container` is the default so every wolfha.json written before VM
+/// support parses unchanged and keeps behaving exactly as it did — the
+/// field simply appears absent and defaults back to what those entries
+/// have always been.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectKind {
+    #[default]
+    Container,
+    Vm,
+}
+
+impl SubjectKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SubjectKind::Container => "container",
+            SubjectKind::Vm => "VM",
+        }
+    }
+}
+
+/// Is the subject running on this node right now?
+pub fn subject_is_running(kind: SubjectKind, name: &str) -> bool {
+    match kind {
+        SubjectKind::Container => crate::containers::lxc_is_running(name),
+        SubjectKind::Vm => crate::vms::manager::VmManager::new().check_running(name),
+    }
+}
+
+/// Start the subject. Used by promotion.
+pub fn subject_start(kind: SubjectKind, name: &str) -> Result<(), String> {
+    match kind {
+        SubjectKind::Container => crate::containers::lxc_start(name).map(|_| ()),
+        SubjectKind::Vm => crate::vms::manager::VmManager::new().start_vm(name),
+    }
+}
+
+/// Stop the subject. Used by demotion and self-fencing.
+///
+/// A VM is stopped gracefully (`force = false`): demotion happens when
+/// another node is taking over, and a guest that is given the chance to
+/// flush its filesystems hands over a cleaner copy.
+pub fn subject_stop(kind: SubjectKind, name: &str) -> Result<(), String> {
+    match kind {
+        SubjectKind::Container => crate::containers::lxc_stop(name).map(|_| ()),
+        SubjectKind::Vm => crate::vms::manager::VmManager::new().stop_vm(name, false),
+    }
 }
 
 /// A peer node in an HA relationship. The id is authoritative; address
@@ -80,7 +133,15 @@ fn default_failover_after() -> u64 { 90 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HaEntry {
+    /// Name of the protected subject. Still called `container` because it
+    /// is the on-disk and API key for every existing install; renaming it
+    /// would invalidate every wolfha.json and every client in the field
+    /// for no behavioural gain. Read it as "subject name".
     pub container: String,
+    /// Container (the default, and everything written before VM support)
+    /// or VM.
+    #[serde(default)]
+    pub kind: SubjectKind,
     pub role: HaRole,
     /// Primary: minutes between delta syncs.
     #[serde(default)]
@@ -127,6 +188,18 @@ pub struct HaEntry {
     /// standby starts.
     #[serde(default = "default_failover_after")]
     pub failover_after_secs: u64,
+    /// Primary, VM only: a disk delta that has been taken but not yet
+    /// confirmed by every replica.
+    ///
+    /// This exists because the bitmap is cleared when the BACKUP succeeds,
+    /// which is before the delta reaches anyone. If a transfer then failed
+    /// and we simply took a fresh delta next round, the blocks in the lost
+    /// one would be in no delta ever again and that replica would diverge
+    /// while continuing to report success — the worst failure an HA system
+    /// can have. So the delta is retained until every replica has applied
+    /// it, and no new one is taken while it is outstanding.
+    #[serde(default)]
+    pub pending_vm_delta: Option<replication::qemu_bitmap::PendingDelta>,
     /// Primary only: this node's own peer identity. Travels to standbys
     /// inside HaMeta.primary so every delta re-teaches them who the
     /// CURRENT primary is — without it, a standby that survived a
@@ -140,6 +213,10 @@ pub struct HaEntry {
 /// and timings — setting changes propagate with the next sync round.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HaMeta {
+    /// What the primary is protecting. `#[serde(default)]` so a delta
+    /// from an older primary still parses and keeps meaning "container".
+    #[serde(default)]
+    pub kind: SubjectKind,
     pub interval_minutes: u64,
     pub replicas: Vec<HaPeer>,
     pub auto_failover: bool,
@@ -154,6 +231,7 @@ pub struct HaMeta {
 impl HaMeta {
     pub fn from_entry(e: &HaEntry) -> Self {
         HaMeta {
+            kind: e.kind,
             interval_minutes: e.interval_minutes,
             replicas: e.replicas.clone(),
             auto_failover: e.auto_failover,
@@ -164,6 +242,10 @@ impl HaMeta {
     }
 
     pub fn apply_to(&self, e: &mut HaEntry) {
+        // The primary is authoritative about what it is replicating; a
+        // standby that guessed wrong would start the wrong kind of thing
+        // on failover.
+        e.kind = self.kind;
         e.interval_minutes = self.interval_minutes;
         e.replicas = self.replicas.clone();
         e.auto_failover = self.auto_failover;
@@ -535,6 +617,7 @@ pub fn dedupe_replicas(container: &str, cluster: &crate::agent::ClusterState) {
 /// clobber a real (non-replica) container of the same name.
 pub fn install_seed(
     container: &str,
+    kind: SubjectKind,
     archive: &str,
     source_config: &str,
     primary: HaPeer,
@@ -577,6 +660,7 @@ pub fn install_seed(
     store.remove(container);
     let mut entry = HaEntry {
         container: container.to_string(),
+        kind,
         role: HaRole::Replica,
         interval_minutes: 0,
         replicas: Vec::new(),
@@ -585,6 +669,7 @@ pub fn install_seed(
         last_sync: HashMap::new(),
         last_delta_at: now_unix(),
         stale: false,
+        pending_vm_delta: None,
         auto_failover: false,
         witness: String::new(),
         failover_after_secs: default_failover_after(),
@@ -608,6 +693,7 @@ pub fn promote_local(container: &str, me: Option<HaPeer>) -> Result<(), String> 
     let entry = store
         .get_mut(container)
         .ok_or_else(|| format!("'{}' is not WolfHA-managed on this node", container))?;
+    let kind = entry.kind;
     if entry.role == HaRole::Primary && !entry.stale {
         return Err(format!("'{}' is already the active primary here", container));
     }
@@ -638,11 +724,19 @@ pub fn promote_local(container: &str, me: Option<HaPeer>) -> Result<(), String> 
     let _ = std::fs::remove_file(marker_path(container));
     store.save()?;
 
-    crate::containers::lxc_start(container).map_err(|e| format!("started promotion but container failed to start: {}", e))?;
+    subject_start(kind, container)
+        .map_err(|e| format!("started promotion but the {} failed to start: {}", kind.label(), e))?;
 
     // Same MAC as the old primary, so peers' ARP caches stay valid; the
     // switch learns the new port from the first outbound frame. Nudge
     // that along with a best-effort gateway ping from inside.
+    //
+    // Container-only: the nudge runs a command INSIDE the guest via
+    // lxc-attach, which has no VM equivalent. A VM sends its own traffic
+    // as it boots, which teaches the switch the same thing slightly later.
+    if kind != SubjectKind::Container {
+        return Ok(());
+    }
     let c = container.to_string();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(3));
@@ -657,8 +751,9 @@ pub fn promote_local(container: &str, me: Option<HaPeer>) -> Result<(), String> 
 /// Demote this node's copy: stop the container if running, mark the
 /// copy stale, become a replica of `new_primary`, write the marker.
 pub fn demote_local(container: &str, new_primary: HaPeer) -> Result<(), String> {
-    if crate::containers::lxc_is_running(container) {
-        crate::containers::lxc_stop(container)
+    let kind = HaStore::load().get(container).map(|e| e.kind).unwrap_or_default();
+    if subject_is_running(kind, container) {
+        subject_stop(kind, container)
             .map_err(|e| format!("could not stop '{}' for demotion: {}", container, e))?;
     }
     let base = crate::containers::lxc_base_dir(container);
@@ -684,6 +779,9 @@ pub fn demote_local(container: &str, new_primary: HaPeer) -> Result<(), String> 
         None => {
             store.entries.push(HaEntry {
                 container: container.to_string(),
+                // No prior entry, so the kind is not known here; the next
+                // delta carries it in HaMeta and corrects this.
+                kind: SubjectKind::default(),
                 role: HaRole::Replica,
                 interval_minutes: 0,
                 replicas: Vec::new(),
@@ -692,6 +790,7 @@ pub fn demote_local(container: &str, new_primary: HaPeer) -> Result<(), String> 
                 last_sync: HashMap::new(),
                 last_delta_at: 0,
                 stale: true,
+                pending_vm_delta: None,
                 auto_failover: false,
                 witness: String::new(),
                 failover_after_secs: default_failover_after(),
@@ -707,6 +806,377 @@ pub fn demote_local(container: &str, new_primary: HaPeer) -> Result<(), String> 
 /// One delta round from this (primary) node to one replica. Returns the
 /// status to record. Blocking-free: all fs/tar work goes through
 /// spawn_blocking; HTTP through the shared client.
+/// Rebuild one file from a block delta and move it into place.
+///
+/// Reconstructs beside the target and renames only once the new content is
+/// complete and fsynced: a crash midway must never leave a half-written
+/// file where the old one was, because a replica exists to be promoted and
+/// a truncated database is worse than a stale one.
+///
+/// Ownership and mode are copied from the file being replaced. The
+/// reconstruction is a brand-new file created with this process's
+/// defaults, so without this every delta would quietly turn its target
+/// into root:root 0644 — and a rootfs whose files change owner on first
+/// sync is a container that breaks the next time it starts.
+fn install_reconstructed_file(target: &str, ops: &[replication::rolling::DeltaOp]) -> Result<(), String> {
+    let tmp = format!("{}.wolfha-delta", target);
+    if let Err(e) = replication::rolling::apply_delta(
+        target,
+        ops,
+        &tmp,
+        replication::rolling::BLOCK_SIZE,
+    ) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Ok(meta) = std::fs::metadata(target) {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _ = std::fs::set_permissions(
+            &tmp,
+            std::fs::Permissions::from_mode(meta.permissions().mode()),
+        );
+        // chown needs the raw syscall — std has no stable API for it.
+        if let Ok(c_tmp) = std::ffi::CString::new(tmp.as_str()) {
+            // SAFETY: c_tmp is a NUL-terminated path we just created, and
+            // uid/gid come from the file being replaced.
+            unsafe {
+                libc::chown(c_tmp.as_ptr(), meta.uid(), meta.gid());
+            }
+        }
+    }
+    std::fs::rename(&tmp, target).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("install: {}", e)
+    })
+}
+
+/// Where a VM's OS disk lives on this node, and its config.
+///
+/// Both are needed together: replication carries the disk AND the
+/// definition, because a replica that holds a perfect disk image but no
+/// VM definition cannot start it on failover.
+pub fn vm_disk_and_config(name: &str) -> Result<(String, crate::vms::manager::VmConfig), String> {
+    let mgr = crate::vms::manager::VmManager::new();
+    let cfg = mgr
+        .get_vm(name)
+        .ok_or_else(|| format!("VM '{}' not found on this node", name))?;
+    let disk = mgr.os_disk_path_for(&cfg).to_string_lossy().to_string();
+    Ok((disk, cfg))
+}
+
+/// Prepare a VM for incremental replication: attach the persistent dirty
+/// bitmap that every later round encodes against.
+///
+/// Called when HA is enabled for a VM and again after any full seed. The
+/// bitmap must exist BEFORE the seed is taken, or writes made during the
+/// seed would be missed by the first incremental and the replica would
+/// silently diverge from the moment it was created.
+pub fn vm_begin_tracking(name: &str) -> Result<(), String> {
+    let (disk, _) = vm_disk_and_config(name)?;
+    let caps = replication::detect_vm_capabilities(&disk);
+    if let Some(reason) = replication::vm_replication_blocked_reason(&caps) {
+        return Err(reason);
+    }
+    let node = replication::qemu_bitmap::resolve_disk_node(name, &disk)?;
+    match replication::qemu_bitmap::bitmap_state(name, &disk)? {
+        replication::qemu_bitmap::BitmapState::Recording => Ok(()),
+        replication::qemu_bitmap::BitmapState::Missing => {
+            replication::qemu_bitmap::create_bitmap(name, &node)
+        }
+        // A bitmap that stopped recording, or one stored improperly by a
+        // killed QEMU, cannot be trusted for an incremental — replace it
+        // and let the caller re-seed.
+        replication::qemu_bitmap::BitmapState::NotRecording
+        | replication::qemu_bitmap::BitmapState::Inconsistent => {
+            let _ = replication::qemu_bitmap::remove_bitmap(name, &node);
+            replication::qemu_bitmap::create_bitmap(name, &node)
+        }
+    }
+}
+
+/// Stop tracking — called when HA is disabled so we do not leave a bitmap
+/// growing inside the operator's disk image.
+pub fn vm_end_tracking(name: &str) -> Result<(), String> {
+    let (disk, _) = vm_disk_and_config(name)?;
+    let node = replication::qemu_bitmap::resolve_disk_node(name, &disk)?;
+    replication::qemu_bitmap::remove_bitmap(name, &node)
+}
+
+/// Write the primary's VM definition into this replica's VM store.
+///
+/// `running` is forced false whatever the primary sent: the definition
+/// describes a VM that is running THERE, and a replica that records its
+/// dormant copy as running would confuse both the UI and the duplicate
+/// detection in the failover monitor.
+pub fn vm_store_replica_config(
+    name: &str,
+    cfg: &crate::vms::manager::VmConfig,
+) -> Result<(), String> {
+    let mut cfg = cfg.clone();
+    cfg.running = false;
+    // Never let a peer's payload rename the subject out from under us —
+    // the file is keyed by the name WE are managing.
+    cfg.name = name.to_string();
+    let path = crate::vms::manager::VmManager::new().config_path_for(name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("vm store dir: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+/// Delete a dormant VM replica: its disk image and its definition.
+///
+/// Refuses if the disk is missing rather than reporting a success that
+/// removed nothing, and never touches a running VM (the caller checks,
+/// and so does this).
+pub fn vm_remove_replica(name: &str) -> Result<(), String> {
+    if subject_is_running(SubjectKind::Vm, name) {
+        return Err(format!("VM '{}' is running — refusing to delete it", name));
+    }
+    let mgr = crate::vms::manager::VmManager::new();
+    let cfg_path = mgr.config_path_for(name);
+    let disk = mgr
+        .get_vm(name)
+        .map(|c| mgr.os_disk_path_for(&c))
+        .unwrap_or_else(|| cfg_path.with_extension("qcow2"));
+    let mut removed_any = false;
+    if disk.exists() {
+        std::fs::remove_file(&disk)
+            .map_err(|e| format!("delete {}: {}", disk.display(), e))?;
+        removed_any = true;
+    }
+    if cfg_path.exists() {
+        std::fs::remove_file(&cfg_path)
+            .map_err(|e| format!("delete {}: {}", cfg_path.display(), e))?;
+        removed_any = true;
+    }
+    if !removed_any {
+        return Err(format!("no VM copy of '{}' found on this node to delete", name));
+    }
+    Ok(())
+}
+
+/// Take one incremental delta of a VM's disk into the staging directory.
+///
+/// Blocking. Returns the staged path and its size.
+pub fn vm_take_delta(name: &str) -> Result<(String, u64), String> {
+    let (disk, _) = vm_disk_and_config(name)?;
+    let stage_dir = "/var/lib/wolfstack/wolfha";
+    std::fs::create_dir_all(stage_dir).map_err(|e| format!("staging dir: {}", e))?;
+    let out = format!("{}/vmdelta-{}.qcow2", stage_dir, uuid::Uuid::new_v4());
+    // 6 hours: a backup job over a large, heavily-dirtied disk is slow,
+    // and a timeout that fires mid-job leaves the round to retry from the
+    // same bitmap rather than corrupting anything.
+    replication::qemu_bitmap::take_incremental(name, &disk, &out, 6 * 60 * 60)?;
+    let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    Ok((out, size))
+}
+
+/// Apply a received VM disk delta on this replica.
+pub fn vm_apply_delta(name: &str, delta_path: &str) -> Result<(), String> {
+    let kind = HaStore::load().get(name).map(|e| e.kind).unwrap_or_default();
+    if kind != SubjectKind::Vm {
+        return Err(format!("'{}' is not a WolfHA-managed VM on this node", name));
+    }
+    if subject_is_running(SubjectKind::Vm, name) {
+        return Err(format!(
+            "VM '{}' is running here — refusing to write into a live disk image",
+            name
+        ));
+    }
+    let (disk, _) = vm_disk_and_config(name)?;
+    replication::qemu_bitmap::apply_delta(delta_path, &disk)
+}
+
+/// Apply a bundle of per-file block deltas to this replica's rootfs.
+///
+/// Each file is reconstructed into a temporary alongside its target and
+/// renamed over it only once complete and fsynced. A partial write must
+/// never be left where the file was: a replica exists to be promoted, and
+/// a half-reconstructed database is worse than an out-of-date one.
+///
+/// Every path is checked with [`is_safe_rel_path`] before use — this
+/// bundle came off the network, and a `../` in a path would otherwise let
+/// a peer write outside the container.
+pub fn apply_block_deltas(container: &str, bundle_path: &str) -> Result<usize, String> {
+    let base = crate::containers::lxc_base_dir(container);
+    let rootfs = format!("{}/{}/rootfs", base, container);
+    let blob = std::fs::read(bundle_path)
+        .map_err(|e| format!("read block delta bundle: {}", e))?;
+    let items = replication::rolling::unpack_file_deltas(&blob)?;
+
+    let mut applied = 0usize;
+    for item in items {
+        if !is_safe_rel_path(&item.path) {
+            return Err(format!("block delta contains an unsafe path: {}", item.path));
+        }
+        let target = format!("{}/{}", rootfs, item.path);
+        if !std::path::Path::new(&target).is_file() {
+            return Err(format!(
+                "block delta references {} which this replica does not have — the copies \
+                 have diverged and a full resync is required",
+                item.path
+            ));
+        }
+        install_reconstructed_file(&target, &item.ops)
+            .map_err(|e| format!("apply {}: {}", item.path, e))?;
+        applied += 1;
+    }
+    Ok(applied)
+}
+
+/// Agree a replication driver with a replica.
+///
+/// Never fails: a peer that cannot be probed — older build, offline
+/// endpoint, malformed reply — is treated as supporting only the floor,
+/// which is exactly the behaviour that shipped before drivers existed.
+/// Returning a driver rather than an error is deliberate; a sync must not
+/// be abandoned because a capability probe did not answer.
+async fn negotiate_driver(
+    rootfs: &str,
+    container: &str,
+    peer: &HaPeer,
+    secret: &str,
+    client: &reqwest::Client,
+) -> replication::DriverKind {
+    let local = {
+        let r = rootfs.to_string();
+        tokio::task::spawn_blocking(move || replication::detect_container_capabilities(&r))
+            .await
+            .unwrap_or_else(|_| replication::ReplicationCapabilities::floor())
+    };
+    let urls = crate::api::build_node_urls(
+        &peer.address,
+        peer.port,
+        &format!("/api/wolfha/capabilities?container={}", container),
+    );
+    for url in &urls {
+        if let Ok(r) = client
+            .get(url)
+            .header("X-WolfStack-Secret", secret.to_string())
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            && r.status().is_success()
+            && let Ok(remote) = r.json::<replication::ReplicationCapabilities>().await
+        {
+            return replication::negotiate(&local, &remote);
+        }
+    }
+    replication::DriverKind::FileManifest
+}
+
+/// Fetch the replica's block signatures for `paths`.
+async fn fetch_signatures(
+    container: &str,
+    peer: &HaPeer,
+    secret: &str,
+    client: &reqwest::Client,
+    paths: &[String],
+) -> Result<std::collections::HashMap<String, Vec<u8>>, String> {
+    use base64::Engine;
+    let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/wolfha/signatures");
+    let body = serde_json::json!({ "container": container, "paths": paths });
+    let mut last = String::new();
+    for url in &urls {
+        match client
+            .post(url)
+            .header("X-WolfStack-Secret", secret.to_string())
+            // Signatures mean hashing every byte of the replica's copy of
+            // these files, which for tens of gigabytes is not quick.
+            .timeout(std::time::Duration::from_secs(900))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                let v: serde_json::Value =
+                    r.json().await.map_err(|e| format!("bad signature reply: {}", e))?;
+                let obj = v.as_object().ok_or("signature reply was not an object")?;
+                let mut out = std::collections::HashMap::new();
+                for (k, val) in obj {
+                    if let Some(s) = val.as_str()
+                        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s)
+                    {
+                        out.insert(k.clone(), bytes);
+                    }
+                }
+                return Ok(out);
+            }
+            Ok(r) => {
+                last = format!("{}: HTTP {}", url, r.status());
+            }
+            Err(e) => last = format!("{}: {}", url, e),
+        }
+    }
+    Err(last)
+}
+
+/// Encode block deltas for `paths` against the replica's signatures.
+///
+/// Returns the staged blob (if any) and the paths that must be sent whole
+/// after all — a file whose signature was missing or unparseable, or whose
+/// delta turned out no smaller than the file, falls back rather than
+/// wasting the round.
+///
+/// Blocking: it hashes and rolls over every byte of each file.
+fn build_block_deltas(
+    rootfs: &str,
+    paths: &[String],
+    sigs: &std::collections::HashMap<String, Vec<u8>>,
+) -> (Option<String>, Vec<String>) {
+    let mut items = Vec::new();
+    let mut fell_back = Vec::new();
+    for rel in paths {
+        let Some(raw) = sigs.get(rel) else {
+            fell_back.push(rel.clone());
+            continue;
+        };
+        let sig = match replication::rolling::decode_signatures(raw) {
+            Ok(s) => s,
+            Err(_) => {
+                fell_back.push(rel.clone());
+                continue;
+            }
+        };
+        let full = format!("{}/{}", rootfs, rel);
+        let file_len = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+        match replication::rolling::compute_delta(&full, &sig) {
+            Ok(ops) => {
+                // A delta bigger than the file itself is possible when a
+                // file was rewritten wholesale; sending it would be strictly
+                // worse than the tar path.
+                let encoded = replication::rolling::encode_delta(&ops).len() as u64;
+                if encoded >= file_len {
+                    fell_back.push(rel.clone());
+                } else {
+                    items.push(replication::rolling::FileDelta { path: rel.clone(), ops });
+                }
+            }
+            Err(_) => fell_back.push(rel.clone()),
+        }
+    }
+    if items.is_empty() {
+        return (None, fell_back);
+    }
+    let blob = replication::rolling::pack_file_deltas(&items);
+    let stage_dir = "/var/lib/wolfstack/wolfha";
+    if std::fs::create_dir_all(stage_dir).is_err() {
+        // Staging is unavailable — fall the whole set back rather than
+        // lose the changes.
+        fell_back.extend(items.into_iter().map(|i| i.path));
+        return (None, fell_back);
+    }
+    let path = format!("{}/blocks-{}.bin", stage_dir, uuid::Uuid::new_v4());
+    if std::fs::write(&path, &blob).is_err() {
+        fell_back.extend(items.into_iter().map(|i| i.path));
+        return (None, fell_back);
+    }
+    (Some(path), fell_back)
+}
+
 pub async fn sync_one_replica(
     container: &str,
     peer: &HaPeer,
@@ -714,11 +1184,18 @@ pub async fn sync_one_replica(
 ) -> HaSyncStatus {
     let started = now_unix();
     match sync_one_replica_inner(container, peer, secret).await {
-        Ok((files, bytes)) => HaSyncStatus {
+        Ok((files, bytes, how)) => HaSyncStatus {
             at: started,
             ok: true,
-            message: if files == 0 { "in sync — no changes".to_string() }
-                     else { format!("{} files updated", files) },
+            // Name the method used. "in sync" alone cannot tell an
+            // operator whether this replica is crash-consistent, which is
+            // the difference between a standby they can fail a database
+            // onto and one they cannot.
+            message: if files == 0 {
+                format!("in sync — no changes ({})", how)
+            } else {
+                format!("{} files updated ({})", files, how)
+            },
             files_sent: files,
             bytes_sent: bytes,
         },
@@ -732,14 +1209,68 @@ pub async fn sync_one_replica(
     }
 }
 
+/// Open a consistent view of the rootfs, run the round against it, and
+/// tear the view down whatever happens.
+///
+/// The snapshot must be destroyed on EVERY exit, including the error
+/// paths — a leaked snapshot pins the blocks it references, and enough of
+/// them fills the pool. That is why the round's body lives in its own
+/// function rather than being guarded by scattered cleanup calls.
 async fn sync_one_replica_inner(
     container: &str,
     peer: &HaPeer,
     secret: &str,
-) -> Result<(u64, u64), String> {
-    let client = &*crate::api::API_HTTP_CLIENT;
+) -> Result<(u64, u64, String), String> {
     let base = crate::containers::lxc_base_dir(container);
     let rootfs = format!("{}/{}/rootfs", base, container);
+    let now = now_unix();
+
+    let (session, read_root) = {
+        let (r, c) = (rootfs.clone(), container.to_string());
+        tokio::task::spawn_blocking(move || {
+            let source = replication::detect_consistency_source(&r);
+            let sess = replication::snapshot::SnapshotSession::open(&source, &r, &c, now);
+            let path = sess.read_path().to_string();
+            (sess, path)
+        })
+        .await
+        .map_err(|e| format!("snapshot task: {}", e))?
+    };
+    let consistency = if session.is_snapshot() {
+        replication::detect_consistency_source(&rootfs).label()
+    } else {
+        replication::ConsistencySource::Live.label()
+    };
+
+    let result = sync_one_replica_from(container, peer, secret, &rootfs, &read_root).await;
+
+    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || session.close()).await {
+        // Not fatal to the round — the data already shipped — but it must
+        // be visible, because the failure mode is a pool that slowly fills.
+        tracing::warn!(
+            "wolfha[{}]: could not remove the replication snapshot: {}",
+            container, e
+        );
+    }
+    result.map(|(files, bytes, driver)| {
+        (files, bytes, format!("{}, {}", driver.label(), consistency))
+    })
+}
+
+/// One replication round, reading files from `read_root`.
+///
+/// `rootfs` is the live path (used for capability detection and for the
+/// container's config), `read_root` is what the round actually walks —
+/// the same thing when no snapshot could be taken.
+async fn sync_one_replica_from(
+    container: &str,
+    peer: &HaPeer,
+    secret: &str,
+    rootfs: &str,
+    read_root: &str,
+) -> Result<(u64, u64, replication::DriverKind), String> {
+    let client = &*crate::api::API_HTTP_CLIENT;
+    let base = crate::containers::lxc_base_dir(container);
     let config_path = format!("{}/{}/config", base, container);
 
     // 1. Remote manifest.
@@ -772,11 +1303,62 @@ async fn sync_one_replica_inner(
     let remote = remote.ok_or_else(|| format!("replica manifest unavailable: {}", last_err))?;
 
     // 2. Local manifest + diff (fs walk off the async runtime).
-    let rootfs_c = rootfs.clone();
+    let rootfs_c = read_root.to_string();
     let local = tokio::task::spawn_blocking(move || build_manifest(&rootfs_c))
         .await
         .map_err(|e| format!("manifest task: {}", e))??;
     let (changed, deletions) = manifest_diff(&local, &remote);
+
+    // 2b. Agree a replication driver with the replica. A peer that
+    // predates the capabilities endpoint 404s and we fall back to the
+    // floor, which is byte-for-byte the behaviour before drivers existed —
+    // so a half-upgraded cluster keeps replicating instead of failing.
+    let driver = negotiate_driver(rootfs, container, peer, secret, client).await;
+
+    // Files big enough to be worth delta-encoding. Below the threshold the
+    // signature exchange costs more than the bytes it saves, so a rootfs of
+    // small files behaves exactly as it always has.
+    let (delta_paths, mut changed): (Vec<String>, Vec<String>) =
+        if driver >= replication::DriverKind::RollingDelta {
+            changed.iter().cloned().partition(|p| {
+                std::fs::metadata(format!("{}/{}", read_root, p))
+                    .map(|m| m.is_file() && m.len() >= replication::rolling::MIN_DELTA_SIZE)
+                    .unwrap_or(false)
+            })
+        } else {
+            (Vec::new(), changed)
+        };
+
+    // Ask the replica what it already holds for those files, then encode
+    // only the blocks that differ. Anything the replica cannot describe
+    // (missing, unreadable, kind mismatch) drops back to being tarred.
+    let mut block_delta_path: Option<String> = None;
+    if !delta_paths.is_empty() {
+        match fetch_signatures(container, peer, secret, client, &delta_paths).await {
+            Ok(sigs) => {
+                let rootfs_c = read_root.to_string();
+                let paths_c = delta_paths.clone();
+                let (blob, fell_back) = tokio::task::spawn_blocking(move || {
+                    build_block_deltas(&rootfs_c, &paths_c, &sigs)
+                })
+                .await
+                .map_err(|e| format!("delta task: {}", e))?;
+                changed.extend(fell_back);
+                block_delta_path = blob;
+            }
+            Err(e) => {
+                // Not fatal — the round still completes by sending the
+                // files whole. Logged so a persistently failing probe does
+                // not silently cost bandwidth forever.
+                tracing::warn!(
+                    "wolfha[{}]: signature exchange with {} failed ({}) — sending {} file(s) whole",
+                    container, peer.address, e, delta_paths.len()
+                );
+                changed.extend(delta_paths.iter().cloned());
+            }
+        }
+    }
+    let changed = changed;
 
     // A quiet round still ships a metadata-only heartbeat (no archive):
     // settings changes must reach standbys without waiting for a file to
@@ -805,7 +1387,8 @@ async fn sync_one_replica_inner(
             }
             std::fs::write(&list_file, buf).map_err(|e| format!("write list: {}", e))?;
         }
-        let (rootfs_c, list_c, archive_c) = (rootfs.clone(), list_file.clone(), archive.clone());
+        let (rootfs_c, list_c, archive_c) =
+            (read_root.to_string(), list_file.clone(), archive.clone());
         let tar_res = tokio::task::spawn_blocking(move || tar_paths(&rootfs_c, &list_c, &archive_c))
             .await
             .map_err(|e| format!("tar task: {}", e));
@@ -816,11 +1399,22 @@ async fn sync_one_replica_inner(
         }
         Some(archive)
     };
-    let bytes_len = archive_on_disk.as_deref()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_bytes = |p: Option<&str>| -> u64 {
+        p.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0)
+    };
+    let bytes_len =
+        file_bytes(archive_on_disk.as_deref()) + file_bytes(block_delta_path.as_deref());
+    let delta_file_count = delta_paths.len().saturating_sub(
+        // Any that fell back were moved into `changed` and are counted there.
+        delta_paths.iter().filter(|p| changed.contains(p)).count(),
+    );
     let config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    // Every exit path from here must clear BOTH staged files or a failing
+    // replica leaks a delta per round into the staging directory.
+    let cleanup = |a: Option<&str>, b: Option<&str>| {
+        if let Some(p) = a { let _ = std::fs::remove_file(p); }
+        if let Some(p) = b { let _ = std::fs::remove_file(p); }
+    };
 
     // 4. Ship it — settings metadata rides along so standbys always
     // know the current priority order / witness / timings.
@@ -837,13 +1431,23 @@ async fn sync_one_replica_inner(
             .text("deletions", deletions_json.clone())
             .text("config", config.clone())
             .text("ha_meta", ha_meta_json.clone());
+        form = form.text("driver", format!("{:?}", driver));
         if let Some(path) = archive_on_disk.as_deref() {
             // Fresh streaming part per attempt — a stream can't be
             // cloned the way the old in-RAM bytes could.
             match stream_archive_part(path).await {
                 Ok(part) => form = form.part("archive", part.file_name("delta.tar.gz")),
                 Err(e) => {
-                    let _ = std::fs::remove_file(path);
+                    cleanup(archive_on_disk.as_deref(), block_delta_path.as_deref());
+                    return Err(e);
+                }
+            }
+        }
+        if let Some(path) = block_delta_path.as_deref() {
+            match stream_archive_part(path).await {
+                Ok(part) => form = form.part("blockdelta", part.file_name("delta.blocks")),
+                Err(e) => {
+                    cleanup(archive_on_disk.as_deref(), block_delta_path.as_deref());
                     return Err(e);
                 }
             }
@@ -855,8 +1459,8 @@ async fn sync_one_replica_inner(
             .send().await
         {
             Ok(r) if r.status().is_success() => {
-                if let Some(p) = archive_on_disk.as_deref() { let _ = std::fs::remove_file(p); }
-                return Ok((changed.len() as u64, bytes_len));
+                cleanup(archive_on_disk.as_deref(), block_delta_path.as_deref());
+                return Ok(((changed.len() + delta_file_count) as u64, bytes_len, driver));
             }
             Ok(r) => {
                 let status = r.status();
@@ -866,7 +1470,7 @@ async fn sync_one_replica_inner(
             Err(e) => { last_err = format!("{}: {}", url, e); }
         }
     }
-    if let Some(p) = archive_on_disk.as_deref() { let _ = std::fs::remove_file(p); }
+    cleanup(archive_on_disk.as_deref(), block_delta_path.as_deref());
     Err(format!("delta upload failed: {}", last_err))
 }
 
@@ -901,7 +1505,95 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
         return Err(format!("'{}' is stale here (a replica was promoted) — it receives syncs now, it doesn't send them", container));
     }
     let peers = entry.replicas.clone();
+    let kind = entry.kind;
     let secret = crate::auth::load_cluster_secret();
+
+    // A VM's delta is taken ONCE per round and shipped to every replica.
+    // Taking one per replica would hand the second replica an empty delta:
+    // `bitmap-mode: on-success` clears the copied bits when the backup
+    // job succeeds, so by the time the second call ran there would be
+    // nothing left to copy and that replica would silently fall behind
+    // while reporting success.
+    // An outstanding delta is retried before any new one is taken — see
+    // `pending_vm_delta`. Its blocks are gone from the bitmap, so it is the
+    // only copy of those changes that exists.
+    let recorded = entry.pending_vm_delta.clone();
+    let pending = recorded.clone()
+        .filter(|p| std::path::Path::new(&p.path).exists());
+    // The record survived but the staged file did not (a cleaned /var, a
+    // full disk, a reboot of a tmpfs staging dir). Those blocks are no
+    // longer in the bitmap either, so every replica that had not applied
+    // it is now behind by changes NO future delta will carry. Say so
+    // loudly and mark them: a replica silently diverging while reporting
+    // success is the worst failure this system can have.
+    if let Some(lost) = recorded.as_ref()
+        && pending.is_none()
+    {
+        let behind: Vec<String> = peers.iter()
+            .filter(|r| !peer_is_local(r) && !lost.applied_by.contains(&r.node_id))
+            .map(|r| r.node_id.clone())
+            .collect();
+        let mut st = HaStore::load();
+        if let Some(e) = st.get_mut(container) {
+            e.pending_vm_delta = None;
+            for id in &behind {
+                e.last_sync.insert(id.clone(), HaSyncStatus {
+                    at: now_unix(),
+                    ok: false,
+                    message: "staged disk delta was lost before this replica applied it — \
+                              it is missing changes no later delta will contain. Disable and \
+                              re-enable HA for this VM to re-seed it.".to_string(),
+                    files_sent: 0,
+                    bytes_sent: 0,
+                });
+            }
+            let _ = st.save();
+        }
+        if !behind.is_empty() {
+            tracing::error!(
+                "wolfha[{}]: staged delta {} vanished before {} replica(s) applied it — they \
+                 are now divergent and need a re-seed",
+                container, lost.path, behind.len()
+            );
+        }
+    }
+    let vm_delta: Option<replication::qemu_bitmap::PendingDelta> = if kind == SubjectKind::Vm {
+        match pending {
+            Some(p) => {
+                tracing::info!(
+                    "wolfha[{}]: retrying a disk delta {} replica(s) have not applied yet",
+                    container,
+                    peers.iter().filter(|r| !p.applied_by.contains(&r.node_id)).count(),
+                );
+                Some(p)
+            }
+            None => {
+                let c = container.to_string();
+                match tokio::task::spawn_blocking(move || vm_take_delta(&c)).await {
+                    Ok(Ok((path, _size))) => {
+                        let p = replication::qemu_bitmap::PendingDelta {
+                            path,
+                            taken_at: now_unix(),
+                            applied_by: Vec::new(),
+                        };
+                        // Record it BEFORE shipping: a crash between the
+                        // backup and the first upload must not lose track
+                        // of a delta the bitmap no longer describes.
+                        let mut st = HaStore::load();
+                        if let Some(e) = st.get_mut(container) {
+                            e.pending_vm_delta = Some(p.clone());
+                            let _ = st.save();
+                        }
+                        Some(p)
+                    }
+                    Ok(Err(e)) => return Err(format!("could not take a disk delta: {}", e)),
+                    Err(e) => return Err(format!("delta task: {}", e)),
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     for peer in &peers {
         // Defensive: never sync to ourselves — an aliased self-entry can
@@ -910,7 +1602,37 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
             tracing::debug!("wolfha: skipping self-aliased replica entry {} for '{}'", peer.node_id, container);
             continue;
         }
-        let status = sync_one_replica(container, peer, &secret).await;
+        let status = match &vm_delta {
+            Some(p) if p.applied_by.contains(&peer.node_id) => {
+                // Already has this delta from an earlier round; nothing to
+                // send until a new one is taken.
+                HaSyncStatus {
+                    at: now_unix(),
+                    ok: true,
+                    message: "already up to date with the current delta".to_string(),
+                    files_sent: 0,
+                    bytes_sent: 0,
+                }
+            }
+            Some(p) => {
+                let st = sync_vm_replica(container, peer, &secret, &p.path).await;
+                if st.ok {
+                    // Durably record WHICH replica has it, so a later
+                    // failure cannot cause this delta to be dropped while
+                    // another replica still needs it.
+                    let mut store = HaStore::load();
+                    if let Some(e) = store.get_mut(container)
+                        && let Some(pd) = e.pending_vm_delta.as_mut()
+                        && !pd.applied_by.contains(&peer.node_id)
+                    {
+                        pd.applied_by.push(peer.node_id.clone());
+                        let _ = store.save();
+                    }
+                }
+                st
+            }
+            None => sync_one_replica(container, peer, &secret).await,
+        };
         let mut store = HaStore::load();
         let previous_ok = store.get(container)
             .and_then(|e| e.last_sync.get(&peer.node_id))
@@ -946,7 +1668,121 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
             _ => {}
         }
     }
+    // Drop the staged delta ONLY once every replica has confirmed it.
+    // Deleting it while one is still behind would strand those blocks:
+    // the bitmap no longer describes them, so no future delta would carry
+    // them and that replica would diverge silently.
+    if vm_delta.is_some() {
+        let mut store = HaStore::load();
+        let done = store.get(container)
+            .and_then(|e| e.pending_vm_delta.clone())
+            .map(|p| {
+                let outstanding = peers.iter()
+                    .filter(|r| !peer_is_local(r))
+                    .any(|r| !p.applied_by.contains(&r.node_id));
+                (p.path, !outstanding)
+            });
+        if let Some((path, all_applied)) = done
+            && all_applied
+        {
+            let _ = std::fs::remove_file(&path);
+            if let Some(e) = store.get_mut(container) {
+                e.pending_vm_delta = None;
+                let _ = store.save();
+            }
+        }
+    }
     Ok(())
+}
+
+/// Ship an already-taken VM disk delta to one replica.
+async fn sync_vm_replica(
+    container: &str,
+    peer: &HaPeer,
+    secret: &str,
+    delta_path: &str,
+) -> HaSyncStatus {
+    let started = now_unix();
+    let bytes = std::fs::metadata(delta_path).map(|m| m.len()).unwrap_or(0);
+    match sync_vm_replica_inner(container, peer, secret, delta_path).await {
+        Ok(()) => HaSyncStatus {
+            at: started,
+            ok: true,
+            message: format!(
+                "disk delta applied ({}, QEMU dirty bitmap)",
+                human_bytes(bytes)
+            ),
+            files_sent: 1,
+            bytes_sent: bytes,
+        },
+        Err(e) => HaSyncStatus {
+            at: started,
+            ok: false,
+            message: e,
+            files_sent: 0,
+            bytes_sent: 0,
+        },
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 { format!("{} {}", n, UNITS[0]) } else { format!("{:.1} {}", v, UNITS[u]) }
+}
+
+async fn sync_vm_replica_inner(
+    container: &str,
+    peer: &HaPeer,
+    secret: &str,
+    delta_path: &str,
+) -> Result<(), String> {
+    let client = &*crate::api::API_HTTP_CLIENT;
+    let ha_meta_json = HaStore::load().get(container)
+        .filter(|e| e.role == HaRole::Primary)
+        .map(|e| serde_json::to_string(&HaMeta::from_entry(e)).unwrap_or_default())
+        .unwrap_or_default();
+    // The VM definition travels with every delta: a replica holding a
+    // perfect disk but no definition cannot start it on failover, and the
+    // definition can change (RAM, cores, NICs) between rounds.
+    let vm_config_json = vm_disk_and_config(container)
+        .ok()
+        .and_then(|(_, cfg)| serde_json::to_string(&cfg).ok())
+        .unwrap_or_default();
+
+    let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/wolfha/apply-vm-delta");
+    let mut last_err = String::new();
+    for url in &urls {
+        let part = match stream_archive_part(delta_path).await {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+        let form = reqwest::multipart::Form::new()
+            .text("container", container.to_string())
+            .text("ha_meta", ha_meta_json.clone())
+            .text("vm_config", vm_config_json.clone())
+            .part("archive", part.file_name("vmdelta.qcow2"));
+        match client.post(url)
+            .header("X-WolfStack-Secret", secret.to_string())
+            .timeout(std::time::Duration::from_secs(3600))
+            .multipart(form)
+            .send().await
+        {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) => {
+                let status = r.status();
+                let body = r.text().await.unwrap_or_default();
+                last_err = format!("{}: HTTP {} {}", url, status, body.chars().take(300).collect::<String>());
+            }
+            Err(e) => last_err = format!("{}: {}", url, e),
+        }
+    }
+    Err(format!("VM delta upload failed: {}", last_err))
 }
 
 // ─── Scheduler + boot guard (spawned from main.rs) ───
@@ -1029,7 +1865,8 @@ pub async fn boot_guard() {
             continue;
         }
         let container = entry.container.clone();
-        if crate::containers::lxc_is_running(&container) {
+        let kind = entry.kind;
+        if subject_is_running(kind, &container) {
             continue;
         }
 
@@ -1075,9 +1912,14 @@ pub async fn boot_guard() {
                 }
             }
             None => {
-                match crate::containers::lxc_start(&container) {
-                    Ok(_) => tracing::info!("wolfha: started HA primary '{}' at boot", container),
-                    Err(e) => tracing::warn!("wolfha: boot start of HA primary '{}' failed: {}", container, e),
+                match subject_start(kind, &container) {
+                    Ok(_) => tracing::info!(
+                        "wolfha: started HA primary {} '{}' at boot", kind.label(), container
+                    ),
+                    Err(e) => tracing::warn!(
+                        "wolfha: boot start of HA primary {} '{}' failed: {}",
+                        kind.label(), container, e
+                    ),
                 }
             }
         }
@@ -1245,8 +2087,8 @@ pub async fn failover_monitor_forever(cluster: std::sync::Arc<crate::agent::Clus
                     // failover cycles (no-op when already clean).
                     dedupe_replicas(&c, &cluster);
                     let running = {
-                        let cc = c.clone();
-                        tokio::task::spawn_blocking(move || crate::containers::lxc_is_running(&cc))
+                        let (cc, k) = (c.clone(), entry.kind);
+                        tokio::task::spawn_blocking(move || subject_is_running(k, &cc))
                             .await.unwrap_or(false)
                     };
                     if !running {
@@ -1313,8 +2155,8 @@ pub async fn failover_monitor_forever(cluster: std::sync::Arc<crate::agent::Clus
                         }
                         alert_clear(&format!("witnessdown:{}", c));
                         tracing::warn!("wolfha: witness {} unreachable {}s and no replica answers — SELF-FENCING '{}'", entry.witness, elapsed, c);
-                        let cc = c.clone();
-                        let _ = tokio::task::spawn_blocking(move || crate::containers::lxc_stop(&cc)).await;
+                        let (cc, k) = (c.clone(), entry.kind);
+                        let _ = tokio::task::spawn_blocking(move || subject_stop(k, &cc)).await;
                         let mut s = HaStore::load();
                         if let Some(e) = s.get_mut(&c) {
                             e.stale = true;
@@ -1370,8 +2212,8 @@ pub async fn failover_monitor_forever(cluster: std::sync::Arc<crate::agent::Clus
                                 e.stale = false;
                                 let _ = s.save();
                             }
-                            let cc = c.clone();
-                            let _ = tokio::task::spawn_blocking(move || crate::containers::lxc_start(&cc)).await;
+                            let (cc, k) = (c.clone(), entry.kind);
+                            let _ = tokio::task::spawn_blocking(move || subject_start(k, &cc)).await;
                             alert_clear(&format!("fenced:{}", c));
                             alert_once(&format!("resumed:{}", c),
                                 &format!("WolfHA '{}' resumed on its primary", c),
@@ -1385,8 +2227,8 @@ pub async fn failover_monitor_forever(cluster: std::sync::Arc<crate::agent::Clus
                 (HaRole::Replica, false) => {
                     let Some(primary) = entry.primary.clone() else { continue };
                     let running_here = {
-                        let cc = c.clone();
-                        tokio::task::spawn_blocking(move || crate::containers::lxc_is_running(&cc))
+                        let (cc, k) = (c.clone(), entry.kind);
+                        tokio::task::spawn_blocking(move || subject_is_running(k, &cc))
                             .await.unwrap_or(false)
                     };
                     let pstat = peer_status(&primary, &c, &secret).await;
@@ -1399,8 +2241,8 @@ pub async fn failover_monitor_forever(cluster: std::sync::Arc<crate::agent::Clus
                             let p_active = v.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
                             if p_active {
                                 tracing::warn!("wolfha: BOTH '{}' copies running — stopping the standby copy", c);
-                                let cc = c.clone();
-                                let _ = tokio::task::spawn_blocking(move || crate::containers::lxc_stop(&cc)).await;
+                                let (cc, k) = (c.clone(), entry.kind);
+                                let _ = tokio::task::spawn_blocking(move || subject_stop(k, &cc)).await;
                                 alert_once(&format!("dup:{}", c),
                                     &format!("WolfHA duplicate '{}' stopped", c),
                                     &format!("This standby was running at the same time as the primary on {} — the standby copy was stopped and stays a replica. Check how it was started.", primary.node_id)).await;
@@ -1538,6 +2380,185 @@ pub async fn failover_monitor_forever(cluster: std::sync::Arc<crate::agent::Clus
 
 #[cfg(test)]
 mod tests {
+
+    /// End-to-end functional test of the replication pipeline against real
+    /// files: signatures on the "replica" copy, delta on the "primary"
+    /// copy, bundle over the wire format, then install on the replica.
+    /// The reconstructed file must match the primary byte for byte.
+    #[test]
+    fn a_block_delta_round_trip_reproduces_the_primary_file() {
+        use super::replication::rolling;
+        let dir = std::env::temp_dir().join(format!("wolfha-e2e-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let replica = dir.join("data.bin");
+        let primary = dir.join("data.new");
+
+        // A file big enough to exercise real block matching.
+        let mut base: Vec<u8> = (0..400_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        std::fs::write(&replica, &base).unwrap();
+        // One small edit deep inside, plus an append.
+        base[250_000] ^= 0xff;
+        base.extend_from_slice(b"appended tail bytes");
+        std::fs::write(&primary, &base).unwrap();
+
+        let sig = rolling::signatures(replica.to_str().unwrap(), rolling::BLOCK_SIZE).unwrap();
+        let sig = rolling::decode_signatures(&rolling::encode_signatures(&sig)).unwrap();
+        let ops = rolling::compute_delta(primary.to_str().unwrap(), &sig).unwrap();
+
+        // Through the multi-file bundle format, as a real round does.
+        let bundle = rolling::pack_file_deltas(&[rolling::FileDelta {
+            path: "data.bin".to_string(),
+            ops,
+        }]);
+        let items = rolling::unpack_file_deltas(&bundle).unwrap();
+        assert_eq!(items.len(), 1);
+
+        super::install_reconstructed_file(replica.to_str().unwrap(), &items[0].ops).unwrap();
+        assert_eq!(std::fs::read(&replica).unwrap(), base, "replica must match the primary exactly");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The delta must cost about ONE BLOCK, not a fraction of the file —
+    /// that is the invariant that makes this worth having, and it is what
+    /// scales: the same single block whether the file is 600 KB or 10 GB.
+    ///
+    /// (Asserting a *percentage* would be wrong. With a 64 KiB block size a
+    /// small file is only a handful of blocks, so one changed block is a
+    /// large share of it — while for the 10 GB database this exists for it
+    /// is 0.0006%.)
+    #[test]
+    fn a_one_byte_change_costs_about_one_block() {
+        use super::replication::rolling;
+        let dir = std::env::temp_dir().join(format!("wolfha-e2e-size-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let replica = dir.join("big.bin");
+        let mut data: Vec<u8> = (0..600_000u32).map(|i| (i.wrapping_mul(40503) >> 8) as u8).collect();
+        std::fs::write(&replica, &data).unwrap();
+        let sig = rolling::signatures(replica.to_str().unwrap(), rolling::BLOCK_SIZE).unwrap();
+        data[300_000] ^= 0xff;
+        let ops = rolling::delta_from_bytes(&data, &sig);
+        let bundle = rolling::pack_file_deltas(&[rolling::FileDelta { path: "big.bin".into(), ops }]);
+        assert!(
+            bundle.len() < rolling::BLOCK_SIZE * 3,
+            "a one-byte change should cost ~1 block ({} bytes), got {} for a {} byte file",
+            rolling::BLOCK_SIZE,
+            bundle.len(),
+            data.len()
+        );
+        // And it must genuinely be less than resending the file.
+        assert!(bundle.len() < data.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Mode must survive the swap. Without this a first sync silently
+    /// turns every replicated file 0644 and the container breaks on its
+    /// next start.
+    #[test]
+    fn installing_a_delta_preserves_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        use super::replication::rolling;
+        let dir = std::env::temp_dir().join(format!("wolfha-e2e-mode-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("script.sh");
+        std::fs::write(&target, b"#!/bin/sh\necho one\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        let new = b"#!/bin/sh\necho two\n".to_vec();
+        let sig = rolling::signatures(target.to_str().unwrap(), rolling::BLOCK_SIZE).unwrap();
+        let ops = rolling::delta_from_bytes(&new, &sig);
+        super::install_reconstructed_file(target.to_str().unwrap(), &ops).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), new);
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o750, "mode changed to {:o}", mode);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    /// THE golden-rule guarantee for VM support: every wolfha.json written
+    /// before `kind` existed must still parse, and must still mean
+    /// "container". A regression here would make existing HA entries
+    /// either fail to load or — far worse — be treated as VMs, so
+    /// promotion would try to start a VM that does not exist.
+    #[test]
+    fn an_entry_without_kind_loads_as_a_container() {
+        let old = r#"{
+            "container": "web01",
+            "role": "primary",
+            "interval_minutes": 5,
+            "replicas": [],
+            "last_sync": {},
+            "last_delta_at": 0,
+            "stale": false
+        }"#;
+        let e: super::HaEntry = serde_json::from_str(old).expect("pre-VM entry must parse");
+        assert_eq!(e.kind, super::SubjectKind::Container);
+        assert!(e.pending_vm_delta.is_none());
+    }
+
+    /// The kind travels to standbys inside HaMeta. A delta from an older
+    /// primary carries no `kind`, and must keep meaning "container".
+    #[test]
+    fn ha_meta_without_kind_means_container() {
+        let old = r#"{
+            "interval_minutes": 5,
+            "replicas": [],
+            "auto_failover": false,
+            "witness": "",
+            "failover_after_secs": 90,
+            "primary": null
+        }"#;
+        let m: super::HaMeta = serde_json::from_str(old).expect("pre-VM meta must parse");
+        assert_eq!(m.kind, super::SubjectKind::Container);
+    }
+
+    /// A standby must learn from the primary what it is holding — guessing
+    /// wrong means starting the wrong kind of thing on failover.
+    #[test]
+    fn ha_meta_carries_the_kind_to_a_standby() {
+        let mut e: super::HaEntry =
+            serde_json::from_str(r#"{"container":"vm01","role":"primary","replicas":[],
+                "last_sync":{},"last_delta_at":0,"stale":false}"#).unwrap();
+        e.kind = super::SubjectKind::Vm;
+        let meta = super::HaMeta::from_entry(&e);
+        assert_eq!(meta.kind, super::SubjectKind::Vm);
+
+        let mut standby: super::HaEntry =
+            serde_json::from_str(r#"{"container":"vm01","role":"replica","replicas":[],
+                "last_sync":{},"last_delta_at":0,"stale":false}"#).unwrap();
+        assert_eq!(standby.kind, super::SubjectKind::Container);
+        meta.apply_to(&mut standby);
+        assert_eq!(standby.kind, super::SubjectKind::Vm, "standby must adopt the primary's kind");
+    }
+
+    /// Wire spelling is pinned: `kind` crosses between nodes, so renaming
+    /// a variant would silently split a mixed-version cluster.
+    #[test]
+    fn subject_kind_wire_names_are_stable() {
+        assert_eq!(serde_json::to_string(&super::SubjectKind::Container).unwrap(), "\"container\"");
+        assert_eq!(serde_json::to_string(&super::SubjectKind::Vm).unwrap(), "\"vm\"");
+    }
+
+    /// A pending delta must survive a restart — it is the only copy of
+    /// blocks the bitmap has already discarded.
+    #[test]
+    fn pending_delta_round_trips_through_the_store() {
+        let mut e: super::HaEntry =
+            serde_json::from_str(r#"{"container":"vm01","role":"primary","replicas":[],
+                "last_sync":{},"last_delta_at":0,"stale":false}"#).unwrap();
+        e.kind = super::SubjectKind::Vm;
+        e.pending_vm_delta = Some(super::replication::qemu_bitmap::PendingDelta {
+            path: "/var/lib/wolfstack/wolfha/vmdelta-x.qcow2".into(),
+            taken_at: 42,
+            applied_by: vec!["node-a".into()],
+        });
+        let json = serde_json::to_string(&e).unwrap();
+        let back: super::HaEntry = serde_json::from_str(&json).unwrap();
+        let pd = back.pending_vm_delta.expect("pending delta must survive");
+        assert_eq!(pd.applied_by, vec!["node-a".to_string()]);
+        assert_eq!(pd.taken_at, 42);
+    }
+
     use super::*;
 
     fn f(p: &str, s: u64, m: i64) -> ManifestEntry {

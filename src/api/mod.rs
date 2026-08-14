@@ -12923,8 +12923,10 @@ pub async fn wolfha_list(req: HttpRequest, state: web::Data<AppState>) -> HttpRe
         let enriched: Vec<serde_json::Value> = store.entries.iter().map(|e| {
             let mut v = serde_json::to_value(e).unwrap_or_default();
             if let Some(obj) = v.as_object_mut() {
+                // Ask the right runtime: a protected VM checked with
+                // lxc_is_running would always render as stopped.
                 obj.insert("active".into(),
-                    serde_json::Value::Bool(containers::lxc_is_running(&e.container)));
+                    serde_json::Value::Bool(crate::wolfha::subject_is_running(e.kind, &e.container)));
             }
             v
         }).collect();
@@ -12988,7 +12990,12 @@ pub async fn wolfha_status(
     }
     let blk = web::block(move || {
         let store = crate::wolfha::HaStore::load();
-        let active = containers::lxc_is_running(&container);
+        // The failover monitor reads this to decide whether the primary is
+        // still up. Checking a VM with lxc_is_running would report it
+        // stopped every time and could drive a takeover of a VM that is
+        // running perfectly well.
+        let kind = store.get(&container).map(|e| e.kind).unwrap_or_default();
+        let active = crate::wolfha::subject_is_running(kind, &container);
         match store.get(&container) {
             Some(e) => serde_json::json!({
                 "role": match e.role { crate::wolfha::HaRole::Primary => "primary", crate::wolfha::HaRole::Replica => "replica" },
@@ -13036,31 +13043,158 @@ pub async fn wolfha_manifest(
     }
 }
 
+/// GET /api/wolfha/capabilities?container= — which replication drivers
+/// this node can use for a subject.
+///
+/// The primary probes this before every sync and uses the best driver
+/// BOTH ends support. A node running a build without this endpoint 404s,
+/// and the caller treats that as "floor only" — which is exactly the
+/// pre-existing whole-file behaviour, so a mixed-version cluster keeps
+/// working rather than half-upgrading into a payload the old side cannot
+/// read.
+pub async fn wolfha_capabilities(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(resp) = wolfha_peer_auth(&req, &state) { return resp; }
+    let Some(container) = query.get("container").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "container parameter required"}));
+    };
+    if !crate::auth::is_safe_name(&container) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
+    }
+    let blk = web::block(move || -> Result<crate::wolfha::replication::ReplicationCapabilities, String> {
+        let store = crate::wolfha::HaStore::load();
+        if store.get(&container).is_none() {
+            return Err(format!("'{}' is not WolfHA-managed on this node", container));
+        }
+        let rootfs = format!("{}/{}/rootfs", containers::lxc_base_dir(&container), container);
+        Ok(crate::wolfha::replication::detect_container_capabilities(&rootfs))
+    }).await;
+    match blk {
+        Ok(Ok(c)) => HttpResponse::Ok().json(c),
+        Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct WolfhaSignatureRequest {
+    pub container: String,
+    /// Rootfs-relative paths the primary intends to delta-encode.
+    pub paths: Vec<String>,
+}
+
+/// POST /api/wolfha/signatures — block signatures for the replica's copy
+/// of specific files, so the primary can send only changed blocks.
+///
+/// Returns `{path: base64(signature)}`. Base64 rather than a binary frame
+/// because a signature is ~20 bytes per 64 KiB block — 0.03% of the file
+/// it describes — so the encoding overhead is irrelevant next to the
+/// clarity of a JSON error path shared with every other endpoint here.
+///
+/// A path the replica does not have is simply absent from the reply; the
+/// primary then sends that file whole.
+pub async fn wolfha_signatures(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<WolfhaSignatureRequest>,
+) -> HttpResponse {
+    if let Err(resp) = wolfha_peer_auth(&req, &state) { return resp; }
+    let b = body.into_inner();
+    if !crate::auth::is_safe_name(&b.container) {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
+    }
+    // Bound the request: a peer asking for signatures over a huge path
+    // list would pin a worker hashing files for an unbounded time.
+    if b.paths.len() > 10_000 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "too many paths in one signature request (max 10000)"
+        }));
+    }
+    let blk = web::block(move || -> Result<serde_json::Value, String> {
+        use base64::Engine;
+        let store = crate::wolfha::HaStore::load();
+        if store.get(&b.container).is_none() {
+            return Err(format!("'{}' is not WolfHA-managed on this node", b.container));
+        }
+        let rootfs = format!("{}/{}/rootfs", containers::lxc_base_dir(&b.container), b.container);
+        let mut out = serde_json::Map::new();
+        for rel in &b.paths {
+            // Same guard the delta applier uses: a peer must not be able
+            // to make us read outside the container's rootfs.
+            if !crate::wolfha::is_safe_rel_path(rel) {
+                continue;
+            }
+            let full = format!("{}/{}", rootfs, rel);
+            // Only regular files have block signatures; a symlink or
+            // directory here means the two ends disagree about the kind,
+            // which the manifest diff already handles by resending.
+            match std::fs::symlink_metadata(&full) {
+                Ok(m) if m.is_file() => {}
+                _ => continue,
+            }
+            if let Ok(sig) = crate::wolfha::replication::rolling::signatures(
+                &full,
+                crate::wolfha::replication::rolling::BLOCK_SIZE,
+            ) {
+                let blob = crate::wolfha::replication::rolling::encode_signatures(&sig);
+                out.insert(
+                    rel.clone(),
+                    serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(blob),
+                    ),
+                );
+            }
+        }
+        Ok(serde_json::Value::Object(out))
+    }).await;
+    match blk {
+        Ok(Ok(v)) => HttpResponse::Ok().json(v),
+        Ok(Err(e)) => HttpResponse::NotFound().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
 /// Shared multipart reader for WolfHA uploads (apply-delta and
 /// receive-seed): text fields into a map, the archive streamed to the
 /// staging dir (NOT /tmp — a multi-GB seed on a tmpfs is how the
 /// wolfstack-1 staging incident happened).
 async fn wolfha_read_multipart(
     payload: &mut actix_multipart::Multipart,
-) -> Result<(std::collections::HashMap<String, String>, Option<String>), String> {
+) -> Result<(std::collections::HashMap<String, String>, Option<String>, Option<String>), String> {
     use futures::StreamExt;
     let stage_dir = "/var/lib/wolfstack/wolfha";
     std::fs::create_dir_all(stage_dir).map_err(|e| format!("staging dir: {}", e))?;
     let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut archive_path: Option<String> = None;
+    let mut blockdelta_path: Option<String> = None;
 
     while let Some(item) = payload.next().await {
         let mut field = item.map_err(|e| format!("multipart error: {}", e))?;
         let field_name = field.name().unwrap_or("").to_string();
-        if field_name == "archive" {
-            let path = format!("{}/incoming-{}.tar.gz", stage_dir, uuid::Uuid::new_v4());
+        // Both file parts stream straight to disk. `blockdelta` is usually
+        // small, but "usually" is not a size limit — a rewritten multi-GB
+        // file produces a delta to match, and buffering it would undo the
+        // memory fix that put the archive on disk in the first place.
+        let staged = match field_name.as_str() {
+            "archive" => Some(format!("{}/incoming-{}.tar.gz", stage_dir, uuid::Uuid::new_v4())),
+            "blockdelta" => Some(format!("{}/incoming-{}.blocks", stage_dir, uuid::Uuid::new_v4())),
+            _ => None,
+        };
+        if let Some(path) = staged {
             let mut file = std::fs::File::create(&path).map_err(|e| format!("stage file: {}", e))?;
             use std::io::Write;
             while let Some(chunk) = field.next().await {
                 let data = chunk.map_err(|e| format!("upload read: {}", e))?;
                 file.write_all(&data).map_err(|e| format!("stage write: {}", e))?;
             }
-            archive_path = Some(path);
+            if field_name == "archive" {
+                archive_path = Some(path);
+            } else {
+                blockdelta_path = Some(path);
+            }
         } else {
             let mut buf = Vec::new();
             while let Some(chunk) = field.next().await {
@@ -13069,7 +13203,7 @@ async fn wolfha_read_multipart(
             fields.insert(field_name, String::from_utf8_lossy(&buf).to_string());
         }
     }
-    Ok((fields, archive_path))
+    Ok((fields, archive_path, blockdelta_path))
 }
 
 /// POST /api/wolfha/apply-delta — a primary ships an incremental rootfs
@@ -13080,13 +13214,14 @@ pub async fn wolfha_apply_delta(
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
     if let Err(resp) = wolfha_peer_auth(&req, &state) { return resp; }
-    let (fields, archive) = match wolfha_read_multipart(&mut payload).await {
+    let (fields, archive, blockdelta) = match wolfha_read_multipart(&mut payload).await {
         Ok(v) => v,
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     };
     let container = fields.get("container").map(|s| s.trim().to_string()).unwrap_or_default();
     if container.is_empty() || !crate::auth::is_safe_name(&container) {
         if let Some(a) = archive { let _ = std::fs::remove_file(a); }
+        if let Some(b) = blockdelta { let _ = std::fs::remove_file(b); }
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
     }
     let deletions: Vec<String> = fields.get("deletions")
@@ -13098,6 +13233,7 @@ pub async fn wolfha_apply_delta(
 
     let c = container.clone();
     let archive_c = archive.clone();
+    let blockdelta_c = blockdelta.clone();
     let blk = web::block(move || -> Result<usize, String> {
         let store = crate::wolfha::HaStore::load();
         let entry = store.get(&c).ok_or_else(|| format!("'{}' is not a WolfHA copy on this node", c))?;
@@ -13106,12 +13242,20 @@ pub async fn wolfha_apply_delta(
         if entry.role == crate::wolfha::HaRole::Primary && !entry.stale {
             return Err(format!("'{}' is the ACTIVE primary here — refusing a delta that would overwrite it", c));
         }
+        // Block deltas are applied BEFORE the tar. The tar carries whole
+        // files, so if a path somehow appears in both, the whole-file copy
+        // is the newer, more complete truth and must win.
+        if let Some(b) = &blockdelta_c {
+            crate::wolfha::apply_block_deltas(&c, b)?;
+        }
         let deleted = match &archive_c {
             Some(a) => crate::wolfha::apply_delta(&c, a, &deletions, &config)?,
             // No archive = metadata-only heartbeat: the sender's diff
             // proved the rootfs identical. Settings changes and the
             // freshness clock must not wait for a file to change
             // (found live 2026-08-08: idle containers never got either).
+            // A round carrying only block deltas still needs the config
+            // refresh, so this arm is reached in that case too.
             None => {
                 crate::wolfha::refresh_replica_config(&c, &config);
                 0
@@ -13134,8 +13278,74 @@ pub async fn wolfha_apply_delta(
         Ok(deleted)
     }).await;
     if let Some(a) = &archive { let _ = std::fs::remove_file(a); }
+    if let Some(b) = &blockdelta { let _ = std::fs::remove_file(b); }
     match blk {
         Ok(Ok(deleted)) => HttpResponse::Ok().json(serde_json::json!({ "ok": true, "deleted": deleted })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/wolfha/apply-vm-delta — a primary ships an incremental VM
+/// disk delta to this replica.
+///
+/// The VM definition rides along with every delta: a replica holding a
+/// perfect disk image but no definition cannot start the VM on failover,
+/// and the definition can change between rounds.
+pub async fn wolfha_apply_vm_delta(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    if let Err(resp) = wolfha_peer_auth(&req, &state) { return resp; }
+    let (fields, archive, _blocks) = match wolfha_read_multipart(&mut payload).await {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    };
+    let container = fields.get("container").map(|s| s.trim().to_string()).unwrap_or_default();
+    if container.is_empty() || !crate::auth::is_safe_name(&container) {
+        if let Some(a) = archive { let _ = std::fs::remove_file(a); }
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid VM name"}));
+    }
+    let Some(archive) = archive else {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "a VM delta upload must carry the delta image"
+        }));
+    };
+    let ha_meta: Option<crate::wolfha::HaMeta> = fields.get("ha_meta")
+        .and_then(|m| serde_json::from_str(m).ok());
+    let vm_config: Option<crate::vms::manager::VmConfig> = fields.get("vm_config")
+        .and_then(|c| serde_json::from_str(c).ok());
+
+    let (c, archive_c) = (container.clone(), archive.clone());
+    let blk = web::block(move || -> Result<(), String> {
+        let store = crate::wolfha::HaStore::load();
+        let entry = store.get(&c)
+            .ok_or_else(|| format!("'{}' is not a WolfHA copy on this node", c))?;
+        if entry.role == crate::wolfha::HaRole::Primary && !entry.stale {
+            return Err(format!(
+                "'{}' is the ACTIVE primary here — refusing a delta that would overwrite it", c
+            ));
+        }
+        crate::wolfha::vm_apply_delta(&c, &archive_c)?;
+        if let Some(cfg) = &vm_config {
+            crate::wolfha::vm_store_replica_config(&c, cfg)?;
+        }
+        let mut store = crate::wolfha::HaStore::load();
+        if let Some(e) = store.get_mut(&c) {
+            e.last_delta_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            e.stale = false;
+            if let Some(m) = &ha_meta {
+                m.apply_to(e);
+            }
+            let _ = store.save();
+        }
+        Ok(())
+    }).await;
+    let _ = std::fs::remove_file(&archive);
+    match blk {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -13154,7 +13364,8 @@ pub async fn wolfha_receive_seed(
             "error": "WolfHA replicas require a native (non-Proxmox) node — Proxmox rootfs storage is not a plain directory"
         }));
     }
-    let (fields, archive) = match wolfha_read_multipart(&mut payload).await {
+    // A seed is a full rootfs tar; there is never a block-delta part.
+    let (fields, archive, _no_blockdelta) = match wolfha_read_multipart(&mut payload).await {
         Ok(v) => v,
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     };
@@ -13175,9 +13386,15 @@ pub async fn wolfha_receive_seed(
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "primary peer identity is required"}));
     };
 
+    // The primary states what it is seeding. An older primary sends no
+    // `kind`, which defaults to Container — exactly what those primaries
+    // have always been sending.
+    let seed_kind = ha_meta.as_ref().map(|m| m.kind).unwrap_or_default();
     let (c, archive_c) = (container.clone(), archive.clone());
     let blk = web::block(move || {
-        crate::wolfha::install_seed(&c, &archive_c, &config, primary, wolfnet_ip.as_deref(), ha_meta.as_ref())
+        crate::wolfha::install_seed(
+            &c, seed_kind, &archive_c, &config, primary, wolfnet_ip.as_deref(), ha_meta.as_ref(),
+        )
     }).await;
     let _ = std::fs::remove_file(&archive);
     match blk {
@@ -13190,6 +13407,10 @@ pub async fn wolfha_receive_seed(
 #[derive(Deserialize)]
 pub struct WolfHaEnableReq {
     pub container: String,
+    /// Container (default) or VM. Absent in requests from older clients,
+    /// which only ever protected containers.
+    #[serde(default)]
+    pub kind: crate::wolfha::SubjectKind,
     /// Ordered — the sequence IS the failover priority.
     pub replica_node_ids: Vec<String>,
     #[serde(default)]
@@ -13346,6 +13567,7 @@ pub async fn wolfha_enable(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let container = body.container.trim().to_string();
+    let subject_kind = body.kind;
     if !crate::auth::is_safe_name(&container) {
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
     }
@@ -13357,7 +13579,27 @@ pub async fn wolfha_enable(
     let base = containers::lxc_base_dir(&container);
     let container_dir = format!("{}/{}", base, container);
     let rootfs = format!("{}/rootfs", container_dir);
-    if !std::path::Path::new(&rootfs).is_dir() {
+    if subject_kind == crate::wolfha::SubjectKind::Vm {
+        // Attach the dirty bitmap BEFORE anything else. Every write from
+        // this instant is captured, so the first incremental after the
+        // seed carries whatever changed while the seed was being taken —
+        // do it later and those writes are in no delta at all and the
+        // replica starts life already diverged.
+        let vm = container.clone();
+        match web::block(move || crate::wolfha::vm_begin_tracking(&vm)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("cannot protect this VM: {}", e)
+                }));
+            }
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("{}", e)
+                }));
+            }
+        }
+    } else if !std::path::Path::new(&rootfs).is_dir() {
         return HttpResponse::NotFound().json(serde_json::json!({
             "error": format!("container '{}' (with a directory rootfs) not found on this node", container)
         }));
@@ -13455,6 +13697,7 @@ pub async fn wolfha_enable(
         let wolfnet_ip = containers::lxc_get_wolfnet_ip(&container).unwrap_or_default();
         let primary_json = serde_json::to_string(&self_peer).unwrap_or_default();
         let ha_meta_json = serde_json::to_string(&crate::wolfha::HaMeta {
+            kind: subject_kind,
             interval_minutes: interval,
             replicas: peers.clone(),
             auto_failover,
@@ -13525,6 +13768,11 @@ pub async fn wolfha_enable(
         let had_autostart = std::fs::read_to_string(format!("{}/config", container_dir))
             .map(|c| c.lines().any(|l| l.trim() == "lxc.start.auto = 1"))
             .unwrap_or(false);
+        // A VM needs its dirty bitmap attached before it is protected, so
+        // every write from this point is captured. Doing it here — after
+        // the seed has been taken — would miss writes made during the
+        // seed, so `wolfha_enable` calls `vm_begin_tracking` earlier; this
+        // is the container-only autostart takeover.
         if had_autostart {
             let _ = containers::lxc_set_autostart(&container, false);
         }
@@ -13533,6 +13781,7 @@ pub async fn wolfha_enable(
         store.remove(&container);
         store.entries.push(crate::wolfha::HaEntry {
             container: container.clone(),
+            kind: subject_kind,
             role: crate::wolfha::HaRole::Primary,
             interval_minutes: interval,
             replicas: peers.clone(),
@@ -13541,6 +13790,7 @@ pub async fn wolfha_enable(
             last_sync: std::collections::HashMap::new(),
             last_delta_at: 0,
             stale: false,
+            pending_vm_delta: None,
             auto_failover,
             witness: witness.clone(),
             failover_after_secs: failover_after,
@@ -13837,8 +14087,26 @@ pub async fn wolfha_drop(
     let destroy = body.remove_replicas;
     let blk = web::block(move || -> Result<String, String> {
         let mut store = crate::wolfha::HaStore::load();
+        // Read the kind BEFORE removing the entry — afterwards there is
+        // nothing left to tell us what this copy was.
+        let kind = store.get(&container).map(|e| e.kind).unwrap_or_default();
         store.remove(&container);
         store.save()?;
+        if kind == crate::wolfha::SubjectKind::Vm {
+            // A VM replica is a disk image plus a definition, not a rootfs
+            // directory, so it is removed through the VM store.
+            if destroy {
+                if crate::wolfha::subject_is_running(kind, &container) {
+                    return Err(format!("VM replica '{}' is RUNNING here — refusing to delete it", container));
+                }
+                crate::wolfha::vm_remove_replica(&container)?;
+                return Ok(format!("VM replica '{}' removed", container));
+            }
+            return Ok(format!(
+                "'{}' is no longer WolfHA-managed here; the dormant VM copy was left in place",
+                container
+            ));
+        }
         if crate::wolfha::is_replica(&container) {
             if destroy {
                 if containers::lxc_is_running(&container) {
@@ -13883,6 +14151,23 @@ pub async fn wolfha_disable(
     };
 
     let mut notes: Vec<String> = Vec::new();
+    // Detach the dirty bitmap so we do not leave replication state inside
+    // an image WolfStack no longer manages. Best-effort: a VM that is not
+    // running has no monitor to talk to, and failing the whole disable
+    // because of that would strand the operator.
+    if entry.kind == crate::wolfha::SubjectKind::Vm
+        && entry.role == crate::wolfha::HaRole::Primary
+    {
+        let vm = container.clone();
+        if let Ok(Err(e)) = web::block(move || crate::wolfha::vm_end_tracking(&vm)).await {
+            notes.push(format!(
+                "The disk's dirty bitmap could not be removed ({}). It is harmless, but \
+                 `qemu-img info` will still list it; remove it with \
+                 `qemu-img bitmap --remove` when the VM is next stopped.",
+                e
+            ));
+        }
+    }
     if entry.role == crate::wolfha::HaRole::Primary {
         let client = &*API_HTTP_CLIENT;
         let secret = state.cluster_secret.clone();
@@ -45075,6 +45360,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/wolfha/list", web::get().to(wolfha_list))
         .route("/api/wolfha/status", web::get().to(wolfha_status))
         .route("/api/wolfha/manifest", web::get().to(wolfha_manifest))
+        .route("/api/wolfha/capabilities", web::get().to(wolfha_capabilities))
+        .route("/api/wolfha/apply-vm-delta", web::post().to(wolfha_apply_vm_delta))
+        .route("/api/wolfha/signatures", web::post().to(wolfha_signatures))
         .route("/api/wolfha/apply-delta", web::post().to(wolfha_apply_delta))
         .route("/api/wolfha/receive-seed", web::post().to(wolfha_receive_seed))
         .route("/api/wolfha/enable", web::post().to(wolfha_enable))
