@@ -69,6 +69,18 @@ pub struct PendingDelta {
     /// Node ids that have confirmed applying it.
     #[serde(default)]
     pub applied_by: Vec<String>,
+    /// Chain token this delta advances the replicas TO. A delta is only
+    /// safe on a replica whose disk is byte-identical to the base it was
+    /// taken against, so each delta carries (prev = the token every
+    /// current replica holds, next = this). A replica whose stored token
+    /// isn't `prev` has diverged (missed a handoff delta, is an
+    /// ex-primary with uncaptured writes, …) and must be re-seeded, not
+    /// patched — applying anyway would corrupt it silently.
+    /// `#[serde(default)]` so a store written before tokens still parses;
+    /// an empty token forces the strict path (re-seed) rather than a
+    /// blind apply.
+    #[serde(default)]
+    pub token: String,
 }
 
 /// One QMP call against a VM's monitor.
@@ -481,6 +493,120 @@ pub fn take_incremental(
     if let Err(e) = result {
         let _ = std::fs::remove_file(out_path);
         return Err(e);
+    }
+    Ok(())
+}
+
+/// Take a FULL copy of `disk_path` into `out_path` while the VM runs —
+/// the initial replica seed (and any re-seed of a diverged replica).
+///
+/// Same node/target plumbing as [`take_incremental`], but with
+/// `sync: "full"` — MirrorSyncMode in qapi/block-core.json: "full: copies
+/// data from all images to the destination". blockdev-backup is
+/// copy-before-write, so the target is a point-in-time image of the disk
+/// as of job START; every guest write from that instant is preserved in
+/// the target's copy and recorded by our dirty bitmap (the caller attaches
+/// the bitmap BEFORE seeding), so the next incremental trues the replica
+/// up. No `bitmap`/`bitmap-mode` args: a full copy must never clear the
+/// dirty set — the bits still describe writes the NEXT delta must carry.
+///
+/// Blocking, like take_incremental — run it off the async runtime.
+// Source: qemu_bitmap.rs:386-486 take_incremental() — mirrored structure,
+// sync mode changed per qapi/block-core.json MirrorSyncMode.
+pub fn take_full(
+    vm: &str,
+    disk_path: &str,
+    out_path: &str,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    let node = resolve_disk_node(vm, disk_path)?;
+    let size = virtual_size(disk_path)?;
+    create_delta_target(out_path, size)?;
+
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let target_node = format!("wolfha-tgt-{}", token);
+    let job_id = format!("wolfha-job-{}", token);
+
+    let add = qmp(
+        vm,
+        "blockdev-add",
+        Some(serde_json::json!({
+            "driver": "qcow2",
+            "node-name": target_node,
+            "file": { "driver": "file", "filename": out_path },
+        })),
+    );
+    if let Err(e) = add {
+        let _ = std::fs::remove_file(out_path);
+        return Err(format!("could not attach the seed target: {}", e));
+    }
+    let detach = |vm: &str, node: &str| {
+        let _ = qmp(vm, "blockdev-del", Some(serde_json::json!({ "node-name": node })));
+    };
+
+    let backup = qmp(
+        vm,
+        "blockdev-backup",
+        Some(serde_json::json!({
+            "job-id": job_id,
+            "device": node,
+            "target": target_node,
+            "sync": "full",
+            // Park in `concluded` so the outcome can be read — see await_job.
+            "auto-dismiss": false,
+        })),
+    );
+    if let Err(e) = backup {
+        detach(vm, &target_node);
+        let _ = std::fs::remove_file(out_path);
+        return Err(format!("could not start the full backup: {}", e));
+    }
+
+    let result = await_job(vm, &job_id, timeout_secs);
+    detach(vm, &target_node);
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(out_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Remove our persistent bitmap from a qcow2 that is NOT attached to a
+/// running QEMU. Used on a replica after installing a seed that was made
+/// by file copy (the copy carries the PRIMARY's bitmap inside it, which
+/// describes nothing about this copy's future) and before re-attaching a
+/// fresh one at promotion. Absent bitmap is not an error.
+///
+/// `qemu-img bitmap --remove -f qcow2 FILE BITMAP` — syntax verified
+/// against qemu-img 11.0.3 (`qemu-img bitmap --help`): "--remove to
+/// remove BITMAP".
+pub fn offline_remove_bitmap(disk_path: &str, vm: &str) {
+    let _ = Command::new("qemu-img")
+        .args(["bitmap", "--remove", "-f", "qcow2", disk_path, &bitmap_name(vm)])
+        .output();
+}
+
+/// Attach our persistent bitmap to a qcow2 that is NOT attached to a
+/// running QEMU — the promotion path: the bitmap must exist and be
+/// recording BEFORE the promoted VM starts, or writes made between start
+/// and any online attach would be in no delta ever.
+///
+/// `qemu-img bitmap --add -f qcow2 FILE BITMAP` — verified against
+/// qemu-img 11.0.3: "--add creates BITMAP in FILE, enables to record
+/// future edits" (enabled by default, no --enable needed). Persistent by
+/// nature: the subcommand exists to edit "the persistent bitmap ... in
+/// the image".
+pub fn offline_add_bitmap(disk_path: &str, vm: &str) -> Result<(), String> {
+    let out = Command::new("qemu-img")
+        .args(["bitmap", "--add", "-f", "qcow2", disk_path, &bitmap_name(vm)])
+        .output()
+        .map_err(|e| format!("qemu-img bitmap --add: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "could not attach a dirty bitmap to {}: {}",
+            disk_path,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }

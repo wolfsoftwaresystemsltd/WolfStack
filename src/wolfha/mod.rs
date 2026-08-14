@@ -200,6 +200,28 @@ pub struct HaEntry {
     /// it, and no new one is taken while it is outstanding.
     #[serde(default)]
     pub pending_vm_delta: Option<replication::qemu_bitmap::PendingDelta>,
+    /// VM only — the replication chain token.
+    ///
+    /// On a PRIMARY: the token every fully-caught-up replica currently
+    /// holds. Each delta ships (prev = this, next = the pending delta's
+    /// token); when every replica has applied the pending delta this
+    /// advances to its token. A seed hands the receiving replica the
+    /// then-current token directly (a seed taken now contains everything
+    /// any outstanding delta contains, and everything since).
+    ///
+    /// On a REPLICA: the token describing this copy's exact disk state.
+    /// A delta whose `prev` doesn't match is proof the copies diverged —
+    /// the replica refuses it and the primary re-seeds automatically.
+    /// `None` = state unknown (a demotion without a controlled final
+    /// delta — crash takeover, boot-guard demote): the copy must be
+    /// re-seeded before any incremental can be trusted on it.
+    ///
+    /// Containers don't need this: their sync diffs a manifest of the
+    /// actual rootfs each round, so divergence is detected and repaired
+    /// file-by-file. A VM disk has no manifest — the chain is what makes
+    /// "this incremental fits that base" provable instead of assumed.
+    #[serde(default)]
+    pub vm_chain: Option<String>,
     /// Primary only: this node's own peer identity. Travels to standbys
     /// inside HaMeta.primary so every delta re-teaches them who the
     /// CURRENT primary is — without it, a standby that survived a
@@ -670,6 +692,9 @@ pub fn install_seed(
         last_delta_at: now_unix(),
         stale: false,
         pending_vm_delta: None,
+        // Containers carry no chain — their divergence detection is the
+        // per-round manifest diff.
+        vm_chain: None,
         auto_failover: false,
         witness: String::new(),
         failover_after_secs: default_failover_after(),
@@ -724,6 +749,26 @@ pub fn promote_local(container: &str, me: Option<HaPeer>) -> Result<(), String> 
     let _ = std::fs::remove_file(marker_path(container));
     store.save()?;
 
+    // A promoted VM becomes the delta SOURCE, so its disk needs a fresh
+    // recording bitmap BEFORE the guest boots — attached online this
+    // would race the first guest writes, and writes made before the
+    // attach would be in no delta ever (the replicas would diverge from
+    // the first round). `qemu-img bitmap --add` on the stopped image
+    // creates it enabled; the persistent bitmap loads recording when the
+    // VM starts. Any bitmap already inside the image (a file-copied seed
+    // carries the old primary's) describes the WRONG history — replace,
+    // never reuse.
+    // The entry's vm_chain is deliberately KEPT: it describes this copy's
+    // disk state, which is exactly the base the standbys share — the
+    // first delta from here fits every caught-up standby, and the stale
+    // ex-primary re-seeds automatically via the chain check.
+    if kind == SubjectKind::Vm {
+        let (disk, _) = vm_disk_and_config(container)?;
+        replication::qemu_bitmap::offline_remove_bitmap(&disk, container);
+        replication::qemu_bitmap::offline_add_bitmap(&disk, container)
+            .map_err(|e| format!("promotion stopped before starting the VM: {}", e))?;
+    }
+
     subject_start(kind, container)
         .map_err(|e| format!("started promotion but the {} failed to start: {}", kind.label(), e))?;
 
@@ -775,6 +820,16 @@ pub fn demote_local(container: &str, new_primary: HaPeer) -> Result<(), String> 
             entry.replicas.clear();
             entry.last_sync.clear();
             entry.self_identity = None;
+            // A demoted VM copy's disk may hold writes no delta ever
+            // captured (a crash takeover is exactly that case), so its
+            // chain token cannot be trusted — clearing it makes the new
+            // primary re-seed this copy instead of patching a diverged
+            // base. The coordinated-handoff path in api::wolfha_demote
+            // re-establishes the token AFTER its quiesced final delta
+            // lands, which is the one case the copy is provably exact.
+            if entry.kind == SubjectKind::Vm {
+                entry.vm_chain = None;
+            }
         }
         None => {
             store.entries.push(HaEntry {
@@ -791,6 +846,9 @@ pub fn demote_local(container: &str, new_primary: HaPeer) -> Result<(), String> 
                 last_delta_at: 0,
                 stale: true,
                 pending_vm_delta: None,
+                // No prior entry means no provable disk state either — a
+                // VM copy in this situation re-seeds via the chain check.
+                vm_chain: None,
                 auto_failover: false,
                 witness: String::new(),
                 failover_after_secs: default_failover_after(),
@@ -864,6 +922,33 @@ pub fn vm_disk_and_config(name: &str) -> Result<(String, crate::vms::manager::Vm
     Ok((disk, cfg))
 }
 
+/// This node's OVMF NVRAM file for a VM, when one exists. None for
+/// SeaBIOS VMs and for OVMF VMs that have never been started (QEMU
+/// creates the VARS copy on first boot).
+pub fn vm_efivars_file(name: &str) -> Option<String> {
+    let mgr = crate::vms::manager::VmManager::new();
+    let cfg = mgr.get_vm(name)?;
+    let p = mgr.efivars_path_for(&cfg);
+    if p.exists() { Some(p.to_string_lossy().to_string()) } else { None }
+}
+
+/// Install a received OVMF NVRAM image where this node's copy of the VM
+/// will look for it. Written to a temp alongside and renamed — a torn
+/// VARS file is a VM that gets stuck in firmware.
+pub fn vm_install_efivars(name: &str, staged: &str) -> Result<(), String> {
+    let mgr = crate::vms::manager::VmManager::new();
+    let cfg = mgr
+        .get_vm(name)
+        .ok_or_else(|| format!("VM '{}' not found on this node", name))?;
+    let target = mgr.efivars_path_for(&cfg);
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create VM store dir: {}", e))?;
+    }
+    let tmp = target.with_extension("fd.tmp");
+    std::fs::copy(staged, &tmp).map_err(|e| format!("stage NVRAM: {}", e))?;
+    std::fs::rename(&tmp, &target).map_err(|e| format!("install NVRAM: {}", e))
+}
+
 /// Prepare a VM for incremental replication: attach the persistent dirty
 /// bitmap that every later round encodes against.
 ///
@@ -914,6 +999,20 @@ pub fn vm_store_replica_config(
 ) -> Result<(), String> {
     let mut cfg = cfg.clone();
     cfg.running = false;
+    // The VM equivalent of stripping `lxc.start.auto` from a replica's
+    // config (write_replica_config): `autostart_vms()` starts every
+    // config with `auto_start` at machine boot, and a dormant standby
+    // carrying the primary's flag would boot straight into a split brain.
+    // Source: vms/manager.rs:3812-3836 autostart_vms() — `vm.auto_start
+    // && !vm.running` is the whole gate.
+    cfg.auto_start = false;
+    // ISO paths are host files that were never replicated. QEMU refuses
+    // to start when a configured -cdrom file is missing, so a promoted
+    // copy carrying the primary's ISO path might not boot AT ALL on the
+    // node that matters. Dropped: the copy boots from its disk, which is
+    // the only thing a failover is for.
+    cfg.iso_path = None;
+    cfg.drivers_iso = None;
     // Never let a peer's payload rename the subject out from under us —
     // the file is keyed by the name WE are managing.
     cfg.name = name.to_string();
@@ -974,9 +1073,40 @@ pub fn vm_take_delta(name: &str) -> Result<(String, u64), String> {
     Ok((out, size))
 }
 
-/// Apply a received VM disk delta on this replica.
-pub fn vm_apply_delta(name: &str, delta_path: &str) -> Result<(), String> {
-    let kind = HaStore::load().get(name).map(|e| e.kind).unwrap_or_default();
+/// Marker every "this VM copy needs a full re-seed" error carries, so the
+/// primary can tell "re-seed and continue" apart from a genuinely failed
+/// round. It travels inside HTTP error bodies between nodes — change it
+/// and mixed-version clusters stop self-healing.
+pub const VM_NEEDS_SEED: &str = "WOLFHA_VM_NEEDS_SEED";
+
+/// Apply a received VM disk delta on this replica — but only when the
+/// chain proves it fits.
+///
+/// An incremental contains just the clusters dirtied since the previous
+/// round; applying one onto a disk that isn't byte-identical to that base
+/// yields a copy that LOOKS healthy and is silently corrupt — the worst
+/// failure an HA system can have. The chain makes the fit provable: the
+/// delta carries the token its base holds (`prev`) and the token it
+/// advances to (`next`); this copy applies only when its stored token is
+/// exactly `prev`. Already at `next` = an idempotent retry, reported as
+/// success. Anything else = diverged; the error carries [`VM_NEEDS_SEED`]
+/// and the primary responds by shipping a full seed instead.
+pub fn vm_apply_delta(
+    name: &str,
+    delta_path: &str,
+    chain_prev: &str,
+    chain_next: &str,
+    efivars: Option<&str>,
+) -> Result<(), String> {
+    let entry_state = HaStore::load()
+        .get(name)
+        .map(|e| (e.kind, e.vm_chain.clone()));
+    let Some((kind, my_token)) = entry_state else {
+        return Err(format!(
+            "{}: '{}' is not a WolfHA copy on this node",
+            VM_NEEDS_SEED, name
+        ));
+    };
     if kind != SubjectKind::Vm {
         return Err(format!("'{}' is not a WolfHA-managed VM on this node", name));
     }
@@ -986,8 +1116,383 @@ pub fn vm_apply_delta(name: &str, delta_path: &str) -> Result<(), String> {
             name
         ));
     }
+    if chain_prev.is_empty() || chain_next.is_empty() {
+        return Err(format!(
+            "{}: the delta arrived without chain tokens, so this copy cannot prove \
+             the delta fits its disk — a full seed re-establishes the chain",
+            VM_NEEDS_SEED
+        ));
+    }
+    match my_token.as_deref() {
+        // Retry of a delta this copy already holds — success, no rewrite.
+        Some(t) if t == chain_next => return Ok(()),
+        Some(t) if t == chain_prev => {}
+        _ => {
+            return Err(format!(
+                "{}: this copy's disk state doesn't match the delta's base \
+                 (it missed a round, or is an ex-primary with uncaptured writes) — \
+                 it must be re-seeded, not patched",
+                VM_NEEDS_SEED
+            ));
+        }
+    }
     let (disk, _) = vm_disk_and_config(name)?;
-    replication::qemu_bitmap::apply_delta(delta_path, &disk)
+    replication::qemu_bitmap::apply_delta(delta_path, &disk)?;
+    // OVMF NVRAM refresh, when the primary sent one. After the disk on
+    // purpose: a delta that failed must not leave firmware state from a
+    // round the disk never got.
+    if let Some(vars) = efivars {
+        vm_install_efivars(name, vars)?;
+    }
+    // Advance the token only after the commit landed — a crash between
+    // apply and save re-runs the same delta, which the `next` short-circuit
+    // above absorbs... only if the apply completed; a HALF-applied commit
+    // re-applies from `prev`, and qemu-img commit is a cluster-level
+    // copy-down, so re-writing the same clusters is idempotent.
+    let mut store = HaStore::load();
+    if let Some(e) = store.get_mut(name) {
+        e.vm_chain = Some(chain_next.to_string());
+        store.save()?;
+    }
+    Ok(())
+}
+
+/// Persist a VM's `auto_start` flag — WolfHA takes a protected VM's boot
+/// over exactly as it does a container's (`lxc_set_autostart`): the flag
+/// is stripped when HA is enabled so `autostart_vms()` can't race the
+/// boot-guard takeover check, and restored when HA is disabled.
+///
+/// Native sidecar JSON only — the whole VM HA path is native-QEMU (the
+/// QMP socket in vms/manager.rs:4931 exists only for natively-started
+/// VMs), so the Proxmox/libvirt arms of get_vm can't reach here.
+// Source: vms/manager.rs:5159-5180 get_vm() reads the sidecar JSON at
+// config_path_for(); vm_store_replica_config writes it the same way.
+pub fn vm_set_autostart(name: &str, on: bool) -> Result<(), String> {
+    let mgr = crate::vms::manager::VmManager::new();
+    let path = mgr.config_path_for(name);
+    // Straight off the sidecar, NOT get_vm(): get_vm overlays runtime
+    // state (running, live VNC ports) onto what it returns, and writing
+    // that back would persist runtime values into the config file.
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("VM '{}' has no config on this node: {}", name, e))?;
+    let mut cfg: crate::vms::manager::VmConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
+    if cfg.auto_start == on {
+        return Ok(());
+    }
+    cfg.auto_start = on;
+    let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
+/// Take a full seed image of a VM's disk into the staging directory.
+/// Blocking. Returns (staged path, size, the VM's current definition).
+///
+/// Running VM → a QEMU `blockdev-backup sync: "full"` — copy-before-write,
+/// so the image is a crash-consistent point-in-time copy and the guest
+/// never pauses. Stopped VM → a plain file copy: nothing is writing, so
+/// the file IS the point-in-time copy. Both are safe bases for the chain
+/// because the dirty bitmap (attached before any seed is taken) records
+/// every write from before the copy began.
+pub fn vm_take_seed(name: &str) -> Result<(String, u64, crate::vms::manager::VmConfig), String> {
+    let (disk, cfg) = vm_disk_and_config(name)?;
+    let stage_dir = "/var/lib/wolfstack/wolfha";
+    std::fs::create_dir_all(stage_dir).map_err(|e| format!("staging dir: {}", e))?;
+    let out = format!("{}/vmseed-{}.qcow2", stage_dir, uuid::Uuid::new_v4());
+    if subject_is_running(SubjectKind::Vm, name) {
+        // Same 6-hour ceiling as vm_take_delta: a full copy of a large
+        // disk is the slowest job this module runs.
+        replication::qemu_bitmap::take_full(name, &disk, &out, 6 * 60 * 60)?;
+    } else {
+        std::fs::copy(&disk, &out)
+            .map_err(|e| format!("copy {} to staging: {}", disk, e))?;
+        // A file copy carries the source's persistent bitmap along inside
+        // the qcow2. It describes the PRIMARY's write history, not this
+        // copy's future — the replica must not inherit it. (A backup-made
+        // seed is a fresh image and never has one.)
+        replication::qemu_bitmap::offline_remove_bitmap(&out, name);
+    }
+    let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    Ok((out, size, cfg))
+}
+
+/// Install a VM seed on this node: the disk image moved into the VM
+/// store, the definition written as a dormant replica, the HA entry
+/// recorded with the seed's chain token. Refuses to clobber a VM of the
+/// same name that is NOT a WolfHA copy — mirror of [`install_seed`]'s
+/// guard for containers.
+pub fn install_vm_seed(
+    container: &str,
+    archive: &str,
+    cfg: &crate::vms::manager::VmConfig,
+    primary: HaPeer,
+    meta: Option<&HaMeta>,
+    chain: &str,
+    efivars: Option<&str>,
+) -> Result<(), String> {
+    if chain.is_empty() {
+        return Err("a VM seed must carry its chain token".to_string());
+    }
+    let mgr = crate::vms::manager::VmManager::new();
+    let store = HaStore::load();
+    let existing_entry = store.get(container);
+    if mgr.get_vm(container).is_some() || mgr.config_path_for(container).exists() {
+        // A same-named VM exists here. Overwriting is only legitimate on
+        // a copy WolfHA itself put here: a replica being re-seeded, or a
+        // stale ex-primary being brought back into the chain (failback).
+        let overwritable = matches!(
+            existing_entry,
+            Some(e) if e.kind == SubjectKind::Vm && (e.role == HaRole::Replica || e.stale)
+        );
+        if !overwritable {
+            return Err(format!(
+                "a VM named '{}' already exists on this node and is NOT a WolfHA copy — refusing to overwrite it",
+                container
+            ));
+        }
+        if subject_is_running(SubjectKind::Vm, container) {
+            return Err(format!(
+                "VM copy '{}' is running here — stop it before re-seeding",
+                container
+            ));
+        }
+    }
+    // The disk lands where every later delta will look for it:
+    // os_disk_path_for() of the stored definition. The definition keeps
+    // the primary's storage_path so a promoted copy runs with the same
+    // layout — the parent dir is created if this host doesn't have it.
+    // Source: wolfha/mod.rs vm_disk_and_config() — the delta path resolves
+    // the disk through get_vm + os_disk_path_for, so the seed must too.
+    let disk = mgr.os_disk_path_for(cfg);
+    if let Some(dir) = disk.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create VM store dir: {}", e))?;
+    }
+    let disk_str = disk.to_string_lossy().to_string();
+    // rename() when staging and store share a filesystem (the default:
+    // both under /var/lib/wolfstack), copy+remove across filesystems.
+    if std::fs::rename(archive, &disk).is_err() {
+        std::fs::copy(archive, &disk).map_err(|e| format!("install seed disk: {}", e))?;
+        let _ = std::fs::remove_file(archive);
+    }
+    // Belt-and-braces: whatever route the seed took, the replica's copy
+    // must not hold a bitmap. Absent = no-op.
+    replication::qemu_bitmap::offline_remove_bitmap(&disk_str, container);
+    if let Err(e) = vm_store_replica_config(container, cfg) {
+        return Err(format!("seed disk installed but the VM definition failed: {}", e));
+    }
+    // After the definition is stored — vm_install_efivars resolves the
+    // target path through it.
+    if let Some(vars) = efivars {
+        vm_install_efivars(container, vars)?;
+    }
+
+    let mut store = HaStore::load();
+    store.remove(container);
+    let mut entry = HaEntry {
+        container: container.to_string(),
+        kind: SubjectKind::Vm,
+        role: HaRole::Replica,
+        interval_minutes: 0,
+        replicas: Vec::new(),
+        primary: Some(primary),
+        autostart_managed: false,
+        last_sync: HashMap::new(),
+        last_delta_at: now_unix(),
+        stale: false,
+        pending_vm_delta: None,
+        vm_chain: Some(chain.to_string()),
+        auto_failover: false,
+        witness: String::new(),
+        failover_after_secs: default_failover_after(),
+        self_identity: None,
+    };
+    if let Some(m) = meta {
+        m.apply_to(&mut entry);
+    }
+    store.entries.push(entry);
+    store.save()
+}
+
+/// Everything a full VM seed carries besides the image itself.
+pub struct VmSeedPayload<'a> {
+    /// Staged qcow2 on the sending primary.
+    pub seed_path: &'a str,
+    /// Serialized [`crate::vms::manager::VmConfig`] of the subject.
+    pub vm_config_json: &'a str,
+    /// Chain token the receiver stores — see [`HaEntry::vm_chain`].
+    pub chain: &'a str,
+    /// The sender's own peer identity (the receiver's `primary`).
+    pub primary: &'a HaPeer,
+    /// Serialized [`HaMeta`] so the standby learns settings immediately.
+    pub ha_meta_json: &'a str,
+}
+
+/// Ship a staged full VM seed to one replica node. Used by `wolfha_enable`
+/// for the initial seeds and by the sync loop to re-seed a replica that
+/// refused a delta with [`VM_NEEDS_SEED`].
+pub async fn vm_seed_replica(
+    container: &str,
+    peer: &HaPeer,
+    secret: &str,
+    payload: &VmSeedPayload<'_>,
+) -> Result<(), String> {
+    let VmSeedPayload { seed_path, vm_config_json, chain, primary, ha_meta_json } = *payload;
+    let client = &*crate::api::API_HTTP_CLIENT;
+    let primary_json = serde_json::to_string(primary).unwrap_or_default();
+    // OVMF NVRAM rides along whenever the VM has one — a promoted copy
+    // with fresh VARS has lost its boot entries.
+    let efivars = vm_efivars_file(container);
+    let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/wolfha/receive-seed");
+    let mut last_err = String::new();
+    for url in &urls {
+        // Fresh streaming part per attempt — the image uploads straight
+        // from disk, never through memory (the wolfstack-3 lesson).
+        let part = match stream_archive_part(seed_path).await {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+        let mut form = reqwest::multipart::Form::new()
+            .text("container", container.to_string())
+            .text("primary", primary_json.clone())
+            .text("ha_meta", ha_meta_json.to_string())
+            .text("vm_config", vm_config_json.to_string())
+            .text("chain", chain.to_string())
+            .part("archive", part.file_name("seed.qcow2"));
+        if let Some(vars) = &efivars {
+            match stream_archive_part(vars).await {
+                Ok(p) => form = form.part("efivars", p.file_name("VARS.fd")),
+                Err(e) => return Err(format!("VM NVRAM vanished mid-send: {}", e)),
+            }
+        }
+        match client.post(url)
+            .header("X-WolfStack-Secret", secret.to_string())
+            .timeout(std::time::Duration::from_secs(3600))
+            .multipart(form)
+            .send().await
+        {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) => {
+                let status = r.status();
+                let body = r.text().await.unwrap_or_default();
+                last_err = format!("{}: HTTP {} {}", url, status, body.chars().take(300).collect::<String>());
+            }
+            Err(e) => last_err = format!("{}: {}", url, e),
+        }
+    }
+    Err(format!("VM seed upload failed: {}", last_err))
+}
+
+/// A full seed staged once per sync round and reused for every replica
+/// that needs it (taking one per replica would double-read the disk for
+/// nothing — the image is identical).
+pub struct StagedVmSeed {
+    pub path: String,
+    pub size: u64,
+    pub cfg_json: String,
+    /// Chain token the seed hands its receiver — see [`HaEntry::vm_chain`].
+    pub token: String,
+}
+
+/// Re-seed one replica during a sync round: stage a full image (once per
+/// round), ship it, and record the outcome exactly as a delta ship would.
+///
+/// The token handed over is chosen so the NEXT delta fits: the pending
+/// delta's token when one is outstanding (a seed taken now contains
+/// everything the pending delta contains, so the receiver is marked as
+/// having applied it), else the primary's current chain token, else — a
+/// broken chain (lost delta, fresh promotion) — a newly minted token that
+/// becomes the primary's chain, which every OTHER replica will fail to
+/// match and be re-seeded against in turn.
+async fn vm_reseed_replica_round(
+    container: &str,
+    peer: &HaPeer,
+    secret: &str,
+    staged: &mut Option<StagedVmSeed>,
+) -> HaSyncStatus {
+    let fail = |msg: String| HaSyncStatus {
+        at: now_unix(), ok: false, message: msg, files_sent: 0, bytes_sent: 0,
+    };
+    if staged.is_none() {
+        let c = container.to_string();
+        let taken = tokio::task::spawn_blocking(move || vm_take_seed(&c)).await;
+        let (path, size, cfg) = match taken {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return fail(format!("re-seed needed but the full image failed: {}", e)),
+            Err(e) => return fail(format!("re-seed task: {}", e)),
+        };
+        let cfg_json = match serde_json::to_string(&cfg) {
+            Ok(j) => j,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return fail(format!("re-seed: VM definition would not serialize: {}", e));
+            }
+        };
+        let mut store = HaStore::load();
+        let Some(e) = store.get_mut(container) else {
+            let _ = std::fs::remove_file(&path);
+            return fail(format!("'{}' vanished from the HA store mid-round", container));
+        };
+        let token = match (&e.pending_vm_delta, &e.vm_chain) {
+            (Some(p), _) if !p.token.is_empty() => p.token.clone(),
+            (_, Some(c)) => c.clone(),
+            _ => {
+                let minted = uuid::Uuid::new_v4().to_string();
+                e.vm_chain = Some(minted.clone());
+                if let Err(err) = store.save() {
+                    let _ = std::fs::remove_file(&path);
+                    return fail(format!("re-seed: could not persist the new chain: {}", err));
+                }
+                minted
+            }
+        };
+        *staged = Some(StagedVmSeed { path, size, cfg_json, token });
+    }
+    let seed = staged.as_ref().expect("staged just set");
+
+    let (self_peer, ha_meta_json) = {
+        let store = HaStore::load();
+        let Some(e) = store.get(container).filter(|e| e.role == HaRole::Primary) else {
+            return fail(format!("'{}' is no longer a primary here — re-seed abandoned", container));
+        };
+        let Some(me) = e.self_identity.clone() else {
+            return fail("re-seed needs this node's own peer identity and the HA entry \
+                         has none — disable and re-enable HA for this VM".to_string());
+        };
+        (me, serde_json::to_string(&HaMeta::from_entry(e)).unwrap_or_default())
+    };
+    match vm_seed_replica(
+        container, peer, secret,
+        &VmSeedPayload {
+            seed_path: &seed.path,
+            vm_config_json: &seed.cfg_json,
+            chain: &seed.token,
+            primary: &self_peer,
+            ha_meta_json: &ha_meta_json,
+        },
+    ).await {
+        Ok(()) => {
+            // The seed supersedes any outstanding delta for this replica —
+            // it was taken later, so its image already contains those
+            // blocks. Recorded durably for the same reason applied_by
+            // exists at all.
+            let mut store = HaStore::load();
+            if let Some(e) = store.get_mut(container)
+                && let Some(pd) = e.pending_vm_delta.as_mut()
+                && !pd.applied_by.contains(&peer.node_id)
+            {
+                pd.applied_by.push(peer.node_id.clone());
+                let _ = store.save();
+            }
+            HaSyncStatus {
+                at: now_unix(),
+                ok: true,
+                message: format!("standby re-seeded with a full disk image ({})", human_bytes(seed.size)),
+                files_sent: 1,
+                bytes_sent: seed.size,
+            }
+        }
+        Err(e) => fail(format!("re-seed failed: {}", e)),
+    }
 }
 
 /// Apply a bundle of per-file block deltas to this replica's rootfs.
@@ -1536,13 +2041,20 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
         let mut st = HaStore::load();
         if let Some(e) = st.get_mut(container) {
             e.pending_vm_delta = None;
+            // The lost blocks exist nowhere but this primary's disk, so
+            // NO standby's state can be trusted against the chain any
+            // more — breaking it forces every one of them through the
+            // automatic full re-seed, which is the only thing that can
+            // carry those blocks now.
+            e.vm_chain = None;
             for id in &behind {
                 e.last_sync.insert(id.clone(), HaSyncStatus {
                     at: now_unix(),
                     ok: false,
                     message: "staged disk delta was lost before this replica applied it — \
-                              it is missing changes no later delta will contain. Disable and \
-                              re-enable HA for this VM to re-seed it.".to_string(),
+                              it is missing changes no later delta will contain. Every \
+                              standby will be re-seeded with a full image on the coming \
+                              rounds.".to_string(),
                     files_sent: 0,
                     bytes_sent: 0,
                 });
@@ -1551,8 +2063,8 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
         }
         if !behind.is_empty() {
             tracing::error!(
-                "wolfha[{}]: staged delta {} vanished before {} replica(s) applied it — they \
-                 are now divergent and need a re-seed",
+                "wolfha[{}]: staged delta {} vanished before {} replica(s) applied it — \
+                 the chain is broken; every standby will be re-seeded automatically",
                 container, lost.path, behind.len()
             );
         }
@@ -1567,6 +2079,12 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
                 );
                 Some(p)
             }
+            // A stopped VM writes nothing, so there is nothing new to
+            // take (and no QMP monitor to take it through). The round
+            // still visits every replica below: quiet status for the
+            // healthy ones, re-seed (file copy — valid on a stopped
+            // disk) for any that demanded one.
+            None if !subject_is_running(SubjectKind::Vm, container) => None,
             None => {
                 let c = container.to_string();
                 match tokio::task::spawn_blocking(move || vm_take_delta(&c)).await {
@@ -1575,6 +2093,10 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
                             path,
                             taken_at: now_unix(),
                             applied_by: Vec::new(),
+                            // The token this delta advances the chain to —
+                            // replicas store it on apply; the primary's
+                            // vm_chain advances to it once ALL have.
+                            token: uuid::Uuid::new_v4().to_string(),
                         };
                         // Record it BEFORE shipping: a crash between the
                         // backup and the first upload must not lose track
@@ -1595,6 +2117,9 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
         None
     };
 
+    // One full seed image per round at most, shared by every replica that
+    // turns out to need one; staged lazily, cleaned up after the loop.
+    let mut staged_seed: Option<StagedVmSeed> = None;
     for peer in &peers {
         // Defensive: never sync to ourselves — an aliased self-entry can
         // survive in stored replica lists from before the promote filter.
@@ -1615,11 +2140,25 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
                 }
             }
             Some(p) => {
-                let st = sync_vm_replica(container, peer, &secret, &p.path).await;
+                // prev = the token every caught-up replica holds NOW.
+                // An empty prev (broken chain) makes the replica refuse
+                // and routes it through the re-seed below — deliberate.
+                let chain_prev = HaStore::load().get(container)
+                    .and_then(|e| e.vm_chain.clone())
+                    .unwrap_or_default();
+                let mut st = sync_vm_replica(container, peer, &secret, &p.path, &chain_prev, &p.token).await;
+                if !st.ok && st.message.contains(VM_NEEDS_SEED) {
+                    // The replica proved the delta doesn't fit its disk
+                    // (divergence, a wiped copy, a broken chain). The
+                    // repair is never "apply anyway" — it is a full image.
+                    st = vm_reseed_replica_round(container, peer, &secret, &mut staged_seed).await;
+                }
                 if st.ok {
                     // Durably record WHICH replica has it, so a later
                     // failure cannot cause this delta to be dropped while
-                    // another replica still needs it.
+                    // another replica still needs it. (A successful
+                    // re-seed recorded itself already — this is then a
+                    // no-op thanks to the contains() check.)
                     let mut store = HaStore::load();
                     if let Some(e) = store.get_mut(container)
                         && let Some(pd) = e.pending_vm_delta.as_mut()
@@ -1630,6 +2169,33 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
                     }
                 }
                 st
+            }
+            // VM with nothing staged: the VM is stopped (a running VM
+            // always has a delta taken above). Heal any standby that
+            // demanded a seed on an earlier round — a stopped disk copies
+            // cleanly — and give the rest an honest quiet status.
+            None if kind == SubjectKind::Vm => {
+                let needs_seed = {
+                    let store = HaStore::load();
+                    store.get(container).map(|e| {
+                        e.vm_chain.is_none()
+                            || e.last_sync.get(&peer.node_id)
+                                .map(|s| !s.ok && s.message.contains(VM_NEEDS_SEED))
+                                .unwrap_or(false)
+                    }).unwrap_or(false)
+                };
+                if needs_seed {
+                    vm_reseed_replica_round(container, peer, &secret, &mut staged_seed).await
+                } else {
+                    HaSyncStatus {
+                        at: now_unix(),
+                        ok: true,
+                        message: "VM is stopped — the standby holds its last delivered state; \
+                                  deltas resume when it starts".to_string(),
+                        files_sent: 0,
+                        bytes_sent: 0,
+                    }
+                }
             }
             None => sync_one_replica(container, peer, &secret).await,
         };
@@ -1668,6 +2234,12 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
             _ => {}
         }
     }
+    // A seed staged for this round is done with — every replica that
+    // needed one has been served (or failed and will retry next round
+    // with a fresh image).
+    if let Some(s) = staged_seed.take() {
+        let _ = std::fs::remove_file(&s.path);
+    }
     // Drop the staged delta ONLY once every replica has confirmed it.
     // Deleting it while one is still behind would strand those blocks:
     // the bitmap no longer describes them, so no future delta would carry
@@ -1680,14 +2252,19 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
                 let outstanding = peers.iter()
                     .filter(|r| !peer_is_local(r))
                     .any(|r| !p.applied_by.contains(&r.node_id));
-                (p.path, !outstanding)
+                (p.path, p.token.clone(), !outstanding)
             });
-        if let Some((path, all_applied)) = done
+        if let Some((path, token, all_applied)) = done
             && all_applied
         {
             let _ = std::fs::remove_file(&path);
             if let Some(e) = store.get_mut(container) {
                 e.pending_vm_delta = None;
+                // Every replica now holds this delta's token — it becomes
+                // the chain base the NEXT delta is taken against.
+                if !token.is_empty() {
+                    e.vm_chain = Some(token);
+                }
                 let _ = store.save();
             }
         }
@@ -1696,15 +2273,17 @@ pub async fn sync_container_now(container: &str) -> Result<(), String> {
 }
 
 /// Ship an already-taken VM disk delta to one replica.
-async fn sync_vm_replica(
+pub async fn sync_vm_replica(
     container: &str,
     peer: &HaPeer,
     secret: &str,
     delta_path: &str,
+    chain_prev: &str,
+    chain_next: &str,
 ) -> HaSyncStatus {
     let started = now_unix();
     let bytes = std::fs::metadata(delta_path).map(|m| m.len()).unwrap_or(0);
-    match sync_vm_replica_inner(container, peer, secret, delta_path).await {
+    match sync_vm_replica_inner(container, peer, secret, delta_path, chain_prev, chain_next).await {
         Ok(()) => HaSyncStatus {
             at: started,
             ok: true,
@@ -1741,6 +2320,8 @@ async fn sync_vm_replica_inner(
     peer: &HaPeer,
     secret: &str,
     delta_path: &str,
+    chain_prev: &str,
+    chain_next: &str,
 ) -> Result<(), String> {
     let client = &*crate::api::API_HTTP_CLIENT;
     let ha_meta_json = HaStore::load().get(container)
@@ -1762,11 +2343,23 @@ async fn sync_vm_replica_inner(
             Ok(p) => p,
             Err(e) => return Err(e),
         };
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .text("container", container.to_string())
             .text("ha_meta", ha_meta_json.clone())
             .text("vm_config", vm_config_json.clone())
+            // The chain proof — the replica applies only when its stored
+            // token is exactly chain_prev (see vm_apply_delta).
+            .text("chain_prev", chain_prev.to_string())
+            .text("chain_next", chain_next.to_string())
             .part("archive", part.file_name("vmdelta.qcow2"));
+        // OVMF NVRAM rides with every round — tiny, and firmware state
+        // (boot entries) must not lag the disk across a failover.
+        if let Some(vars) = vm_efivars_file(container) {
+            match stream_archive_part(&vars).await {
+                Ok(p) => form = form.part("efivars", p.file_name("VARS.fd")),
+                Err(e) => return Err(format!("VM NVRAM vanished mid-send: {}", e)),
+            }
+        }
         match client.post(url)
             .header("X-WolfStack-Secret", secret.to_string())
             .timeout(std::time::Duration::from_secs(3600))
@@ -1999,6 +2592,23 @@ fn container_static_ip(container: &str) -> Option<String> {
         .and_then(|l| l.split('=').nth(1))
         .map(|v| v.trim().split('/').next().unwrap_or("").trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// The subject's own IP for the promotion GATE 5 ping — the last check
+/// before a standby takes over: if the subject still answers on the
+/// bridge, it is alive SOMEWHERE and promoting would split-brain.
+/// Containers: the static lxc.net.0 address. VMs: the WolfNet IP from
+/// this replica's stored definition (`VmConfig.wolfnet_ip` — the same
+/// identity the promoted copy would take over).
+fn subject_static_ip(kind: SubjectKind, name: &str) -> Option<String> {
+    match kind {
+        SubjectKind::Container => container_static_ip(name),
+        SubjectKind::Vm => crate::vms::manager::VmManager::new()
+            .get_vm(name)
+            .and_then(|c| c.wolfnet_ip)
+            .map(|ip| ip.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    }
 }
 
 fn fence_secs(failover_after: u64) -> u64 {
@@ -2332,9 +2942,9 @@ pub async fn failover_monitor_forever(cluster: std::sync::Arc<crate::agent::Clus
                         continue;
                     }
 
-                    // GATE 5 — the bridge itself: if the container's IP
+                    // GATE 5 — the bridge itself: if the subject's IP
                     // answers, it is alive SOMEWHERE. Abort.
-                    if let Some(ip) = container_static_ip(&c) {
+                    if let Some(ip) = subject_static_ip(entry.kind, &c) {
                         let alive = tokio::task::spawn_blocking(move || ping_host(&ip)).await.unwrap_or(false);
                         if alive {
                             tracing::warn!("wolfha: '{}' answers on the bridge — its node is unreachable but the container is alive; NOT promoting", c);
@@ -2551,12 +3161,29 @@ mod tests {
             path: "/var/lib/wolfstack/wolfha/vmdelta-x.qcow2".into(),
             taken_at: 42,
             applied_by: vec!["node-a".into()],
+            token: "tok-1".into(),
         });
+        e.vm_chain = Some("tok-0".into());
         let json = serde_json::to_string(&e).unwrap();
         let back: super::HaEntry = serde_json::from_str(&json).unwrap();
         let pd = back.pending_vm_delta.expect("pending delta must survive");
         assert_eq!(pd.applied_by, vec!["node-a".to_string()]);
         assert_eq!(pd.taken_at, 42);
+        assert_eq!(pd.token, "tok-1");
+        assert_eq!(back.vm_chain.as_deref(), Some("tok-0"), "the chain token must survive a restart");
+    }
+
+    /// The chain gate is what stands between an incremental and a
+    /// diverged disk: only the exact expected token applies; the token
+    /// the delta advances TO is an idempotent success; anything else —
+    /// including an unknown state — demands a full seed, loudly.
+    #[test]
+    fn vm_delta_chain_gate_refuses_a_diverged_copy() {
+        // No HA entry at all → not silently applied, and the error names
+        // the remedy the primary automates (a full seed).
+        let err = super::vm_apply_delta("no-such-vm-xyz", "/nonexistent.qcow2", "a", "b", None)
+            .expect_err("must refuse");
+        assert!(err.contains(super::VM_NEEDS_SEED), "wrong error: {}", err);
     }
 
     use super::*;

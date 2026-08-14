@@ -13163,24 +13163,37 @@ pub async fn wolfha_signatures(
 /// wolfstack-1 staging incident happened).
 async fn wolfha_read_multipart(
     payload: &mut actix_multipart::Multipart,
-) -> Result<(std::collections::HashMap<String, String>, Option<String>, Option<String>), String> {
+) -> Result<
+    (
+        std::collections::HashMap<String, String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
+    String,
+> {
     use futures::StreamExt;
     let stage_dir = "/var/lib/wolfstack/wolfha";
     std::fs::create_dir_all(stage_dir).map_err(|e| format!("staging dir: {}", e))?;
     let mut fields: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut archive_path: Option<String> = None;
     let mut blockdelta_path: Option<String> = None;
+    let mut efivars_path: Option<String> = None;
 
     while let Some(item) = payload.next().await {
         let mut field = item.map_err(|e| format!("multipart error: {}", e))?;
         let field_name = field.name().unwrap_or("").to_string();
-        // Both file parts stream straight to disk. `blockdelta` is usually
+        // File parts stream straight to disk. `blockdelta` is usually
         // small, but "usually" is not a size limit — a rewritten multi-GB
         // file produces a delta to match, and buffering it would undo the
         // memory fix that put the archive on disk in the first place.
+        // `efivars` is an OVMF NVRAM image (hundreds of KB) riding along
+        // with VM seeds/deltas — binary, so it must never land in the
+        // lossy text-field map.
         let staged = match field_name.as_str() {
             "archive" => Some(format!("{}/incoming-{}.tar.gz", stage_dir, uuid::Uuid::new_v4())),
             "blockdelta" => Some(format!("{}/incoming-{}.blocks", stage_dir, uuid::Uuid::new_v4())),
+            "efivars" => Some(format!("{}/incoming-{}.fd", stage_dir, uuid::Uuid::new_v4())),
             _ => None,
         };
         if let Some(path) = staged {
@@ -13190,10 +13203,10 @@ async fn wolfha_read_multipart(
                 let data = chunk.map_err(|e| format!("upload read: {}", e))?;
                 file.write_all(&data).map_err(|e| format!("stage write: {}", e))?;
             }
-            if field_name == "archive" {
-                archive_path = Some(path);
-            } else {
-                blockdelta_path = Some(path);
+            match field_name.as_str() {
+                "archive" => archive_path = Some(path),
+                "blockdelta" => blockdelta_path = Some(path),
+                _ => efivars_path = Some(path),
             }
         } else {
             let mut buf = Vec::new();
@@ -13203,7 +13216,7 @@ async fn wolfha_read_multipart(
             fields.insert(field_name, String::from_utf8_lossy(&buf).to_string());
         }
     }
-    Ok((fields, archive_path, blockdelta_path))
+    Ok((fields, archive_path, blockdelta_path, efivars_path))
 }
 
 /// POST /api/wolfha/apply-delta — a primary ships an incremental rootfs
@@ -13214,10 +13227,12 @@ pub async fn wolfha_apply_delta(
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
     if let Err(resp) = wolfha_peer_auth(&req, &state) { return resp; }
-    let (fields, archive, blockdelta) = match wolfha_read_multipart(&mut payload).await {
+    let (fields, archive, blockdelta, efivars) = match wolfha_read_multipart(&mut payload).await {
         Ok(v) => v,
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     };
+    // Container deltas never carry NVRAM — drop a stray part immediately.
+    if let Some(v) = efivars { let _ = std::fs::remove_file(v); }
     let container = fields.get("container").map(|s| s.trim().to_string()).unwrap_or_default();
     if container.is_empty() || !crate::auth::is_safe_name(&container) {
         if let Some(a) = archive { let _ = std::fs::remove_file(a); }
@@ -13298,16 +13313,21 @@ pub async fn wolfha_apply_vm_delta(
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
     if let Err(resp) = wolfha_peer_auth(&req, &state) { return resp; }
-    let (fields, archive, _blocks) = match wolfha_read_multipart(&mut payload).await {
+    let (fields, archive, _blocks, efivars) = match wolfha_read_multipart(&mut payload).await {
         Ok(v) => v,
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     };
+    let cleanup_staged = |a: &Option<String>, v: &Option<String>| {
+        if let Some(p) = a { let _ = std::fs::remove_file(p); }
+        if let Some(p) = v { let _ = std::fs::remove_file(p); }
+    };
     let container = fields.get("container").map(|s| s.trim().to_string()).unwrap_or_default();
     if container.is_empty() || !crate::auth::is_safe_name(&container) {
-        if let Some(a) = archive { let _ = std::fs::remove_file(a); }
+        cleanup_staged(&archive, &efivars);
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid VM name"}));
     }
     let Some(archive) = archive else {
+        cleanup_staged(&None, &efivars);
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "a VM delta upload must carry the delta image"
         }));
@@ -13316,21 +13336,35 @@ pub async fn wolfha_apply_vm_delta(
         .and_then(|m| serde_json::from_str(m).ok());
     let vm_config: Option<crate::vms::manager::VmConfig> = fields.get("vm_config")
         .and_then(|c| serde_json::from_str(c).ok());
+    let chain_prev = fields.get("chain_prev").cloned().unwrap_or_default();
+    let chain_next = fields.get("chain_next").cloned().unwrap_or_default();
 
-    let (c, archive_c) = (container.clone(), archive.clone());
+    let (c, archive_c, efivars_c) = (container.clone(), archive.clone(), efivars.clone());
     let blk = web::block(move || -> Result<(), String> {
         let store = crate::wolfha::HaStore::load();
-        let entry = store.get(&c)
-            .ok_or_else(|| format!("'{}' is not a WolfHA copy on this node", c))?;
+        let Some(entry) = store.get(&c) else {
+            // No entry: this node lost (or never got) its copy. Carrying
+            // the marker lets the primary heal it with a fresh full seed
+            // instead of erroring forever.
+            return Err(format!(
+                "{}: '{}' is not a WolfHA copy on this node",
+                crate::wolfha::VM_NEEDS_SEED, c
+            ));
+        };
         if entry.role == crate::wolfha::HaRole::Primary && !entry.stale {
+            // Deliberately NOT the needs-seed marker: two nodes both
+            // believing they are the active primary is an operator
+            // problem, and an automatic seed must never paper over it.
             return Err(format!(
                 "'{}' is the ACTIVE primary here — refusing a delta that would overwrite it", c
             ));
         }
-        crate::wolfha::vm_apply_delta(&c, &archive_c)?;
+        // The VM definition first: the disk-path/NVRAM installs resolve
+        // through the stored definition, and the primary's is current.
         if let Some(cfg) = &vm_config {
             crate::wolfha::vm_store_replica_config(&c, cfg)?;
         }
+        crate::wolfha::vm_apply_delta(&c, &archive_c, &chain_prev, &chain_next, efivars_c.as_deref())?;
         let mut store = crate::wolfha::HaStore::load();
         if let Some(e) = store.get_mut(&c) {
             e.last_delta_at = std::time::SystemTime::now()
@@ -13344,6 +13378,7 @@ pub async fn wolfha_apply_vm_delta(
         Ok(())
     }).await;
     let _ = std::fs::remove_file(&archive);
+    if let Some(v) = &efivars { let _ = std::fs::remove_file(v); }
     match blk {
         Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
@@ -13361,20 +13396,25 @@ pub async fn wolfha_receive_seed(
     if let Err(resp) = wolfha_peer_auth(&req, &state) { return resp; }
     if containers::is_proxmox() {
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "WolfHA replicas require a native (non-Proxmox) node — Proxmox rootfs storage is not a plain directory"
+            "error": "WolfHA replicas require a native (non-Proxmox) node — Proxmox guest storage is not a plain host path"
         }));
     }
-    // A seed is a full rootfs tar; there is never a block-delta part.
-    let (fields, archive, _no_blockdelta) = match wolfha_read_multipart(&mut payload).await {
+    // A seed never carries a block-delta part; a VM seed may carry NVRAM.
+    let (fields, archive, _no_blockdelta, efivars) = match wolfha_read_multipart(&mut payload).await {
         Ok(v) => v,
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     };
+    let cleanup_staged = |a: &Option<String>, v: &Option<String>| {
+        if let Some(p) = a { let _ = std::fs::remove_file(p); }
+        if let Some(p) = v { let _ = std::fs::remove_file(p); }
+    };
     let container = fields.get("container").map(|s| s.trim().to_string()).unwrap_or_default();
     if container.is_empty() || !crate::auth::is_safe_name(&container) {
-        if let Some(a) = archive { let _ = std::fs::remove_file(a); }
+        cleanup_staged(&archive, &efivars);
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid container name"}));
     }
     let Some(archive) = archive else {
+        cleanup_staged(&None, &efivars);
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "archive is required"}));
     };
     let config = fields.get("config").cloned().unwrap_or_default();
@@ -13382,7 +13422,7 @@ pub async fn wolfha_receive_seed(
     let ha_meta: Option<crate::wolfha::HaMeta> = fields.get("ha_meta")
         .and_then(|m| serde_json::from_str(m).ok());
     let Some(primary) = fields.get("primary").and_then(|p| serde_json::from_str::<crate::wolfha::HaPeer>(p).ok()) else {
-        let _ = std::fs::remove_file(&archive);
+        cleanup_staged(&Some(archive), &efivars);
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "primary peer identity is required"}));
     };
 
@@ -13390,13 +13430,37 @@ pub async fn wolfha_receive_seed(
     // `kind`, which defaults to Container — exactly what those primaries
     // have always been sending.
     let seed_kind = ha_meta.as_ref().map(|m| m.kind).unwrap_or_default();
-    let (c, archive_c) = (container.clone(), archive.clone());
-    let blk = web::block(move || {
-        crate::wolfha::install_seed(
-            &c, seed_kind, &archive_c, &config, primary, wolfnet_ip.as_deref(), ha_meta.as_ref(),
-        )
-    }).await;
+    let blk = if seed_kind == crate::wolfha::SubjectKind::Vm {
+        // A VM seed is a full qcow2 plus the VM definition and the chain
+        // token every later delta will be verified against.
+        let Some(vm_config) = fields.get("vm_config")
+            .and_then(|c| serde_json::from_str::<crate::vms::manager::VmConfig>(c).ok())
+        else {
+            cleanup_staged(&Some(archive), &efivars);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "a VM seed must carry the VM definition (vm_config)"
+            }));
+        };
+        let chain = fields.get("chain").cloned().unwrap_or_default();
+        let (c, archive_c, efivars_c) = (container.clone(), archive.clone(), efivars.clone());
+        web::block(move || {
+            crate::wolfha::install_vm_seed(
+                &c, &archive_c, &vm_config, primary, ha_meta.as_ref(), &chain,
+                efivars_c.as_deref(),
+            )
+        }).await
+    } else {
+        let (c, archive_c) = (container.clone(), archive.clone());
+        web::block(move || {
+            crate::wolfha::install_seed(
+                &c, seed_kind, &archive_c, &config, primary, wolfnet_ip.as_deref(), ha_meta.as_ref(),
+            )
+        }).await
+    };
+    // install_vm_seed consumes the archive by rename when it can — remove
+    // is a no-op then, and the cleanup that matters on every error path.
     let _ = std::fs::remove_file(&archive);
+    if let Some(v) = &efivars { let _ = std::fs::remove_file(v); }
     match blk {
         Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
         Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
@@ -13580,13 +13644,34 @@ pub async fn wolfha_enable(
     let container_dir = format!("{}/{}", base, container);
     let rootfs = format!("{}/rootfs", container_dir);
     if subject_kind == crate::wolfha::SubjectKind::Vm {
-        // Attach the dirty bitmap BEFORE anything else. Every write from
-        // this instant is captured, so the first incremental after the
-        // seed carries whatever changed while the seed was being taken —
-        // do it later and those writes are in no delta at all and the
-        // replica starts life already diverged.
         let vm = container.clone();
-        match web::block(move || crate::wolfha::vm_begin_tracking(&vm)).await {
+        match web::block(move || -> Result<(), String> {
+            // What CAN'T fail over is refused up front, honestly, instead
+            // of seeding a replica that dies at promotion:
+            //  - extra disks: replication covers the OS disk (the one the
+            //    dirty bitmap tracks) — a promoted copy silently missing
+            //    a data disk is worse than no HA;
+            //  - passthrough hardware is physically attached to THIS host;
+            //  - a TPM's swtpm state holds sealing secrets that are not
+            //    replicated (and must not travel in a sync stream) — a
+            //    promoted Windows/BitLocker guest without them can't boot.
+            let (_, cfg) = crate::wolfha::vm_disk_and_config(&vm)?;
+            if !cfg.extra_disks.is_empty() {
+                return Err("this VM has extra data disks, and WolfHA replicates only the OS disk — a failover would lose them. Detach them (or keep their data on network storage) to protect this VM".to_string());
+            }
+            if !cfg.pci_devices.is_empty() || !cfg.usb_devices.is_empty() {
+                return Err("this VM uses PCI/USB passthrough — hardware attached to this host can't fail over to another node".to_string());
+            }
+            if cfg.tpm {
+                return Err("this VM has an emulated TPM, whose state (BitLocker-relevant sealing keys) is not replicated — a promoted copy could not unseal its disks".to_string());
+            }
+            // Attach the dirty bitmap BEFORE anything else. Every write
+            // from this instant is captured, so the first incremental
+            // after the seed carries whatever changed while the seed was
+            // being taken — do it later and those writes are in no delta
+            // at all and the replica starts life already diverged.
+            crate::wolfha::vm_begin_tracking(&vm)
+        }).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 return HttpResponse::BadRequest().json(serde_json::json!({
@@ -13672,10 +13757,137 @@ pub async fn wolfha_enable(
         // first delta rounds true it up.
         let stage_dir = "/var/lib/wolfstack/wolfha";
         if let Err(e) = std::fs::create_dir_all(stage_dir) {
+            if subject_kind == crate::wolfha::SubjectKind::Vm {
+                let vm = container.clone();
+                let _ = tokio::task::spawn_blocking(move || crate::wolfha::vm_end_tracking(&vm)).await;
+            }
             wolfha_protect_fail(&container, &format!("staging dir: {}", e));
             migration_fail(&tasks, &tid, &format!("staging dir: {}", e));
             return;
         }
+
+        // ── VM subject: full disk image + definition + chain token ──
+        // Fully separate from the rootfs-tar pipeline below — feeding a VM
+        // into that is exactly the released bug this replaces (tar of
+        // /var/lib/lxc/<vm>/rootfs, which does not exist). Every failure
+        // exit detaches the dirty bitmap the gate attached, so a failed
+        // protect leaves no replication state inside the operator's image.
+        // Source: this function's container pipeline below (tar → per-peer
+        // POST /api/wolfha/receive-seed → HaStore entry) — mirrored per
+        // stage with the VM primitives from src/wolfha/mod.rs.
+        if subject_kind == crate::wolfha::SubjectKind::Vm {
+            migration_update(&tasks, &tid, "seed", "Creating a full disk image (the VM keeps running)…");
+            wolfha_protect_note(&container, "Creating a full disk image (the VM keeps running)…");
+            let vm = container.clone();
+            let seed = tokio::task::spawn_blocking(move || crate::wolfha::vm_take_seed(&vm)).await;
+            let (seed_path, seed_size, vm_cfg) = match seed.map_err(|e| e.to_string()).and_then(|r| r) {
+                Ok(v) => v,
+                Err(e) => {
+                    let vm = container.clone();
+                    let _ = tokio::task::spawn_blocking(move || crate::wolfha::vm_end_tracking(&vm)).await;
+                    wolfha_protect_fail(&container, &format!("Seed snapshot failed: {}", e));
+                    migration_fail(&tasks, &tid, &format!("Seed snapshot failed: {}", e));
+                    return;
+                }
+            };
+            let cfg_json = match serde_json::to_string(&vm_cfg) {
+                Ok(j) => j,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&seed_path);
+                    let vm = container.clone();
+                    let _ = tokio::task::spawn_blocking(move || crate::wolfha::vm_end_tracking(&vm)).await;
+                    wolfha_protect_fail(&container, &format!("VM definition would not serialize: {}", e));
+                    migration_fail(&tasks, &tid, &format!("VM definition would not serialize: {}", e));
+                    return;
+                }
+            };
+            // The seed token — every replica's copy of this image gets it,
+            // and the first delta will name it as the base it fits.
+            let chain = uuid::Uuid::new_v4().to_string();
+            let ha_meta_json = serde_json::to_string(&crate::wolfha::HaMeta {
+                kind: subject_kind,
+                interval_minutes: interval,
+                replicas: peers.clone(),
+                auto_failover,
+                witness: witness.clone(),
+                failover_after_secs: failover_after,
+                primary: Some(self_peer.clone()),
+            }).unwrap_or_default();
+            let size_mb = seed_size / (1024 * 1024);
+            for (i, peer) in peers.iter().enumerate() {
+                migration_update(&tasks, &tid, "seed",
+                    &format!("Seeding replica {}/{} on {} ({} MB)…", i + 1, peers.len(), peer.node_id, size_mb));
+                wolfha_protect_note(&container,
+                    &format!("Seeding replica {}/{} on {} ({} MB)…", i + 1, peers.len(), peer.node_id, size_mb));
+                if let Err(e) = crate::wolfha::vm_seed_replica(
+                    &container, peer, &secret,
+                    &crate::wolfha::VmSeedPayload {
+                        seed_path: &seed_path,
+                        vm_config_json: &cfg_json,
+                        chain: &chain,
+                        primary: &self_peer,
+                        ha_meta_json: &ha_meta_json,
+                    },
+                ).await {
+                    let _ = std::fs::remove_file(&seed_path);
+                    let vm = container.clone();
+                    let _ = tokio::task::spawn_blocking(move || crate::wolfha::vm_end_tracking(&vm)).await;
+                    wolfha_protect_fail(&container, &format!(
+                        "Seeding replica on {} failed: {}. No HA entry was created — fix the node and try again.",
+                        peer.node_id, e));
+                    migration_fail(&tasks, &tid, &format!(
+                        "Seeding replica on {} failed: {}. No HA entry was created — fix the node and enable again.",
+                        peer.node_id, e));
+                    return;
+                }
+            }
+            let _ = std::fs::remove_file(&seed_path);
+
+            // Boot takeover, VM-style: strip `auto_start` so autostart_vms()
+            // can never race the boot-guard takeover check; the flag is
+            // remembered in the entry and restored when HA is disabled.
+            let had_autostart = vm_cfg.auto_start;
+            if had_autostart {
+                let vm = container.clone();
+                if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::wolfha::vm_set_autostart(&vm, false)).await {
+                    tracing::warn!("wolfha[{}]: could not strip the VM autostart flag: {}", container, e);
+                }
+            }
+
+            let mut store = crate::wolfha::HaStore::load();
+            store.remove(&container);
+            store.entries.push(crate::wolfha::HaEntry {
+                container: container.clone(),
+                kind: subject_kind,
+                role: crate::wolfha::HaRole::Primary,
+                interval_minutes: interval,
+                replicas: peers.clone(),
+                primary: None,
+                autostart_managed: had_autostart,
+                last_sync: std::collections::HashMap::new(),
+                last_delta_at: 0,
+                stale: false,
+                pending_vm_delta: None,
+                vm_chain: Some(chain),
+                auto_failover,
+                witness: witness.clone(),
+                failover_after_secs: failover_after,
+                self_identity: Some(self_peer.clone()),
+            });
+            if let Err(e) = store.save() {
+                let vm = container.clone();
+                let _ = tokio::task::spawn_blocking(move || crate::wolfha::vm_end_tracking(&vm)).await;
+                wolfha_protect_fail(&container, &format!("Replicas seeded but saving the HA entry failed: {}", e));
+                migration_fail(&tasks, &tid, &format!("Replicas seeded but saving the HA entry failed: {}", e));
+                return;
+            }
+            wolfha_protect_clear(&container);
+            migration_done(&tasks, &tid, &format!(
+                "'{}' is protected — {} replica(s) seeded, disk delta sync every {} min.",
+                container, peers.len(), interval));
+            return;
+        }
+
         let archive = format!("{}/seed-{}.tar.gz", stage_dir, uuid::Uuid::new_v4());
         migration_update(&tasks, &tid, "seed", "Creating live rootfs snapshot…");
         wolfha_protect_note(&container, "Creating live rootfs snapshot…");
@@ -13791,6 +14003,9 @@ pub async fn wolfha_enable(
             last_delta_at: 0,
             stale: false,
             pending_vm_delta: None,
+            // Containers prove convergence via the per-round manifest
+            // diff — no chain needed.
+            vm_chain: None,
             auto_failover,
             witness: witness.clone(),
             failover_after_secs: failover_after,
@@ -13936,6 +14151,142 @@ pub async fn wolfha_demote(
     }
     let new_primary = body.new_primary.clone();
     let final_sync = body.final_sync;
+    let kind = crate::wolfha::HaStore::load().get(&container).map(|e| e.kind).unwrap_or_default();
+
+    let mut final_sync_note = String::new();
+    if kind == crate::wolfha::SubjectKind::Vm {
+        // A VM hands off by freeze → final delta → terminate:
+        //  1. QMP `stop` freezes the vCPUs with the process (and its QMP
+        //     monitor) still alive — the disk stops changing but a delta
+        //     can still be taken through the block layer;
+        //  2. the final incremental therefore captures the EXACT final
+        //     state, which is what makes the demoted copy's chain token
+        //     trustworthy for later reverse deltas;
+        //  3. SIGTERM ends the process (the native graceful stop —
+        //     vms/manager.rs stop_vm — a frozen guest can't answer ACPI,
+        //     so "graceful to the guest" stopped being an option at the
+        //     freeze; the guest state was already captured in 2).
+        let was_running = {
+            let c = container.clone();
+            web::block(move || crate::wolfha::subject_is_running(crate::wolfha::SubjectKind::Vm, &c))
+                .await.unwrap_or(false)
+        };
+        let mut handoff_token: Option<String> = None;
+        if was_running {
+            let c = container.clone();
+            let paused = web::block(move || crate::vms::manager::VmManager::new().pause_vm(&c)).await;
+            if let Ok(Err(e)) = &paused {
+                // Not fatal: the takeover proceeds either way, the new
+                // primary just gets the last periodic state. Honest note.
+                final_sync_note = format!(" (could not freeze the VM for a final delta: {})", e);
+            }
+            if final_sync && matches!(paused, Ok(Ok(()))) {
+                let c = container.clone();
+                match web::block(move || crate::wolfha::vm_take_delta(&c)).await {
+                    Ok(Ok((delta_path, _size))) => {
+                        let entry_snapshot = crate::wolfha::HaStore::load().get(&container).cloned();
+                        let prev = entry_snapshot.as_ref()
+                            .and_then(|e| e.vm_chain.clone())
+                            .unwrap_or_default();
+                        let next = uuid::Uuid::new_v4().to_string();
+                        let secret = crate::auth::load_cluster_secret();
+                        // The promoting node MUST get this delta (it is
+                        // about to run the VM); the other standbys get it
+                        // too so their chains stay intact — any that miss
+                        // it will refuse the new primary's first delta and
+                        // be re-seeded automatically, so a failure here
+                        // degrades to bandwidth, never to divergence.
+                        let st = crate::wolfha::sync_vm_replica(
+                            &container, &new_primary, &secret, &delta_path, &prev, &next,
+                        ).await;
+                        if st.ok {
+                            handoff_token = Some(next.clone());
+                            for peer in entry_snapshot.map(|e| e.replicas).unwrap_or_default() {
+                                if peer.node_id == new_primary.node_id
+                                    || peer.address == new_primary.address
+                                    || crate::wolfha::peer_is_local(&peer)
+                                {
+                                    continue;
+                                }
+                                let ost = crate::wolfha::sync_vm_replica(
+                                    &container, &peer, &secret, &delta_path, &prev, &next,
+                                ).await;
+                                if !ost.ok {
+                                    tracing::warn!(
+                                        "wolfha[{}]: handoff delta did not reach standby {} ({}) — it will be re-seeded by the new primary",
+                                        container, peer.node_id, ost.message);
+                                }
+                            }
+                        } else {
+                            final_sync_note = format!(
+                                " (final delta failed: {} — the promoted copy has the last periodic sync)",
+                                st.message);
+                        }
+                        let _ = std::fs::remove_file(&delta_path);
+                    }
+                    Ok(Err(e)) => {
+                        final_sync_note = format!(
+                            " (final delta could not be taken: {} — the promoted copy has the last periodic sync)", e);
+                    }
+                    Err(e) => {
+                        final_sync_note = format!(" (final delta task failed: {})", e);
+                    }
+                }
+            }
+            // Terminate and WAIT for the process to be gone — promotion on
+            // the other node starts a copy with this VM's MAC and IPs, and
+            // two of those alive at once is the split brain HA exists to
+            // prevent. SIGTERM first (clean QEMU shutdown, flushes the
+            // block layer), SIGKILL only if it lingers.
+            let c = container.clone();
+            let stopped = web::block(move || -> Result<(), String> {
+                let mgr = crate::vms::manager::VmManager::new();
+                mgr.stop_vm(&c, false)?;
+                for _ in 0..240 {
+                    if !mgr.check_running(&c) { return Ok(()); }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                mgr.stop_vm(&c, true)?;
+                for _ in 0..20 {
+                    if !mgr.check_running(&c) { return Ok(()); }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err("the QEMU process would not exit".to_string())
+            }).await;
+            match stopped {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("could not stop VM '{}' for handoff: {}", container, e)
+                })),
+                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+            }
+        }
+        let c = container.clone();
+        let np = new_primary.clone();
+        let blk = web::block(move || crate::wolfha::demote_local(&c, np)).await;
+        match blk {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+            Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+        }
+        // demote_local cleared the chain token (a demoted VM copy is
+        // normally unprovable). This handoff is the one exception: the
+        // final delta was taken off a frozen disk and confirmed applied,
+        // so this copy IS the token's content — restoring it lets the new
+        // primary send this standby incrementals instead of a full
+        // re-seed.
+        if let Some(next) = handoff_token {
+            let mut store = crate::wolfha::HaStore::load();
+            if let Some(e) = store.get_mut(&container) {
+                e.vm_chain = Some(next);
+                let _ = store.save();
+            }
+        }
+        return HttpResponse::Ok().json(serde_json::json!({
+            "ok": true,
+            "message": format!("'{}' stopped and demoted to replica{}", container, final_sync_note),
+        }));
+    }
 
     // Stop first so the final delta captures a quiesced rootfs.
     let c = container.clone();
@@ -13954,7 +14305,6 @@ pub async fn wolfha_demote(
         Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
     }
 
-    let mut final_sync_note = String::new();
     if final_sync {
         let secret = crate::auth::load_cluster_secret();
         let status = crate::wolfha::sync_one_replica(&container, &new_primary, &secret).await;
@@ -14192,7 +14542,16 @@ pub async fn wolfha_disable(
             }
         }
         if entry.autostart_managed {
-            let _ = containers::lxc_set_autostart(&container, true);
+            // Hand the boot back to whatever owned it before HA: the LXC
+            // flag for containers, the VM sidecar flag for VMs.
+            if entry.kind == crate::wolfha::SubjectKind::Vm {
+                let c = container.clone();
+                if let Ok(Err(e)) = web::block(move || crate::wolfha::vm_set_autostart(&c, true)).await {
+                    notes.push(format!("could not restore the VM's autostart flag: {}", e));
+                }
+            } else {
+                let _ = containers::lxc_set_autostart(&container, true);
+            }
         }
     } else {
         // Disabling from a replica just abandons the local copy.

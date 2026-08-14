@@ -104,6 +104,35 @@ fn build_progress_body(
     (reqwest::Body::wrap_stream(stream), total)
 }
 
+/// WolfHA lifecycle guard for VM endpoints.
+///
+/// A protected VM's disk layout and identity are replicated state — the
+/// operations below would silently break the standbys (or start a second
+/// copy of a takeover identity), so they are refused with the way out
+/// spelled out. Mirrors the container guard in api::lxc action handling.
+/// Returns Some(refusal) when `name` is WolfHA-managed as a VM here.
+fn wolfha_vm_guard(name: &str, action: &str) -> Option<HttpResponse> {
+    let store = crate::wolfha::HaStore::load();
+    let entry = store.get(name)?;
+    if entry.kind != crate::wolfha::SubjectKind::Vm {
+        return None;
+    }
+    Some(match entry.role {
+        crate::wolfha::HaRole::Replica => HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "'{}' is a WolfHA standby copy — {} it here would collide with the active copy. Use Promote on the WolfHA page instead (or Disable to release it).",
+                name, action
+            )
+        })),
+        crate::wolfha::HaRole::Primary => HttpResponse::Conflict().json(serde_json::json!({
+            "error": format!(
+                "'{}' is WolfHA-protected — {} would break its replicas. Disable WolfHA for this VM first, then try again.",
+                name, action
+            )
+        })),
+    })
+}
+
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/vms")
@@ -229,7 +258,26 @@ async fn list_vms(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse 
     // 10-20s. Offload to the blocking pool; the lock is taken inside it.
     let state = state.clone(); // clone the Arc-backed web::Data, lock inside the block
     match web::block(move || state.vms.lock().unwrap().list_vms()).await {
-        Ok(vms) => HttpResponse::Ok().json(vms),
+        Ok(vms) => {
+            // Flag WolfHA standby copies the same way the LXC list does
+            // (`ha_replica`) — the WolfHA protect dialog filters on it,
+            // and the VM cards can label a dormant copy for what it is.
+            // Injected at the JSON edge: VmConfig itself stays unchanged
+            // so nothing extra is persisted into sidecar files.
+            let store = crate::wolfha::HaStore::load();
+            let out: Vec<serde_json::Value> = vms.into_iter().map(|vm| {
+                let is_standby = store.get(&vm.name).map(|e| {
+                    e.kind == crate::wolfha::SubjectKind::Vm
+                        && e.role == crate::wolfha::HaRole::Replica
+                }).unwrap_or(false);
+                let mut v = serde_json::to_value(&vm).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("ha_replica".to_string(), serde_json::Value::Bool(is_standby));
+                }
+                v
+            }).collect();
+            HttpResponse::Ok().json(out)
+        }
         Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "vm list unavailable"})),
     }
 }
@@ -568,6 +616,38 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
             }));
         }
 
+    // WolfHA: a standby's definition is managed by the sync stream (any
+    // edit here would be overwritten by the next round); on a protected
+    // primary, ordinary edits replicate fine but the ones that break the
+    // replication invariants are refused with the way out spelled out.
+    {
+        let store = crate::wolfha::HaStore::load();
+        if let Some(e) = store.get(&name).filter(|e| e.kind == crate::wolfha::SubjectKind::Vm) {
+            if e.role == crate::wolfha::HaRole::Replica {
+                return HttpResponse::Conflict().json(serde_json::json!({
+                    "error": format!("'{}' is a WolfHA standby — its definition comes from the primary and edits here would be overwritten by the next sync. Edit the VM on its active node.", name)
+                }));
+            }
+            if body.disk_size_gb.is_some() {
+                return HttpResponse::Conflict().json(serde_json::json!({
+                    "error": "this VM is WolfHA-protected and its standbys hold disks of the current size — resizing would break every incremental. Disable WolfHA, resize, then enable it again (which re-seeds at the new size)."
+                }));
+            }
+            if body.tpm == Some(true) {
+                return HttpResponse::Conflict().json(serde_json::json!({
+                    "error": "this VM is WolfHA-protected — TPM state is not replicated, so a TPM cannot be added while HA is enabled. Disable WolfHA first."
+                }));
+            }
+            if body.usb_devices.as_ref().is_some_and(|d| !d.is_empty())
+                || body.pci_devices.as_ref().is_some_and(|d| !d.is_empty())
+            {
+                return HttpResponse::Conflict().json(serde_json::json!({
+                    "error": "this VM is WolfHA-protected — passthrough hardware is attached to this host and cannot fail over. Disable WolfHA first."
+                }));
+            }
+        }
+    }
+
     let manager = state.vms.lock().unwrap();
     match manager.update_vm(&name, body.cpus, body.memory_mb, body.iso_path.clone(),
                             body.wolfnet_ip.clone(), body.disk_size_gb,
@@ -623,6 +703,10 @@ async fn get_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<St
 async fn delete_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+    // Deleting a protected primary would orphan its replicas (and the HA
+    // entry would keep trying to sync a ghost); deleting a standby is the
+    // WolfHA page's job (Disable, with or without removing copies).
+    if let Some(refusal) = wolfha_vm_guard(&name, "deleting it") { return refusal; }
     let manager = state.vms.lock().unwrap();
     
     match manager.delete_vm(&name) {
@@ -653,6 +737,24 @@ async fn vm_action(req: HttpRequest, state: web::Data<AppState>, path: web::Path
         {
             return HttpResponse::Conflict().json(serde_json::json!({
                 "error": format!("WolfNet IP already in use: {} (active on {})", ip.trim(), holder)
+            }));
+        }
+    }
+    // A WolfHA standby VM carries its primary's MAC and IPs — hand-starting
+    // it while the primary runs puts two identical machines on one L2.
+    // Promotion (the WolfHA page) is the sanctioned way to start it.
+    // Mirrors the LXC guard in api::mod.rs container actions.
+    if matches!(body.action.as_str(), "start" | "restart" | "resume") {
+        let store = crate::wolfha::HaStore::load();
+        let is_standby = store.get(&name).map(|e| {
+            e.kind == crate::wolfha::SubjectKind::Vm && e.role == crate::wolfha::HaRole::Replica
+        }).unwrap_or(false);
+        if is_standby {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!(
+                    "'{}' is a WolfHA standby — starting it here would collide with the active copy. Use Promote on the WolfHA page instead.",
+                    name
+                )
             }));
         }
     }
@@ -1048,6 +1150,10 @@ struct AddVolumeRequest {
 async fn add_volume(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<AddVolumeRequest>) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let vm_name = path.into_inner();
+    // WolfHA replicates the OS disk only (the one the dirty bitmap
+    // tracks) — a data disk added now would silently not exist on the
+    // standbys, and a failover would lose it.
+    if let Some(refusal) = wolfha_vm_guard(&vm_name, "adding a data disk") { return refusal; }
     let manager = state.vms.lock().unwrap();
 
     match manager.add_volume(&vm_name, &body.name, body.size_gb, 
@@ -1261,6 +1367,9 @@ async fn vm_migrate(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+    // Migration moves the disk out from under the replication chain and
+    // the HA entry stays behind pointing at nothing.
+    if let Some(refusal) = wolfha_vm_guard(&name, "migrating it") { return refusal; }
     let new_name = body.new_name.as_deref().unwrap_or(&name).to_string();
 
     // Resolve target node synchronously so bad targets produce a 4xx
@@ -1544,6 +1653,9 @@ async fn vm_disk_migrate(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+    // Moving the OS disk mid-chain would leave the replicas resolving a
+    // path that exists only on the primary.
+    if let Some(refusal) = wolfha_vm_guard(&name, "moving its storage") { return refusal; }
     let target = body.target.trim().to_string();
     let remove_source = body.remove_source;
     if target.is_empty() {
@@ -1782,6 +1894,7 @@ async fn vm_migrate_external(
 ) -> HttpResponse {
     if let Err(resp) = require_auth(&req, &state) { return resp; }
     let name = path.into_inner();
+    if let Some(refusal) = wolfha_vm_guard(&name, "migrating it") { return refusal; }
     let new_name = body.new_name.as_deref().unwrap_or(&name).to_string();
 
     let expected_total: Option<u64> = super::manager::read_vm_config(&name)
