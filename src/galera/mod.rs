@@ -1466,10 +1466,20 @@ fn node_address_local(kind: &str, container: &str) -> String {
             .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("").to_string())
             .unwrap_or_default()
     } else {
-        crate::containers::lxc_list_all_cached().iter()
+        // `ip_address` is the raw multi-homed string for a container with
+        // several NICs ("10.0.10.111, 10.0.3.3, 10.10.10.3" — bridge + LAN
+        // + overlay). Returning it verbatim is how adopt failed with "no
+        // reachable address found" on iw-db-2 (Paul, 2026-08-14): the list
+        // isn't an address. Pick ONE here, on the container's own host,
+        // where the WolfNet marker is readable — preferred because the
+        // overlay is the cross-host fabric WolfStack manages.
+        // Source: containers/mod.rs pick_cross_host_ip() + lxc_get_wolfnet_ip().
+        let raw = crate::containers::lxc_list_all_cached().iter()
             .find(|c| c.name == container)
             .map(|c| c.ip_address.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let wolfnet = crate::containers::lxc_get_wolfnet_ip(container);
+        crate::containers::pick_cross_host_ip(&raw, wolfnet.as_deref()).unwrap_or(raw)
     }
 }
 
@@ -1751,13 +1761,18 @@ pub fn adopt_cluster(
         // it resolves even when the picked id is a peer self_id this node hasn't
         // directly polled — the case that broke cross-host adopt in a large mesh.
         let host = locate_host(ctx, kind, &p.container, &p.node_id)?;
-        let addr = run_op(ctx, &host, kind, &p.container, NodeOp::Address)
+        let raw = run_op(ctx, &host, kind, &p.container, NodeOp::Address)
             .map_err(|e| format!("[{}] couldn't resolve address: {}", p.container, e))?;
-        let addr = addr.trim().to_string();
+        // The host normally returns one picked address, but an older
+        // remote (≤ v25.14.0) sends the raw multi-homed list — pick here
+        // too so a mixed-version cluster still adopts. A bare hostname
+        // has no parseable IP and passes through untouched.
+        let addr = crate::containers::pick_cross_host_ip(&raw, None)
+            .unwrap_or_else(|| raw.trim().to_string());
         if !valid_address(&addr) {
             return Err(format!(
                 "[{}] no reachable address found (got '{}') — is the container running and on WolfNet?",
-                p.container, addr));
+                p.container, raw.trim()));
         }
         nodes.push(GaleraNode {
             node_id: host,

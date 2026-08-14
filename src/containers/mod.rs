@@ -3173,6 +3173,76 @@ fn first_reportable_ip(raw: &str) -> Option<String> {
     addr.parse::<std::net::IpAddr>().ok().map(|a| a.to_string())
 }
 
+/// Pick ONE address other hosts can reach from a multi-homed `ip_address`
+/// field — the string a container reports when it has several NICs (the
+/// lxcbr0 bridge + a LAN/vSwitch NIC + a WolfNet overlay NIC), e.g.
+/// `"10.0.10.111, 10.0.3.3, 10.10.10.3"`. Tokens may carry a CIDR suffix
+/// and/or a `" (wolfnet)"` annotation, both produced by the LXC listers in
+/// this module.
+///
+/// Preference order:
+/// 1. `prefer` (the container's WolfNet marker IP, when the caller has it)
+///    if it is actually among the live addresses — the overlay is the
+///    cross-host fabric WolfStack itself manages;
+/// 2. a token annotated `(wolfnet)` by the lister;
+/// 3. the first address that is not host-local — loopback, link-local, or
+///    the lxcbr0 bridge 10.0.3.0/24, which only this host can route;
+/// 4. the first address at all (better a candidate the operator can see
+///    stored than rejecting the whole list).
+///
+/// None only when the string contains no parseable IP (e.g. a bare
+/// hostname) — callers fall back to the raw value then.
+pub fn pick_cross_host_ip(raw: &str, prefer: Option<&str>) -> Option<String> {
+    struct Cand {
+        ip: std::net::IpAddr,
+        wolfnet_tagged: bool,
+    }
+    let mut cands: Vec<Cand> = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let tagged = part.contains("(wolfnet)");
+        // First whitespace token drops the annotation; strip any CIDR.
+        let Some(token) = part.split_whitespace().next() else { continue };
+        let addr = token.split('/').next().unwrap_or("");
+        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+            cands.push(Cand { ip, wolfnet_tagged: tagged });
+        }
+    }
+    if let Some(w) = prefer
+        && let Ok(want) = w.trim().parse::<std::net::IpAddr>()
+        && cands.iter().any(|c| c.ip == want)
+    {
+        return Some(want.to_string());
+    }
+    if let Some(c) = cands.iter().find(|c| c.wolfnet_tagged) {
+        return Some(c.ip.to_string());
+    }
+    let host_local = |ip: &std::net::IpAddr| -> bool {
+        match ip {
+            std::net::IpAddr::V4(v) => {
+                let o = v.octets();
+                v.is_loopback()
+                    || v.is_link_local()
+                    // lxcbr0 bridge — routable only from the container's own
+                    // host (same range wolfscale::pick_usable_address excludes).
+                    || (o[0] == 10 && o[1] == 0 && o[2] == 3)
+            }
+            std::net::IpAddr::V6(v) => {
+                // fe80::/10 link-local (is_unicast_link_local is unstable).
+                v.is_loopback() || (v.segments()[0] & 0xffc0) == 0xfe80
+            }
+        }
+    };
+    cands
+        .iter()
+        .find(|c| !host_local(&c.ip))
+        .or_else(|| cands.first())
+        .map(|c| c.ip.to_string())
+}
+
 /// Parse the `bridge=` value out of a Proxmox container's `net0:` line.
 fn bridge_from_pve_net0(config: &str) -> Option<String> {
     for line in config.lines() {
@@ -4680,6 +4750,67 @@ fn parse_cgroup_stat(text: &str) -> std::collections::HashMap<String, u64> {
             }
     }
     map
+}
+
+#[cfg(test)]
+mod pick_cross_host_ip_tests {
+    use super::pick_cross_host_ip;
+
+    /// The live failure (Paul, 2026-08-14): iw-db-2's Galera adopt got the
+    /// raw three-NIC list and rejected the whole string. The pick must skip
+    /// the host-local lxcbr0 bridge (10.0.3.x) and return one address.
+    #[test]
+    fn multi_homed_list_yields_one_cross_host_address() {
+        assert_eq!(
+            pick_cross_host_ip("10.0.10.111, 10.0.3.3, 10.10.10.3", None).as_deref(),
+            Some("10.0.10.111")
+        );
+        // Bridge listed first must still lose to a routable address.
+        assert_eq!(
+            pick_cross_host_ip("10.0.3.3, 10.10.10.3", None).as_deref(),
+            Some("10.10.10.3")
+        );
+    }
+
+    /// The WolfNet marker wins when its address is live — the overlay is
+    /// the fabric WolfStack manages — but a stale marker naming an address
+    /// the container doesn't hold must NOT be returned.
+    #[test]
+    fn wolfnet_marker_is_preferred_only_when_live() {
+        assert_eq!(
+            pick_cross_host_ip("10.0.10.111, 10.0.3.3, 10.10.10.3", Some("10.10.10.3")).as_deref(),
+            Some("10.10.10.3")
+        );
+        assert_eq!(
+            pick_cross_host_ip("10.0.10.111, 10.10.10.3", Some("192.168.9.9")).as_deref(),
+            Some("10.0.10.111")
+        );
+    }
+
+    /// The LXC listers annotate the overlay NIC and can leave CIDR
+    /// suffixes — both forms the old wolfscale picker silently dropped.
+    #[test]
+    fn annotated_and_cidr_tokens_are_parsed() {
+        assert_eq!(
+            pick_cross_host_ip("10.0.3.3, 10.0.10.5/24 (wolfnet)", None).as_deref(),
+            Some("10.0.10.5")
+        );
+        assert_eq!(
+            pick_cross_host_ip("10.10.10.3/16", None).as_deref(),
+            Some("10.10.10.3")
+        );
+    }
+
+    /// All-host-local lists still return SOMETHING (the operator can see
+    /// what was stored and fix it), and a bare hostname returns None so
+    /// callers fall back to the raw string.
+    #[test]
+    fn degenerate_inputs_degrade_honestly() {
+        assert_eq!(pick_cross_host_ip("10.0.3.3", None).as_deref(), Some("10.0.3.3"));
+        assert_eq!(pick_cross_host_ip("db-node-2.internal", None), None);
+        assert_eq!(pick_cross_host_ip("", None), None);
+        assert_eq!(pick_cross_host_ip("-", None), None);
+    }
 }
 
 #[cfg(test)]
