@@ -10832,25 +10832,33 @@ pub async fn control_panel_inventory_node(
 }
 
 async fn fetch_local_json(state: &web::Data<AppState>, path: &str) -> Option<serde_json::Value> {
-    // Local fan-out hits the node over HTTP on whichever plain port is
-    // actually listening — inter_node when TLS is on (the main port is
-    // HTTPS then), or api when TLS is off (the api port IS the plain
-    // HTTP listener). Using the wrong one silently fails because no
-    // listener is bound.
-    let ports = crate::ports::PortConfig::load();
-    let port = if state.tls_enabled { ports.inter_node } else { ports.api };
+    // Try the loopback candidates in order rather than picking one port up
+    // front. The previous version assumed that "TLS is on" implies the plain
+    // inter-node listener exists, but a node with a CA-signed certificate
+    // never binds it (`cert_is_self_signed` in main.rs), so on those nodes
+    // every self-fetch failed — the node silently contributed nothing to its
+    // own inventory. See `ports::self_api_urls`.
     let client = &*API_HTTP_CLIENT;
-    let url = format!("http://127.0.0.1:{}{}", port, path);
-    let resp = client.get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .header("X-WolfStack-Secret", state.cluster_secret.clone())
-        .send().await.ok()?;
-    if !resp.status().is_success() {
-        // Drain error body → socket returns to keep-alive pool.
+    for url in crate::ports::self_api_urls(path) {
+        let Ok(resp) = client.get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .header("X-WolfStack-Secret", state.cluster_secret.clone())
+            .send().await
+        else {
+            continue; // wrong scheme or nothing bound here — try the next
+        };
+        if resp.status().is_success() {
+            if let Ok(j) = resp.json::<serde_json::Value>().await { return Some(j); }
+            // json() failing still consumed the body.
+            return None;
+        }
+        // A bound listener that gave a definitive non-2xx answer is the right
+        // listener — a different port won't answer differently. Drain the body
+        // so the socket returns to the keep-alive pool, then stop.
         let _ = resp.bytes().await;
         return None;
     }
-    resp.json::<serde_json::Value>().await.ok()
+    None
 }
 
 async fn fetch_remote_json(

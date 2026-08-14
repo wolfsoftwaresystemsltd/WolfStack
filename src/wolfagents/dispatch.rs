@@ -1465,27 +1465,39 @@ async fn tool_wolfstack_api(
     // session). This means user-scoped endpoints that inspect the
     // session username will see "cluster-node" instead, which is
     // fine for observation and admin ops.
-    let port = crate::ports::PortConfig::load().api;
-    let url = format!("http://127.0.0.1:{}{}", port, path);
+    // Walk the loopback candidates rather than assuming plain HTTP on the api
+    // port: when TLS is on, that port serves HTTPS and a plain-HTTP request to
+    // it never connects. See `ports::self_api_urls`.
     let client = &*DISPATCH_CLIENT;
-    let req_builder = match method.as_str() {
-        "GET" => client.get(&url),
-        "POST" => client.post(&url),
-        "PUT" => client.put(&url),
-        "PATCH" => client.patch(&url),
-        "DELETE" => client.delete(&url),
-        _ => unreachable!(),
-    };
-    let req_builder = req_builder
-        .timeout(Duration::from_secs(30))
-        .header("X-WolfStack-Secret", &state.cluster_secret);
-    let req_builder = if let Some(b) = body {
-        req_builder.header("Content-Type", "application/json").json(b)
-    } else {
-        req_builder
-    };
+    let mut last_err: Option<String> = None;
+    let mut response = None;
+    for url in crate::ports::self_api_urls(path) {
+        let req_builder = match method.as_str() {
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "PATCH" => client.patch(&url),
+            "DELETE" => client.delete(&url),
+            _ => unreachable!(),
+        };
+        let req_builder = req_builder
+            .timeout(Duration::from_secs(30))
+            .header("X-WolfStack-Secret", &state.cluster_secret);
+        let req_builder = if let Some(b) = body {
+            req_builder.header("Content-Type", "application/json").json(b)
+        } else {
+            req_builder
+        };
+        match req_builder.send().await {
+            // Any answer from a bound listener is THE answer — every listener
+            // serves the same routes, so a different port won't reply
+            // differently. Only a transport failure is worth retrying.
+            Ok(resp) => { response = Some(resp); break; }
+            Err(e) => { last_err = Some(e.to_string()); }
+        }
+    }
 
-    match req_builder.send().await {
+    match response.ok_or_else(|| last_err.unwrap_or_else(|| "no loopback listener answered".to_string())) {
         Ok(resp) => {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();

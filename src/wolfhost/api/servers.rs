@@ -41,13 +41,14 @@ pub fn wolfstack_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-/// Try HTTPS first (port 8553), then HTTP on same port, then HTTP on 8554
-/// Try HTTPS on 8553 first, then HTTP on 8554 (port+1)
+/// Loopback URLs for this node's own WolfStack API, best candidate first.
+///
+/// Delegates to `ports::self_api_urls` so a node with non-default ports works:
+/// this used to hardcode 8553/8554, which silently broke on any install whose
+/// `ports.json` moved them (the go2rtc/Frigate clashes that made the Node Ports
+/// panel necessary in the first place).
 pub fn wolfstack_urls(path: &str) -> Vec<String> {
-    vec![
-        format!("https://127.0.0.1:8553{}", path),
-        format!("http://127.0.0.1:8554{}", path),
-    ]
+    crate::ports::self_api_urls(path)
 }
 
 pub async fn wolfstack_api(path: &str) -> Result<serde_json::Value, String> {

@@ -80221,8 +80221,12 @@ async function galeraRemoveProxy(cid, container) {
 // ── Adopt from a container picker ────────────────────────────────────
 
 let _galeraAdoptInv = [];
+// Hosts whose inventory fetch failed, so the picker can say so instead of
+// silently listing fewer hosts than the cluster actually has.
+let _galeraAdoptFailures = [];
 function galeraAdoptOpen() {
     _galeraAdoptInv = [];
+    _galeraAdoptFailures = [];
     const html = `
         <div style="font-size:13px;display:grid;gap:10px;">
             <label>Cluster name (wsrep_cluster_name)
@@ -80261,14 +80265,27 @@ async function galeraAdoptLoadInventory() {
     try {
         const results = await Promise.all(hosts.map(h =>
             fetch('/api/control-panel/inventory/node/' + encodeURIComponent(h.id))
-                .then(r => (r.ok ? r.json() : { items: [] }))
-                .catch(() => ({ items: [] }))
+                .then(r => (r.ok ? r.json() : { items: [], errors: [{ kind: 'all', error: 'HTTP ' + r.status }] }))
+                .catch(e => ({ items: [], errors: [{ kind: 'all', error: (e && e.message) || String(e) }] }))
         ));
         const inv = [];
-        results.forEach(d => (d.items || []).forEach(it => {
-            if (it.kind === 'lxc' || it.kind === 'docker') inv.push(it);
-        }));
+        // A host whose inventory failed used to contribute nothing and say
+        // nothing, so the picker just showed fewer hosts than the cluster has
+        // and the operator had no way to tell a broken host from an empty one.
+        const failures = [];
+        results.forEach((d, i) => {
+            (d.items || []).forEach(it => {
+                if (it.kind === 'lxc' || it.kind === 'docker') inv.push(it);
+            });
+            const errs = (d.errors || []).filter(e => e.kind !== 'share');
+            if (errs.length) {
+                const host = hosts[i];
+                failures.push(((host && (host.hostname || host.id)) || 'unknown host')
+                    + ': ' + errs.map(e => (e.kind || '?') + ' — ' + (e.error || 'failed')).join('; '));
+            }
+        });
         _galeraAdoptInv = inv;
+        _galeraAdoptFailures = failures;
         galeraAdoptRenderPicker();
     } catch (e) {
         if (picker) picker.innerHTML = `<div role="alert" style="color:var(--danger);font-size:12px;padding:10px;">Couldn't load containers: ${escapeHtml((e && e.message) || String(e))}</div>`;
@@ -80278,13 +80295,23 @@ async function galeraAdoptLoadInventory() {
 function galeraAdoptRenderPicker() {
     const picker = document.getElementById('ga-picker');
     if (!picker) return;
+    // Failed hosts are announced whether or not any containers were found —
+    // "2 of your 3 hosts answered" is the single most useful thing to know
+    // here, and its absence is what made a missing host look like a host with
+    // nothing on it.
+    const warn = _galeraAdoptFailures.length
+        ? `<div role="alert" style="color:var(--warning,#f59e0b);font-size:11px;padding:8px;margin-bottom:6px;border:1px solid var(--warning,#f59e0b);border-radius:6px;line-height:1.5;">
+               ⚠ Couldn't list containers on ${_galeraAdoptFailures.length} host(s) — their containers are missing from this list:<br>
+               ${_galeraAdoptFailures.map(f => escapeHtml(f)).join('<br>')}
+           </div>`
+        : '';
     if (!_galeraAdoptInv.length) {
-        picker.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:10px;">No LXC or Docker containers found in this cluster.</div>`;
+        picker.innerHTML = warn + `<div style="color:var(--text-muted);font-size:12px;padding:10px;">No LXC or Docker containers found in this cluster.</div>`;
         return;
     }
     const byHost = {};
     _galeraAdoptInv.forEach((it, i) => { (byHost[it.node_id] = byHost[it.node_id] || []).push({ it, i }); });
-    let html = '';
+    let html = warn;
     Object.keys(byHost).forEach(hostId => {
         html += `<div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin:6px 0 4px;">${escapeHtml(galeraHostName(hostId))}</div>`;
         byHost[hostId].forEach(({ it, i }) => {
