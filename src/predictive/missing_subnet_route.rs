@@ -89,6 +89,10 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
     let v6_active = cfg.ipv6_subnet_routing
         && crate::networking::router::ipv6_available();
 
+    // What the kernel already routes into WolfNet. A subnet covered here is
+    // reachable whether or not WolfRouter has a config entry for it.
+    let kernel_routed = kernel_wolfnet_route_cidrs();
+
     let mut missing = Vec::new();
     for peer in &peers {
         let peer_ip_only = peer.ip.split('/').next().unwrap_or(&peer.ip).to_string();
@@ -121,6 +125,10 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
                 continue;
             }
             if subnet_already_covered(sub, &peer_ip_only, &configured) { continue; }
+            // Already routed by the kernel — the subnet is reachable, so
+            // reporting it unreachable would be false, and the suggested
+            // `ip route` command could not apply anyway.
+            if kernel_route_covers(sub, &kernel_routed) { continue; }
             missing.push(MissingRoute {
                 peer_name: peer.name.clone(),
                 peer_wolfnet_ip: peer_ip_only.clone(),
@@ -134,6 +142,77 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
 
 /// Load the persisted cluster nodes (workload_subnets included since the
 /// v22.13.0 schema bump). Same path as `ClusterState::save_nodes`.
+/// Destination CIDRs this node already routes over the WolfNet interface,
+/// read from the kernel.
+///
+/// The analyzer used to decide "unreachable" purely from WolfRouter's
+/// CONFIG. That is a different layer from the kernel table, and when the
+/// two disagreed the finding could never clear: the route was already
+/// installed (by wolfnetd, by an operator, or by an older build), so the
+/// subnet WAS reachable, but with no matching WolfRouter entry the
+/// analyzer kept reporting it — and the suggested `ip route add` could only
+/// ever answer `RTNETLINK answers: File exists`. Reported by klas,
+/// 2026-08-14: "either this is a useless error, or the fix is not working."
+/// It was the first.
+fn kernel_wolfnet_route_cidrs() -> Vec<String> {
+    let mut out = Vec::new();
+    for args in [
+        vec!["route", "show", "dev", "wolfnet0"],
+        vec!["-6", "route", "show", "dev", "wolfnet0"],
+    ] {
+        let Ok(o) = std::process::Command::new("ip").args(&args).output() else { continue };
+        if !o.status.success() {
+            continue;
+        }
+        out.extend(parse_route_destinations(&String::from_utf8_lossy(&o.stdout)));
+    }
+    out
+}
+
+/// Pull destination CIDRs out of `ip route show` output.
+///
+/// Each line starts with the destination; `default` and any bare address
+/// without a prefix are ignored — this is only used to answer "is this
+/// CIDR already routed", and a host route or default cannot establish
+/// that for a subnet.
+fn parse_route_destinations(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|d| *d != "default" && d.contains('/'))
+        .map(|d| d.to_string())
+        .collect()
+}
+
+/// True when one of `routed` (kernel destinations over WolfNet) covers
+/// `target_subnet`.
+///
+/// Gateway-agnostic on purpose: a route pointing into the WolfNet
+/// interface means packets for that subnet enter the overlay, which is
+/// what "reachable from this node" means here. Which peer ultimately
+/// answers is wolfnetd's business, not this analyzer's.
+fn kernel_route_covers(target_subnet: &str, routed: &[String]) -> bool {
+    if is_ipv6_cidr(target_subnet) {
+        let Some((tnet, tprefix)) = parse_cidr_v6(target_subnet) else { return false };
+        return routed.iter().any(|r| {
+            if !is_ipv6_cidr(r) { return false; }
+            let Some((rnet, rprefix)) = parse_cidr_v6(r) else { return false };
+            if rprefix > tprefix { return false; }
+            let mask: u128 = if rprefix == 0 { 0 }
+                else { u128::MAX.checked_shl(128 - rprefix).unwrap_or(0) };
+            (tnet & mask) == (rnet & mask)
+        });
+    }
+    let Some((tnet, tprefix)) = parse_cidr(target_subnet) else { return false };
+    routed.iter().any(|r| {
+        if is_ipv6_cidr(r) { return false; }
+        let Some((rnet, rprefix)) = parse_cidr(r) else { return false };
+        if rprefix > tprefix { return false; }
+        let mask: u32 = if rprefix == 0 { 0 }
+            else { 0xFFFF_FFFFu32.checked_shl(32 - rprefix).unwrap_or(0) };
+        (tnet & mask) == rnet
+    })
+}
+
 fn load_nodes_from_disk() -> Option<Vec<crate::agent::Node>> {
     let path = &crate::paths::get().nodes_config;
     let data = std::fs::read_to_string(path).ok()?;
@@ -336,7 +415,7 @@ fn build_proposal(missing: &[&MissingRoute], scope: &ProposalScope) -> Proposal 
     let instructions = format!(
         "Open WolfRouter on this node, go to Subnet Routes, and add one entry per missing \
          CIDR — gateway always `{}` (the peer's WolfNet IP). Concretely:\n\n{}\n\n\
-         The route reconciler from v22.10.6 will apply each `ip route add` within ~60s and \
+         The route reconciler from v22.10.6 will apply each route within ~60s and \
          the finding will auto-resolve on the next tick. If you'd rather not configure the \
          routes (the peer's workloads aren't supposed to be cluster-reachable), dismiss this \
          finding — it'll stay dismissed.",
@@ -350,12 +429,12 @@ fn build_proposal(missing: &[&MissingRoute], scope: &ProposalScope) -> Proposal 
             // a v6 dest); wolfnetd resolves the CIDR to the v4 gateway peer.
             // WolfRouter still stores gateway = the peer's WolfNet IP.
             format!(
-                "ip -6 route add {} dev wolfnet0   # one-off; gateway {} is resolved by wolfnetd. WolfRouter is the canonical place",
+                "ip -6 route replace {} dev wolfnet0   # one-off; gateway {} is resolved by wolfnetd. WolfRouter is the canonical place",
                 m.subnet_cidr, m.peer_wolfnet_ip,
             )
         } else {
             format!(
-                "ip route add {} via {} dev wolfnet0   # one-off; WolfRouter is the canonical place",
+                "ip route replace {} via {} dev wolfnet0   # one-off; WolfRouter is the canonical place",
                 m.subnet_cidr, m.peer_wolfnet_ip,
             )
         }
@@ -432,8 +511,11 @@ mod tests {
     #[test]
     fn v6_command_is_device_route_not_via() {
         // The remediation command for a v6 missing route must be the device
-        // route (`ip -6 route add … dev wolfnet0`) — never the broken
-        // `ip route add <v6> via <v4>` form that v24.47.3 filtered out.
+        // route (`ip -6 route replace … dev wolfnet0`) — never the broken
+        // `ip route … <v6> via <v4>` form that v24.47.3 filtered out.
+        // `replace` rather than `add`: an `add` that collides with an
+        // existing route fails with "File exists" and the operator is left
+        // with a correction that cannot be applied (klas, 2026-08-14).
         let missing = MissingRoute {
             peer_name: "ninni".into(),
             peer_wolfnet_ip: "10.100.10.30".into(),
@@ -443,7 +525,7 @@ mod tests {
         let p = build_proposal(&[&missing], &scope);
         if let RemediationPlan::Manual { commands, .. } = &p.remediation {
             assert_eq!(commands.len(), 1);
-            assert!(commands[0].starts_with("ip -6 route add fc00:abcd::/48 dev wolfnet0"),
+            assert!(commands[0].starts_with("ip -6 route replace fc00:abcd::/48 dev wolfnet0"),
                 "got: {}", commands[0]);
             assert!(!commands[0].contains(" via "), "v6 device route must have no via: {}", commands[0]);
         } else {
@@ -537,5 +619,73 @@ mod tests {
         let acks = AckStore::default();
         let proposals = crate::predictive::proposal::ProposalStore::default();
         assert!(analyze(&ctx, &facts, &acks, &proposals).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod kernel_coverage_tests {
+    use super::*;
+
+    /// klas, 2026-08-14: the inbox repeated "workload subnets are
+    /// unreachable" while the offered fix always answered "File exists".
+    /// Both symptoms are one cause — the route WAS installed, so the
+    /// subnet was reachable and `ip route add` had nothing to do. A
+    /// destination already routed into WolfNet must not be reported.
+    #[test]
+    fn a_subnet_already_routed_over_wolfnet_is_not_missing() {
+        let routed = vec!["172.18.0.0/16".to_string()];
+        assert!(kernel_route_covers("172.18.0.0/16", &routed));
+    }
+
+    /// A wider kernel route covers a narrower workload subnet — the same
+    /// supernet rule the configured-route check already applies.
+    #[test]
+    fn a_wider_kernel_route_covers_a_narrower_subnet() {
+        let routed = vec!["10.0.0.0/8".to_string()];
+        assert!(kernel_route_covers("10.4.3.0/24", &routed));
+        // ...but a narrower route does NOT cover a wider subnet.
+        let narrow = vec!["10.4.3.0/24".to_string()];
+        assert!(!kernel_route_covers("10.0.0.0/8", &narrow));
+    }
+
+    /// A genuinely absent route must still be reported, or the fix would
+    /// have silenced a real problem instead of a false one.
+    #[test]
+    fn an_unrouted_subnet_is_still_missing() {
+        let routed = vec!["10.0.0.0/8".to_string(), "172.18.0.0/16".to_string()];
+        assert!(!kernel_route_covers("192.168.5.0/24", &routed));
+        assert!(!kernel_route_covers("10.0.0.0/24", &[]));
+    }
+
+    /// Families never cross-cover: a v4 route cannot make a v6 subnet
+    /// reachable and vice versa.
+    #[test]
+    fn address_families_do_not_cross_cover() {
+        assert!(!kernel_route_covers("fc00:abcd::/48", &["10.0.0.0/8".to_string()]));
+        assert!(!kernel_route_covers("10.0.0.0/8", &["fc00:abcd::/48".to_string()]));
+        // A /48 spans only the third group it names: fc00:abcd::/48 covers
+        // fc00:abcd:0000::* and NOT fc00:abcd:1::, which is a different /48.
+        assert!(!kernel_route_covers("fc00:abcd:1::/64", &["fc00:abcd::/48".to_string()]));
+        assert!(kernel_route_covers("fc00:abcd:0:1::/64", &["fc00:abcd::/48".to_string()]));
+        // A /32 does span it.
+        assert!(kernel_route_covers("fc00:abcd:1::/64", &["fc00:abcd::/32".to_string()]));
+    }
+
+    /// `default` and host routes cannot establish that a SUBNET is
+    /// routed, so they are not treated as coverage.
+    #[test]
+    fn default_and_host_routes_are_ignored() {
+        let text = "default via 10.100.10.1 dev wolfnet0\n\
+                    10.100.10.5 dev wolfnet0 scope link\n\
+                    172.18.0.0/16 via 10.100.10.30 dev wolfnet0\n";
+        let dests = parse_route_destinations(text);
+        assert_eq!(dests, vec!["172.18.0.0/16"]);
+    }
+
+    #[test]
+    fn route_parsing_tolerates_empty_and_malformed_output() {
+        assert!(parse_route_destinations("").is_empty());
+        assert!(parse_route_destinations("\n\n").is_empty());
+        assert!(!kernel_route_covers("not-a-cidr", &["10.0.0.0/8".to_string()]));
     }
 }
