@@ -1372,7 +1372,7 @@ pub fn remove_proxy(cluster_id: &str, container: &str) -> Result<GaleraCluster, 
 /// One atomic node operation, dispatched locally or to a peer host. `Address`
 /// resolves a container's reachable IP (used when adopting from the picker).
 #[derive(Clone, Copy, PartialEq)]
-pub enum NodeOp { Start, Stop, Restart, Bootstrap, Seqno, IsDown, Exists, Address, Sysinfo }
+pub enum NodeOp { Start, Stop, Restart, Bootstrap, Seqno, IsDown, Exists, Address, Sysinfo, Gcomm }
 
 impl NodeOp {
     fn as_str(self) -> &'static str {
@@ -1380,7 +1380,7 @@ impl NodeOp {
             NodeOp::Start => "start", NodeOp::Stop => "stop", NodeOp::Restart => "restart",
             NodeOp::Bootstrap => "bootstrap", NodeOp::Seqno => "seqno",
             NodeOp::IsDown => "isdown", NodeOp::Exists => "exists", NodeOp::Address => "address",
-            NodeOp::Sysinfo => "sysinfo",
+            NodeOp::Sysinfo => "sysinfo", NodeOp::Gcomm => "gcomm",
         }
     }
     pub fn from_str(s: &str) -> Option<NodeOp> {
@@ -1388,7 +1388,7 @@ impl NodeOp {
             "start" => NodeOp::Start, "stop" => NodeOp::Stop, "restart" => NodeOp::Restart,
             "bootstrap" => NodeOp::Bootstrap, "seqno" => NodeOp::Seqno,
             "isdown" => NodeOp::IsDown, "exists" => NodeOp::Exists, "address" => NodeOp::Address,
-            "sysinfo" => NodeOp::Sysinfo,
+            "sysinfo" => NodeOp::Sysinfo, "gcomm" => NodeOp::Gcomm,
             _ => return None,
         })
     }
@@ -1396,7 +1396,8 @@ impl NodeOp {
     /// blocking slot if a peer hangs; service/bootstrap ops legitimately take time.
     fn timeout_secs(self) -> u64 {
         match self {
-            NodeOp::Seqno | NodeOp::IsDown | NodeOp::Exists | NodeOp::Address | NodeOp::Sysinfo => 20,
+            NodeOp::Seqno | NodeOp::IsDown | NodeOp::Exists | NodeOp::Address
+            | NodeOp::Sysinfo | NodeOp::Gcomm => 20,
             NodeOp::Start | NodeOp::Stop | NodeOp::Restart | NodeOp::Bootstrap => 180,
         }
     }
@@ -1455,10 +1456,115 @@ fn container_exists_local(kind: &str, container: &str) -> bool {
     }
 }
 
-/// Resolve a (local) container's reachable address for Galera peering + status
-/// queries. LXC → its WolfNet IP (cluster-routable) falling back to its primary
-/// IP; Docker → its network IP via `docker inspect`. Empty if not resolvable.
+/// Strip an optional `:port` from a wsrep address token. Handles the
+/// `[v6]:port` bracket form, bare IPv4/IPv6, and `host:port` — a bare
+/// IPv6 address parses whole and is never split on its colons.
+fn strip_wsrep_port(s: &str) -> String {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return rest[..end].to_string();
+    }
+    if s.parse::<std::net::IpAddr>().is_ok() {
+        return s.to_string();
+    }
+    if let Some((host, port)) = s.rsplit_once(':')
+        && !port.is_empty()
+        && port.chars().all(|c| c.is_ascii_digit())
+    {
+        return host.to_string();
+    }
+    s.to_string()
+}
+
+/// Pull the wsrep addresses out of MariaDB config text: the node's own
+/// `wsrep_node_address` (when set) and the `gcomm://` member list. Last
+/// occurrence wins, matching how MariaDB layers config files. Options
+/// after `?` in the gcomm URL (e.g. `?gmcast.segment=1`) are dropped.
+fn wsrep_addresses_from_config(text: &str) -> (Option<String>, Vec<String>) {
+    let mut node_addr: Option<String> = None;
+    let mut gcomm: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let key = k.trim();
+        let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+        if key == "wsrep_node_address" && !val.is_empty() {
+            let addr = strip_wsrep_port(val);
+            // 0.0.0.0 / loopback would tell peers to talk to themselves —
+            // never adopt those; fall through to the gcomm match instead.
+            let usable = match addr.parse::<std::net::IpAddr>() {
+                Ok(ip) => !ip.is_unspecified() && !ip.is_loopback(),
+                Err(_) => !addr.is_empty(), // hostnames pass
+            };
+            if usable {
+                node_addr = Some(addr);
+            }
+        } else if key == "wsrep_cluster_address" {
+            let list = val
+                .strip_prefix("gcomm://")
+                .unwrap_or(val)
+                .split('?')
+                .next()
+                .unwrap_or("");
+            gcomm = list
+                .split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(strip_wsrep_port)
+                .collect();
+        }
+    }
+    (node_addr, gcomm)
+}
+
+/// The address a Galera node's OWN configuration says it replicates on —
+/// the authoritative answer for adopt, because it is the address the
+/// running cluster already uses (Paul, 2026-08-14: "go look at the galera
+/// config in one of the nodes to get the ips").
+///
+/// `wsrep_node_address` when the config sets one; otherwise the member of
+/// the `gcomm://` list that is one of this container's own live IPs
+/// (Galera auto-detects its bind address in that setup, but the gcomm
+/// list still names every node exactly as its peers reach it). None when
+/// the container has no wsrep config (not a Galera node yet) or can't be
+/// exec'd (stopped) — callers fall back to NIC-based picking then.
+fn galera_config_address(kind: &str, container: &str) -> Option<String> {
+    // Same config roots set_gcomm() searches — they cover Debian/Ubuntu
+    // (/etc/mysql/**, incl. WolfStack's own 60-galera.cnf) and RHEL/Alpine
+    // (/etc/my.cnf, /etc/my.cnf.d/**, incl. galera.cnf).
+    let out = cexec(
+        kind,
+        container,
+        "grep -rhsE '^[[:space:]]*wsrep_(node_address|cluster_address)[[:space:]]*=' \
+         /etc/mysql /etc/my.cnf /etc/my.cnf.d 2>/dev/null",
+    )
+    .ok()?;
+    let (node_addr, gcomm) = wsrep_addresses_from_config(&out);
+    if node_addr.is_some() {
+        return node_addr;
+    }
+    if gcomm.is_empty() {
+        return None;
+    }
+    let mine = cexec(kind, container, "hostname -I 2>/dev/null").unwrap_or_default();
+    let my_ips: std::collections::HashSet<&str> = mine.split_whitespace().collect();
+    gcomm.iter().find(|m| my_ips.contains(m.as_str())).cloned()
+}
+
+/// Resolve a (local) container's address for Galera peering + status queries.
+/// The container's own wsrep config is the ground truth; the NIC-based pick
+/// (WolfNet-preferred) covers containers with no wsrep config yet. Empty if
+/// not resolvable.
 fn node_address_local(kind: &str, container: &str) -> String {
+    // The node's own Galera config is the ground truth — the cluster is
+    // already replicating over these addresses, so nothing needs asking
+    // or guessing.
+    if let Some(addr) = galera_config_address(kind, container) {
+        return addr;
+    }
+    // No wsrep config to read (fresh container being provisioned, or a
+    // stopped one) — fall back to NIC-based resolution.
     if kind == "docker" {
         std::process::Command::new("docker")
             .args(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", container])
@@ -1471,8 +1577,7 @@ fn node_address_local(kind: &str, container: &str) -> String {
         // + overlay). Returning it verbatim is how adopt failed with "no
         // reachable address found" on iw-db-2 (Paul, 2026-08-14): the list
         // isn't an address. Pick ONE here, on the container's own host,
-        // where the WolfNet marker is readable — preferred because the
-        // overlay is the cross-host fabric WolfStack manages.
+        // where the WolfNet marker is readable.
         // Source: containers/mod.rs pick_cross_host_ip() + lxc_get_wolfnet_ip().
         let raw = crate::containers::lxc_list_all_cached().iter()
             .find(|c| c.name == container)
@@ -1544,8 +1649,26 @@ pub fn local_node_op(kind: &str, container: &str, op: NodeOp) -> Result<String, 
         NodeOp::Bootstrap => bootstrap_local(kind, container),
         NodeOp::Address => Ok(node_address_local(kind, container)),
         NodeOp::Sysinfo => Ok(node_sysinfo_local(kind, container)),
+        NodeOp::Gcomm => Ok(node_gcomm_local(kind, container)),
         NodeOp::Exists => unreachable!(),
     }
+}
+
+/// The gcomm member list from this (local) container's own Galera config,
+/// comma-joined with ports/options stripped — empty when the container has
+/// no wsrep config or declares the bootstrap form `gcomm://`. Used by adopt
+/// to verify the picked containers cover the WHOLE membership.
+fn node_gcomm_local(kind: &str, container: &str) -> String {
+    let Ok(out) = cexec(
+        kind,
+        container,
+        "grep -rhsE '^[[:space:]]*wsrep_cluster_address[[:space:]]*=' \
+         /etc/mysql /etc/my.cnf /etc/my.cnf.d 2>/dev/null",
+    ) else {
+        return String::new();
+    };
+    let (_, gcomm) = wsrep_addresses_from_config(&out);
+    gcomm.join(",")
 }
 
 /// Run a node op on a peer host via its `/api/galera/local/{kind}/{op}/{container}`
@@ -1782,6 +1905,50 @@ pub fn adopt_cluster(
             port: 3306,
             node_name: p.container.clone(),
         });
+    }
+    // The cluster's own gcomm list is the authoritative membership — the
+    // picked containers must cover ALL of it. Adopting a subset would put
+    // WolfStack in charge of a cluster it can only half see: recovery
+    // stops "every node" and bootstraps the most-advanced, and doing that
+    // while an unmanaged member is still live corrupts the cluster (the
+    // exact hazard recover_cluster's down-check exists for). The list is
+    // read from a picked node's config; when none yields one (stopped
+    // containers, or their hosts run an older WolfStack without the gcomm
+    // op) the check is skipped rather than blocking the adopt.
+    let picked: std::collections::HashSet<&str> =
+        nodes.iter().map(|n| n.address.as_str()).collect();
+    for n in &nodes {
+        let Ok(list) = run_op(ctx, &n.node_id, &n.kind, &n.container, NodeOp::Gcomm) else { continue };
+        let members: Vec<&str> = list.trim().split(',').map(str::trim)
+            .filter(|m| !m.is_empty()).collect();
+        if members.is_empty() {
+            continue;
+        }
+        let missing: Vec<&str> = members.iter()
+            .filter(|m| !picked.contains(**m))
+            .filter(|m| {
+                // A gcomm member named by HOSTNAME can still be a picked
+                // node whose address resolved as an IP — resolve before
+                // calling it missing (DNS is fine here: adopt runs on the
+                // blocking pool).
+                use std::net::ToSocketAddrs;
+                let covered_via_dns = (**m, 0u16).to_socket_addrs()
+                    .map(|addrs| {
+                        let mut addrs = addrs;
+                        addrs.any(|a| picked.contains(a.ip().to_string().as_str()))
+                    })
+                    .unwrap_or(false);
+                !covered_via_dns
+            })
+            .copied().collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "[{}] this cluster's own config (gcomm) also lists {} — tick the container(s) \
+                 holding those addresses too, so WolfStack manages the WHOLE cluster. Managing \
+                 a subset would make recovery unsafe (it must be able to stop every member).",
+                n.container, missing.join(", ")));
+        }
+        break; // one authoritative list verified is enough
     }
     let cluster = GaleraCluster {
         id: uuid::Uuid::new_v4().to_string(),
@@ -2101,4 +2268,64 @@ fn persist_tuning_remote(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &
         }
         Err(last)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{strip_wsrep_port, wsrep_addresses_from_config};
+
+    /// Adopt reads the addresses the running cluster ALREADY uses out of
+    /// each node's own config (Paul, 2026-08-14) — a realistic
+    /// 60-galera.cnf must yield the node address exactly.
+    #[test]
+    fn node_address_is_read_from_a_real_galera_cnf() {
+        let cnf = r#"
+[galera]
+wsrep_on=ON
+wsrep_provider=/usr/lib/galera/libgalera_smm.so
+wsrep_cluster_name="wolf-galera"
+wsrep_cluster_address="gcomm://10.0.10.111,10.0.10.112,10.0.10.113"
+wsrep_node_address="10.0.10.111"
+wsrep_node_name=iw-db-1
+"#;
+        let (node, gcomm) = wsrep_addresses_from_config(cnf);
+        assert_eq!(node.as_deref(), Some("10.0.10.111"));
+        assert_eq!(gcomm, vec!["10.0.10.111", "10.0.10.112", "10.0.10.113"]);
+    }
+
+    /// Without wsrep_node_address (Galera auto-detects its bind), the
+    /// gcomm member list is still authoritative — ports and gmcast
+    /// options must not leak into the parsed members.
+    #[test]
+    fn gcomm_members_are_parsed_with_ports_and_options_stripped() {
+        let cnf = "wsrep_cluster_address = gcomm://10.0.10.111:4567,10.0.10.112:4567?gmcast.segment=1\n";
+        let (node, gcomm) = wsrep_addresses_from_config(cnf);
+        assert_eq!(node, None);
+        assert_eq!(gcomm, vec!["10.0.10.111", "10.0.10.112"]);
+    }
+
+    /// MariaDB layers config files with last-occurrence-wins; the parser
+    /// must agree, and must never adopt an address that tells peers to
+    /// talk to themselves.
+    #[test]
+    fn last_occurrence_wins_and_unusable_addresses_are_refused() {
+        let cnf = "wsrep_node_address=10.9.9.9\nwsrep_node_address=10.0.10.111:4567\n";
+        assert_eq!(wsrep_addresses_from_config(cnf).0.as_deref(), Some("10.0.10.111"));
+        assert_eq!(wsrep_addresses_from_config("wsrep_node_address=0.0.0.0\n").0, None);
+        assert_eq!(wsrep_addresses_from_config("wsrep_node_address=127.0.0.1\n").0, None);
+        // An empty bootstrap-form gcomm has no members to match against.
+        assert_eq!(wsrep_addresses_from_config("wsrep_cluster_address=gcomm://\n").1.len(), 0);
+    }
+
+    /// Port stripping across the address forms wsrep accepts.
+    #[test]
+    fn wsrep_port_stripping_handles_v4_v6_and_hostnames() {
+        assert_eq!(strip_wsrep_port("10.0.10.111:4567"), "10.0.10.111");
+        assert_eq!(strip_wsrep_port("10.0.10.111"), "10.0.10.111");
+        assert_eq!(strip_wsrep_port("[2a01:4f8::1]:4567"), "2a01:4f8::1");
+        // A bare IPv6 address parses whole — its colons are not a port.
+        assert_eq!(strip_wsrep_port("2a01:4f8::1"), "2a01:4f8::1");
+        assert_eq!(strip_wsrep_port("db-node-2.internal:4567"), "db-node-2.internal");
+        assert_eq!(strip_wsrep_port("db-node-2.internal"), "db-node-2.internal");
+    }
 }

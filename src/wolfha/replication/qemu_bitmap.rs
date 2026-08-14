@@ -88,6 +88,17 @@ fn qmp(vm: &str, command: &str, args: Option<serde_json::Value>) -> Result<serde
     crate::vms::manager::qmp_command(vm, command, args)
 }
 
+/// Per-job token for the ephemeral target node + job id.
+///
+/// TRUNCATED to 16 hex chars: QEMU caps block node names at 31 characters
+/// — verified against a live QEMU 11.0.3 (31 accepted, 32 → "Node name
+/// too long") — and `"wolfha-tgt-" + <32-hex uuid>` is 43, so the full
+/// UUID made every blockdev-add fail on the first real backup. 64 random
+/// bits is ample uniqueness for a name that lives for one job.
+fn ephemeral_token() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..16].to_string()
+}
+
 /// Resolve the QEMU block node that backs `disk_path` for this VM.
 ///
 /// `blockdev-backup.device` takes "the device name or node-name of a root
@@ -289,9 +300,16 @@ pub fn remove_bitmap(vm: &str, node: &str) -> Result<(), String> {
 /// Virtual size of a qcow2 in bytes, via `qemu-img info --output=json`.
 /// The delta target must be created at the same virtual size as the source
 /// or the backup job has nowhere to put high-offset clusters.
+///
+/// `-U` (`--force-share`, "open image in shared mode for concurrent
+/// access" — qemu-img 11.0.3 help) is REQUIRED here: the disk being sized
+/// belongs to a RUNNING VM, whose QEMU holds the image's write lock, and
+/// without it every seed and delta fails with `Failed to get shared
+/// "write" lock` (RutgerDiehard, 2026-08-14, first live VM protect).
+/// Reading the size of an in-use image is exactly what the flag is for.
 pub fn virtual_size(disk_path: &str) -> Result<u64, String> {
     let out = Command::new("qemu-img")
-        .args(["info", "--output=json", disk_path])
+        .args(["info", "-U", "--output=json", disk_path])
         .output()
         .map_err(|e| format!("qemu-img info: {}", e))?;
     if !out.status.success() {
@@ -436,7 +454,7 @@ pub fn take_incremental(
 
     // Unique per round so a retry can never collide with a node name still
     // registered from a previous attempt.
-    let token = uuid::Uuid::new_v4().simple().to_string();
+    let token = ephemeral_token();
     let target_node = format!("wolfha-tgt-{}", token);
     let job_id = format!("wolfha-job-{}", token);
 
@@ -523,7 +541,7 @@ pub fn take_full(
     let size = virtual_size(disk_path)?;
     create_delta_target(out_path, size)?;
 
-    let token = uuid::Uuid::new_v4().simple().to_string();
+    let token = ephemeral_token();
     let target_node = format!("wolfha-tgt-{}", token);
     let job_id = format!("wolfha-job-{}", token);
 
@@ -691,6 +709,20 @@ mod tests {
         assert_eq!(match_strength("/srv/other/db.qcow2", want), None);
         // Ordering is what the resolver relies on.
         assert!(match_strength(want, want) < match_strength("/srv/other/web01.qcow2", want));
+    }
+
+    /// QEMU refuses block node names over 31 characters (verified live:
+    /// 31 ok, 32 "Node name too long"). The first shipped version used a
+    /// full 32-hex UUID in the name — 43 chars — so every backup's
+    /// blockdev-add failed. The composed names must stay under the cap.
+    #[test]
+    fn backup_node_names_fit_qemus_31_char_cap() {
+        for _ in 0..8 {
+            let t = ephemeral_token();
+            assert!(format!("wolfha-tgt-{}", t).len() <= 31);
+            assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+        assert_ne!(ephemeral_token(), ephemeral_token(), "tokens must be unique per job");
     }
 
     #[test]
