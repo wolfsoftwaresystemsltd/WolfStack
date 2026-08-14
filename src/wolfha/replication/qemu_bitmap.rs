@@ -90,34 +90,95 @@ fn qmp(vm: &str, command: &str, args: Option<serde_json::Value>) -> Result<serde
 pub fn resolve_disk_node(vm: &str, disk_path: &str) -> Result<String, String> {
     let blocks = qmp(vm, "query-block", None)?;
     let arr = blocks.as_array().ok_or("query-block did not return a list")?;
+
+    // Collect (match-strength, node-reference) for every inserted medium.
+    // Strength 0 = exact string, 1 = same resolved path, 2 = same file name.
+    // Strongest wins, and a file-name match is only trusted when it is
+    // UNIQUE: a VM with two disks of the same name in different directories
+    // must not have the bitmap attached to whichever came first.
+    let mut candidates: Vec<(u8, String)> = Vec::new();
     for b in arr {
-        let inserted = match b.get("inserted") {
-            Some(i) => i,
-            None => continue, // no medium (e.g. an empty cdrom tray)
-        };
+        let Some(inserted) = b.get("inserted") else { continue }; // empty tray
         let file = inserted.get("file").and_then(|f| f.as_str()).unwrap_or("");
-        if file != disk_path {
-            continue;
-        }
-        // Prefer the node-name: `device` is the legacy drive id and is an
-        // empty string for a -blockdev style disk, whereas node-name is
-        // always present on an inserted medium.
-        if let Some(n) = inserted.get("node-name").and_then(|n| n.as_str())
-            && !n.is_empty()
-        {
-            return Ok(n.to_string());
-        }
-        if let Some(d) = b.get("device").and_then(|d| d.as_str())
-            && !d.is_empty()
-        {
-            return Ok(d.to_string());
+        let Some(strength) = match_strength(file, disk_path) else { continue };
+        // Prefer the node-name. QEMU auto-generates one (`#block134`) when
+        // the drive was not declared with an explicit node-name, and it
+        // accepts that form as a reference — verified against a live QEMU,
+        // as was the `device` id form, so either works.
+        let reference = inserted
+            .get("node-name")
+            .and_then(|n| n.as_str())
+            .filter(|n| !n.is_empty())
+            .or_else(|| b.get("device").and_then(|d| d.as_str()).filter(|d| !d.is_empty()));
+        if let Some(r) = reference {
+            candidates.push((strength, r.to_string()));
         }
     }
+
+    for strength in 0u8..=2 {
+        let at: Vec<&(u8, String)> = candidates.iter().filter(|(s, _)| *s == strength).collect();
+        match at.len() {
+            0 => continue,
+            1 => return Ok(at[0].1.clone()),
+            n if strength == 2 => {
+                return Err(format!(
+                    "{} disks on VM '{}' share the file name of {} — cannot tell which to \
+                     replicate. Give the VM's disks distinct file names.",
+                    n, vm, disk_path
+                ));
+            }
+            // Two disks reporting the identical path is QEMU serving the
+            // same image twice; either reference is the same disk.
+            _ => return Ok(at[0].1.clone()),
+        }
+    }
+
     Err(format!(
         "no QEMU block node is serving {} on VM '{}' — the disk path in the VM \
          config must match what QEMU actually opened",
         disk_path, vm
     ))
+}
+
+/// Do QEMU's reported filename and our configured path name the same disk?
+///
+/// `query-block` reports the filename **as QEMU was given it on the command
+/// line**, which is not necessarily the string we hold. Against a live QEMU
+/// launched with a relative path it reported `qmptest.qcow2` while our
+/// configured path was absolute, and an exact comparison found nothing —
+/// so VM replication would have failed to locate its own disk.
+///
+/// Compared in widening steps, returning how strongly they match:
+/// `0` identical strings, `1` same resolved path (collapsing symlinks and
+/// `..`), `2` same file name, `None` for no match. The caller only trusts a
+/// file-name match when it is unambiguous.
+fn match_strength(reported: &str, configured: &str) -> Option<u8> {
+    if reported.is_empty() {
+        return None;
+    }
+    if reported == configured {
+        return Some(0);
+    }
+    let canon = |p: &str| std::fs::canonicalize(p).ok();
+    if let (Some(a), Some(b)) = (canon(reported), canon(configured))
+        && a == b
+    {
+        return Some(1);
+    }
+    let name = |p: &str| {
+        std::path::Path::new(p)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+    };
+    match (name(reported), name(configured)) {
+        (Some(a), Some(b)) if a == b => Some(2),
+        _ => None,
+    }
+}
+
+/// Convenience wrapper used by the tests and by `bitmap_state`.
+fn same_disk(reported: &str, configured: &str) -> bool {
+    match_strength(reported, configured).is_some()
 }
 
 /// State of our bitmap on a node, as reported by `query-block`.
@@ -143,7 +204,15 @@ pub fn bitmap_state(vm: &str, disk_path: &str) -> Result<BitmapState, String> {
     let arr = blocks.as_array().ok_or("query-block did not return a list")?;
     for b in arr {
         let Some(inserted) = b.get("inserted") else { continue };
-        if inserted.get("file").and_then(|f| f.as_str()).unwrap_or("") != disk_path {
+        // Same path-form tolerance as `resolve_disk_node`: QEMU reports the
+        // filename as it was launched with, which is not necessarily the
+        // string we hold. An exact comparison here would report the bitmap
+        // missing on a VM that has one, and the caller would then demand a
+        // full re-seed on every round.
+        if !same_disk(
+            inserted.get("file").and_then(|f| f.as_str()).unwrap_or(""),
+            disk_path,
+        ) {
             continue;
         }
         // BlockDeviceInfo.dirty-bitmaps: ['BlockDirtyInfo'] (optional).
@@ -462,6 +531,41 @@ pub fn apply_delta(delta_path: &str, target_disk: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verified against a live QEMU: `query-block` reports the filename as
+    /// QEMU was launched with, not the absolute path we hold. An exact
+    /// comparison found no disk at all, which would have made VM
+    /// replication non-functional.
+    #[test]
+    fn a_disk_is_matched_despite_path_form() {
+        assert!(same_disk("/var/lib/wolfstack/vms/web01.qcow2", "/var/lib/wolfstack/vms/web01.qcow2"));
+        // The live failure: relative on one side, absolute on the other.
+        assert!(same_disk("web01.qcow2", "/var/lib/wolfstack/vms/web01.qcow2"));
+        assert!(same_disk("./web01.qcow2", "/srv/vms/web01.qcow2"));
+    }
+
+    /// Different disks must never be conflated — that would attach the
+    /// bitmap to, and later back up, the wrong image.
+    #[test]
+    fn different_disks_do_not_match() {
+        assert!(!same_disk("web02.qcow2", "/var/lib/wolfstack/vms/web01.qcow2"));
+        assert!(!same_disk("", "/var/lib/wolfstack/vms/web01.qcow2"));
+        assert!(!same_disk("/var/lib/wolfstack/vms/db.qcow2", "/var/lib/wolfstack/vms/web01.qcow2"));
+    }
+
+    /// Match strength orders the candidates, so an exact path always wins
+    /// over a mere file-name coincidence. Without the ordering, a VM with a
+    /// second disk of the same name elsewhere could have the bitmap
+    /// attached to the wrong image.
+    #[test]
+    fn an_exact_path_outranks_a_name_coincidence() {
+        let want = "/var/lib/wolfstack/vms/web01.qcow2";
+        assert_eq!(match_strength(want, want), Some(0));
+        assert_eq!(match_strength("/srv/other/web01.qcow2", want), Some(2));
+        assert_eq!(match_strength("/srv/other/db.qcow2", want), None);
+        // Ordering is what the resolver relies on.
+        assert!(match_strength(want, want) < match_strength("/srv/other/web01.qcow2", want));
+    }
 
     #[test]
     fn bitmap_name_is_namespaced_per_vm() {
