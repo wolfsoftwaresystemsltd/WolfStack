@@ -457,9 +457,31 @@ pub fn self_node_id() -> String {
         .to_string()
 }
 
+/// Seconds since the Unix epoch, saturating to 0 if the system clock is
+/// set before 1970.
+///
+/// Several of these timestamps are taken *while holding the membership
+/// write lock*. `duration_since(UNIX_EPOCH).unwrap()` there would panic
+/// on a backwards clock and poison the lock for the life of the process,
+/// which is exactly the failure mode `nodes_read` exists to survive — so
+/// the panic is removed at source rather than only absorbed downstream.
+/// A bogus clock now yields a bogus-but-harmless timestamp instead of
+/// taking the node's whole control plane down.
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Cluster state
 pub struct ClusterState {
-    pub nodes: RwLock<HashMap<String, Node>>,
+    /// Private on purpose. Every reader and writer must go through
+    /// [`ClusterState::nodes_read`] / [`ClusterState::nodes_write`], which
+    /// recover from lock poisoning. Making the field private is what
+    /// *enforces* that — a `.read().unwrap()` on this map cannot be
+    /// reintroduced from another module without a compile error.
+    nodes: RwLock<HashMap<String, Node>>,
     pub self_id: String,
     pub self_address: String,
     pub port: u16,
@@ -507,12 +529,51 @@ impl ClusterState {
         state
     }
 
+    /// Read-lock the membership map, recovering from poisoning.
+    ///
+    /// A `std::sync::RwLock` stays poisoned for the life of the process
+    /// once any thread panics while holding it. With `.read().unwrap()`
+    /// at every call site, a single transient panic in one background
+    /// task became a permanent outage: every handler that reads
+    /// membership would panic in turn, and actix renders a handler panic
+    /// as HTTP 500. The whole Fleet Security page (which fans out over
+    /// this map) would stay broken until WolfStack was restarted.
+    ///
+    /// Recovering is the right trade here. The guarded value is a
+    /// `HashMap<String, Node>` whose mutations are individually atomic
+    /// (`insert` / `remove`), so the worst a poisoned map can hold is a
+    /// stale or missing peer record — and the 10s polling loop rewrites
+    /// it anyway. Serving slightly stale membership beats serving 500s
+    /// forever.
+    pub fn nodes_read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Node>> {
+        self.nodes.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Write-lock the membership map, recovering from poisoning.
+    /// See [`ClusterState::nodes_read`] for why recovery is safe here.
+    pub fn nodes_write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Node>> {
+        self.nodes.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Read-lock the deletion tombstone set, recovering from poisoning.
+    /// Same reasoning as [`ClusterState::nodes_read`]: a poisoned set
+    /// would otherwise make every membership merge panic, and gossip
+    /// would stop honouring deletions entirely.
+    fn deleted_read(&self) -> std::sync::RwLockReadGuard<'_, HashSet<String>> {
+        self.deleted_ids.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Write-lock the deletion tombstone set, recovering from poisoning.
+    fn deleted_write(&self) -> std::sync::RwLockWriteGuard<'_, HashSet<String>> {
+        self.deleted_ids.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Remove ghost nodes: nodes with same hostname or matching self_id pattern but different ID
     fn cleanup_ghosts(&self) {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_default();
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         
         // Collect IDs of ghost nodes to remove:
         // - Any non-self WolfStack node whose hostname matches ours (previous restarts of this server)
@@ -542,7 +603,7 @@ impl ClusterState {
 
     /// Remove non-self WolfStack nodes that were not added with a verified join token
     fn purge_unverified(&self) {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         let unverified: Vec<String> = nodes.values()
             .filter(|n| !n.is_self && n.node_type == "wolfstack" && !n.join_verified)
             .map(|n| n.id.clone())
@@ -563,7 +624,7 @@ impl ClusterState {
     fn load_nodes(&self) {
         if let Ok(data) = std::fs::read_to_string(&Self::nodes_file()) {
             if let Ok(saved) = serde_json::from_str::<Vec<Node>>(&data) {
-                let mut nodes = self.nodes.write().unwrap();
+                let mut nodes = self.nodes_write();
                 for mut node in saved {
                     node.online = false; // Will be updated by polling
                     node.is_self = false;
@@ -580,7 +641,7 @@ impl ClusterState {
 
     /// Save remote nodes to disk
     pub fn save_nodes(&self) {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes_read();
         let remote_nodes: Vec<&Node> = nodes.values()
             .filter(|n| !n.is_self)
             .collect();
@@ -653,17 +714,17 @@ impl ClusterState {
         // Resolve the address we advertise to peers under a READ lock, so the
         // (rare, cached) interface enumeration never runs under the write lock.
         let registry_address = {
-            let nodes_r = self.nodes.read().unwrap();
+            let nodes_r = self.nodes_read();
             self.self_registry_address(&nodes_r, &my_ips)
         };
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         // Fetch existing cluster_name: in-memory first, then persisted file, then default
         let cluster_name = nodes.get(&self.self_id)
             .and_then(|n| n.cluster_name.clone())
             .or_else(|| Self::load_self_cluster_name())
             .or_else(|| Some("WolfStack".to_string()));
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = now_unix();
         let prev_login_disabled = nodes.get(&self.self_id).map(|n| n.login_disabled);
         let prev_update_script = nodes.get(&self.self_id).and_then(|n| n.update_script.clone());
         // Site is persisted to disk via the same path as cluster_name —
@@ -762,7 +823,7 @@ impl ClusterState {
 
     /// Update a remote node's status
     pub fn update_remote(&self, node: Node) {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         nodes.insert(node.id.clone(), node);
     }
 
@@ -777,8 +838,8 @@ impl ClusterState {
     }
 
     pub fn get_all_nodes(&self) -> Vec<Node> {
-        let nodes = self.nodes.read().unwrap();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let nodes = self.nodes_read();
+        let now = now_unix();
         // Find self node's hostname and port for dedup
         let self_hostname = nodes.get(&self.self_id).map(|n| n.hostname.clone()).unwrap_or_default();
         let self_port = self.port;
@@ -838,14 +899,14 @@ impl ClusterState {
     /// peer tables) only knows the peer's self_id. Linear scan is
     /// fine — clusters are tens of nodes, not thousands.
     pub fn get_node(&self, id: &str) -> Option<Node> {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes_read();
         if let Some(n) = nodes.get(id) { return Some(n.clone()); }
         nodes.values().find(|n| n.self_id.as_deref() == Some(id)).cloned()
     }
 
     /// Get this node's cluster name
     pub fn get_self_cluster_name(&self) -> String {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes_read();
         nodes.get(&self.self_id)
             .and_then(|n| n.cluster_name.clone())
             .unwrap_or_else(|| "WolfStack".to_string())
@@ -869,7 +930,7 @@ impl ClusterState {
 
     /// Mark a node as join-verified
     pub fn mark_verified(&self, id: &str) {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         if let Some(node) = nodes.get_mut(id) {
             node.join_verified = true;
         }
@@ -879,7 +940,7 @@ impl ClusterState {
 
     /// Add a server with full options (deduplicates by address+port+pve_node_name)
     fn add_server_full(&self, address: String, port: u16, node_type: String, pve_token: Option<String>, pve_fingerprint: Option<String>, pve_node_name: Option<String>, pve_cluster_name: Option<String>, cluster_name: Option<String>) -> String {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         
         // Dedup: check if a node with the same address+port+node_type already exists
         if let Some(existing) = nodes.values().find(|n| {
@@ -892,7 +953,7 @@ impl ClusterState {
         }
         
         let id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = now_unix();
         nodes.insert(id.clone(), Node {
             id: id.clone(),
             hostname: address.clone(),
@@ -942,7 +1003,7 @@ impl ClusterState {
 
     /// Remove a server — persists to disk and adds to tombstone set
     pub fn remove_server(&self, id: &str) -> bool {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         let removed = nodes.remove(id).is_some();
         drop(nodes);
         if removed {
@@ -955,7 +1016,7 @@ impl ClusterState {
 
     /// Add a node ID to the tombstone set (prevents gossip re-adding)
     fn add_tombstone(&self, id: &str) {
-        let mut deleted = self.deleted_ids.write().unwrap();
+        let mut deleted = self.deleted_write();
         deleted.insert(id.to_string());
         drop(deleted);
         self.save_deleted_ids();
@@ -963,12 +1024,12 @@ impl ClusterState {
 
     /// Check if a node ID is tombstoned
     pub fn is_tombstoned(&self, id: &str) -> bool {
-        self.deleted_ids.read().unwrap().contains(id)
+        self.deleted_read().contains(id)
     }
 
     /// Merge remote tombstones into local set
     pub fn merge_tombstones(&self, remote_deleted: &[String]) {
-        let mut deleted = self.deleted_ids.write().unwrap();
+        let mut deleted = self.deleted_write();
         let mut changed = false;
         for id in remote_deleted {
             if id != &self.self_id && deleted.insert(id.clone()) {
@@ -978,9 +1039,9 @@ impl ClusterState {
         drop(deleted);
         if changed {
             // Also remove any nodes that are now tombstoned
-            let mut nodes = self.nodes.write().unwrap();
+            let mut nodes = self.nodes_write();
             let to_remove: Vec<String> = nodes.keys()
-                .filter(|k| self.deleted_ids.read().unwrap().contains(*k))
+                .filter(|k| self.deleted_read().contains(*k))
                 .cloned()
                 .collect();
             for id in &to_remove {
@@ -997,7 +1058,7 @@ impl ClusterState {
 
     /// Get the current tombstone set
     pub fn get_deleted_ids(&self) -> Vec<String> {
-        self.deleted_ids.read().unwrap().iter().cloned().collect()
+        self.deleted_read().iter().cloned().collect()
     }
 
     /// Merge a peer's advertised cluster members into our own list so that ANY
@@ -1102,7 +1163,7 @@ impl ClusterState {
     /// (self > verified > online > usable-address). Returns the number of
     /// entries removed. Saves to disk only if something changed.
     pub fn prune_duplicate_nodes(&self) -> usize {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         let before = nodes.len();
         let entries: Vec<Node> = nodes.values().cloned().collect();
         let remove = Self::plan_prune(entries);
@@ -1172,21 +1233,21 @@ impl ClusterState {
     /// wiping the on-disk files (`leave_wipe_membership_files`).
     pub fn clear_membership_in_memory(&self) {
         let self_id = self.self_id.clone();
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         let keep_self = nodes.remove(&self_id);
         nodes.clear();
         if let Some(s) = keep_self {
             nodes.insert(self_id, s);
         }
         drop(nodes);
-        self.deleted_ids.write().unwrap().clear();
+        self.deleted_write().clear();
     }
 
     /// Load tombstoned node IDs from disk
     fn load_deleted_ids(&self) {
         if let Ok(data) = std::fs::read_to_string(&Self::deleted_file()) {
             if let Ok(ids) = serde_json::from_str::<Vec<String>>(&data) {
-                let mut deleted = self.deleted_ids.write().unwrap();
+                let mut deleted = self.deleted_write();
                 for id in ids {
                     deleted.insert(id);
                 }
@@ -1197,7 +1258,7 @@ impl ClusterState {
 
     /// Save tombstoned node IDs to disk
     fn save_deleted_ids(&self) {
-        let deleted = self.deleted_ids.read().unwrap();
+        let deleted = self.deleted_read();
         let ids: Vec<&String> = deleted.iter().collect();
         if let Ok(json) = serde_json::to_string_pretty(&ids) {
             let path = Self::deleted_file();
@@ -1215,7 +1276,7 @@ impl ClusterState {
     /// a small notice file the UI reads to render the deprecation banner.
     fn cleanup_proxmox_legacy(&self) {
         let proxmox_entries: Vec<Node> = {
-            let nodes = self.nodes.read().unwrap();
+            let nodes = self.nodes_read();
             nodes.values().filter(|n| n.node_type == "proxmox").cloned().collect()
         };
         if proxmox_entries.is_empty() {
@@ -1223,7 +1284,7 @@ impl ClusterState {
         }
 
         let nodes_path = Self::nodes_file();
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let timestamp = now_unix();
         let backup_path = format!("{}.proxmox-backup-{}", nodes_path, timestamp);
         if let Err(e) = std::fs::copy(&nodes_path, &backup_path) {
             warn!("Failed to back up nodes.json before Proxmox cleanup: {}", e);
@@ -1232,8 +1293,8 @@ impl ClusterState {
         }
 
         {
-            let mut nodes = self.nodes.write().unwrap();
-            let mut deleted = self.deleted_ids.write().unwrap();
+            let mut nodes = self.nodes_write();
+            let mut deleted = self.deleted_write();
             for n in &proxmox_entries {
                 nodes.remove(&n.id);
                 deleted.insert(n.id.clone());
@@ -1322,7 +1383,7 @@ impl ClusterState {
     /// Update node settings (hostname, address, port, token, fingerprint, cluster name, site)
     #[allow(clippy::too_many_arguments)]
     pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>, site: Option<String>, display_name: Option<String>, migration_address: Option<String>) -> bool {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes_write();
         if let Some(node) = nodes.get_mut(id) {
             if let Some(h) = hostname { node.hostname = h; }
             if let Some(a) = address { node.address = a; }
@@ -1977,7 +2038,7 @@ pub async fn sweep_replicate_control_plane(cluster: Arc<ClusterState>, cluster_s
     // count of distinct peers we push to, which is bounded by the real fleet.
     let local = local_ipv4_addrs();
     let peers: Vec<(String, u16)> = {
-        let nodes = cluster.nodes.read().unwrap();
+        let nodes = cluster.nodes_read();
         let mut seen: std::collections::HashSet<(String, u16)> = std::collections::HashSet::new();
         nodes.values()
             .filter(|n| !n.is_self && n.node_type == "wolfstack" && n.online)
@@ -2022,8 +2083,8 @@ pub async fn sweep_replicate_control_plane(cluster: Arc<ClusterState>, cluster_s
 pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: String, ai_agent: Option<Arc<crate::ai::AiAgent>>) {
     // Snapshot previous online state BEFORE polling
     let previous_states: HashMap<String, (bool, String)> = {
-        let nodes = cluster.nodes.read().unwrap();
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let nodes = cluster.nodes_read();
+        let now = now_unix();
         nodes.values()
             .filter(|n| !n.is_self)
             .map(|n| (n.id.clone(), (now - n.last_seen < 60, n.hostname.clone())))
@@ -2150,7 +2211,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                     }
                     if let Ok(msg) = resp.json::<AgentMessage>().await {
                         if let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, site: peer_site, display_name: peer_display_name, roles: peer_roles, license_key } = msg {
-                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                            let now = now_unix();
                             // Detect TLS by the URL scheme that actually
                             // answered. v23.12 chain is HTTPS → HTTP-over-
                             // WolfNet → legacy plaintext; only the last
@@ -2362,11 +2423,11 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             // never disagree and re-assert a stale "".
                                             let want = if gossiped_name.is_empty() { None } else { Some(gossiped_name.clone()) };
                                             let current_name = {
-                                                let nodes_r = cluster.nodes.read().unwrap();
+                                                let nodes_r = cluster.nodes_read();
                                                 nodes_r.get(&cluster.self_id).and_then(|n| n.display_name.clone())
                                             };
                                             if current_name != want {
-                                                let mut nodes_w = cluster.nodes.write().unwrap();
+                                                let mut nodes_w = cluster.nodes_write();
                                                 if let Some(n) = nodes_w.get_mut(&cluster.self_id) {
                                                     n.display_name = want.clone();
                                                 }
@@ -2559,8 +2620,8 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
             let count = fails.entry(node.id.clone()).or_insert(0);
             *count += 1;
             if *count < 2 {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                let mut nodes = cluster.nodes.write().unwrap();
+                let now = now_unix();
+                let mut nodes = cluster.nodes_write();
                 if let Some(n) = nodes.get_mut(&node.id) {
                     n.last_seen = now;
                 }
@@ -3096,5 +3157,100 @@ mod fleet_rename_tests {
         assert!(cluster_rename_member_matches(None, "wolfstack"));
         // …but renaming any OTHER cluster must not grab unassigned nodes.
         assert!(!cluster_rename_member_matches(None, "Minio"));
+    }
+}
+
+#[cfg(test)]
+mod lock_poison_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Build a ClusterState without touching disk. `ClusterState::new`
+    /// loads and writes `/etc/wolfstack` state, which a unit test must
+    /// not do; the struct literal is available here because the test
+    /// module sits inside the defining module.
+    fn bare_state() -> ClusterState {
+        ClusterState {
+            nodes: RwLock::new(HashMap::new()),
+            self_id: "ws-test".to_string(),
+            self_address: "127.0.0.1".to_string(),
+            port: 8553,
+            deleted_ids: RwLock::new(HashSet::new()),
+        }
+    }
+
+    /// Build a `Node` through its own `Deserialize` impl rather than
+    /// deriving `Default` on the production struct purely for tests.
+    /// Only the fields without a serde default need to be present.
+    fn test_node(id: &str) -> Node {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "hostname": id,
+            "address": "127.0.0.1",
+            "port": 8553,
+            "last_seen": 0,
+            "metrics": null,
+            "components": [],
+            "online": false,
+            "is_self": false,
+        }))
+        .expect("test node should deserialise")
+    }
+
+    /// The regression this guards: a panic while holding the membership
+    /// write lock used to poison it for the life of the process, so every
+    /// later `.read().unwrap()` panicked and actix turned each one into a
+    /// 500. Fleet Security stayed broken until WolfStack was restarted.
+    #[test]
+    fn membership_survives_a_poisoned_lock() {
+        let state = Arc::new(bare_state());
+        state.nodes_write().insert(
+            "peer-1".to_string(),
+            test_node("peer-1"),
+        );
+
+        // Poison the lock exactly the way a panicking background task would.
+        let poisoner = Arc::clone(&state);
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.nodes_write();
+            panic!("simulated panic while holding the membership write lock");
+        })
+        .join();
+        assert!(joined.is_err(), "the spawned thread was supposed to panic");
+        assert!(state.nodes.is_poisoned(), "lock should now be poisoned");
+
+        // Both accessors must still work, and the data must still be there.
+        assert_eq!(state.nodes_read().len(), 1);
+        state.nodes_write().insert(
+            "peer-2".to_string(),
+            test_node("peer-2"),
+        );
+        assert_eq!(state.nodes_read().len(), 2);
+    }
+
+    /// Same contract for the tombstone set: a poisoned set must not stop
+    /// gossip from honouring deletions.
+    #[test]
+    fn tombstones_survive_a_poisoned_lock() {
+        let state = Arc::new(bare_state());
+        let poisoner = Arc::clone(&state);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.deleted_write();
+            panic!("simulated panic while holding the tombstone write lock");
+        })
+        .join();
+        assert!(state.deleted_ids.is_poisoned());
+
+        state.deleted_write().insert("gone-1".to_string());
+        assert!(state.deleted_read().contains("gone-1"));
+    }
+
+    /// `now_unix` replaced seven `duration_since(UNIX_EPOCH).unwrap()`
+    /// calls, several of them taken while holding the membership write
+    /// lock. It must never panic, and must still return a real timestamp.
+    #[test]
+    fn now_unix_is_sane_and_never_panics() {
+        // 1_700_000_000 = 2023-11-14. Any correct clock is past it.
+        assert!(now_unix() > 1_700_000_000);
     }
 }

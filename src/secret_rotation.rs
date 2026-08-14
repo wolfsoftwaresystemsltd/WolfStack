@@ -778,7 +778,7 @@ pub async fn api_coordinated_rotate(
 
     let self_id = state.cluster.self_id.clone();
     let peers: Vec<crate::agent::Node> = {
-        let n = state.cluster.nodes.read().unwrap();
+        let n = state.cluster.nodes_read();
         n.values()
             .filter(|p| p.id != self_id && p.node_type == "wolfstack")
             .cloned()
