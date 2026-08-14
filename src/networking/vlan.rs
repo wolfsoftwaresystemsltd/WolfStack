@@ -61,6 +61,59 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+/// Longest interface name the kernel will accept.
+///
+/// `linux/if.h` defines `IFNAMSIZ 16`, and that size INCLUDES the NUL
+/// terminator, so 15 characters are usable. Exceeding it does not
+/// truncate — `ip link` rejects the request outright with
+/// `argument "..." is wrong: "name" not a valid ifname`.
+pub const IFNAME_MAX: usize = 15;
+
+/// The interface name for a VLAN on `parent`.
+///
+/// The conventional name is `<parent>.<vlan_id>`, and that is used
+/// whenever it fits. It does not always fit: a USB ethernet adapter gets
+/// a predictable name like `enx803f5dd431dd`, which is already exactly 15
+/// characters, so appending `.104` produces a 19-character name the kernel
+/// refuses. Reported by RutgerDiehard, 2026-08-14 — every VLAN on a USB
+/// NIC failed to create.
+///
+/// When the natural name is too long the parent is shortened and a short
+/// hash of the FULL parent name is folded in. The hash is what keeps this
+/// safe: plain truncation would map two adapters sharing a prefix — and
+/// `enx` + the first hex digits of a MAC is exactly such a prefix — onto
+/// one VLAN interface name, so WolfStack would silently manage the wrong
+/// NIC's VLAN.
+///
+/// The result is deterministic: the same parent and VLAN id always give
+/// the same name, on every node and every run. That matters more than
+/// prettiness, because create, delete, status and all four persistence
+/// writers must independently arrive at the identical string or WolfStack
+/// creates one interface and then looks for another.
+pub fn vlan_ifname(parent: &str, vlan_id: u32) -> String {
+    let suffix = format!(".{}", vlan_id);
+    let natural = format!("{}{}", parent, suffix);
+    if natural.len() <= IFNAME_MAX {
+        return natural;
+    }
+    // 4 hex characters of the parent's digest, leaving the rest for as
+    // much of the readable parent name as will fit.
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(parent.as_bytes());
+    let tag = format!("{:02x}{:02x}", digest[0], digest[1]);
+    let room = IFNAME_MAX.saturating_sub(suffix.len() + tag.len());
+    // Truncate on a char boundary. Interface names are ASCII in practice,
+    // but slicing a String by byte index panics if they ever are not.
+    let mut prefix = String::new();
+    for c in parent.chars() {
+        if prefix.len() + c.len_utf8() > room {
+            break;
+        }
+        prefix.push(c);
+    }
+    format!("{}{}{}", prefix, tag, suffix)
+}
+
 /// Provider-specific defaults. Picking a preset auto-fills MTU and
 /// gives the UI a hint about VLAN-ID range. Custom skips all hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1393,7 +1446,7 @@ pub fn render_ifupdown(store: &VlanStore) -> String {
     for v in &store.vlans {
         let prefix = cidr_prefix(&v.subnet).unwrap_or(24);
         let netmask = cidr_to_netmask_v4(prefix);
-        let vlan_iface = format!("{}.{}", v.parent_iface, v.vlan_id);
+        let vlan_iface = vlan_ifname(&v.parent_iface, v.vlan_id);
         out.push_str(&format!("# VLAN: {} (provider: {:?})\n", v.name, v.provider));
         if !v.notes.is_empty() {
             for line in v.notes.lines() {
@@ -1662,7 +1715,7 @@ pub fn preflight(
                 });
             }
         // Bridge name conflict — does it already exist as something else?
-        if bridge_exists_unrelated(&v.bridge_name, &v.parent_iface, v.vlan_id) {
+        if bridge_exists_unrelated(store, &v.bridge_name, &v.parent_iface, v.vlan_id) {
             findings.push(PreflightFinding {
                 severity: PreflightSeverity::Critical,
                 title: format!("Bridge name '{}' already in use", v.bridge_name),
@@ -1787,7 +1840,20 @@ fn iface_mtu(name: &str) -> Option<u32> {
 /// our expected sub-interface as a member, it's ours. If it has DIFFERENT
 /// members (Docker/libvirt-style), it's not ours and reusing it would
 /// hijack their workload.
-fn bridge_exists_unrelated(name: &str, parent: &str, vlan_id: u32) -> bool {
+fn bridge_exists_unrelated(store: &VlanStore, name: &str, parent: &str, vlan_id: u32) -> bool {
+    // A bridge this node already records as belonging to a VLAN attachment
+    // is ours by definition, whatever is currently plugged into it.
+    //
+    // This check has to come first, and its absence was a real bug
+    // (RutgerDiehard, 2026-08-14): changing the parent NIC of an existing
+    // attachment made the member test below look for the NEW parent's VLAN
+    // interface, while the bridge still held the OLD one. No match, so the
+    // operator's own bridge was reported as a stranger's and the edit was
+    // blocked by a critical warning about a conflict with itself.
+    if store.vlans.iter().any(|s| s.bridge_name == name) {
+        return false;
+    }
+
     let out = Command::new("ip").args(["-d", "link", "show", name]).output();
     let info = match out {
         Ok(o) if o.status.success() => o,
@@ -1802,10 +1868,18 @@ fn bridge_exists_unrelated(name: &str, parent: &str, vlan_id: u32) -> bool {
     // interface is already a port on it, this is a previous WolfStack
     // bridge we can safely reuse. Otherwise it's somebody else's
     // (docker0, virbr0, cni0, hand-rolled, etc.).
-    let expected_port = format!("{}.{}", parent, vlan_id);
+    let expected_port = vlan_ifname(parent, vlan_id);
     let members = bridge_members(name);
     if members.iter().any(|m| m == &expected_port) {
         return false;  // our bridge — safe to reuse
+    }
+    // A member carrying the SAME VLAN id on a different parent is still
+    // this VLAN's bridge — the operator is re-pointing it at another NIC.
+    // Ask the kernel for each member's VLAN id rather than parsing names:
+    // a name only carries the id by convention, and the shortened form
+    // used for long parents is not something to pattern-match on.
+    if members.iter().any(|m| iface_vlan_id(m) == Some(vlan_id)) {
+        return false;
     }
     // No matching member. If the bridge has NO members at all, it's a
     // freshly-created empty bridge that's probably ours from a prior
@@ -1814,6 +1888,33 @@ fn bridge_exists_unrelated(name: &str, parent: &str, vlan_id: u32) -> bool {
         return false;
     }
     true  // has members, none of them are ours — somebody else's bridge
+}
+
+/// The 802.1Q VLAN id of an interface, or `None` if it is not a VLAN.
+///
+/// Parses `ip -d link show`, which renders a VLAN device's detail line as
+/// `vlan protocol 802.1Q id 104 <REORDER_HDR>`.
+fn iface_vlan_id(iface: &str) -> Option<u32> {
+    let out = Command::new("ip").args(["-d", "link", "show", iface]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_vlan_id_from_link(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pure parser for [`iface_vlan_id`], split out so the parsing rules can
+/// be pinned without a live interface to point at.
+fn parse_vlan_id_from_link(text: &str) -> Option<u32> {
+    // Anchor on "vlan protocol" so an unrelated "id" token elsewhere in
+    // the output cannot be mistaken for a VLAN id.
+    let after = text.split("vlan protocol").nth(1)?;
+    let mut it = after.split_whitespace();
+    while let Some(tok) = it.next() {
+        if tok == "id" {
+            return it.next().and_then(|v| v.parse::<u32>().ok());
+        }
+    }
+    None
 }
 
 /// List the slave interfaces (bridge ports) of a bridge by parsing
@@ -1964,7 +2065,7 @@ pub struct ApplyReport {
 
 fn apply_kernel_state(store: &VlanStore, report: &mut ApplyReport) {
     for v in &store.vlans {
-        let vlan_iface = format!("{}.{}", v.parent_iface, v.vlan_id);
+        let vlan_iface = vlan_ifname(&v.parent_iface, v.vlan_id);
         // Roll-back tracking: only undo what THIS apply created. Pre-
         // existing devices stay put.
         let mut created_vlan = false;
@@ -2246,7 +2347,7 @@ pub fn render_netplan(store: &VlanStore) -> String {
     }
     out.push_str("  vlans:\n");
     for v in &store.vlans {
-        let vlan_iface = format!("{}.{}", v.parent_iface, v.vlan_id);
+        let vlan_iface = vlan_ifname(&v.parent_iface, v.vlan_id);
         out.push_str(&format!("    {}:\n", vlan_iface));
         out.push_str(&format!("      id: {}\n", v.vlan_id));
         out.push_str(&format!("      link: {}\n", v.parent_iface));
@@ -2264,7 +2365,7 @@ pub fn render_netplan(store: &VlanStore) -> String {
     }
     out.push_str("  bridges:\n");
     for v in &store.vlans {
-        let vlan_iface = format!("{}.{}", v.parent_iface, v.vlan_id);
+        let vlan_iface = vlan_ifname(&v.parent_iface, v.vlan_id);
         let prefix = cidr_prefix(&v.subnet).unwrap_or(24);
         out.push_str(&format!("    {}:\n", v.bridge_name));
         out.push_str(&format!("      interfaces: [{}]\n", vlan_iface));
@@ -2380,9 +2481,9 @@ pub fn render_nm_script(store: &VlanStore) -> String {
             bridge_con, v.bridge_name, ipv4_cfg, v.mtu,
         ));
         out.push_str(&format!(
-            "nmcli connection add type vlan con-name '{}' ifname '{}.{}' \
+            "nmcli connection add type vlan con-name '{}' ifname '{}' \
              dev '{}' id {} master '{}' slave-type bridge 802-3-ethernet.mtu {}\n",
-            vlan_con, v.parent_iface, v.vlan_id, v.parent_iface, v.vlan_id,
+            vlan_con, vlan_ifname(&v.parent_iface, v.vlan_id), v.parent_iface, v.vlan_id,
             v.bridge_name, v.mtu,
         ));
         for r in &v.routes {
@@ -2473,7 +2574,7 @@ fn persist_network_manager(store: &VlanStore, report: &mut ApplyReport) {
         let addr = format!("{}/{}", v.self_ip, prefix);
         let mtu = v.mtu.to_string();
         let vlan_id = v.vlan_id.to_string();
-        let vlan_ifname = format!("{}.{}", v.parent_iface, v.vlan_id);
+        let vlan_ifname = vlan_ifname(&v.parent_iface, v.vlan_id);
 
         // Skip creation if the connection already exists. This is the
         // "diff-then-apply" half: we only mutate connections that
@@ -2611,7 +2712,10 @@ pub fn render_systemd_networkd_files(store: &VlanStore) -> Vec<(String, String)>
         dropin.push_str("# Auto-generated by WolfStack — drop-in to declare VLAN devices.\n");
         dropin.push_str("[Network]\n");
         for v in vlans {
-            dropin.push_str(&format!("VLAN={}.{}\n", v.parent_iface, v.vlan_id));
+            dropin.push_str(&format!(
+                "VLAN={}\n",
+                vlan_ifname(&v.parent_iface, v.vlan_id)
+            ));
         }
         // Drop-in path: <parent>.network.d/wolfstack-vlan.conf — applies
         // to whichever .network file matches the parent. If none exists
@@ -2623,7 +2727,7 @@ pub fn render_systemd_networkd_files(store: &VlanStore) -> Vec<(String, String)>
     }
 
     for v in &store.vlans {
-        let vlan_iface = format!("{}.{}", v.parent_iface, v.vlan_id);
+        let vlan_iface = vlan_ifname(&v.parent_iface, v.vlan_id);
         let prefix = cidr_prefix(&v.subnet).unwrap_or(24);
 
         // VLAN netdev.
@@ -2860,7 +2964,7 @@ fn apply_public_ip_iptables(store: &VlanStore, report: &mut ApplyReport) {
 pub fn teardown_vlan_kernel_state(parent: &str, vlan_id: u32, bridge: &str) {
     let _ = Command::new("ip").args(["link", "set", bridge, "down"]).status();
     let _ = Command::new("ip").args(["link", "del", bridge]).status();
-    let vlan_iface = format!("{}.{}", parent, vlan_id);
+    let vlan_iface = vlan_ifname(parent, vlan_id);
     let _ = Command::new("ip").args(["link", "del", &vlan_iface]).status();
 }
 
@@ -2883,6 +2987,130 @@ pub fn teardown_public_ip_kernel_state(ip: &str, internal_ip: &str, egress: &str
 
 #[cfg(test)]
 mod tests {
+
+    /// RutgerDiehard, 2026-08-14: every VLAN on a USB LAN adapter failed
+    /// with `"name" not a valid ifname`. A USB NIC is named `enx<MAC>` —
+    /// exactly 15 characters, the entire budget — so the conventional
+    /// `<parent>.<vid>` name is 19 and the kernel rejects it outright.
+    #[test]
+    fn usb_nic_vlan_name_fits_the_kernel_limit() {
+        let name = super::vlan_ifname("enx803f5dd431dd", 104);
+        assert!(
+            name.len() <= super::IFNAME_MAX,
+            "generated name {} is {} chars, kernel allows {}",
+            name,
+            name.len(),
+            super::IFNAME_MAX
+        );
+        // The reported failing name must never be produced again.
+        assert_ne!(name, "enx803f5dd431dd.104");
+        // The VLAN id stays readable — it is what an operator looks for.
+        assert!(name.ends_with(".104"), "vlan id should remain visible: {}", name);
+    }
+
+    /// Ordinary NIC names are unchanged. Existing installs already have
+    /// interfaces called `eno1.4000`; renaming them on upgrade would
+    /// orphan every VLAN WolfStack previously created.
+    #[test]
+    fn short_parents_keep_the_conventional_name() {
+        assert_eq!(super::vlan_ifname("eno1", 4000), "eno1.4000");
+        assert_eq!(super::vlan_ifname("eth0", 5), "eth0.5");
+        assert_eq!(super::vlan_ifname("enp3s0", 100), "enp3s0.100");
+        // Exactly at the limit must still use the natural form.
+        let exact = super::vlan_ifname("enp0s31f6xy", 100);
+        assert_eq!(exact.len(), super::IFNAME_MAX);
+        assert_eq!(exact, "enp0s31f6xy.100");
+    }
+
+    /// Two adapters sharing a long prefix must not collapse onto one VLAN
+    /// interface name. Plain truncation would do exactly that — `enx` plus
+    /// the leading hex of a MAC is a shared prefix by construction — and
+    /// WolfStack would then manage the wrong NIC's VLAN.
+    #[test]
+    fn similar_parents_do_not_collide() {
+        let a = super::vlan_ifname("enx803f5dd431dd", 104);
+        let b = super::vlan_ifname("enx803f5dd431de", 104);
+        let c = super::vlan_ifname("enx803f5dd43100", 104);
+        assert_ne!(a, b, "adapters differing in the last digit collided: {}", a);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+        for n in [&a, &b, &c] {
+            assert!(n.len() <= super::IFNAME_MAX, "{} too long", n);
+        }
+    }
+
+    /// Create, delete, status and all four persistence writers derive the
+    /// name independently; if it were not deterministic they would target
+    /// different interfaces.
+    #[test]
+    fn name_generation_is_deterministic() {
+        for _ in 0..5 {
+            assert_eq!(
+                super::vlan_ifname("enx803f5dd431dd", 104),
+                super::vlan_ifname("enx803f5dd431dd", 104)
+            );
+        }
+    }
+
+    /// RutgerDiehard, 2026-08-14: changing the parent NIC of an existing
+    /// VLAN attachment reported the operator's OWN bridge as "already in
+    /// use", because the member test looked for the new parent's VLAN
+    /// interface while the bridge still held the old one. A bridge this
+    /// node already records as belonging to an attachment is ours,
+    /// whatever is currently plugged into it.
+    #[test]
+    fn a_bridge_already_in_our_store_is_never_a_conflict() {
+        let mut store = super::VlanStore::default();
+        store.vlans.push(super::VlanAttachment {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            provider: super::VlanProvider::Custom,
+            parent_iface: "eno1".to_string(),
+            vlan_id: 110,
+            mtu: 1500,
+            bridge_name: "vmbr110".to_string(),
+            subnet: "10.0.1.0/24".to_string(),
+            self_ip: "10.0.1.1".to_string(),
+            routes: Vec::new(),
+            allocations: Vec::new(),
+            external_reservations: Vec::new(),
+            notes: String::new(),
+        });
+        // Re-pointing the same attachment at a different NIC must not be
+        // blocked by a conflict with itself.
+        assert!(!super::bridge_exists_unrelated(&store, "vmbr110", "eno2", 110));
+        // And a bridge we have never heard of is still evaluated normally
+        // (no store entry, so the kernel checks below decide).
+        assert!(!super::bridge_exists_unrelated(&store, "vmbr-nonexistent-xyz", "eno1", 4000));
+    }
+
+    /// `ip -d link show` renders a VLAN as
+    /// `vlan protocol 802.1Q id 104 <REORDER_HDR>`. Parsing is anchored on
+    /// "vlan protocol" so an unrelated `id` token cannot be misread.
+    #[test]
+    fn vlan_id_parsing_is_anchored_and_tolerates_non_vlans() {
+        assert_eq!(super::parse_vlan_id_from_link("vlan protocol 802.1Q id 104 <REORDER_HDR>"), Some(104));
+        assert_eq!(super::parse_vlan_id_from_link("vlan protocol 802.1ad id 7"), Some(7));
+        // A bridge line mentions other tokens but no vlan protocol.
+        assert_eq!(
+            super::parse_vlan_id_from_link("bridge forward_delay 0 hello_time 200 max_age 2000"),
+            None
+        );
+        assert_eq!(super::parse_vlan_id_from_link(""), None);
+        // Malformed: "id" present but no number after it.
+        assert_eq!(super::parse_vlan_id_from_link("vlan protocol 802.1Q id"), None);
+    }
+
+    /// A 4-digit VLAN id leaves less room; the limit still holds.
+    #[test]
+    fn long_vlan_ids_still_fit() {
+        for vid in [1u32, 99, 999, 4094] {
+            let n = super::vlan_ifname("enx803f5dd431dd", vid);
+            assert!(n.len() <= super::IFNAME_MAX, "{} ({} chars)", n, n.len());
+            assert!(n.ends_with(&format!(".{}", vid)));
+        }
+    }
+
     use super::*;
 
     #[test]
