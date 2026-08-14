@@ -895,10 +895,6 @@ pub struct AdoptPick {
     pub ws_id: String,
 }
 
-/// Adopt existing WolfScale containers into a managed cluster. Each picked
-/// container's reachable address is resolved ON ITS HOST (host-aware) — no IPs
-/// to type, same as the Galera adopt.
-#[allow(clippy::too_many_arguments)]
 /// A node's reported address can be a comma/space-separated list when its
 /// container has several NICs (the lxcbr0 bridge + a LAN/vSwitch NIC + a
 /// WolfNet overlay NIC). Pick a single address usable for cross-host cluster
@@ -912,23 +908,18 @@ pub struct AdoptPick {
 /// overlay address isn't present (e.g. WolfNet partially down). This is the
 /// requested LAN-fallback for adoption when WolfNet is unreachable.
 fn pick_usable_address(raw: &str) -> Option<String> {
-    let candidates: Vec<std::net::Ipv4Addr> = raw
-        .split([',', ' ', '\t', '\n', ';'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<std::net::Ipv4Addr>().ok())
-        .collect();
-    let host_local = |ip: &std::net::Ipv4Addr| {
-        let o = ip.octets();
-        ip.is_loopback()
-            || ip.is_link_local()
-            || (o[0] == 10 && o[1] == 0 && o[2] == 3) // lxcbr0 bridge — host-local
-    };
-    candidates.iter().find(|ip| !host_local(ip))
-        .or_else(|| candidates.first())
-        .map(|ip| ip.to_string())
+    // Shared with the Galera adopt (same failure, same fix — the picker
+    // moved to containers/ so both cluster adopters and the ip_address
+    // format live together). Also handles the CIDR-suffixed and
+    // "(wolfnet)"-annotated token forms the LXC listers produce, which
+    // the original Ipv4-parse-only version silently dropped.
+    crate::containers::pick_cross_host_ip(raw, None)
 }
 
+/// Adopt existing WolfScale containers into a managed cluster. Each picked
+/// container's reachable address is resolved ON ITS HOST (host-aware) — no IPs
+/// to type, same as the Galera adopt.
+#[allow(clippy::too_many_arguments)]
 pub fn adopt_cluster(
     ws_cluster: &str, name: &str, db_user: &str, db_password: &str,
     cluster_port: u16, api_port: u16, proxy_port: u16, picks: &[AdoptPick],
