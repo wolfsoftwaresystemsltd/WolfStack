@@ -46,6 +46,39 @@ fn default_api() -> u16 { 8553 }
 fn default_inter_node() -> u16 { 8554 }
 fn default_status() -> u16 { 8550 }
 
+/// Loopback URLs for calling THIS node's own API, best candidate first.
+///
+/// The self equivalent of `api::build_node_urls`, and it exists for the same
+/// reason that function documents: **a node with a CA-signed certificate does
+/// not bind the plain-HTTP inter-node listener at all** (see the
+/// `cert_is_self_signed` guard in `main.rs`). Any self-call that goes straight
+/// to `http://127.0.0.1:{inter_node}` therefore hits a closed port on exactly
+/// the installs that are configured most correctly — it fails silently and
+/// forever, not intermittently, so it reads as "this feature is broken on this
+/// node" rather than as a connection bug.
+///
+/// Order:
+/// 1. HTTPS on the api port — the main listener whenever TLS is on, and the
+///    ONLY listener on a CA-signed install. Callers must use a client with
+///    `danger_accept_invalid_certs`, since a self-signed install serves its own
+///    cert here; the peer is 127.0.0.1, so validation buys nothing.
+/// 2. HTTP on the api port — `--no-tls` installs, where the api port IS the
+///    plain listener.
+/// 3. HTTP on the inter-node port — self-signed installs, which still bind it.
+///
+/// `path` is expected to start with `/`.
+pub fn self_api_urls(path: &str) -> Vec<String> {
+    let cfg = PortConfig::load();
+    let mut urls = Vec::with_capacity(3);
+    urls.push(format!("https://127.0.0.1:{}{}", cfg.api, path));
+    urls.push(format!("http://127.0.0.1:{}{}", cfg.api, path));
+    // Only worth trying when it is a genuinely different port.
+    if cfg.inter_node != cfg.api {
+        urls.push(format!("http://127.0.0.1:{}{}", cfg.inter_node, path));
+    }
+    urls
+}
+
 /// Reconcile a systemd-unit-baked `--port N` into a loaded [`PortConfig`].
 ///
 /// Background: `setup.sh` historically wrote `--port $WS_PORT` into the
@@ -429,5 +462,42 @@ mod tests {
         let persisted = r.persist.expect("custom baked port must be persisted");
         assert_eq!(persisted.api, 9000);
         assert_eq!(persisted.inter_node, 9001);
+    }
+}
+
+#[cfg(test)]
+mod self_api_url_tests {
+    use super::*;
+
+    /// HTTPS on the api port MUST come first. A CA-signed install binds only
+    /// that listener, so any ordering that reaches the inter-node port first
+    /// re-creates the wolfstack-1 failure: self-calls to a closed port,
+    /// reported as "unreachable", forever.
+    #[test]
+    fn https_on_the_api_port_is_tried_first() {
+        let urls = self_api_urls("/api/containers/lxc");
+        assert!(urls[0].starts_with("https://127.0.0.1:"), "got {:?}", urls);
+        assert!(urls[0].ends_with("/api/containers/lxc"), "got {:?}", urls);
+    }
+
+    /// The plain-HTTP fallbacks must still be present for --no-tls installs
+    /// and for self-signed installs that do bind the inter-node listener.
+    #[test]
+    fn plain_http_fallbacks_follow() {
+        let urls = self_api_urls("/x");
+        assert!(urls.iter().any(|u| u.starts_with("http://")), "got {:?}", urls);
+        // Every candidate targets loopback — never a routable address.
+        assert!(urls.iter().all(|u| u.contains("127.0.0.1")), "got {:?}", urls);
+    }
+
+    /// No duplicate candidate when a config collapses the two ports onto one
+    /// value — retrying an identical URL just doubles the connect timeout.
+    #[test]
+    fn no_duplicate_candidate_when_ports_coincide() {
+        let urls = self_api_urls("/x");
+        let mut seen = urls.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), urls.len(), "duplicate candidates in {:?}", urls);
     }
 }
