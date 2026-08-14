@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.13.1: protected VMs could not locate their own disk** _(2026-08-14 — [`ff777d4d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff777d4da9f9b0dd4dd0240212bde78ecf810484))_
 - **v25.13.0: WolfHA protects virtual machines, and syncs changed blocks rather than whole files** _(2026-08-14 — [`27ef517e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/27ef517eecf0c4624b795e88deef56b565dbbe7f))_
 - **v25.12.14: subnet-route warnings that could not be fixed, and a migration field you could not find** _(2026-08-14 — [`9d5c35fe`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9d5c35fe33897f9e2835c3f48ba1a87e26afde9e))_
 - **v25.12.13: VLANs can be created on USB network adapters again** _(2026-08-14 — [`1234eb2e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1234eb2e05001e9a7fcfe7a06c1623f26e0c4b7e))_
