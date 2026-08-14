@@ -16472,12 +16472,11 @@ function openNodeSettings(nodeId) {
                     <input type="text" class="form-control" id="node-settings-site" value="${node.site || ''}" placeholder="${autoSiteHint(node.address) || 'unset'}" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
                     <small style="color: var(--text-muted);">Physical location tag (e.g. <code>home</code>, <code>office-vlan10</code>, <code>hetzner-vps</code>). Nodes sharing a site are dialled at their LAN address; different sites go via public IP. Leave blank to auto-derive from address (currently <code>${autoSiteHint(node.address) || 'none'}</code>).</small>
                 </div>
-                ${isSelf ? '' : `
                 <div class="form-group">
                     <label>Migration address <span style="color:var(--text-muted);font-weight:normal;">(optional)</span></label>
                     <input type="text" class="form-control" id="node-settings-migration-address" value="${escapeAttr(node.migration_address || '')}" placeholder="${escapeAttr(node.address || '')}" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
-                    <small style="color: var(--text-muted);">Pin VM/LXC migration &amp; bulk transfers to a specific NIC by entering that interface's IP (e.g. a 2.5&nbsp;GbE link). Cluster/control traffic still uses <strong>Address</strong> above. Leave blank to use Address.</small>
-                </div>`}
+                    <small style="color: var(--text-muted);">Pin VM/LXC migration &amp; bulk transfers <em>into this node</em> to a specific NIC by entering that interface's IP (e.g. a 2.5&nbsp;GbE link). Other nodes upload to it over that link; cluster/control traffic still uses <strong>Address</strong> above. Leave blank to use Address.</small>
+                </div>
                 ${isPve ? '' : `
                 <div class="form-group">
                     <label>Tier roles</label>
@@ -16846,8 +16845,15 @@ async function saveNodeSettings() {
     }
 
     // Migration address override — empty string clears it (migration falls
-    // back to Address). Same empty-is-meaningful handling as Site. Hidden for
-    // the self node, so the element is absent there.
+    // back to Address). Same empty-is-meaningful handling as Site.
+    //
+    // Shown for every node including this one. It used to be hidden on the
+    // self node, which had it backwards: the setting describes how OTHER
+    // nodes reach THIS one for bulk transfer, so a node's own settings page
+    // is exactly where an operator looks for it. Hiding it there made the
+    // field unfindable for anyone administering a node from its own UI
+    // (jdelrue, 2026-08-14 — the assistant correctly described a field the
+    // UI then refused to show).
     const migAddrEl = document.getElementById('node-settings-migration-address');
     if (migAddrEl) {
         const node = allNodes.find(n => n.id === nodeId);
