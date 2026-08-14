@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.12.12: a node with a real TLS certificate can call its own API again** _(2026-08-14 — [`b1ff8ee7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b1ff8ee72720f348559c125965660239f4d8f9bc))_
+- **v25.12.11: the host mail relay no longer falls back to default SMTP settings on nodes that never received yours** _(2026-08-14 — [`65598bb3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65598bb317af0b83beb396fbf27e0ab6783496d1))_
 - **v25.12.10: clear the clippy backlog, and stop three handlers holding a borrow across an await** _(2026-08-14 — [`802f0bca`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/802f0bcaeb74bc50b9433ae806f6303c4171894e))_
 - **v25.12.9: one panic no longer takes every fleet-wide endpoint down until restart** _(2026-08-14 — [`92066954`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/92066954bf2b31aa95269cd28e956fd857afc596))_
 - **v25.12.8: stop the container probes multiplying, and let a wedged Docker daemon say so** _(2026-08-13 — [`f09a49d9`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f09a49d94224f51af6b407156f3685cf6a93ad7c))_
