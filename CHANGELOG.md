@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.12.14: subnet-route warnings that could not be fixed, and a migration field you could not find** _(2026-08-14 — [`9d5c35fe`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/9d5c35fe33897f9e2835c3f48ba1a87e26afde9e))_
 - **v25.12.13: VLANs can be created on USB network adapters again** _(2026-08-14 — [`1234eb2e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1234eb2e05001e9a7fcfe7a06c1623f26e0c4b7e))_
 - **v25.12.12: a node with a real TLS certificate can call its own API again** _(2026-08-14 — [`b1ff8ee7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/b1ff8ee72720f348559c125965660239f4d8f9bc))_
 - **v25.12.11: the host mail relay no longer falls back to default SMTP settings on nodes that never received yours** _(2026-08-14 — [`65598bb3`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/65598bb317af0b83beb396fbf27e0ab6783496d1))_
