@@ -419,6 +419,59 @@ pub fn cluster_rename_member_matches(node_cluster: Option<&str>, old_name: &str)
         || (node_cluster.is_none() && old_name.eq_ignore_ascii_case("WolfStack"))
 }
 
+/// True when two nodes sit in the same display cluster — the predicate to use
+/// when deciding whether a config push may cross from one node to another.
+///
+/// This is `cluster_rename_member_matches` made symmetric, and it exists
+/// because the naive version (compare names, treating `None` as `""`) splits a
+/// genuinely-single cluster: an unassigned node reports `None` while its peers
+/// report `Some("WolfStack")`, and the unassigned one then silently stops
+/// receiving cluster-wide settings. Scoping a push is a security boundary — a
+/// multi-cluster bastion must not hand one operator's SMTP password or AI keys
+/// to another's fleet — so it has to be both tight and correct.
+pub fn same_display_cluster(a: Option<&str>, b: Option<&str>) -> bool {
+    let is_default_group = |c: Option<&str>| {
+        c.is_none() || c.is_some_and(|s| s.trim().is_empty() || s.trim().eq_ignore_ascii_case("WolfStack"))
+    };
+    match (a, b) {
+        _ if is_default_group(a) && is_default_group(b) => true,
+        (Some(x), Some(y)) => x.trim().eq_ignore_ascii_case(y.trim()),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod same_display_cluster_tests {
+    use super::same_display_cluster;
+
+    #[test]
+    fn unassigned_nodes_share_the_default_group() {
+        // The regression this predicate exists to prevent: a node that never
+        // had a cluster name assigned must still count as a peer of one
+        // explicitly labelled "WolfStack", or it stops receiving settings.
+        assert!(same_display_cluster(None, Some("WolfStack")));
+        assert!(same_display_cluster(Some("WolfStack"), None));
+        assert!(same_display_cluster(None, None));
+        assert!(same_display_cluster(Some(""), None));
+        assert!(same_display_cluster(Some("  "), Some("wolfstack")));
+    }
+
+    #[test]
+    fn names_match_case_and_whitespace_insensitively() {
+        assert!(same_display_cluster(Some("Prod"), Some("prod")));
+        assert!(same_display_cluster(Some(" prod "), Some("prod")));
+    }
+
+    #[test]
+    fn distinct_clusters_never_match() {
+        assert!(!same_display_cluster(Some("prod"), Some("staging")));
+        // A named cluster is NOT the default group, so an unassigned node on a
+        // multi-cluster bastion must not receive its secrets.
+        assert!(!same_display_cluster(None, Some("customer-a")));
+        assert!(!same_display_cluster(Some("customer-a"), None));
+    }
+}
+
 /// Migrate every NODE-LOCAL cluster-tagged store from `old_name` to
 /// `new_name` when a WolfStack cluster is renamed: TrueNAS + Unraid
 /// instances, Galera + WolfScale cluster definitions, and the cluster's

@@ -41105,7 +41105,18 @@ async function saveAiConfig() {
         });
         var data = await resp.json();
         if (data.status === 'saved') {
-            showModal('Settings Saved');
+            // Peers that rejected or were unreachable must be visible here.
+            // Silently-failed propagation is what leaves another node running
+            // on default SMTP settings until someone notices mail is broken.
+            if (data.peers_failed > 0) {
+                showModal('Settings saved on this node, but ' + data.peers_failed + ' other node(s) did not receive them:\n\n'
+                    + (data.peers || []).filter(function (p) { return !p.ok; })
+                        .map(function (p) { return '• ' + p.hostname + ' (' + p.address + '): ' + (p.error || 'unknown error'); })
+                        .join('\n')
+                    + '\n\nFix those nodes and press "Push to all nodes" to retry.');
+            } else {
+                showModal('Settings Saved');
+            }
             loadAiStatus();
             // Show/hide the AI chat bubble based on the master toggle.
             // Server-side `is_configured()` already gates the backend;
@@ -41120,6 +41131,43 @@ async function saveAiConfig() {
         }
     } catch (e) {
         showModal('Error: ' + e.message);
+    }
+}
+
+// Force-push the saved AI/email settings to every online node in the cluster.
+// The save-time push only reaches nodes that were online at that moment, so a
+// node added later keeps loading defaults — which is what makes its host mail
+// relay come up pointing at the placeholder SMTP host.
+async function pushAiConfigToNodes() {
+    var btn = document.getElementById('ai-push-nodes-btn');
+    // Label lives in its own span: writing textContent on the button itself
+    // would delete the icon span nested inside it.
+    var lbl = document.getElementById('ai-push-nodes-label');
+    if (btn) btn.disabled = true;
+    if (lbl) lbl.textContent = 'Pushing…';
+    try {
+        var resp = await fetch(aiNodeUrl('/api/ai/config/propagate'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        var data = await resp.json();
+        if (!resp.ok) {
+            showModal('Error: ' + (data.error || ('HTTP ' + resp.status)));
+        } else if (data.pushed === 0) {
+            showModal('No other online nodes in this cluster to push to.');
+        } else if (data.failed > 0) {
+            showModal('Pushed to ' + (data.pushed - data.failed) + ' of ' + data.pushed + ' node(s). Failed:\n\n'
+                + (data.peers || []).filter(function (p) { return !p.ok; })
+                    .map(function (p) { return '• ' + p.hostname + ' (' + p.address + '): ' + (p.error || 'unknown error'); })
+                    .join('\n'));
+        } else {
+            showModal('Email and AI settings pushed to all ' + data.pushed + ' node(s) in this cluster.');
+        }
+    } catch (e) {
+        showModal('Error: ' + e.message);
+    } finally {
+        if (btn) btn.disabled = false;
+        if (lbl) lbl.textContent = 'Push to all nodes';
     }
 }
 
@@ -41157,6 +41205,10 @@ async function mailRelayLoadStatus() {
             line = '✅ Active — host services on this server send email via the WolfStack relay (msmtp → ' + escapeHtml(s.smtp_host || 'your SMTP') + ').';
         } else if (s.sendmail === 'other') {
             line = 'This server already has its own mail server (' + escapeHtml(s.sendmail_target || 'existing MTA') + '). Enabling will ask you to confirm replacing it.';
+        } else if (s.settings_present === false) {
+            // Settings exist somewhere in the cluster but never reached this
+            // node — telling the operator to re-type them would be wrong.
+            line = '⚠ This node has not received the email settings yet. Open Settings → AI on the node where you configured email and press "Push to all nodes", then reload this page.';
         } else if (!s.smtp_configured) {
             line = '⚠ No SMTP relay configured yet — fill in the SMTP settings above and Save, then enable the relay.';
         } else {
