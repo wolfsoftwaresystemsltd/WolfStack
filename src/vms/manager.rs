@@ -1173,6 +1173,13 @@ impl VmManager {
         self.vm_os_disk_path(config)
     }
 
+    /// Public form of [`Self::vm_efivars_path`] — WolfHA replicates an
+    /// OVMF VM's NVRAM alongside its disk: a promoted copy with fresh
+    /// VARS has lost its boot entries and may not boot at all.
+    pub fn efivars_path_for(&self, config: &VmConfig) -> PathBuf {
+        self.vm_efivars_path(config)
+    }
+
     /// Get the OS disk path, respecting custom storage_path if set
     fn vm_os_disk_path(&self, config: &VmConfig) -> PathBuf {
         if let Some(ref sp) = config.storage_path {
@@ -3826,7 +3833,18 @@ impl VmManager {
             return;
         }
 
+        // WolfHA copies never boot themselves: a standby starting is a
+        // split brain, and a protected primary's boot belongs to the
+        // boot guard (which first asks every replica "did you take over
+        // while I was down?"). Their stored auto_start is already false
+        // (stripped at enable / forced on replica config writes) — this
+        // is the backstop for a hand-edited sidecar file.
+        // Source: src/wolfha/mod.rs boot_guard() + vm_store_replica_config().
+        let ha = crate::wolfha::HaStore::load();
         for vm in self.list_vms() {
+            if ha.get(&vm.name).is_some_and(|e| e.kind == crate::wolfha::SubjectKind::Vm) {
+                continue;
+            }
             if vm.auto_start && !vm.running
 
                 && let Err(e) = self.start_vm(&vm.name) {
