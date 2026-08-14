@@ -8,6 +8,8 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.14.3: protecting a running VM takes its first real seed** _(2026-08-14 — [`96faddc5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/96faddc5015f2969602070917b885d570e456d02))_
+- **v25.14.2: Galera adopt takes its addresses from the cluster itself** _(2026-08-14 — [`c8583341`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c8583341c01ef056457487be774d5d19b372e425))_
 - **v25.14.1: adopting a multi-NIC MariaDB container into a Galera cluster works** _(2026-08-14 — [`e1ed6ad7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e1ed6ad7f04de09bec259d32b5ca57686221a49b))_
 - **v25.14.0: WolfHA VM protection works end to end — real disk seeds, self-healing standbys, safe handoff** _(2026-08-14 — [`ec76b6d1`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ec76b6d1776a768728a2b3d1a92fb0f2d45c68f7))_
 - **v25.13.1: protected VMs could not locate their own disk** _(2026-08-14 — [`ff777d4d`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ff777d4da9f9b0dd4dd0240212bde78ecf810484))_
