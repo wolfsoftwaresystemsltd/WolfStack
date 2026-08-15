@@ -2626,8 +2626,9 @@ pub fn ipv6_available() -> bool {
 
 /// Master opt-in: is IPv6 subnet routing enabled in this node's persisted
 /// RouterConfig? Only ever consulted on the v6 branch (after
-/// `is_ipv6_cidr`), so the common v4 path never reads it.
-fn v6_subnet_routing_enabled() -> bool {
+/// `is_ipv6_cidr`), so the common v4 path never reads it. pub(crate) for
+/// the workload-subnet raw-exception reconciler in containers::.
+pub(crate) fn v6_subnet_routing_enabled() -> bool {
     RouterConfig::load().ipv6_subnet_routing
 }
 
@@ -2895,10 +2896,84 @@ pub fn enable_subnet_route_forwarding(route: &SubnetRoute) -> Result<(), String>
         }
     }
 
+    // 5. raw PREROUTING exception (jdelrue 2026-08-15). When the route's
+    //    subnet is a Docker bridge on this node, dockerd's anti-direct-
+    //    routing rule (`-t raw -A PREROUTING -d <container-ip> ! -i
+    //    docker0 -j DROP`) discards the decapped packet before FORWARD /
+    //    DOCKER-USER ever see it — so every accept installed above is
+    //    unreachable. raw PREROUTING is the earliest hook; our exception
+    //    must be inserted at position 1, scoped to traffic that already
+    //    arrived through the wolfnet interface. Harmless when the subnet
+    //    is a plain LAN (no raw DROP to bypass). The marker comment tags
+    //    the rule as ours for teardown and for the workload-subnet
+    //    reconciler in containers::setup_wolfnet_forwarding, which uses a
+    //    DIFFERENT marker so neither cleanup path deletes the other's.
+    if let Err(e) = ensure_raw_wolfnet_accept("iptables", &wn_iface, &route.subnet_cidr, RAW_MARKER_ROUTE) {
+        errors.push(e);
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors.join("; "))
+    }
+}
+
+/// Marker comment on raw-table exceptions owned by the subnet-route
+/// gateway plumbing (enable/disable_subnet_route_forwarding).
+pub(crate) const RAW_MARKER_ROUTE: &str = "wolfstack-wolfnet-route";
+/// Marker comment on raw-table exceptions owned by the locally-owned
+/// workload-subnet reconciler (containers::setup_wolfnet_forwarding).
+pub(crate) const RAW_MARKER_LOCAL: &str = "wolfstack-wolfnet-local";
+
+/// Insert `-t raw -I PREROUTING 1 -i <iface> -d <cidr> -m comment
+/// --comment <marker> -j ACCEPT` if not already present. `bin` selects the
+/// family (`iptables` / `ip6tables`). `-C` compares the parsed rule, so
+/// the comment is part of the match and the two markers never collide.
+pub(crate) fn ensure_raw_wolfnet_accept(bin: &str, wn_iface: &str, cidr: &str, marker: &str) -> Result<(), String> {
+    use std::process::Command;
+    let rule = ["-i", wn_iface, "-d", cidr, "-m", "comment", "--comment", marker, "-j", "ACCEPT"];
+    let mut check: Vec<&str> = vec!["-t", "raw", "-C", "PREROUTING"];
+    check.extend_from_slice(&rule);
+    let exists = Command::new(bin)
+        .args(&check)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    let mut add: Vec<&str> = vec!["-t", "raw", "-I", "PREROUTING", "1"];
+    add.extend_from_slice(&rule);
+    let out = Command::new(bin)
+        .args(&add)
+        .output()
+        .map_err(|e| format!("{} raw PREROUTING insert exec failed: {}", bin, e))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "raw PREROUTING -i {} -d {} ACCEPT: {}",
+            wn_iface, cidr,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Delete every copy of the raw-table exception `ensure_raw_wolfnet_accept`
+/// installs (looped like the FORWARD teardown so duplicates from crashed
+/// half-runs all clear; capped so a pathological state can't spin).
+pub(crate) fn remove_raw_wolfnet_accept(bin: &str, wn_iface: &str, cidr: &str, marker: &str) {
+    use std::process::Command;
+    let rule = ["-i", wn_iface, "-d", cidr, "-m", "comment", "--comment", marker, "-j", "ACCEPT"];
+    for _ in 0..16 {
+        let mut del: Vec<&str> = vec!["-t", "raw", "-D", "PREROUTING"];
+        del.extend_from_slice(&rule);
+        let out = Command::new(bin).args(&del).output();
+        match out {
+            Ok(o) if o.status.success() => continue, // may be a duplicate
+            _ => break,
+        }
     }
 }
 
@@ -3090,6 +3165,13 @@ pub fn enable_subnet_route_forwarding_v6(route: &SubnetRoute) -> Result<(), Stri
         }
     }
 
+    // raw PREROUTING exception — v6 mirror of the v4 step 5 (dockerd
+    // installs the same anti-direct-routing raw DROP for v6 container
+    // addresses when it manages an IPv6 bridge).
+    if let Err(e) = ensure_raw_wolfnet_accept("ip6tables", &wn_iface, &route.subnet_cidr, RAW_MARKER_ROUTE) {
+        errors.push(e);
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -3132,6 +3214,9 @@ pub fn disable_subnet_route_forwarding_v6(route: &SubnetRoute) -> Result<(), Str
             _ => break,
         }
     }
+
+    // v6 mirror of the v4 raw-exception teardown.
+    remove_raw_wolfnet_accept("ip6tables", &wn_iface, &route.subnet_cidr, RAW_MARKER_ROUTE);
 
     Ok(())
 }
@@ -3985,11 +4070,37 @@ pub fn sync_subnet_routes_to_wolfnet(routes: &[SubnetRoute]) {
     // v4-only case adds no disk I/O to this per-tick self-heal.
     let has_v6 = routes.iter().any(|r| r.enabled && is_ipv6_cidr(&r.subnet_cidr));
     let allow_v6 = !has_v6 || v6_subnet_routing_enabled();
-    let map: std::collections::BTreeMap<String, String> = routes.iter()
+    let mut map: std::collections::BTreeMap<String, String> = routes.iter()
         .filter(|r| r.enabled)
         .filter(|r| allow_v6 || !is_ipv6_cidr(&r.subnet_cidr))
         .map(|r| (r.subnet_cidr.clone(), r.gateway.clone()))
         .collect();
+
+    // Owner-side receive dispatch (jdelrue 2026-08-15): wolfnetd's decap
+    // path looks the destination up in this very map and delivers to the
+    // TUN only when the matched gateway is the node's own WolfNet IP
+    // (wolfnet main.rs `find_subnet_match` → `gw_ip == wolfnet_ip`). The
+    // node that OWNS a workload subnet never had an entry for it — remote
+    // peers auto-create `172.21.0.0/24 via <owner>` and encapsulate to us,
+    // but our own table said nothing about 172.21.0.0/24, so the decrypted
+    // packet fell through and was dropped before ever reaching docker0.
+    // Export every locally-owned workload CIDR mapped to our own WolfNet
+    // IP: userspace entry ONLY — deliberately never a kernel route, the
+    // kernel already has the connected route via the bridge itself.
+    // Configured routes win on key collision (or_insert), so an operator
+    // deliberately routing a CIDR elsewhere is never overridden. Default
+    // bridge CIDRs stay out for the same reason they're excluded from
+    // auto-apply and the predictive rule: every node owns 172.17.0.0/16,
+    // so no peer is ever told to send it to us. Self-heals when a bridge
+    // disappears: the reconcile tick re-runs this sync every 60s and
+    // collect_workload_subnets() no longer returns the dead bridge.
+    if let Some(local_wn_ip) = local_wolfnet_ipv4() {
+        let locals = crate::networking::collect_workload_subnets();
+        // Same master gate as configured v6 routes — but computed from the
+        // LOCAL candidates, so a v4-only host never pays the config read.
+        let v6_allowed = locals.iter().any(|s| is_ipv6_cidr(s)) && v6_subnet_routing_enabled();
+        merge_local_owner_entries(&mut map, &locals, &local_wn_ip, v6_allowed);
+    }
 
     let path = "/var/run/wolfnet/subnet-routes.json";
     if let Err(e) = std::fs::create_dir_all("/var/run/wolfnet") {
@@ -4022,6 +4133,62 @@ pub fn sync_subnet_routes_to_wolfnet(routes: &[SubnetRoute]) {
     }
     // No SIGHUP — wolfnetd reloads this file on its own 15s tick. See the
     // function doc for why signalling here purged learned peers.
+}
+
+/// Merge locally-owned workload CIDRs into the wolfnetd export map as
+/// `<cidr> → <own wolfnet IP>` entries. Pure so the precedence and
+/// filtering rules are unit-testable:
+///   • an existing key (a configured route) is never overridden
+///   • default bridge CIDRs are never exported (see DEFAULT_BRIDGE_CIDRS)
+///   • v6 CIDRs are exported only when the v6 master gate is on
+fn merge_local_owner_entries(
+    map: &mut std::collections::BTreeMap<String, String>,
+    local_subnets: &[String],
+    local_wn_ip: &str,
+    v6_allowed: bool,
+) {
+    for sub in local_subnets {
+        if is_ipv6_cidr(sub) && !v6_allowed {
+            continue;
+        }
+        if is_default_bridge_cidr(sub) {
+            continue;
+        }
+        map.entry(sub.clone())
+            .or_insert_with(|| local_wn_ip.to_string());
+    }
+}
+
+/// This node's own IPv4 address on the wolfnet interface, or None when
+/// wolfnet isn't up. Same `ip -4 addr show` parse as
+/// `node_is_route_gateway` — uncached for the same reason (wolfnet can
+/// re-address at runtime, and callers run on the 60s reconcile tick).
+fn local_wolfnet_ipv4() -> Option<String> {
+    use std::process::Command;
+    let wn_iface = crate::networking::detect_wolfnet_iface()
+        .unwrap_or_else(|| "wolfnet0".to_string());
+    let out = Command::new("ip")
+        .args(["-4", "addr", "show", &wn_iface])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let rest = match line.trim().strip_prefix("inet ") {
+            Some(r) => r,
+            None => continue,
+        };
+        let addr = match rest.split_whitespace().next() {
+            Some(a) => a.split('/').next().unwrap_or(""),
+            None => continue,
+        };
+        if addr.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Some(addr.to_string());
+        }
+    }
+    None
 }
 
 /// Run `ip -4 route get <first-in-subnet>` and pull out the egress iface
@@ -4147,6 +4314,11 @@ pub fn disable_subnet_route_forwarding(route: &SubnetRoute) -> Result<(), String
             _ => break,
         }
     }
+
+    // Tear down the raw PREROUTING exception this route's apply installed.
+    // Only OUR marker — the workload-subnet reconciler's rules (different
+    // marker) are managed by containers::setup_wolfnet_forwarding.
+    remove_raw_wolfnet_accept("iptables", &wn_iface, &route.subnet_cidr, RAW_MARKER_ROUTE);
 
     Ok(())
 }
@@ -4647,6 +4819,55 @@ mod default_bridge_route_tests {
         // never false-positive on our own correctly-installed v6 device route.
         assert!(!kernel_owns_cidr_unmanageable("fd00::/8"));
         assert!(!kernel_owns_cidr_unmanageable("2001:db8::/32"));
+    }
+
+    // ── Owner-side wolfnetd export (jdelrue 2026-08-15) ──
+    // The receiving node must find its OWN workload CIDRs in
+    // subnet-routes.json (mapped to its own WolfNet IP) or wolfnetd drops
+    // every decapped packet destined for them.
+
+    fn locals() -> Vec<String> {
+        vec![
+            "172.21.0.0/24".to_string(), // real workload bridge (neo's case)
+            "172.17.0.0/16".to_string(), // default docker0 — must stay out
+            "10.0.3.0/24".to_string(),   // default lxcbr0 — must stay out
+            "fd42:1::/64".to_string(),   // v6 workload bridge
+        ]
+    }
+
+    #[test]
+    fn owner_exports_its_workload_cidr_to_its_own_ip() {
+        let mut map = std::collections::BTreeMap::new();
+        merge_local_owner_entries(&mut map, &locals(), "10.10.10.90", false);
+        assert_eq!(map.get("172.21.0.0/24").map(String::as_str), Some("10.10.10.90"));
+    }
+
+    #[test]
+    fn default_bridges_are_never_exported_as_owner_entries() {
+        let mut map = std::collections::BTreeMap::new();
+        merge_local_owner_entries(&mut map, &locals(), "10.10.10.90", true);
+        assert!(!map.contains_key("172.17.0.0/16"));
+        assert!(!map.contains_key("10.0.3.0/24"));
+    }
+
+    #[test]
+    fn configured_route_wins_over_owner_entry() {
+        // An operator deliberately routing our bridge's CIDR elsewhere must
+        // not be silently overridden by the self-entry.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("172.21.0.0/24".to_string(), "10.10.10.120".to_string());
+        merge_local_owner_entries(&mut map, &locals(), "10.10.10.90", false);
+        assert_eq!(map.get("172.21.0.0/24").map(String::as_str), Some("10.10.10.120"));
+    }
+
+    #[test]
+    fn v6_owner_entries_respect_the_master_gate() {
+        let mut map = std::collections::BTreeMap::new();
+        merge_local_owner_entries(&mut map, &locals(), "10.10.10.90", false);
+        assert!(!map.contains_key("fd42:1::/64"));
+        let mut map = std::collections::BTreeMap::new();
+        merge_local_owner_entries(&mut map, &locals(), "10.10.10.90", true);
+        assert_eq!(map.get("fd42:1::/64").map(String::as_str), Some("10.10.10.90"));
     }
 }
 

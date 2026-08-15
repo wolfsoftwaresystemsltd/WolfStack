@@ -136,6 +136,22 @@ pub fn setup_wolfnet_forwarding() {
         apply_wolfnet_accepts(chain, true);
     }
 
+    // ── raw PREROUTING exceptions for locally-owned workload subnets ──
+    // jdelrue 2026-08-15: dockerd protects every container address with an
+    // anti-direct-routing rule in the raw table
+    // (`-t raw -A PREROUTING -d <ip> ! -i docker0 -j DROP`), which runs
+    // BEFORE the FORWARD / DOCKER-USER accepts installed above — so a
+    // packet another cluster node sent us over WolfNet for one of our own
+    // containers was dropped at the earliest netfilter hook and none of
+    // the accepts ever saw it. Keep a per-subnet exception at the head of
+    // raw PREROUTING, scoped to traffic that arrived through wolfnet0 and
+    // only for the workload CIDRs this node intentionally advertises over
+    // gossip (default bridges excluded, exactly like auto-apply and the
+    // predictive rule). Stale exceptions are removed when a bridge
+    // disappears — this runs on the same 60s reconcile as the rest of
+    // this function.
+    reconcile_wolfnet_raw_workload_accepts();
+
     // ── MASQUERADE for non-WolfNet source IPs going out wolfnet0 ──
     // Containers without a WolfNet IP (using Docker IPs like 172.x) need source NAT
     // so remote peers can route replies back. Containers WITH WolfNet IPs are not
@@ -154,6 +170,149 @@ pub fn setup_wolfnet_forwarding() {
                 "-j", "MASQUERADE"
             ]).output();
         }
+    }
+}
+
+/// Keep raw-table PREROUTING exceptions in sync with this node's workload
+/// subnets: one `-i wolfnet0 -d <cidr> -j ACCEPT` per locally-owned,
+/// non-default-bridge CIDR (marker RAW_MARKER_LOCAL), stale ones removed.
+/// See the call site in setup_wolfnet_forwarding for why raw is the only
+/// table that can host this exception. v6 CIDRs participate only when the
+/// operator has enabled IPv6 subnet routing; with the gate off, the empty
+/// wanted-set still sweeps any v6 exceptions left from when it was on.
+fn reconcile_wolfnet_raw_workload_accepts() {
+    use crate::networking::router::{
+        is_default_bridge_cidr, is_ipv6_cidr, v6_subnet_routing_enabled, RAW_MARKER_LOCAL,
+    };
+    let locals = crate::networking::collect_workload_subnets();
+
+    let v4_wanted: Vec<String> = locals.iter()
+        .filter(|s| !is_ipv6_cidr(s))
+        .filter(|s| !is_default_bridge_cidr(s))
+        .cloned()
+        .collect();
+    // Config is read only when a v6 candidate actually exists (same lazy
+    // pattern as sync_subnet_routes_to_wolfnet).
+    let v6_candidates: Vec<String> = locals.iter()
+        .filter(|s| is_ipv6_cidr(s))
+        .cloned()
+        .collect();
+    let v6_wanted: Vec<String> = if !v6_candidates.is_empty() && v6_subnet_routing_enabled() {
+        v6_candidates
+    } else {
+        Vec::new()
+    };
+
+    reconcile_raw_accepts_family("iptables", &v4_wanted, RAW_MARKER_LOCAL);
+    reconcile_raw_accepts_family("ip6tables", &v6_wanted, RAW_MARKER_LOCAL);
+}
+
+/// One address family of the reconcile above: read the current PREROUTING
+/// rules, add missing exceptions, delete ours that no longer correspond to
+/// a live workload subnet. Rules carrying the router-plumbing marker
+/// (RAW_MARKER_ROUTE) are invisible here — different comment, so the
+/// substring filter in the parser never selects them.
+fn reconcile_raw_accepts_family(bin: &str, wanted: &[String], marker: &str) {
+    let out = Command::new(bin)
+        .args(["-t", "raw", "-S", "PREROUTING"])
+        .output();
+    let listing = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        // Can't read the table (no binary / raw unsupported) — adding
+        // would fail the same way, and deleting blind is worse. Skip.
+        _ => return,
+    };
+    let existing = parse_marked_raw_accept_cidrs(&listing, marker);
+    let existing_set: std::collections::HashSet<&str> =
+        existing.iter().map(String::as_str).collect();
+    let wanted_set: std::collections::HashSet<&str> =
+        wanted.iter().map(String::as_str).collect();
+
+    for cidr in wanted {
+        if !existing_set.contains(cidr.as_str())
+            && let Err(e) = crate::networking::router::ensure_raw_wolfnet_accept(bin, "wolfnet0", cidr, marker) {
+                tracing::warn!("wolfnet raw exception for {} not installed: {}", cidr, e);
+            }
+    }
+    for cidr in &existing {
+        if !wanted_set.contains(cidr.as_str()) {
+            crate::networking::router::remove_raw_wolfnet_accept(bin, "wolfnet0", cidr, marker);
+        }
+    }
+}
+
+/// Pull the `-d <cidr>` operand out of every PREROUTING rule that carries
+/// our marker comment. Tolerates both comment print forms — iptables-nft
+/// quotes the comment (`--comment "wolfstack-wolfnet-local"`), legacy
+/// prints it bare — by substring-matching the marker and trimming quotes
+/// off the extracted operand defensively. Pure; unit-tested below.
+fn parse_marked_raw_accept_cidrs(listing: &str, marker: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in listing.lines() {
+        if !line.starts_with("-A PREROUTING") || !line.contains(marker) {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        while let Some(t) = toks.next() {
+            if t == "-d" {
+                if let Some(c) = toks.next() {
+                    out.push(c.trim_matches('"').to_string());
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod wolfnet_raw_exception_tests {
+    use super::parse_marked_raw_accept_cidrs;
+
+    // Real-world shapes: iptables-nft quotes the comment, legacy doesn't.
+    const NFT_LISTING: &str = "\
+-P PREROUTING ACCEPT
+-A PREROUTING -d 172.21.0.0/24 -i wolfnet0 -m comment --comment \"wolfstack-wolfnet-local\" -j ACCEPT
+-A PREROUTING -d 192.168.50.0/24 -i wolfnet0 -m comment --comment \"wolfstack-wolfnet-route\" -j ACCEPT
+-A PREROUTING -d 172.21.0.2/32 ! -i docker0 -j DROP";
+
+    #[test]
+    fn extracts_only_rules_with_our_marker() {
+        let got = parse_marked_raw_accept_cidrs(NFT_LISTING, "wolfstack-wolfnet-local");
+        assert_eq!(got, vec!["172.21.0.0/24".to_string()]);
+        // The router-plumbing marker selects ITS rule and not ours — the two
+        // cleanup paths must never see each other's exceptions.
+        let got = parse_marked_raw_accept_cidrs(NFT_LISTING, "wolfstack-wolfnet-route");
+        assert_eq!(got, vec!["192.168.50.0/24".to_string()]);
+    }
+
+    #[test]
+    fn dockers_own_drop_rules_are_never_selected() {
+        // Docker's anti-direct-routing DROP has no marker; an empty result
+        // here is what guarantees the stale-sweep can never delete it.
+        let got = parse_marked_raw_accept_cidrs(
+            "-A PREROUTING -d 172.21.0.2/32 ! -i docker0 -j DROP",
+            "wolfstack-wolfnet-local",
+        );
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn legacy_unquoted_comment_form_parses_too() {
+        let listing = "-A PREROUTING -d fd42:1::/64 -i wolfnet0 -m comment --comment wolfstack-wolfnet-local -j ACCEPT";
+        let got = parse_marked_raw_accept_cidrs(listing, "wolfstack-wolfnet-local");
+        assert_eq!(got, vec!["fd42:1::/64".to_string()]);
+    }
+
+    #[test]
+    fn only_prerouting_appends_are_considered() {
+        // -P policy lines, other chains, and unrelated tables must not
+        // contribute entries even if a marker string appears in them.
+        let listing = "\
+-P PREROUTING ACCEPT
+-A OUTPUT -d 10.9.9.0/24 -m comment --comment wolfstack-wolfnet-local -j ACCEPT";
+        let got = parse_marked_raw_accept_cidrs(listing, "wolfstack-wolfnet-local");
+        assert!(got.is_empty());
     }
 }
 
