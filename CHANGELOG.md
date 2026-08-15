@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.14.4: peer workload subnets no longer go stale in nodes.json, and default bridges are never flagged as missing routes** _(2026-08-15 — [`90d250c2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/90d250c2f194a6b7425d0b316e0222639ea028f4))_
 - **v25.14.3: protecting a running VM takes its first real seed** _(2026-08-14 — [`96faddc5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/96faddc5015f2969602070917b885d570e456d02))_
 - **v25.14.2: Galera adopt takes its addresses from the cluster itself** _(2026-08-14 — [`c8583341`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/c8583341c01ef056457487be774d5d19b372e425))_
 - **v25.14.1: adopting a multi-NIC MariaDB container into a Galera cluster works** _(2026-08-14 — [`e1ed6ad7`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/e1ed6ad7f04de09bec259d32b5ca57686221a49b))_
