@@ -93,6 +93,14 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
     // reachable whether or not WolfRouter has a config entry for it.
     let kernel_routed = kernel_wolfnet_route_cidrs();
 
+    // Subnets this node ALSO owns locally. A peer's copy of one of these can
+    // never be usefully routed over WolfNet from here — the kernel's own
+    // `proto kernel scope link` route for the local bridge wins/collides —
+    // so recommending a route for it is always wrong. Same guard WolfRouter
+    // auto-apply applies (see `auto_apply_missing_workload_routes`).
+    let local_subnets: HashSet<String> =
+        crate::networking::collect_workload_subnets().into_iter().collect();
+
     let mut missing = Vec::new();
     for peer in &peers {
         let peer_ip_only = peer.ip.split('/').next().unwrap_or(&peer.ip).to_string();
@@ -110,20 +118,7 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
         if workload_subnets.is_empty() { continue; }
 
         for sub in workload_subnets {
-            // v4 always qualifies. v6 qualifies only when IPv6 subnet
-            // routing is active on this node (see `v6_active`); otherwise
-            // the finding could never auto-resolve because the reconciler's
-            // v6 apply path is gated the same way. Anything that's neither a
-            // well-formed v4 nor v6 CIDR (bare IP, garbage) is skipped.
-            // (First-class v6 subnet routing built 2026-06-16; was filtered
-            // out as a broken command in v24.47.3 — CodeBangZoom.)
-            if is_ipv4_cidr(sub) {
-                // proceed
-            } else if is_ipv6_cidr(sub) {
-                if !v6_active { continue; }
-            } else {
-                continue;
-            }
+            if !subnet_qualifies(sub, v6_active, &local_subnets) { continue; }
             if subnet_already_covered(sub, &peer_ip_only, &configured) { continue; }
             // Already routed by the kernel — the subnet is reachable, so
             // reporting it unreachable would be false, and the suggested
@@ -138,6 +133,38 @@ fn sample_blocking() -> MissingSubnetRouteFacts {
     }
 
     MissingSubnetRouteFacts { missing, scanned: true }
+}
+
+/// The per-subnet gate that needs no route context — everything decidable
+/// from the CIDR itself plus this node's own state:
+///
+/// • v4 always qualifies. v6 qualifies only when IPv6 subnet routing is
+///   active on this node (see `v6_active`); otherwise the finding could
+///   never auto-resolve because the reconciler's v6 apply path is gated
+///   the same way. Anything that's neither a well-formed v4 nor v6 CIDR
+///   (bare IP, garbage) is skipped. (First-class v6 subnet routing built
+///   2026-06-16; was filtered out as a broken command in v24.47.3 —
+///   CodeBangZoom.)
+/// • Universal default container bridges (docker0 172.17.0.0/16, lxcbr0
+///   10.0.3.0/24) never qualify: EVERY Docker/LXC node owns its own copy,
+///   so "route it to peer X" is wrong on its face — and used to be emitted
+///   once per peer, recommending the same CIDR via several different
+///   gateways at once. WolfRouter auto-apply has always skipped these
+///   (`DEFAULT_BRIDGE_CIDRS`); the finding now matches, instead of telling
+///   the operator to hand-configure the exact route auto-apply refuses to
+///   plant (nc cluster report, 2026-08-15).
+/// • Subnets this node also owns locally never qualify, for the same
+///   collision reason — mirrors auto-apply's `local_subnets` guard.
+fn subnet_qualifies(sub: &str, v6_active: bool, local_subnets: &HashSet<String>) -> bool {
+    if is_ipv4_cidr(sub) {
+        // proceed
+    } else if is_ipv6_cidr(sub) {
+        if !v6_active { return false; }
+    } else {
+        return false;
+    }
+    if crate::networking::router::is_default_bridge_cidr(sub) { return false; }
+    !local_subnets.contains(sub)
 }
 
 /// Load the persisted cluster nodes (workload_subnets included since the
@@ -213,6 +240,13 @@ fn kernel_route_covers(target_subnet: &str, routed: &[String]) -> bool {
     })
 }
 
+/// Reading the FILE (not live ClusterState) is deliberate — it keeps this
+/// module free of an agent dependency and means the finding and WolfRouter
+/// auto-apply (which reads the same file for the same reason) always act on
+/// identical data. Freshness is guaranteed by the poll loop: since the
+/// stale-nodes.json fix, `poll_remote_nodes` persists within one 10s cycle
+/// of any peer's workload_subnets (or other identity fields) changing —
+/// see `ClusterState::persistent_peer_fields_changed`.
 fn load_nodes_from_disk() -> Option<Vec<crate::agent::Node>> {
     let path = &crate::paths::get().nodes_config;
     let data = std::fs::read_to_string(path).ok()?;
@@ -455,6 +489,39 @@ fn build_proposal(missing: &[&MissingRoute], scope: &ProposalScope) -> Proposal 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// nc cluster report, 2026-08-15: five nodes each own the default Docker
+    /// bridge, and the finding recommended `172.17.0.0/16 via pve1`, `via
+    /// pve3` AND `via pbs` simultaneously — routes WolfRouter auto-apply
+    /// itself refuses to plant. Default bridge CIDRs must never be flagged.
+    #[test]
+    fn default_bridge_cidrs_are_never_flagged() {
+        let no_local = HashSet::new();
+        assert!(!subnet_qualifies("172.17.0.0/16", false, &no_local));
+        assert!(!subnet_qualifies("10.0.3.0/24", false, &no_local));
+        // …while a genuinely unique workload subnet still qualifies.
+        assert!(subnet_qualifies("172.23.0.0/24", false, &no_local));
+    }
+
+    /// A subnet this node ALSO owns locally collides with the kernel's own
+    /// bridge route — same guard as auto-apply's `local_subnets` skip.
+    #[test]
+    fn locally_owned_subnets_are_never_flagged() {
+        let local: HashSet<String> = ["172.30.0.0/16".to_string()].into_iter().collect();
+        assert!(!subnet_qualifies("172.30.0.0/16", false, &local));
+        assert!(subnet_qualifies("172.31.0.0/16", false, &local));
+    }
+
+    /// The family gate carried over from the old inline check: garbage and
+    /// bare IPs never qualify; v6 only when v6 routing is active.
+    #[test]
+    fn family_gate_matches_old_inline_behaviour() {
+        let no_local = HashSet::new();
+        assert!(!subnet_qualifies("not-a-cidr", true, &no_local));
+        assert!(!subnet_qualifies("10.0.0.1", true, &no_local));
+        assert!(!subnet_qualifies("fc00:abcd::/48", false, &no_local));
+        assert!(subnet_qualifies("fc00:abcd::/48", true, &no_local));
+    }
 
     #[test]
     fn subnet_already_covered_exact_match() {

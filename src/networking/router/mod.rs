@@ -3420,14 +3420,17 @@ pub fn disable_subnet_routes_via_gateway(state: &RouterState, gateway_ip: &str) 
 /// copy is never a useful WolfNet route target — auto-routing one collides
 /// with the kernel's own `proto kernel scope link` route for the local bridge
 /// and can never install. docker0 = 172.17.0.0/16 (Docker default bridge),
-/// lxcbr0 = 10.0.3.0/24 (created by `containers::ensure_lxc_bridge`). Used only
-/// to gate AUTO-apply; an operator-configured route for these is still honoured
-/// (and backed off by the reconciler if it turns out to be locally owned).
+/// lxcbr0 = 10.0.3.0/24 (created by `containers::ensure_lxc_bridge`). Gates
+/// AUTO-apply here AND the predictive `missing_wolfnet_subnet_route` finding
+/// (which used to recommend hand-configuring the exact routes auto-apply
+/// refuses to plant — nc cluster report, 2026-08-15); an operator-configured
+/// route for these is still honoured (and backed off by the reconciler if it
+/// turns out to be locally owned).
 /// AstroMando 2026-06-26: a 30s-cache miss planted these on a 6-node Proxmox
 /// cluster and the watchdog retried the impossible `ip route add` every 60s.
 const DEFAULT_BRIDGE_CIDRS: &[&str] = &["172.17.0.0/16", "10.0.3.0/24"];
 
-fn is_default_bridge_cidr(cidr: &str) -> bool {
+pub(crate) fn is_default_bridge_cidr(cidr: &str) -> bool {
     DEFAULT_BRIDGE_CIDRS.contains(&cidr)
 }
 
