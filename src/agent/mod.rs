@@ -879,6 +879,36 @@ impl ClusterState {
         nodes.insert(node.id.clone(), node);
     }
 
+    /// True when a peer's PERSISTED, self-reported identity/topology fields
+    /// differ between the previous snapshot and a freshly-polled report.
+    ///
+    /// `update_remote` only writes RAM, so `/etc/wolfstack/nodes.json` used to
+    /// go stale indefinitely on a healthy cluster — save_nodes() only fired on
+    /// add/remove/settings events. Several consumers read that FILE directly
+    /// (predictive `missing_subnet_route`, WolfRouter
+    /// `auto_apply_missing_workload_routes`, auth, pools), so e.g. a peer
+    /// migrating its Docker bridge off 172.17.0.0/16 kept producing findings
+    /// and route decisions from the pre-migration subnets for hours (nc
+    /// cluster report, 2026-08-15).
+    ///
+    /// Deliberately EXCLUDES per-poll churn — `last_seen`, `metrics`,
+    /// `online`, and the container/VM counts — so the poll loop persists at
+    /// most once per cycle and only when something meaningful changed, not
+    /// every 10 seconds on every node.
+    fn persistent_peer_fields_changed(old: &Node, new: &Node) -> bool {
+        old.hostname != new.hostname
+            || old.self_id != new.self_id
+            || old.public_ip != new.public_ip
+            || old.workload_subnets != new.workload_subnets
+            || old.site != new.site
+            || old.display_name != new.display_name
+            || old.roles != new.roles
+            || old.tls != new.tls
+            || old.has_docker != new.has_docker
+            || old.has_lxc != new.has_lxc
+            || old.has_kvm != new.has_kvm
+    }
+
     /// Get all nodes (deduplicated: if a non-self WolfStack node has same hostname+port as self, skip it)
     /// Every cluster node carrying `role`, deduplicated via `get_all_nodes`.
     /// The tier subsystems (DNS zone fan-out, mail, ingress) dispatch on this:
@@ -2139,6 +2169,14 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
     let mut polled_endpoints: HashSet<(String, u16)> = HashSet::new();
     // Collect subnet routes from all remote nodes' wolfnet_ips
     let mut subnet_routes: HashMap<String, String> = HashMap::new();
+    // Set when a poll changes a peer's persisted identity/topology fields
+    // (workload_subnets, hostname, self_id, …) — flushed as ONE save_nodes()
+    // after the loop, so a cycle costs at most one disk write and a steady-
+    // state cluster costs none. Without this, update_remote() only touched
+    // RAM and nodes.json stayed stale until some unrelated settings event,
+    // feeding obsolete workload_subnets to every consumer that reads the
+    // file (predictive missing_subnet_route, WolfRouter auto-apply).
+    let mut persist_after_cycle = false;
     for node in nodes {
         if node.is_self { continue; }
 
@@ -2270,7 +2308,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // reconciler below without re-locking cluster state.
                             let peer_hostname_for_reconcile = hostname.clone();
                             let peer_public_ip_for_reconcile = public_ip.clone();
-                            cluster.update_remote(Node {
+                            let updated_node = Node {
                                 id: node.id.clone(),
                                 hostname,
                                 address: node.address.clone(),
@@ -2335,7 +2373,16 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 // too — trust the self-report. Empty = a
                                 // general-purpose node (or an older peer).
                                 roles: peer_roles,
-                            });
+                            };
+                            // `node` is the pre-poll snapshot from
+                            // get_all_nodes() at cycle start — compare the
+                            // persisted fields BEFORE the fresh report
+                            // replaces it in RAM, and remember to flush
+                            // nodes.json once after the loop.
+                            if ClusterState::persistent_peer_fields_changed(&node, &updated_node) {
+                                persist_after_cycle = true;
+                            }
+                            cluster.update_remote(updated_node);
 
                             // Reset fail count on success
                             POLL_FAIL_COUNTS.lock().unwrap().remove(&node.id);
@@ -2665,6 +2712,12 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                 }
             }
         }
+    }
+
+    // Batched flush of the persisted-field changes detected above — one
+    // write per cycle at most, none when nothing meaningful changed.
+    if persist_after_cycle {
+        cluster.save_nodes();
     }
 
     // Build updated route table. Strategy:
@@ -3288,5 +3341,81 @@ mod lock_poison_tests {
     fn now_unix_is_sane_and_never_panics() {
         // 1_700_000_000 = 2023-11-14. Any correct clock is past it.
         assert!(now_unix() > 1_700_000_000);
+    }
+}
+
+#[cfg(test)]
+mod persistence_change_tests {
+    use super::*;
+
+    /// Same technique as `lock_poison_tests::test_node`: build through
+    /// Deserialize so the production struct never needs a test-only Default.
+    fn test_node(id: &str) -> Node {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "hostname": id,
+            "address": "127.0.0.1",
+            "port": 8553,
+            "last_seen": 0,
+            "metrics": null,
+            "components": [],
+            "online": false,
+            "is_self": false,
+        }))
+        .expect("test node should deserialise")
+    }
+
+    /// The nc-cluster regression (2026-08-15): per-poll churn must NOT
+    /// trigger a disk write, or every WolfStack node would rewrite
+    /// nodes.json every 10 seconds forever.
+    #[test]
+    fn per_poll_churn_does_not_count_as_a_persistent_change() {
+        let old = test_node("pve1");
+        let mut new = test_node("pve1");
+        new.last_seen = 9_999_999;
+        new.online = true;
+        new.docker_count = 42;
+        new.lxc_count = 7;
+        new.vm_count = 3;
+        new.compose_count = 2;
+        assert!(!ClusterState::persistent_peer_fields_changed(&old, &new));
+    }
+
+    /// …but a migrated Docker bridge (workload_subnets change) MUST — that
+    /// staleness is exactly what fed the predictive rule and WolfRouter
+    /// auto-apply obsolete 172.17.0.0/16 subnets for hours.
+    #[test]
+    fn changed_workload_subnets_must_persist() {
+        let mut old = test_node("pve1");
+        old.workload_subnets = vec!["172.17.0.0/16".into()];
+        let mut new = test_node("pve1");
+        new.workload_subnets = vec!["172.23.0.0/24".into()];
+        assert!(ClusterState::persistent_peer_fields_changed(&old, &new));
+    }
+
+    /// The other persisted self-reported fields each count too.
+    #[test]
+    fn identity_field_changes_persist() {
+        let old = test_node("pve1");
+
+        let mut renamed = test_node("pve1");
+        renamed.hostname = "pve1-new".into();
+        assert!(ClusterState::persistent_peer_fields_changed(&old, &renamed));
+
+        let mut self_id = test_node("pve1");
+        self_id.self_id = Some("abc-123".into());
+        assert!(ClusterState::persistent_peer_fields_changed(&old, &self_id));
+
+        let mut sited = test_node("pve1");
+        sited.site = Some("rack-2".into());
+        assert!(ClusterState::persistent_peer_fields_changed(&old, &sited));
+
+        let mut roled = test_node("pve1");
+        roled.roles = vec![NodeRole::Dns];
+        assert!(ClusterState::persistent_peer_fields_changed(&old, &roled));
+
+        let mut pub_ip = test_node("pve1");
+        pub_ip.public_ip = Some("203.0.113.9".into());
+        assert!(ClusterState::persistent_peer_fields_changed(&old, &pub_ip));
     }
 }
