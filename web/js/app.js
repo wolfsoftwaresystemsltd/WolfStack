@@ -2489,7 +2489,7 @@ function selectServerView(nodeId, view) {
         }
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadZfsStatus(), loadDiskInfo(), loadGlusterStatus(), loadDriveHealthCard()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadS3RemotesHealthCard().then(() => loadSyncJobsCard()), loadZfsStatus(), loadDiskInfo(), loadGlusterStatus(), loadDriveHealthCard()]).finally(() => hidePageLoadingOverlay(el));
     if (view === 'shares') { _gwClusterMode = null; gwLoad().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'syslogs') { loadSystemLogs(); hidePageLoadingOverlay(el); }
     if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
@@ -10673,6 +10673,17 @@ function showCreateMountModal() {
     document.getElementById('create-mount-modal').classList.add('active');
     onMountTypeChange();
     loadS3Remotes();
+    // Seed the provider hint/placeholders for the default selection and
+    // drop any test result left over from the last time the modal was open.
+    applyS3ProviderPreset('s3');
+    clearS3TestResults('s3-test-status', 's3-test-alert');
+}
+
+function clearS3TestResults(statusId, alertId) {
+    const s = document.getElementById(statusId);
+    const a = document.getElementById(alertId);
+    if (s) s.textContent = '';
+    if (a) a.textContent = '';
 }
 
 function closeMountModal() {
@@ -10692,6 +10703,769 @@ function closeMountModal() {
     document.getElementById('mount-auto').checked = true;
     onS3RemoteChange();
     onMountTypeChange();
+}
+
+// ─── S3 provider presets ───
+// Picking a provider pre-fills the endpoint/region grammar so the operator
+// isn't left guessing URL shapes. Every pattern below was verified against
+// the provider's own documentation (or, for R2, against WolfStack's own
+// is_r2_endpoint/effective_s3_region handling; for Garage, a live garage
+// v2.3.0 install) — see plans/s3-storage-and-sync.md Phase 1.1.
+// `endpointPlaceholder`/`regionPlaceholder` are hints only; `region` is a
+// real default filled in when the field is empty or still holds another
+// preset's default (never clobbers something the operator typed).
+const S3_PROVIDER_PRESETS = {
+    // AWS uses region-only addressing — no endpoint at all.
+    'AWS':          { region: 'us-east-1', endpointPlaceholder: 'Leave blank for AWS',
+                      hint: 'AWS needs only a region (e.g. us-east-1, eu-west-2).' },
+    // R2: per-account host; SigV4 region is always "auto" (WolfStack forces
+    // it server-side for r2.cloudflarestorage.com endpoints).
+    'Cloudflare':   { region: 'auto', endpointPlaceholder: 'https://<accountid>.r2.cloudflarestorage.com',
+                      hint: 'Replace <accountid> with your Cloudflare account ID (R2 dashboard → API). Region stays "auto".' },
+    'DigitalOcean': { region: '', regionPlaceholder: 'nyc3', endpointPlaceholder: 'https://<region>.digitaloceanspaces.com',
+                      hint: 'Replace <region> with your Space’s region (nyc3, ams3, sgp1, …) and set Region to match.' },
+    'Wasabi':       { region: 'us-east-1', endpointPlaceholder: 'https://s3.<region>.wasabisys.com',
+                      hint: 'Replace <region> with your bucket’s region (us-east-1, eu-central-1, …) and set Region to match.' },
+    'Backblaze':    { region: '', regionPlaceholder: 'us-west-004', endpointPlaceholder: 'https://s3.<region>.backblazeb2.com',
+                      hint: 'Your endpoint is shown on the bucket page (e.g. s3.us-west-004.backblazeb2.com); Region is the <region> part of it.' },
+    'IDrive':       { region: 'us-east-1', endpointPlaceholder: 'https://<your-endpoint>.idrivee2-XX.com',
+                      hint: 'IDrive e2 endpoints are account-specific — copy yours from the e2 dashboard (Regions/Endpoint).' },
+    'Minio':        { region: 'us-east-1', endpointPlaceholder: 'https://minio.example.com:9000',
+                      hint: 'Your MinIO server’s URL (default port 9000). MinIO’s default region is us-east-1.' },
+    'Garage':       { region: 'garage', endpointPlaceholder: 'https://garage.example.com:3900',
+                      hint: 'Your Garage server’s S3 API URL (default port 3900). Garage’s default region is "garage" — check s3_region in its garage.toml.' },
+    'Hetzner':      { region: '', regionPlaceholder: 'fsn1', endpointPlaceholder: 'https://<location>.your-objectstorage.com',
+                      hint: 'Replace <location> with your bucket’s location (fsn1, nbg1 or hel1) and set Region to match — a wrong location gives empty listings.' },
+    'Scaleway':     { region: '', regionPlaceholder: 'fr-par', endpointPlaceholder: 'https://s3.<region>.scw.cloud',
+                      hint: 'Replace <region> with your bucket’s region (fr-par, nl-ams, pl-waw, it-mil) and set Region to match.' },
+    'Other':        { region: '', regionPlaceholder: 'us-east-1', endpointPlaceholder: 'https://s3.example.com',
+                      hint: 'Any S3-compatible endpoint. If listings fail with signature errors, check the region the server expects.' },
+};
+
+// Region values the presets fill in. If the region field currently holds one
+// of these (or is empty), a provider change may overwrite it — anything else
+// is operator input and is left alone.
+const S3_PRESET_REGION_DEFAULTS = new Set(
+    Object.values(S3_PROVIDER_PRESETS).map(p => p.region).filter(r => r));
+
+// Apply the preset for the currently selected provider to the form whose
+// field ids start with `prefix` ('s3' for Add Mount, 'edit-s3' for Edit
+// Mount). Placeholders + hint always update; the region VALUE only when it
+// is empty or still a preset default.
+function applyS3ProviderPreset(prefix) {
+    const sel = document.getElementById(prefix + '-provider');
+    if (!sel) return;
+    const preset = S3_PROVIDER_PRESETS[sel.value] || S3_PROVIDER_PRESETS['Other'];
+    const endpoint = document.getElementById(prefix + '-endpoint');
+    const region = document.getElementById(prefix + '-region');
+    if (endpoint) endpoint.placeholder = preset.endpointPlaceholder || '';
+    if (region) {
+        region.placeholder = preset.regionPlaceholder || preset.region || 'us-east-1';
+        const current = region.value.trim();
+        if (current === '' || S3_PRESET_REGION_DEFAULTS.has(current)) {
+            region.value = preset.region || '';
+        }
+    }
+    const hint = document.getElementById(prefix + '-provider-hint');
+    if (hint) hint.textContent = preset.hint || '';
+}
+
+// ─── S3 connection test ───
+// One backend call verifies the credentials actually work against the
+// endpoint before anything is saved or mounted: ListBuckets first, falling
+// back to a 1-key list of a named bucket for bucket-scoped keys. The result
+// lands inline next to the button — successes in a polite live region,
+// failures in an assertive alert that stays until the next test.
+async function runS3ConnectionTest(payload, statusId, alertId, button) {
+    const statusEl = document.getElementById(statusId);
+    const alertEl = document.getElementById(alertId);
+    if (statusEl) { statusEl.textContent = 'Testing…'; statusEl.style.color = 'var(--text-muted)'; }
+    if (alertEl) alertEl.textContent = '';
+    if (button) button.disabled = true;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/test'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Test failed');
+        if (data.ok) {
+            if (statusEl) {
+                statusEl.textContent = `✓ ${data.message} (${data.latency_ms} ms)`;
+                statusEl.style.color = 'var(--success, #10b981)';
+            }
+        } else {
+            const label = data.verdict === 'auth' ? 'Authentication failed'
+                : data.verdict === 'unreachable' ? 'Endpoint unreachable'
+                : 'Test failed';
+            if (statusEl) statusEl.textContent = '';
+            if (alertEl) alertEl.textContent = `✗ ${label}: ${data.message}`;
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = '';
+        if (alertEl) alertEl.textContent = '✗ ' + e.message;
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+// Test the credentials currently typed into the Add Mount manual fields.
+function testS3ManualCredentials(button) {
+    runS3ConnectionTest({
+        provider: document.getElementById('s3-provider').value,
+        endpoint: document.getElementById('s3-endpoint').value.trim(),
+        region: document.getElementById('s3-region').value.trim(),
+        access_key_id: document.getElementById('s3-access-key').value.trim(),
+        secret_access_key: document.getElementById('s3-secret-key').value,
+        bucket: document.getElementById('s3-bucket').value.trim(),
+    }, 's3-test-status', 's3-test-alert', button);
+}
+
+// Test the saved remote currently selected in the picker.
+function testS3SelectedRemote(button) {
+    const id = document.getElementById('s3-remote').value;
+    if (!id) return;
+    runS3ConnectionTest({ id }, 's3-remote-test-status', 's3-remote-test-alert', button);
+}
+
+// ─── S3 remotes health card (Storage view) ───
+// Every saved remote with its background-probe state: a dead endpoint is
+// visible here before any mount or sync job trips over it. Probes run
+// server-side every ~5min; this card just renders the stored state.
+async function loadS3RemotesHealthCard() {
+    const body = document.getElementById('s3-remotes-health-body');
+    if (!body) return;
+    let remotes = [];
+    let health = {};
+    try {
+        const [remotesResp, healthResp] = await Promise.all([
+            fetch(apiUrl('/api/storage/s3-remotes')),
+            fetch(apiUrl('/api/storage/s3-remotes/health')),
+        ]);
+        if (!remotesResp.ok) throw new Error('HTTP ' + remotesResp.status);
+        remotes = await remotesResp.json();
+        // Health state is best-effort — a node that has never probed still
+        // renders the remotes list.
+        if (healthResp.ok) health = await healthResp.json();
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger); padding:12px;">Could not load S3 remotes: ${escapeHtml(e.message)}</div>`;
+        return;
+    }
+    // Keep the picker cache in sync so Test/Edit work from this card too.
+    s3Remotes = remotes;
+    if (remotes.length === 0) {
+        body.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:12px;">' +
+            'No S3 credentials saved yet. Add some under <strong>+ Add Mount → S3</strong> ' +
+            'or <strong>Import rclone.conf</strong>.</div>';
+        return;
+    }
+    const rows = remotes.map(r => {
+        const h = health[r.id] || {};
+        let dot, statusText, statusColor;
+        if (h.disabled) {
+            dot = '⏸'; statusText = 'checks off'; statusColor = 'var(--text-muted)';
+        } else if (!h.last_checked_epoch) {
+            dot = '·'; statusText = 'not yet checked'; statusColor = 'var(--text-muted)';
+        } else if (h.verdict === 'ok') {
+            dot = '●'; statusText = `ok, ${h.latency_ms} ms`; statusColor = 'var(--success)';
+        } else {
+            dot = '●';
+            statusText = `${h.verdict || 'failing'} × ${h.consecutive_failures}`;
+            statusColor = 'var(--danger)';
+        }
+        const lastChecked = h.last_checked_epoch
+            ? new Date(h.last_checked_epoch * 1000).toLocaleTimeString()
+            : '—';
+        const err = (!h.disabled && h.last_error)
+            ? `<div style="font-size:11px; color:var(--danger); max-width:420px; overflow-wrap:anywhere;">${escapeHtml(h.last_error)}</div>`
+            : '';
+        const toggleLabel = h.disabled ? 'Enable checks' : 'Disable checks';
+        return `<tr>
+            <td><span style="color:${statusColor};" aria-hidden="true">${dot}</span>
+                <span style="color:${statusColor}; font-size:12px;">${escapeHtml(statusText)}</span></td>
+            <td><strong>${escapeHtml(r.name)}</strong>
+                <div style="font-size:11px; color:var(--text-muted);">${escapeHtml(r.access_key_hint || '')}${r.origin ? ' — ' + escapeHtml(r.origin) : ''}</div></td>
+            <td>${escapeHtml(r.provider || '')}</td>
+            <td style="font-size:12px; overflow-wrap:anywhere;">${escapeHtml(r.endpoint || (r.region ? 'AWS ' + r.region : 'AWS'))}${err}</td>
+            <td style="font-size:12px; color:var(--text-muted);">${escapeHtml(lastChecked)}</td>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="testS3RemoteFromCard('${escapeAttr(r.id)}', this)">Test</button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="openS3BucketsModal('${escapeAttr(r.id)}')">Buckets</button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="toggleS3RemoteHealth('${escapeAttr(r.id)}', ${h.disabled ? 'false' : 'true'})">${toggleLabel}</button>
+                ${r.editable ? `<button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="editS3RemoteFromCard('${escapeAttr(r.id)}')">Edit</button>` : ''}
+            </td>
+        </tr>`;
+    }).join('');
+    body.innerHTML = `<table class="data-table">
+        <thead><tr><th>Status</th><th>Name</th><th>Provider</th><th>Endpoint</th><th>Last checked</th><th>Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// On-demand test from the health card — reuses the shared runner, with the
+// card's own live regions for output.
+function testS3RemoteFromCard(id, button) {
+    runS3ConnectionTest({ id }, 's3-health-action-status', 's3-health-action-alert', button);
+}
+
+function editS3RemoteFromCard(id) {
+    openEditS3RemoteModal(id);
+}
+
+// ─── Bucket management on a saved remote ───
+// Launched from the S3 Remotes card: list the remote's buckets, create a
+// new one, delete an EMPTY one (the backend refuses non-empty deletes —
+// destroying objects deliberately has no button here).
+let s3BucketsRemoteId = '';
+
+function openS3BucketsModal(id) {
+    const remote = s3Remotes.find(r => r.id === id);
+    if (!remote) return;
+    s3BucketsRemoteId = id;
+    document.getElementById('s3-buckets-remote-name').textContent = remote.name;
+    document.getElementById('s3-new-bucket-name').value = '';
+    clearS3TestResults('s3-buckets-status', 's3-buckets-alert');
+    document.getElementById('s3-buckets-modal').classList.add('active');
+    loadS3BucketsList();
+}
+
+function closeS3BucketsModal() {
+    document.getElementById('s3-buckets-modal').classList.remove('active');
+    s3BucketsRemoteId = '';
+}
+
+async function loadS3BucketsList() {
+    const list = document.getElementById('s3-buckets-list');
+    list.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:12px;">Loading buckets…</div>';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/buckets?id=' + encodeURIComponent(s3BucketsRemoteId)));
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Could not list buckets');
+        const buckets = data.buckets || [];
+        if (buckets.length === 0) {
+            list.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:12px;">No buckets on this account yet — create one below.</div>';
+            return;
+        }
+        list.innerHTML = `<table class="data-table"><tbody>` + buckets.map(b => `<tr>
+            <td style="overflow-wrap:anywhere;">${escapeHtml(b)}</td>
+            <td style="text-align:right; white-space:nowrap;">
+                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;"
+                    onclick="deleteS3Bucket('${escapeAttr(b)}', this)">Delete</button>
+            </td>
+        </tr>`).join('') + '</tbody></table>';
+    } catch (e) {
+        list.innerHTML = `<div style="color:var(--danger); padding:12px;">${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function createS3Bucket(button) {
+    const name = document.getElementById('s3-new-bucket-name').value.trim();
+    const statusEl = document.getElementById('s3-buckets-status');
+    const alertEl = document.getElementById('s3-buckets-alert');
+    if (!name) { alertEl.textContent = 'Enter a bucket name'; return; }
+    statusEl.textContent = 'Creating…';
+    alertEl.textContent = '';
+    button.disabled = true;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/buckets'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: s3BucketsRemoteId, bucket: name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Create failed');
+        statusEl.textContent = data.message || 'Bucket created';
+        document.getElementById('s3-new-bucket-name').value = '';
+        loadS3BucketsList();
+    } catch (e) {
+        statusEl.textContent = '';
+        alertEl.textContent = e.message;
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function deleteS3Bucket(bucket, button) {
+    const statusEl = document.getElementById('s3-buckets-status');
+    const alertEl = document.getElementById('s3-buckets-alert');
+    if (!(await showConfirm(
+        `Delete the bucket “${bucket}”?\n\n` +
+        `Only EMPTY buckets can be deleted — WolfStack never destroys objects from here.`))) return;
+    statusEl.textContent = 'Deleting…';
+    alertEl.textContent = '';
+    if (button) button.disabled = true;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/buckets/delete'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: s3BucketsRemoteId, bucket }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Delete failed');
+        statusEl.textContent = data.message || 'Bucket deleted';
+        loadS3BucketsList();
+    } catch (e) {
+        statusEl.textContent = '';
+        alertEl.textContent = e.message;
+        if (button) button.disabled = false;
+    }
+}
+
+async function toggleS3RemoteHealth(id, disabled) {
+    const statusEl = document.getElementById('s3-health-action-status');
+    const alertEl = document.getElementById('s3-health-action-alert');
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/health/toggle'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, disabled }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Toggle failed');
+        if (statusEl) { statusEl.textContent = data.message || 'Saved'; statusEl.style.color = 'var(--text-muted)'; }
+        if (alertEl) alertEl.textContent = '';
+        loadS3RemotesHealthCard();
+    } catch (e) {
+        if (alertEl) alertEl.textContent = 'Could not change health checks: ' + e.message;
+    }
+}
+
+// ─── S3 bucket-sync jobs ───
+// rclone copy/sync between two saved remotes, scheduled server-side.
+// This card renders stored state; passes run on the node in the background.
+let syncJobsCache = [];
+
+function fmtEpoch(epoch) {
+    return epoch ? new Date(epoch * 1000).toLocaleString() : '—';
+}
+
+function fmtLag(epoch) {
+    if (!epoch) return 'never';
+    const secs = Math.max(0, Math.floor(Date.now() / 1000) - epoch);
+    if (secs < 90) return 'just now';
+    if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+    if (secs < 172800) return Math.round(secs / 3600) + 'h ago';
+    return Math.round(secs / 86400) + 'd ago';
+}
+
+async function loadSyncJobsCard() {
+    const body = document.getElementById('sync-jobs-body');
+    if (!body) return;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-sync'));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        syncJobsCache = await resp.json();
+    } catch (e) {
+        body.innerHTML = `<div style="color:var(--danger); padding:12px;">Could not load sync jobs: ${escapeHtml(e.message)}</div>`;
+        return;
+    }
+    if (syncJobsCache.length === 0) {
+        body.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:12px;">' +
+            'No sync jobs yet. <strong>+ Add Sync Job</strong> keeps a bucket on one remote mirrored to a ' +
+            'bucket on another — local server to cloud, cloud to cloud, or cloud to local.</div>';
+        return;
+    }
+    const rows = syncJobsCache.map(j => {
+        const last = (j.last_runs && j.last_runs[0]) || null;
+        let stateDot, stateText, stateColor;
+        if (j.running) {
+            stateDot = '↻'; stateColor = 'var(--accent-light, #f87171)';
+            stateText = 'running';
+        } else if (!j.enabled) {
+            stateDot = '⏸'; stateText = 'paused'; stateColor = 'var(--text-muted)';
+        } else if (last && !last.ok) {
+            stateDot = '●'; stateText = 'failed'; stateColor = 'var(--danger)';
+        } else if (last) {
+            stateDot = '●'; stateText = 'ok'; stateColor = 'var(--success)';
+        } else {
+            stateDot = '·'; stateText = 'not yet run'; stateColor = 'var(--text-muted)';
+        }
+        const modeBadge = j.mode === 'sync'
+            ? '<span style="background:var(--danger-bg, rgba(239,68,68,0.1)); color:var(--danger); border:1px solid var(--danger); padding:1px 8px; border-radius:10px; font-size:10px; font-weight:600;">SYNC — deletes</span>'
+            : '<span style="background:var(--success-bg, rgba(16,185,129,0.1)); color:var(--success); border:1px solid var(--success); padding:1px 8px; border-radius:10px; font-size:10px; font-weight:600;">copy</span>';
+        const schedText = j.schedule.type === 'back_to_back' ? `continuous, ${j.schedule.gap_minutes}m gap`
+            : j.schedule.type === 'cron' ? `cron ${escapeHtml(j.schedule.expr)}`
+            : 'manual';
+        const lastText = last
+            ? (last.ok
+                ? `${last.objects} objects (${escapeHtml(last.bytes_human || '0 B')}), window ${escapeHtml(last.window)}`
+                : escapeHtml((last.message || 'failed').slice(0, 120)))
+            : '—';
+        const srcName = (s3Remotes.find(r => r.id === j.src.remote_id) || {}).name || j.src.remote_id;
+        const dstName = (s3Remotes.find(r => r.id === j.dst.remote_id) || {}).name || j.dst.remote_id;
+        const pathText = `${escapeHtml(srcName)}:${escapeHtml(j.src.bucket)}${j.src.prefix ? '/' + escapeHtml(j.src.prefix) : ''}
+            → ${escapeHtml(dstName)}:${escapeHtml(j.dst.bucket)}${j.dst.prefix ? '/' + escapeHtml(j.dst.prefix) : ''}`;
+        return `<tr>
+            <td><span style="color:${stateColor};" aria-hidden="true">${stateDot}</span>
+                <span style="color:${stateColor}; font-size:12px;">${stateText}</span></td>
+            <td><strong>${escapeHtml(j.name)}</strong>
+                <div style="font-size:11px; color:var(--text-muted); overflow-wrap:anywhere;">${pathText}</div></td>
+            <td>${modeBadge}</td>
+            <td style="font-size:12px; color:var(--text-muted);">${schedText}</td>
+            <td style="font-size:12px; overflow-wrap:anywhere; max-width:280px;">${lastText}
+                <div style="font-size:11px; color:var(--text-muted);">last success: ${fmtLag(j.last_success_epoch)}</div></td>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="runSyncJobNow('${escapeAttr(j.id)}', this)" ${j.running ? 'disabled' : ''}>Run now</button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="toggleSyncJob('${escapeAttr(j.id)}', ${j.enabled ? 'false' : 'true'})">${j.enabled ? 'Pause' : 'Resume'}</button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="openSyncJobModal('${escapeAttr(j.id)}')">Edit</button>
+                <button class="btn btn-sm" style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px; padding:2px 8px;"
+                    onclick="openSyncLogModal('${escapeAttr(j.id)}')">Log</button>
+                <button class="btn btn-sm btn-danger" style="font-size:11px; padding:2px 8px;"
+                    onclick="deleteSyncJob('${escapeAttr(j.id)}', '${escapeAttr(j.name)}')"><span class="ws-icon-clean-wrap" data-icon="trash"></span></button>
+            </td>
+        </tr>`;
+    }).join('');
+    body.innerHTML = `<table class="data-table">
+        <thead><tr><th>Status</th><th>Job</th><th>Mode</th><th>Schedule</th><th>Last pass</th><th>Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function runSyncJobNow(id, button) {
+    const statusEl = document.getElementById('sync-jobs-status');
+    const alertEl = document.getElementById('sync-jobs-alert');
+    if (button) button.disabled = true;
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-sync/run'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Could not start the pass');
+        if (statusEl) { statusEl.textContent = data.message; statusEl.style.color = 'var(--text-muted)'; }
+        if (alertEl) alertEl.textContent = '';
+        loadSyncJobsCard();
+    } catch (e) {
+        if (alertEl) alertEl.textContent = e.message;
+        if (button) button.disabled = false;
+    }
+}
+
+async function toggleSyncJob(id, enabled) {
+    const alertEl = document.getElementById('sync-jobs-alert');
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-sync/toggle'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, enabled }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Toggle failed');
+        showToast(data.message, 'success');
+        loadSyncJobsCard();
+    } catch (e) {
+        if (alertEl) alertEl.textContent = e.message;
+    }
+}
+
+async function deleteSyncJob(id, name) {
+    if (!(await showConfirm(
+        `Delete the sync job “${name}”?\n\nNo objects are touched — only the job and its run history go.`))) return;
+    const alertEl = document.getElementById('sync-jobs-alert');
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-sync/delete'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Delete failed');
+        showToast('Sync job deleted', 'success');
+        loadSyncJobsCard();
+    } catch (e) {
+        if (alertEl) alertEl.textContent = e.message;
+    }
+}
+
+// ── Job add/edit modal ──
+
+function populateSyncRemoteSelect(selectId, selectedId) {
+    const sel = document.getElementById(selectId);
+    sel.innerHTML = s3Remotes.map(r =>
+        `<option value="${escapeAttr(r.id)}"${r.id === selectedId ? ' selected' : ''}>${escapeHtml(r.name)} (${escapeHtml(r.provider || '')})</option>`
+    ).join('');
+}
+
+async function loadSyncBucketOptions(side, preselect) {
+    const remoteId = document.getElementById(`sync-${side}-remote`).value;
+    const sel = document.getElementById(`sync-${side}-bucket`);
+    const status = document.getElementById(`sync-${side}-bucket-status`);
+    if (!remoteId) { sel.innerHTML = ''; return; }
+    sel.innerHTML = '<option value="">Loading buckets…</option>';
+    status.textContent = '';
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-remotes/buckets?id=' + encodeURIComponent(remoteId)));
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Could not list buckets');
+        const buckets = data.buckets || [];
+        sel.innerHTML = buckets.map(b => `<option value="${escapeAttr(b)}">${escapeHtml(b)}</option>`).join('');
+        if (preselect) {
+            if (!buckets.includes(preselect)) {
+                sel.innerHTML += `<option value="${escapeAttr(preselect)}">${escapeHtml(preselect)} (not listed)</option>`;
+            }
+            sel.value = preselect;
+        }
+        if (buckets.length === 0 && !preselect) {
+            sel.innerHTML = '<option value="">No buckets on this account</option>';
+            status.textContent = 'Create one first (S3 Remotes → Buckets).';
+        }
+    } catch (e) {
+        sel.innerHTML = '<option value="">Could not list buckets</option>';
+        status.textContent = e.message;
+        status.style.color = 'var(--danger)';
+    }
+}
+
+function onSyncModeChange() {
+    const warning = document.getElementById('sync-mode-warning');
+    warning.style.display =
+        document.getElementById('sync-job-mode').value === 'sync' ? 'block' : 'none';
+}
+
+function onSyncScheduleChange() {
+    const v = document.getElementById('sync-job-schedule').value;
+    document.getElementById('sync-gap-group').style.display = v === 'back_to_back' ? '' : 'none';
+    document.getElementById('sync-cron-group').style.display = v === 'cron' ? '' : 'none';
+}
+
+function onSyncWindowChange() {
+    document.getElementById('sync-window-hours-group').style.display =
+        document.getElementById('sync-job-window').value === 'hours' ? '' : 'none';
+}
+
+async function openSyncJobModal(id) {
+    // The remote pickers need the remotes list; make sure it's fresh.
+    if (s3Remotes.length === 0) {
+        try {
+            const resp = await fetch(apiUrl('/api/storage/s3-remotes'));
+            if (resp.ok) s3Remotes = await resp.json();
+        } catch (e) { /* pickers will just be empty */ }
+    }
+    const job = id ? syncJobsCache.find(j => j.id === id) : null;
+    document.getElementById('sync-job-modal-title').textContent = job ? 'Edit Sync Job' : 'Add Sync Job';
+    document.getElementById('sync-job-id').value = job ? job.id : '';
+    document.getElementById('sync-job-name').value = job ? job.name : '';
+    populateSyncRemoteSelect('sync-src-remote', job ? job.src.remote_id : '');
+    populateSyncRemoteSelect('sync-dst-remote', job ? job.dst.remote_id : '');
+    document.getElementById('sync-src-prefix').value = job ? job.src.prefix : '';
+    document.getElementById('sync-dst-prefix').value = job ? job.dst.prefix : '';
+    document.getElementById('sync-job-mode').value = job ? job.mode : 'copy';
+    onSyncModeChange();
+    const sched = job ? job.schedule : { type: 'back_to_back', gap_minutes: 15 };
+    document.getElementById('sync-job-schedule').value = sched.type;
+    document.getElementById('sync-gap-minutes').value = sched.type === 'back_to_back' ? sched.gap_minutes : 15;
+    document.getElementById('sync-cron-expr').value = sched.type === 'cron' ? sched.expr : '';
+    onSyncScheduleChange();
+    const win = job ? job.window : { type: 'auto' };
+    document.getElementById('sync-job-window').value =
+        win.type === 'max_age_hours' ? 'hours' : win.type;
+    document.getElementById('sync-window-hours').value = win.type === 'max_age_hours' ? win.hours : 24;
+    onSyncWindowChange();
+    const tuning = (job && job.tuning) || { transfers: 32, checkers: 16, bwlimit: '' };
+    document.getElementById('sync-transfers').value = tuning.transfers;
+    document.getElementById('sync-checkers').value = tuning.checkers;
+    document.getElementById('sync-bwlimit').value = tuning.bwlimit || '';
+    document.getElementById('sync-job-enabled').checked = job ? !!job.enabled : true;
+    document.getElementById('sync-job-modal-alert').textContent = '';
+    document.getElementById('sync-job-modal').classList.add('active');
+    loadSyncBucketOptions('src', job ? job.src.bucket : undefined);
+    loadSyncBucketOptions('dst', job ? job.dst.bucket : undefined);
+}
+
+function closeSyncJobModal() {
+    document.getElementById('sync-job-modal').classList.remove('active');
+}
+
+async function saveSyncJob() {
+    const alertEl = document.getElementById('sync-job-modal-alert');
+    alertEl.textContent = '';
+    const mode = document.getElementById('sync-job-mode').value;
+    const schedType = document.getElementById('sync-job-schedule').value;
+    const winType = document.getElementById('sync-job-window').value;
+    const job = {
+        id: document.getElementById('sync-job-id').value,
+        name: document.getElementById('sync-job-name').value.trim(),
+        enabled: document.getElementById('sync-job-enabled').checked,
+        src: {
+            remote_id: document.getElementById('sync-src-remote').value,
+            bucket: document.getElementById('sync-src-bucket').value,
+            prefix: document.getElementById('sync-src-prefix').value.trim(),
+        },
+        dst: {
+            remote_id: document.getElementById('sync-dst-remote').value,
+            bucket: document.getElementById('sync-dst-bucket').value,
+            prefix: document.getElementById('sync-dst-prefix').value.trim(),
+        },
+        mode,
+        schedule: schedType === 'back_to_back'
+            ? { type: 'back_to_back', gap_minutes: parseInt(document.getElementById('sync-gap-minutes').value, 10) || 15 }
+            : schedType === 'cron'
+                ? { type: 'cron', expr: document.getElementById('sync-cron-expr').value.trim() }
+                : { type: 'manual' },
+        window: winType === 'hours'
+            ? { type: 'max_age_hours', hours: parseInt(document.getElementById('sync-window-hours').value, 10) || 24 }
+            : { type: winType },
+        tuning: {
+            transfers: parseInt(document.getElementById('sync-transfers').value, 10) || 32,
+            checkers: parseInt(document.getElementById('sync-checkers').value, 10) || 16,
+            bwlimit: document.getElementById('sync-bwlimit').value.trim(),
+        },
+        created_at: '',
+    };
+    if (!job.src.bucket || !job.dst.bucket) {
+        alertEl.textContent = 'Pick a source and destination bucket';
+        return;
+    }
+    // Sync mode = destination deletions. The backend refuses the save
+    // without confirm_sync; this dialog is where the operator grants it.
+    let confirmSync = false;
+    if (mode === 'sync') {
+        confirmSync = await showDangerConfirm({
+            title: 'Sync mode deletes destination objects',
+            danger: `Every pass makes “${job.dst.bucket}” identical to “${job.src.bucket}” — objects deleted (or corrupted) at the source are deleted at the destination too.`,
+            detail: 'For backups and append-only stores, Copy is the safe choice: it only ever adds. Proceed with Sync only if you want true mirroring, deletions included.',
+            countdown: 5,
+            confirmLabel: 'I understand — use Sync',
+        });
+        if (!confirmSync) return;
+    }
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-sync'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...job, confirm_sync: confirmSync }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Save failed');
+        showToast(data.message || 'Sync job saved', 'success');
+        closeSyncJobModal();
+        loadSyncJobsCard();
+    } catch (e) {
+        alertEl.textContent = e.message;
+    }
+}
+
+// ── Log viewer ──
+
+let syncLogJobId = '';
+
+function openSyncLogModal(id) {
+    const job = syncJobsCache.find(j => j.id === id);
+    syncLogJobId = id;
+    document.getElementById('sync-log-job-name').textContent = job ? job.name : id;
+    document.getElementById('sync-log-content').textContent = 'Loading…';
+    document.getElementById('sync-log-modal').classList.add('active');
+    loadSyncJobLog();
+}
+
+function closeSyncLogModal() {
+    document.getElementById('sync-log-modal').classList.remove('active');
+    syncLogJobId = '';
+}
+
+async function loadSyncJobLog() {
+    if (!syncLogJobId) return;
+    const pre = document.getElementById('sync-log-content');
+    try {
+        const resp = await fetch(apiUrl('/api/storage/s3-sync/log?id=' + encodeURIComponent(syncLogJobId)));
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Could not read log');
+        pre.textContent = data.log || '(empty)';
+        pre.scrollTop = pre.scrollHeight;
+    } catch (e) {
+        pre.textContent = 'Could not read log: ' + e.message;
+    }
+}
+
+// ─── Edit a saved S3 remote ───
+// The browser never holds the secret and only a masked key hint, so both
+// credential fields open blank; blank on save keeps the stored values
+// (save_s3_remote upserts by name). Which remote is being edited:
+let editingS3RemoteId = '';
+
+function openEditS3RemoteModal(id) {
+    // Called from the Add Mount picker (no arg — reads the selection) and
+    // from the S3 Remotes health card (explicit id).
+    const remoteId = id || document.getElementById('s3-remote').value;
+    const remote = s3Remotes.find(r => r.id === remoteId);
+    if (!remote || !remote.editable) return;
+    editingS3RemoteId = remote.id;
+    document.getElementById('remote-edit-name').value = remote.name;
+    document.getElementById('remote-edit-provider').value =
+        S3_PROVIDER_PRESETS[remote.provider] ? remote.provider : 'Other';
+    document.getElementById('remote-edit-region').value = remote.region || '';
+    document.getElementById('remote-edit-endpoint').value = remote.endpoint || '';
+    document.getElementById('remote-edit-access-key').value = '';
+    document.getElementById('remote-edit-access-key').placeholder =
+        remote.access_key_hint ? `${remote.access_key_hint} (stored)` : 'AKIA…';
+    document.getElementById('remote-edit-secret-key').value = '';
+    // Hint text for the current provider, without touching field values.
+    const hint = document.getElementById('remote-edit-provider-hint');
+    const preset = S3_PROVIDER_PRESETS[document.getElementById('remote-edit-provider').value];
+    if (hint && preset) hint.textContent = preset.hint || '';
+    clearS3TestResults('remote-edit-test-status', 'remote-edit-test-alert');
+    document.getElementById('edit-s3-remote-modal').classList.add('active');
+}
+
+function closeEditS3RemoteModal() {
+    document.getElementById('edit-s3-remote-modal').classList.remove('active');
+    editingS3RemoteId = '';
+}
+
+function testS3RemoteEditCredentials(button) {
+    runS3ConnectionTest({
+        provider: document.getElementById('remote-edit-provider').value,
+        endpoint: document.getElementById('remote-edit-endpoint').value.trim(),
+        region: document.getElementById('remote-edit-region').value.trim(),
+        access_key_id: document.getElementById('remote-edit-access-key').value.trim(),
+        secret_access_key: document.getElementById('remote-edit-secret-key').value,
+        credentials_from: editingS3RemoteId,
+    }, 'remote-edit-test-status', 'remote-edit-test-alert', button);
+}
+
+async function saveEditedS3Remote() {
+    const name = document.getElementById('remote-edit-name').value;
+    const ok = await saveS3Remote({
+        name,
+        provider: document.getElementById('remote-edit-provider').value,
+        endpoint: document.getElementById('remote-edit-endpoint').value.trim(),
+        region: document.getElementById('remote-edit-region').value.trim(),
+        access_key_id: document.getElementById('remote-edit-access-key').value.trim(),
+        secret_access_key: document.getElementById('remote-edit-secret-key').value,
+    });
+    if (!ok) return;   // saveS3Remote already reported why
+    closeEditS3RemoteModal();
+    await loadS3Remotes();
+    // The health card shows endpoint/provider — refresh it if it's on
+    // screen so the edit is visible immediately.
+    if (document.getElementById('s3-remotes-health-body')) loadS3RemotesHealthCard();
+}
+
+// Test the credentials in the Edit Mount form. The secret (and possibly the
+// access key) may be blank there — blank means "unchanged", and the browser
+// never held them — so `credentials_from: mount:<id>` lets the backend fill
+// the blanks from the mount's stored copy while still testing the
+// endpoint/region/bucket exactly as currently typed.
+function testS3EditMountCredentials(button) {
+    const mountId = document.getElementById('edit-mount-id').value;
+    runS3ConnectionTest({
+        provider: document.getElementById('edit-s3-provider').value,
+        endpoint: document.getElementById('edit-s3-endpoint').value.trim(),
+        region: document.getElementById('edit-s3-region').value.trim(),
+        access_key_id: document.getElementById('edit-s3-access-key').value.trim(),
+        secret_access_key: document.getElementById('edit-s3-secret-key').value,
+        credentials_from: mountId ? 'mount:' + mountId : '',
+        bucket: document.getElementById('edit-s3-bucket').value.trim(),
+    }, 'edit-s3-test-status', 'edit-s3-test-alert', button);
 }
 
 // ─── Saved S3 credentials ("remotes") ───
@@ -10744,6 +11518,18 @@ function onS3RemoteChange() {
     // mount are deleted by deleting that mount.
     document.getElementById('s3-remote-forget').style.display =
         (remote && remote.editable) ? '' : 'none';
+    // Any saved remote can be TESTED, whatever its origin.
+    const testBtn = document.getElementById('s3-remote-test');
+    if (testBtn) testBtn.style.display = usingRemote ? '' : 'none';
+    // Editing rewrites WolfStack's own store, so it follows the same rule
+    // as Forget: only for remotes WolfStack owns.
+    const editBtn = document.getElementById('s3-remote-edit');
+    if (editBtn) editBtn.style.display = (remote && remote.editable) ? '' : 'none';
+    // A stale test result belongs to the previous selection.
+    const testStatus = document.getElementById('s3-remote-test-status');
+    const testAlert = document.getElementById('s3-remote-test-alert');
+    if (testStatus) testStatus.textContent = '';
+    if (testAlert) testAlert.textContent = '';
     if (usingRemote) loadS3RemoteBuckets(sel.value);
 }
 
@@ -11212,6 +11998,7 @@ function openEditMount(id) {
 
     if (m.type === 's3') {
         document.getElementById('edit-s3-fields').style.display = 'block';
+        clearS3TestResults('edit-s3-test-status', 'edit-s3-test-alert');
         const s3 = m.s3_config || {};
         document.getElementById('edit-s3-provider').value = s3.provider || 'AWS';
         document.getElementById('edit-s3-bucket').value = s3.bucket || '';
@@ -36610,6 +37397,58 @@ let _editingSchedule = null;
 // path then preserves the schedule's existing targets untouched.
 let _editScheduleTargetsLocked = false;
 
+// When editing a FOLDER schedule (all targets systempath), the modal's own
+// editable folder list — kept target objects verbatim (excludes survive),
+// new folders appended as fresh systempath targets. Null outside that mode.
+let _editFolderTargets = null;
+
+// Render the editable folder list into the schedule modal's note area.
+function renderEditFolderList() {
+    const note = document.getElementById('schedule-folder-summary');
+    if (!note || !_editFolderTargets) return;
+    note.style.display = '';
+    const rows = _editFolderTargets.map((t, i) => `
+        <div style="display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px solid var(--border);">
+            <code style="flex:1; font-size:12px; color:var(--text-primary); overflow-wrap:anywhere;">${escapeHtml(t.system_path || t.name)}</code>
+            ${t.exclude_mounts && t.exclude_mounts.length ? `<span style="font-size:10px; color:var(--text-muted);">excludes: ${escapeHtml(t.exclude_mounts.join(', '))}</span>` : ''}
+            <button type="button" class="btn btn-sm btn-danger" style="font-size:11px; padding:1px 8px;"
+                onclick="removeEditFolderTarget(${i})" title="Remove this folder from the schedule">&times;</button>
+        </div>`).join('');
+    note.innerHTML = `
+        <div style="font-weight:600; font-size:12px; color:var(--text-primary); margin-bottom:4px;">Folders in this schedule</div>
+        ${rows || '<div style="color:var(--danger); font-size:12px; padding:4px 0;">No folders left — add one below or the schedule cannot be saved.</div>'}
+        <div style="display:flex; gap:8px; margin-top:8px;">
+            <input type="text" class="form-control" id="edit-folder-add-path" placeholder="/absolute/path/to/add"
+                style="flex:1; font-size:12px;" aria-label="Folder path to add to this schedule">
+            <button type="button" class="btn btn-sm" onclick="addEditFolderTarget()">Add folder</button>
+        </div>`;
+}
+
+function addEditFolderTarget() {
+    if (!_editFolderTargets) return;
+    const input = document.getElementById('edit-folder-add-path');
+    let path = ((input && input.value) || '').trim();
+    if (path.length > 1) path = path.replace(/\/+$/, ''); // keep bare "/" intact
+    if (!path) { showToast('Enter a folder path', 'error'); return; }
+    if (!path.startsWith('/')) { showToast('Folder path must be absolute (start with /)', 'error'); return; }
+    if (_editFolderTargets.some(t => t.system_path === path)) {
+        showToast('That folder is already in the schedule', 'error');
+        return;
+    }
+    _editFolderTargets.push({
+        type: 'systempath',
+        name: path.split('/').filter(Boolean).pop() || 'folder',
+        system_path: path,
+    });
+    renderEditFolderList();
+}
+
+function removeEditFolderTarget(index) {
+    if (!_editFolderTargets) return;
+    _editFolderTargets.splice(index, 1);
+    renderEditFolderList();
+}
+
 // Fill the modal's pre/post hook fields. Called on EVERY modal-open path
 // (create, folder, edit) — the modal is shared, so skipping the reset would
 // leak the previous schedule's hooks into a new one. Auto-expands the
@@ -36637,6 +37476,7 @@ function editSchedule(id) {
     _editingSchedule = s;
     _scheduleFolderTarget = null;
     _editScheduleTargetsLocked = false;
+    _editFolderTargets = null;
     const setVal = (elId, v) => { const el = document.getElementById(elId); if (el && v != null) el.value = v; };
     setVal('schedule-name', s.name);
     setVal('schedule-frequency', s.frequency);
@@ -36662,16 +37502,23 @@ function editSchedule(id) {
     const isFolder = schedTargets.length > 0 && schedTargets.every(t => t && t.type === 'systempath');
     const noItems = !Array.isArray(window._backupTargets) || window._backupTargets.length === 0;
     const allCb = document.getElementById('schedule-backup-all');
-    if (isFolder || noItems) {
-        // System-folder schedules back up paths (not containers) and so can't be
-        // shown in the item picker; the same applies if the live item list hasn't
-        // loaded. Keep the existing targets and just show what's covered — never
-        // wipe a schedule's targets because the picker couldn't represent them.
+    if (isFolder) {
+        // System-folder schedule: its paths ARE editable in place — a list
+        // with remove buttons plus an add-folder field. (Mancolt 2026-08-16:
+        // adding one path to an existing folder schedule meant rebuilding
+        // the whole schedule and disabling the old one.) Each kept target
+        // object is preserved verbatim so per-target excludes survive.
+        _editFolderTargets = schedTargets.map(t => ({ ...t }));
+        setScheduleModalMode('note', '');
+        renderEditFolderList();
+        if (allCb) { allCb.checked = false; allCb.disabled = true; }
+    } else if (noItems) {
+        // The live item list hasn't loaded, so the picker can't represent the
+        // targets. Keep them as-is — never wipe a schedule's targets because
+        // the picker couldn't show them.
         _editScheduleTargetsLocked = true;
-        const note = isFolder
-            ? 'Backing up folders: ' + schedTargets.map(t => t.system_path || t.name).join(', ') + ' (kept — edit name/frequency/time/retention here)'
-            : 'Items kept as-is — the live item list is still loading; reopen Edit once it appears to change what is backed up.';
-        setScheduleModalMode('note', note);
+        setScheduleModalMode('note',
+            'Items kept as-is — the live item list is still loading; reopen Edit once it appears to change what is backed up.');
         if (allCb) { allCb.checked = false; allCb.disabled = true; }
     } else {
         setScheduleModalMode('items');
@@ -36881,6 +37728,7 @@ async function scheduleSystemFolder() {
     _scheduleFolderTarget = targets;       // now an array — one target per folder
     _editingSchedule = null;               // new folder schedule, not an edit
     _editScheduleTargetsLocked = false;
+    _editFolderTargets = null;
     _scheduleExcludeMap = {};              // folders have no per-container mounts
     _scheduleStopMap = {};                 // ...nor containers to stop
     const allCb = document.getElementById('schedule-backup-all');
@@ -37312,6 +38160,7 @@ async function _runRestoreStream(id, overwrite, storage, name, progressEl, resul
 async function showScheduleSelectedModal() {
     _scheduleFolderTarget = null; // table-selection path — clear any folder target
     _editScheduleTargetsLocked = false;
+    _editFolderTargets = null;
     // Carry any mount exclusions + stop-for-backup flags the operator set on the
     // page into the modal's own maps (shallow copies — later edits reassign keys,
     // so the page maps are untouched).
@@ -37361,6 +38210,16 @@ async function createSchedule() {
         backup_all = false;
         finalTargets = folderTargets;
         storage = editing ? editing.storage : await getSelectedStorage();
+    } else if (editing && _editFolderTargets) {
+        // Editing a folder schedule: the modal's editable folder list is the
+        // source of truth (add/remove in place — Mancolt 2026-08-16).
+        if (_editFolderTargets.length === 0) {
+            showToast('Add at least one folder — a folder schedule with no folders backs up nothing', 'error');
+            return;
+        }
+        backup_all = false;
+        finalTargets = _editFolderTargets;
+        storage = editing.storage;
     } else if (editing && _editScheduleTargetsLocked) {
         // Editing a schedule whose targets can't be shown in the item picker
         // (existing folder schedule, or item list not yet loaded) — preserve them.
@@ -37392,6 +38251,7 @@ async function createSchedule() {
     _scheduleFolderTarget = null; // consumed — don't leak into the next schedule
     _editingSchedule = null;
     _editScheduleTargetsLocked = false;
+    _editFolderTargets = null;
 
     const body = {
         name,
@@ -44648,6 +45508,17 @@ function _startUpgradeTracking() {
     // id and the upgrade would be invisible in the log.
     trackers.forEach(function(t) {
         if (t.done) return;
+        // A tracker this old is not an upgrade in progress — the in-loop
+        // heuristics complete within 1h. It's a leftover (typically the node
+        // was deleted from the cluster mid-tracking, which used to spin
+        // "reconnecting..." forever and resurrect the task entry on every
+        // page load, even after the operator cleared the task log). Retire
+        // it silently — recreating an entry just to say so would put the
+        // ghost row back.
+        if (Date.now() - t.startedAt > 2 * 3600 * 1000) {
+            t.done = true;
+            return;
+        }
         var existing = t.taskId && _taskLogEntries.find(function (e) { return e.id === t.taskId; });
         if (!existing) {
             t.taskId = addTaskLogEntry({
@@ -44672,11 +45543,30 @@ function _startUpgradeTracking() {
             var elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
             var timeStr = elapsed >= 60 ? Math.floor(elapsed/60) + 'm ' + (elapsed%60) + 's' : elapsed + 's';
 
-            if (!currentNode || allNodes.length === 0) {
+            if (allNodes.length === 0) {
+                // Node list not loaded yet — can't tell anything, keep waiting.
                 if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — reconnecting... (' + timeStr + ')', status: 'running' });
                 pending++;
                 return;
             }
+            if (!currentNode) {
+                // The node list IS loaded and the node isn't in it: it was
+                // removed from the cluster (a deleted node never reappears,
+                // unlike an offline one, which stays listed). A few
+                // consecutive misses guard against catching allNodes
+                // mid-rebuild; then stop tracking with a visible final state
+                // instead of spinning "reconnecting..." forever.
+                t.missingTicks = (t.missingTicks || 0) + 1;
+                if (t.missingTicks >= 6) {
+                    t.done = true;
+                    if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — node removed from cluster; upgrade tracking stopped', status: 'stopped' });
+                } else {
+                    if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — reconnecting... (' + timeStr + ')', status: 'running' });
+                    pending++;
+                }
+                return;
+            }
+            t.missingTicks = 0;
 
             if (currentNode.is_self && currentNode.online && elapsed > 10) {
                 // Local node — if we're running, the upgrade is done (we restarted)
@@ -55074,10 +55964,12 @@ async function loadStorageProviders() {
                     </div>
                 </div>
                 ${wdHtml}
+                ${p.docker_container ? `<div style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">Docker: <strong style="color:var(--text-primary)">${escapeHtml(p.docker_container)}</strong> — manage it from the Containers view</div>` : ''}
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
-                    <span style="font-size:12px; font-weight:600; color:${statusColor};">${statusLabel}</span>
+                    <span style="font-size:12px; font-weight:600; color:${statusColor};">${statusLabel}${p.version ? ` <span style="font-weight:400; color:var(--text-muted);">${escapeHtml(p.version)}</span>` : ''}</span>
                     <div style="display:flex; gap:4px; flex-wrap:wrap;">
-                        ${!p.installed ? `<button class="btn btn-sm btn-primary" style="font-size:11px;" onclick="installProvider('${p.name}')">Install</button>` : ''}
+                        ${!p.installed && p.install_via_appstore ? `<button class="btn btn-sm btn-primary" style="font-size:11px;" onclick="openAppStoreInstallModal('${escapeAttr(p.install_via_appstore)}')">Install via App Store</button>` : ''}
+                        ${!p.installed && !p.install_via_appstore ? `<button class="btn btn-sm btn-primary" style="font-size:11px;" onclick="installProvider('${p.name}')">Install</button>` : ''}
                         ${hasService && p.status !== 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#10b981;" onclick="providerAction('${p.name}','start')">▶ Start</button>` : ''}
                         ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#ef4444;" onclick="providerAction('${p.name}','stop')">Stop</button>` : ''}
                         ${hasService && p.status === 'running' ? `<button class="btn btn-sm" style="font-size:11px; color:#3b82f6;" onclick="providerAction('${p.name}','restart')">Restart</button>` : ''}
@@ -55098,9 +55990,10 @@ async function loadStorageProviders() {
 // storage::package_for_helper maps them to the per-distro package — and the
 // Debian package name, used only in the confirm dialog.
 const PROVIDER_PACKAGES = {
-    nfs:   { binary: 'mount.nfs', debianPkg: 'nfs-common' },
-    sshfs: { binary: 'sshfs',     debianPkg: 'sshfs' },
-    s3fs:  { binary: 's3fs',      debianPkg: 's3fs' },
+    nfs:    { binary: 'mount.nfs', debianPkg: 'nfs-common' },
+    sshfs:  { binary: 'sshfs',     debianPkg: 'sshfs' },
+    s3fs:   { binary: 's3fs',      debianPkg: 's3fs' },
+    rclone: { binary: 'rclone',    debianPkg: 'rclone' },
 };
 
 async function installProvider(name) {

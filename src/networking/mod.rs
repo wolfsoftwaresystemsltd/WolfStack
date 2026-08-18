@@ -17,6 +17,7 @@ use tracing::{info, warn};
 
 pub mod lan_bridge;
 pub mod nic_addr;
+pub mod link_persist;
 pub mod router;
 pub mod vlan;
 pub mod vlan_attach;

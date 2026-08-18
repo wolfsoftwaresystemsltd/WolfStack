@@ -17991,14 +17991,23 @@ pub async fn net_set_state(
             // operator has a countdown-to-auto-up in the UI banner.
             // Bringing UP is safe — no rollback needed.
             if !body.up {
+                // Operator chose down: stop re-upping it at boot (back
+                // to whatever the system's own network config does).
+                networking::link_persist::clear(&iface);
                 let iface_for_undo = iface.clone();
                 let danger_id = crate::danger::schedule(
                     "interface_down",
                     &format!("Interface {} was brought DOWN", iface),
                     90,
                     Box::new(move || {
-                        crate::networking::set_interface_state(&iface_for_undo, true)
-                            .map(|_| format!("Interface {} brought back UP.", iface_for_undo))
+                        crate::networking::set_interface_state(&iface_for_undo, true).map(|_| {
+                            // The undo restores the runtime state, so it
+                            // restores the boot intent too — otherwise a
+                            // cancelled down would still lose the NIC at
+                            // the next reboot.
+                            let note = crate::networking::link_persist::record_up(&iface_for_undo);
+                            format!("Interface {} brought back UP{}.", iface_for_undo, note)
+                        })
                     }),
                 );
                 return HttpResponse::Ok().json(serde_json::json!({
@@ -18008,7 +18017,11 @@ pub async fn net_set_state(
                     "confirm_required": true,
                 }));
             }
-            HttpResponse::Ok().json(serde_json::json!({ "message": msg }))
+            // UP from the UI is an intent, not a one-off: without this a
+            // NIC no network manager owns (typical USB NIC) is down again
+            // after every reboot (RutgerDiehard, 2026-08-18).
+            let note = networking::link_persist::record_up(&iface);
+            HttpResponse::Ok().json(serde_json::json!({ "message": format!("{}{}", msg, note) }))
         }
         Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     }
@@ -24903,10 +24916,315 @@ pub struct SaveS3RemoteRequest {
     pub endpoint: String,
     #[serde(default)]
     pub region: String,
+    /// Blank when updating an existing remote = keep the stored key (the
+    /// browser only ever sees a masked hint, so the edit form cannot
+    /// round-trip it).
+    #[serde(default)]
     pub access_key_id: String,
     /// Blank when updating an existing remote = keep the stored secret.
     #[serde(default)]
     pub secret_access_key: String,
+}
+
+#[derive(Deserialize)]
+pub struct TestS3RemoteRequest {
+    /// Test a SAVED remote by id — mutually exclusive with the inline fields.
+    #[serde(default)]
+    pub id: String,
+    /// Inline fields from a form. Endpoint/region/provider are tested as
+    /// typed; blank credential fields resolve via `credentials_from`.
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub access_key_id: String,
+    #[serde(default)]
+    pub secret_access_key: String,
+    /// Remote id (`wolfstack:name` or `mount:id`) whose STORED credentials
+    /// fill any blank credential field — the edit-form case, where the
+    /// browser never held the secret (and only a masked key hint) but the
+    /// operator may have changed endpoint/region and wants them tested.
+    #[serde(default)]
+    pub credentials_from: String,
+    /// Optional bucket for the scoped-key fallback probe.
+    #[serde(default)]
+    pub bucket: String,
+}
+
+/// POST /api/storage/s3-remotes/test — verify a credential set actually
+/// works against its endpoint, without saving or mounting anything.
+pub async fn storage_test_s3_remote(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<TestS3RemoteRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let r = body.into_inner();
+
+    let remote = if !r.id.is_empty() {
+        match storage::find_s3_remote(&r.id) {
+            Some(remote) => remote,
+            None => {
+                return HttpResponse::BadRequest()
+                    .json(serde_json::json!({ "error": format!("Remote '{}' not found", r.id) }))
+            }
+        }
+    } else {
+        let mut remote = storage::S3Remote {
+            id: String::new(),
+            name: String::new(),
+            provider: if r.provider.is_empty() { "AWS".to_string() } else { r.provider.clone() },
+            endpoint: r.endpoint.clone(),
+            region: r.region.clone(),
+            access_key_id: r.access_key_id.trim().to_string(),
+            secret_access_key: r.secret_access_key.clone(),
+            origin: String::new(),
+        };
+        // Edit-form case: blank credential fields resolve from the named
+        // stored remote/mount — the browser never held the secret, but the
+        // endpoint/region as typed still get tested.
+        if (remote.access_key_id.is_empty() || remote.secret_access_key.is_empty())
+            && !r.credentials_from.is_empty()
+            && let Some(stored) = storage::find_s3_remote(&r.credentials_from)
+        {
+            if remote.access_key_id.is_empty() {
+                remote.access_key_id = stored.access_key_id;
+            }
+            if remote.secret_access_key.is_empty() {
+                remote.secret_access_key = stored.secret_access_key;
+            }
+        }
+        if remote.access_key_id.is_empty() || remote.secret_access_key.is_empty() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Access Key ID and Secret Access Key are required to test (or pick a saved credential set)"
+            }));
+        }
+        remote
+    };
+
+    let bucket = r.bucket.clone();
+    // web::block — test_s3_connection builds its own current-thread runtime,
+    // which panics if constructed inside the actix worker's runtime.
+    let result = web::block(move || storage::test_s3_connection(&remote, &bucket)).await;
+    match result {
+        Ok(outcome) => HttpResponse::Ok().json(outcome),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct S3BucketOpRequest {
+    pub id: String,
+    pub bucket: String,
+}
+
+/// POST /api/storage/s3-remotes/buckets — create a bucket on a saved remote
+pub async fn storage_create_s3_bucket(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<S3BucketOpRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let r = body.into_inner();
+    let (id, bucket) = (r.id, r.bucket);
+    let bucket_for_msg = bucket.clone();
+    // web::block — create_remote_bucket builds its own current-thread runtime.
+    let result = web::block(move || storage::create_remote_bucket(&id, &bucket)).await;
+    match result {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Bucket “{}” created", bucket_for_msg)
+        })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// POST /api/storage/s3-remotes/buckets/delete — delete an EMPTY bucket.
+/// Body-style like the remote delete: ids contain ':' so path segments
+/// don't fit them.
+pub async fn storage_delete_s3_bucket(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<S3BucketOpRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let r = body.into_inner();
+    let (id, bucket) = (r.id, r.bucket);
+    let bucket_for_msg = bucket.clone();
+    let result = web::block(move || storage::delete_remote_bucket(&id, &bucket)).await;
+    match result {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Bucket “{}” deleted", bucket_for_msg)
+        })),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+// ─── S3 bucket-sync jobs ───
+
+/// GET /api/storage/s3-sync — every job, with a derived `running` flag
+pub async fn storage_list_sync_jobs(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let config = storage::s3_sync::load();
+    let jobs: Vec<serde_json::Value> = config.jobs.iter().map(|j| {
+        let mut v = serde_json::to_value(j).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("running".into(), serde_json::json!(storage::s3_sync::is_running(&j.id)));
+        }
+        v
+    }).collect();
+    HttpResponse::Ok().json(jobs)
+}
+
+#[derive(Deserialize)]
+pub struct SaveSyncJobRequest {
+    #[serde(flatten)]
+    pub job: storage::s3_sync::SyncJob,
+    /// Required true when mode == sync — the UI's typed confirmation.
+    #[serde(default)]
+    pub confirm_sync: bool,
+}
+
+/// POST /api/storage/s3-sync — create or update a job
+pub async fn storage_save_sync_job(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SaveSyncJobRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let r = body.into_inner();
+    match storage::s3_sync::save_job(r.job, r.confirm_sync) {
+        Ok(job) => HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Sync job “{}” saved", job.name),
+            "id": job.id,
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SyncJobIdRequest {
+    pub id: String,
+}
+
+/// POST /api/storage/s3-sync/delete
+pub async fn storage_delete_sync_job(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SyncJobIdRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match storage::s3_sync::delete_job(&body.id) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "message": "Sync job deleted" })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SyncJobToggleRequest {
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// POST /api/storage/s3-sync/toggle — pause/resume scheduling
+pub async fn storage_toggle_sync_job(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SyncJobToggleRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    match storage::s3_sync::set_enabled(&body.id, body.enabled) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": if body.enabled { "Sync job enabled" } else { "Sync job paused" }
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/storage/s3-sync/run — start a pass NOW, in the background.
+/// Returns immediately; progress lands in the job's run history and log.
+pub async fn storage_run_sync_job(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<SyncJobIdRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = body.id.clone();
+    if storage::s3_sync::is_running(&id) {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "A pass for this job is already running"
+        }));
+    }
+    // Fail fast on a dead job id — the spawn below can't report back.
+    if !storage::s3_sync::load().jobs.iter().any(|j| j.id == id) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": format!("Sync job '{}' not found", id)
+        }));
+    }
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = storage::s3_sync::run_job(&id) {
+            tracing::warn!("manual s3-sync run failed to start: {}", e);
+        }
+    });
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "Pass started — watch the job's log and run history"
+    }))
+}
+
+/// GET /api/storage/s3-sync/log?id=… — tail of a job's rclone log
+pub async fn storage_sync_job_log(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<SyncJobIdRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let id = query.id.clone();
+    let result = web::block(move || storage::s3_sync::read_job_log(&id, 64 * 1024)).await;
+    match result {
+        Ok(log) => HttpResponse::Ok().json(serde_json::json!({ "log": log })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": format!("{}", e) })),
+    }
+}
+
+/// GET /api/storage/s3-remotes/health — background-probe state per remote id
+pub async fn storage_s3_remote_health(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    HttpResponse::Ok().json(storage::s3_health::health_snapshot())
+}
+
+#[derive(Deserialize)]
+pub struct S3HealthToggleRequest {
+    pub id: String,
+    pub disabled: bool,
+}
+
+/// POST /api/storage/s3-remotes/health/toggle — opt a remote in/out of
+/// background probing (out for metered/egress-billed endpoints)
+pub async fn storage_s3_remote_health_toggle(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<S3HealthToggleRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    storage::s3_health::set_probe_disabled(&body.id, body.disabled);
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": if body.disabled {
+            format!("Background health checks disabled for {}", body.id)
+        } else {
+            format!("Background health checks enabled for {}", body.id)
+        }
+    }))
 }
 
 /// POST /api/storage/s3-remotes — create or update a saved credential set
@@ -45905,7 +46223,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/storage/s3-remotes", web::get().to(storage_list_s3_remotes))
         .route("/api/storage/s3-remotes", web::post().to(storage_save_s3_remote))
         .route("/api/storage/s3-remotes/delete", web::post().to(storage_delete_s3_remote))
+        .route("/api/storage/s3-remotes/test", web::post().to(storage_test_s3_remote))
+        .route("/api/storage/s3-remotes/health", web::get().to(storage_s3_remote_health))
+        .route("/api/storage/s3-remotes/health/toggle", web::post().to(storage_s3_remote_health_toggle))
         .route("/api/storage/s3-remotes/buckets", web::get().to(storage_s3_remote_buckets))
+        .route("/api/storage/s3-remotes/buckets", web::post().to(storage_create_s3_bucket))
+        .route("/api/storage/s3-remotes/buckets/delete", web::post().to(storage_delete_s3_bucket))
+        .route("/api/storage/s3-sync", web::get().to(storage_list_sync_jobs))
+        .route("/api/storage/s3-sync", web::post().to(storage_save_sync_job))
+        .route("/api/storage/s3-sync/delete", web::post().to(storage_delete_sync_job))
+        .route("/api/storage/s3-sync/toggle", web::post().to(storage_toggle_sync_job))
+        .route("/api/storage/s3-sync/run", web::post().to(storage_run_sync_job))
+        .route("/api/storage/s3-sync/log", web::get().to(storage_sync_job_log))
         .route("/api/storage/mounts/{id}", web::put().to(storage_update_mount))
         .route("/api/storage/mounts/{id}", web::delete().to(storage_remove_mount))
         .route("/api/storage/mounts/{id}/duplicate", web::post().to(storage_duplicate_mount))
