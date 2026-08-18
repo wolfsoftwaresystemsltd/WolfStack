@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.15.1: NIC boot persistence survives USB adapters that randomize their MAC** _(2026-08-18 — [`a28480af`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a28480af47f4a16247b945fa9e64c9b9ceb2571e))_
 - **v25.15.0: S3 remotes get health checks and bucket sync; USB NICs survive reboots; folder backup schedules are editable** _(2026-08-18 — [`ca5af5fe`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/ca5af5fecfffb999d0d8025442cfa65a17d9c33a))_
 - **v25.14.5: packets for a node's own docker subnets no longer drop at the wolfnet edge** _(2026-08-15 — [`03d6f6c8`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/03d6f6c809edd78d9e42650dece81a7ea4954abb))_
 - **v25.14.4: peer workload subnets no longer go stale in nodes.json, and default bridges are never flagged as missing routes** _(2026-08-15 — [`90d250c2`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/90d250c2f194a6b7425d0b316e0222639ea028f4))_
