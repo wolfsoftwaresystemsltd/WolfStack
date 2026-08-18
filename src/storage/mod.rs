@@ -22,6 +22,10 @@ use std::process::Command;
 use tracing::{warn, error, info};
 use chrono::Utc;
 
+pub mod s3_health;
+pub mod s3_servers;
+pub mod s3_sync;
+
 fn config_path() -> String { crate::paths::get().storage_config }
 const MOUNT_BASE: &str = "/mnt/wolfstack";
 
@@ -1386,6 +1390,16 @@ pub fn package_for_helper(binary: &str) -> Option<(&'static str, &'static str)> 
         ("s3fs", DistroFamily::Alpine)  => Some(("apk",     "s3fs-fuse")),
         ("s3fs", DistroFamily::Unknown) => Some(("apt-get", "s3fs")),
 
+        // rclone — the bucket-sync engine. Packaged as plain `rclone` on
+        // every family (verified apt/dnf/pacman/apk + openSUSE Factory,
+        // 2026-08-18); RHEL-likes need EPEL, same as s3fs.
+        ("rclone", DistroFamily::Debian)  => Some(("apt-get", "rclone")),
+        ("rclone", DistroFamily::RedHat)  => Some(("dnf",     "rclone")),
+        ("rclone", DistroFamily::Suse)    => Some(("zypper",  "rclone")),
+        ("rclone", DistroFamily::Arch)    => Some(("pacman",  "rclone")),
+        ("rclone", DistroFamily::Alpine)  => Some(("apk",     "rclone")),
+        ("rclone", DistroFamily::Unknown) => Some(("apt-get", "rclone")),
+
         _ => None,
     }
 }
@@ -2374,19 +2388,26 @@ pub fn save_s3_remote(mut remote: S3Remote) -> Result<S3Remote, String> {
     }
     remote.id = format!("wolfstack:{}", remote.name);
     remote.origin = "WolfStack".to_string();
-    if remote.access_key_id.trim().is_empty() {
-        return Err("Access Key ID is required".to_string());
-    }
 
     let mut store = load_remote_store();
     match store.remotes.iter_mut().find(|r| r.id == remote.id) {
         Some(existing) => {
+            // Blank credential fields on an update keep the stored values:
+            // the browser only ever sees a masked access-key hint and never
+            // the secret, so the edit form cannot round-trip either — an
+            // operator changing just the endpoint must not need the keys.
+            if remote.access_key_id.trim().is_empty() {
+                remote.access_key_id = existing.access_key_id.clone();
+            }
             if remote.secret_access_key.is_empty() {
                 remote.secret_access_key = existing.secret_access_key.clone();
             }
             *existing = remote.clone();
         }
         None => {
+            if remote.access_key_id.trim().is_empty() {
+                return Err("Access Key ID is required".to_string());
+            }
             if remote.secret_access_key.is_empty() {
                 return Err("Secret Access Key is required".to_string());
             }
@@ -2398,6 +2419,18 @@ pub fn save_s3_remote(mut remote: S3Remote) -> Result<S3Remote, String> {
 }
 
 pub fn delete_s3_remote(id: &str) -> Result<(), String> {
+    // Dependency check: an enabled sync job resolves its credentials from
+    // this remote at every pass — deleting it breaks the job at its next
+    // run, hours from now, with nothing pointing back here. Refuse and
+    // say WHAT references it. (Mounts are immune: they store their own
+    // credential copy, as the Forget dialog already tells the operator.)
+    let dependents = s3_sync::jobs_using_remote(id);
+    if !dependents.is_empty() {
+        return Err(format!(
+            "These enabled sync jobs use this remote: {}. Disable or delete them first.",
+            dependents.join(", ")
+        ));
+    }
     let mut store = load_remote_store();
     let before = store.remotes.len();
     store.remotes.retain(|r| r.id != id);
@@ -2465,6 +2498,304 @@ pub fn list_remote_buckets(id: &str) -> Result<Vec<String>, String> {
     let mut names: Vec<String> = response.bucket_names().collect();
     names.sort();
     Ok(names)
+}
+
+// ─── Bucket create / delete ───
+
+/// Validate a bucket name against the S3 general-purpose bucket rules
+/// (AWS bucket-naming documentation, captured 2026-08-18): 3-63 chars;
+/// lowercase letters, digits, dots, hyphens; begins/ends alphanumeric;
+/// no adjacent dots; not IP-formatted; plus the reserved AWS prefixes/
+/// suffixes. Self-hosted servers are laxer, but a name valid everywhere
+/// beats one that works on garage and breaks the day it syncs to AWS.
+pub fn validate_bucket_name(name: &str) -> Result<(), String> {
+    if name.len() < 3 || name.len() > 63 {
+        return Err("Bucket names must be 3-63 characters long".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-') {
+        return Err("Bucket names may only contain lowercase letters, numbers, dots and hyphens".to_string());
+    }
+    let first = name.chars().next().unwrap_or(' ');
+    let last = name.chars().last().unwrap_or(' ');
+    if !first.is_ascii_alphanumeric() || !last.is_ascii_alphanumeric() {
+        return Err("Bucket names must begin and end with a letter or number".to_string());
+    }
+    if name.contains("..") {
+        return Err("Bucket names must not contain two adjacent dots".to_string());
+    }
+    // Four dot-separated all-digit groups = IP-shaped, forbidden.
+    let groups: Vec<&str> = name.split('.').collect();
+    if groups.len() == 4 && groups.iter().all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_digit())) {
+        return Err("Bucket names must not be formatted like an IP address".to_string());
+    }
+    for prefix in ["xn--", "sthree-", "amzn-s3-demo-"] {
+        if name.starts_with(prefix) {
+            return Err(format!("Bucket names must not start with the reserved prefix '{}'", prefix));
+        }
+    }
+    for suffix in ["-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"] {
+        if name.ends_with(suffix) {
+            return Err(format!("Bucket names must not end with the reserved suffix '{}'", suffix));
+        }
+    }
+    Ok(())
+}
+
+/// Create a bucket on a saved remote. Path-style, same as every other
+/// rust-s3 call in this module — virtual-host addressing needs wildcard
+/// DNS that self-hosted endpoints rarely have.
+pub fn create_remote_bucket(id: &str, bucket: &str) -> Result<(), String> {
+    let remote = find_s3_remote(id).ok_or_else(|| format!("Remote '{}' not found", id))?;
+    create_bucket_on(&remote, bucket)
+}
+
+/// The store-independent half of create_remote_bucket, so the live test
+/// can drive it with scratch credentials.
+pub fn create_bucket_on(remote: &S3Remote, bucket: &str) -> Result<(), String> {
+    use s3::bucket::Bucket;
+    use s3::bucket_ops::BucketConfiguration;
+    use s3::creds::Credentials;
+
+    validate_bucket_name(bucket)?;
+    let s3 = remote.to_s3_config(bucket);
+    let credentials = Credentials::new(
+        Some(&s3.access_key_id),
+        Some(&s3.secret_access_key),
+        None, None, None,
+    ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
+    let region = build_s3_region(&s3);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create runtime: {}", e))?;
+
+    rt.block_on(Bucket::create_with_path_style(
+        bucket,
+        region,
+        credentials,
+        BucketConfiguration::default(),
+    ))
+    .map(|_| ())
+    .map_err(|e| with_s3_credential_hint(format!("Could not create bucket '{}': {}", bucket, e)))
+}
+
+/// Delete a bucket on a saved remote — only when it is EMPTY. The 1-key
+/// listing is the guard; there is deliberately no force path in v1
+/// (destroying objects belongs to a much scarier button than this one).
+pub fn delete_remote_bucket(id: &str, bucket: &str) -> Result<(), String> {
+    let remote = find_s3_remote(id).ok_or_else(|| format!("Remote '{}' not found", id))?;
+    delete_bucket_on(&remote, bucket)
+}
+
+/// The store-independent half of delete_remote_bucket (see create_bucket_on).
+pub fn delete_bucket_on(remote: &S3Remote, bucket: &str) -> Result<(), String> {
+    use s3::bucket::Bucket;
+    use s3::creds::Credentials;
+
+    let s3 = remote.to_s3_config(bucket);
+    let credentials = Credentials::new(
+        Some(&s3.access_key_id),
+        Some(&s3.secret_access_key),
+        None, None, None,
+    ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
+    let region = build_s3_region(&s3);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create runtime: {}", e))?;
+
+    rt.block_on(async {
+        let b = Bucket::new(bucket, region, credentials)
+            .map_err(|e| format!("Failed to create S3 bucket handle: {}", e))?
+            .with_path_style();
+        let (listing, _status) = b
+            .list_page(String::new(), None, None, None, Some(1))
+            .await
+            .map_err(|e| with_s3_credential_hint(format!("Could not check whether '{}' is empty: {}", bucket, e)))?;
+        if !listing.contents.is_empty() {
+            return Err(format!(
+                "Bucket '{}' is not empty — WolfStack only deletes empty buckets. Empty it first with your S3 tools.",
+                bucket
+            ));
+        }
+        b.delete()
+            .await
+            .map(|_| ())
+            .map_err(|e| with_s3_credential_hint(format!("Could not delete bucket '{}': {}", bucket, e)))
+    })
+}
+
+// ─── Connection test ───
+
+/// Outcome of an S3 connection test, for the UI to render inline. `verdict`
+/// is a machine-readable class so the frontend can pick severity without
+/// string-matching the human message:
+///   "ok"          — the call succeeded
+///   "auth"        — endpoint answered but rejected the credentials/signature
+///   "unreachable" — DNS/connect/TLS/timeout, the endpoint never answered S3
+///   "error"       — everything else (bucket missing, malformed response, …)
+#[derive(Debug, Clone, Serialize)]
+pub struct S3TestResult {
+    pub ok: bool,
+    pub verdict: String,
+    pub message: String,
+    pub latency_ms: u64,
+    /// Set when the test was a ListBuckets — lets the UI say "12 buckets".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket_count: Option<usize>,
+    /// Set when the test fell back to (or was scoped to) a single bucket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+}
+
+/// True when `err` reads as "the endpoint never answered S3 at all" —
+/// DNS failure, refused/timed-out connection, or a TLS handshake problem —
+/// as opposed to an S3-level rejection. Matches on reqwest/rustls error text
+/// as surfaced through rust-s3's error Display.
+fn s3_transport_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    [
+        "error sending request", "connection refused", "connection reset",
+        "dns error", "failed to lookup", "timed out", "timeout",
+        "certificate", "tls", "handshake", "unexpected eof",
+        "network unreachable", "no route to host",
+    ]
+    .iter()
+    .any(|m| e.contains(m))
+}
+
+fn classify_s3_error(err: &str) -> &'static str {
+    let e = err.to_ascii_lowercase();
+    if s3_transport_error(err) {
+        "unreachable"
+    // "got http 401/403" is rust-s3's HttpFailWithBody prefix (fail-on-err
+    // feature) — catches providers whose error body is empty, where none of
+    // the s3_credential_hint body markers can match.
+    } else if s3_credential_hint(err) || e.contains("got http 401") || e.contains("got http 403") {
+        "auth"
+    } else {
+        "error"
+    }
+}
+
+/// Hard cap on one test call. Shorter than the mount path's 30s: a test is
+/// interactive — the operator is watching the button — and a healthy
+/// endpoint answers ListBuckets in well under a second.
+const S3_TEST_TIMEOUT_SECS: u64 = 15;
+
+/// Test that a credential set actually works against its endpoint.
+///
+/// Primary probe is ListBuckets. When that is denied AND the caller named a
+/// bucket, falls back to a 1-key ListObjectsV2 on that bucket — the normal
+/// shape of a key-per-bucket account (IDrive e2 and B2 application keys are
+/// commonly scoped this way), where ListBuckets 403s but the bucket itself
+/// is fully usable. Both probes are metadata calls; no object data moves.
+pub fn test_s3_connection(remote: &S3Remote, bucket: &str) -> S3TestResult {
+    use s3::bucket::Bucket;
+    use s3::creds::Credentials;
+
+    let started = std::time::Instant::now();
+    let fail = |verdict: &str, message: String, started: std::time::Instant| S3TestResult {
+        ok: false,
+        verdict: verdict.to_string(),
+        message,
+        latency_ms: started.elapsed().as_millis() as u64,
+        bucket_count: None,
+        bucket: None,
+    };
+
+    let s3 = remote.to_s3_config(bucket);
+    let credentials = match Credentials::new(
+        Some(&s3.access_key_id),
+        Some(&s3.secret_access_key),
+        None, None, None,
+    ) {
+        Ok(c) => c,
+        Err(e) => return fail("error", format!("Invalid S3 credentials: {}", e), started),
+    };
+    let region = build_s3_region(&s3);
+
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => return fail("error", format!("Failed to create runtime: {}", e), started),
+    };
+
+    let timeout = std::time::Duration::from_secs(S3_TEST_TIMEOUT_SECS);
+
+    // Probe 1: ListBuckets (account-wide, cheapest authenticated call).
+    let list_result = rt.block_on(async {
+        tokio::time::timeout(timeout, Bucket::list_buckets(region.clone(), credentials.clone()))
+            .await
+            .map_err(|_| format!("timed out after {}s", S3_TEST_TIMEOUT_SECS))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+    });
+
+    match list_result {
+        Ok(response) => {
+            let count = response.bucket_names().count();
+            return S3TestResult {
+                ok: true,
+                verdict: "ok".to_string(),
+                message: format!(
+                    "Connected — credentials can see {} bucket{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ),
+                latency_ms: started.elapsed().as_millis() as u64,
+                bucket_count: Some(count),
+                bucket: None,
+            };
+        }
+        Err(e) => {
+            let verdict = classify_s3_error(&e);
+            // Auth failure on ListBuckets + a named bucket = maybe a
+            // bucket-scoped key. Anything else (unreachable, malformed)
+            // would fail the per-bucket probe identically, so don't retry.
+            if verdict != "auth" || bucket.trim().is_empty() {
+                return fail(verdict, with_s3_credential_hint(format!("Connection test failed: {}", e)), started);
+            }
+        }
+    }
+
+    // Probe 2: bucket-scoped 1-key list.
+    let bucket_name = bucket.trim();
+    let b = match Bucket::new(bucket_name, region, credentials) {
+        Ok(b) => b.with_path_style(),
+        Err(e) => return fail("error", format!("Failed to create S3 bucket handle: {}", e), started),
+    };
+    let probe = rt.block_on(async {
+        tokio::time::timeout(
+            timeout,
+            b.list_page(String::new(), None, None, None, Some(1)),
+        )
+        .await
+        .map_err(|_| format!("timed out after {}s", S3_TEST_TIMEOUT_SECS))
+        .and_then(|r| r.map_err(|e| e.to_string()))
+    });
+
+    match probe {
+        Ok(_) => S3TestResult {
+            ok: true,
+            verdict: "ok".to_string(),
+            message: format!(
+                "Connected — key is scoped to bucket “{}” (account-wide bucket listing is denied, which is normal for per-bucket keys)",
+                bucket_name
+            ),
+            latency_ms: started.elapsed().as_millis() as u64,
+            bucket_count: None,
+            bucket: Some(bucket_name.to_string()),
+        },
+        Err(e) => fail(
+            classify_s3_error(&e),
+            with_s3_credential_hint(format!(
+                "Connection test failed (both account listing and bucket “{}”): {}",
+                bucket_name, e
+            )),
+            started,
+        ),
+    }
 }
 
 // ─── Auto-mount on boot ───
@@ -2679,6 +3010,17 @@ pub struct StorageProvider {
     /// WolfDisk-specific configuration summary (only set for wolfdisk provider)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wolfdisk_info: Option<WolfDiskInfo>,
+    /// Name of the RUNNING Docker container this provider was detected
+    /// from (e.g. an App Store MinIO/Garage deployment). The card shows
+    /// it so the operator knows service start/stop applies to Docker,
+    /// not systemd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker_container: Option<String>,
+    /// App Store manifest id to deploy when native install isn't offered
+    /// (MinIO: upstream stopped maintaining community server binaries,
+    /// so its supported path is the Docker manifest).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_via_appstore: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2731,6 +3073,8 @@ pub fn list_providers() -> Vec<StorageProvider> {
                 config_path: Some("/etc/exports".to_string()),
                 version: None,
                 wolfdisk_info: None,
+                docker_container: None,
+                install_via_appstore: None,
             }
         },
         {
@@ -2747,6 +3091,8 @@ pub fn list_providers() -> Vec<StorageProvider> {
                 config_path: Some("/etc/fuse.conf".to_string()),
                 version: None,
                 wolfdisk_info: None,
+                docker_container: None,
+                install_via_appstore: None,
             }
         },
         {
@@ -2763,6 +3109,8 @@ pub fn list_providers() -> Vec<StorageProvider> {
                 config_path: Some("/etc/passwd-s3fs".to_string()),
                 version: None,
                 wolfdisk_info: None,
+                docker_container: None,
+                install_via_appstore: None,
             }
         },
         {
@@ -2786,6 +3134,88 @@ pub fn list_providers() -> Vec<StorageProvider> {
                 config_path: Some("/etc/wolfdisk/config.toml".to_string()),
                 version,
                 wolfdisk_info,
+                docker_container: None,
+                install_via_appstore: None,
+            }
+        },
+        {
+            // rclone — the engine behind bucket-sync jobs, and useful on
+            // its own for operators who manage remotes with the CLI.
+            let installed = s3_servers::has_rclone();
+            StorageProvider {
+                name: "rclone".to_string(),
+                label: "rclone".to_string(),
+                icon: "\u{1f501}".to_string(),
+                installed,
+                description: "Cloud-storage engine \u{2014} powers S3 bucket sync jobs".to_string(),
+                package: "rclone".to_string(),
+                service: None,
+                status: if installed { "no-service".to_string() } else { "not-installed".to_string() },
+                config_path: Some("/root/.config/rclone/rclone.conf".to_string()),
+                version: if installed { s3_servers::binary_version("rclone", "version") } else { None },
+                wolfdisk_info: None,
+                docker_container: None,
+                install_via_appstore: None,
+            }
+        },
+        {
+            // Garage — self-hosted S3. Native systemd install offered;
+            // Docker deployments (App Store manifest "garage") detected.
+            let native = s3_servers::has_garage_binary();
+            let docker = s3_servers::docker_instance(&["dxflrs/garage"]);
+            let installed = native || docker.is_some();
+            let status = if native {
+                service_status("garage")
+            } else if docker.is_some() {
+                "running".to_string()
+            } else {
+                "not-installed".to_string()
+            };
+            StorageProvider {
+                name: "garage".to_string(),
+                label: "Garage".to_string(),
+                icon: "\u{1f3e0}".to_string(),
+                installed,
+                description: "Self-hosted S3-compatible object storage (lightweight, single binary)".to_string(),
+                package: "garage".to_string(),
+                service: if native { Some("garage".to_string()) } else { None },
+                status,
+                config_path: if native { Some("/etc/garage/garage.toml".to_string()) } else { None },
+                version: if native { s3_servers::binary_version("garage", "--version") } else { None },
+                wolfdisk_info: None,
+                docker_container: docker,
+                install_via_appstore: None,
+            }
+        },
+        {
+            // MinIO — native installs detected, but new installs go via
+            // the App Store Docker manifest: upstream stopped maintaining
+            // community server binaries (verified 2026-08-18), so there
+            // is no native binary WolfStack can responsibly download.
+            let native = s3_servers::has_minio_binary();
+            let docker = s3_servers::docker_instance(&["minio/minio"]);
+            let installed = native || docker.is_some();
+            let status = if native {
+                service_status("minio")
+            } else if docker.is_some() {
+                "running".to_string()
+            } else {
+                "not-installed".to_string()
+            };
+            StorageProvider {
+                name: "minio".to_string(),
+                label: "MinIO".to_string(),
+                icon: "\u{1f4bf}".to_string(),
+                installed,
+                description: "Self-hosted S3-compatible object storage (deployed as a Docker container)".to_string(),
+                package: "minio".to_string(),
+                service: if native { Some("minio".to_string()) } else { None },
+                status,
+                config_path: None,
+                version: if native { s3_servers::binary_version("minio", "--version") } else { None },
+                wolfdisk_info: None,
+                docker_container: docker,
+                install_via_appstore: if installed { None } else { Some("minio".to_string()) },
             }
         },
     ]
@@ -2796,6 +3226,10 @@ pub fn provider_action(name: &str, action: &str) -> Result<String, String> {
     let service_name = match name {
         "nfs" => "nfs-server",
         "wolfdisk" => "wolfdisk",
+        // Native systemd installs only — Docker-detected instances are
+        // managed from the Containers view.
+        "garage" => "garage",
+        "minio" => "minio",
         _ => return Err(format!("Provider '{}' has no manageable service", name)),
     };
 
@@ -2941,6 +3375,10 @@ pub fn provider_action_targeted(name: &str, action: &str, target: &crate::config
     let service_name = match name {
         "nfs" => "nfs-server",
         "wolfdisk" => "wolfdisk",
+        // Native systemd installs only — Docker-detected instances are
+        // managed from the Containers view.
+        "garage" => "garage",
+        "minio" => "minio",
         _ => return Err(format!("Provider '{}' has no manageable service", name)),
     };
 
@@ -3093,6 +3531,16 @@ pub fn install_provider(name: &str) -> Result<String, String> {
         "wolfdisk" => {
             return crate::installer::install_component(crate::installer::Component::WolfDisk);
         },
+        "rclone" => return s3_servers::install_rclone(),
+        "garage" => return s3_servers::install_garage(),
+        // MinIO's supported install path is the App Store Docker manifest
+        // — the UI routes there directly (install_via_appstore), so this
+        // arm only fires from a raw API call.
+        "minio" => return Err(
+            "MinIO is deployed as a Docker container — install it from the App Store (app id \"minio\"). \
+             Upstream no longer maintains community server binaries, so WolfStack does not download one."
+                .to_string(),
+        ),
         _ => return Err(format!("Unknown provider: {}", name)),
     };
 
@@ -4206,6 +4654,261 @@ mod config_guard_tests {
         assert!(!config_is_unreadable());
 
         CONFIG_UNREADABLE.store(restore, Ordering::Relaxed);
+    }
+
+    /// Bucket-name rules from the AWS general-purpose bucket naming
+    /// documentation (captured 2026-08-18) — every listed rule gets a
+    /// positive and negative case.
+    #[test]
+    fn bucket_name_validation_follows_the_s3_rules() {
+        // Valid shapes.
+        for ok in ["abc", "my-bucket", "my.bucket.1", "0-9", &"a".repeat(63)] {
+            assert!(validate_bucket_name(ok).is_ok(), "{} should be valid", ok);
+        }
+        // Length.
+        assert!(validate_bucket_name("ab").is_err());
+        assert!(validate_bucket_name(&"a".repeat(64)).is_err());
+        // Charset.
+        assert!(validate_bucket_name("My-Bucket").is_err());
+        assert!(validate_bucket_name("my_bucket").is_err());
+        assert!(validate_bucket_name("my bucket").is_err());
+        // Start/end.
+        assert!(validate_bucket_name("-bucket").is_err());
+        assert!(validate_bucket_name("bucket-").is_err());
+        assert!(validate_bucket_name(".bucket").is_err());
+        // Adjacent dots + IP shape.
+        assert!(validate_bucket_name("example..com").is_err());
+        assert!(validate_bucket_name("192.168.5.4").is_err());
+        assert!(validate_bucket_name("192.168.5.com").is_ok()); // not all-digit groups
+        // Reserved prefixes/suffixes.
+        assert!(validate_bucket_name("xn--bucket").is_err());
+        assert!(validate_bucket_name("sthree-bucket").is_err());
+        assert!(validate_bucket_name("amzn-s3-demo-bucket").is_err());
+        assert!(validate_bucket_name("bucket-s3alias").is_err());
+        assert!(validate_bucket_name("bucket--ol-s3").is_err());
+        assert!(validate_bucket_name("bucket.mrap").is_err());
+        assert!(validate_bucket_name("bucket--x-s3").is_err());
+        assert!(validate_bucket_name("bucket--table-s3").is_err());
+    }
+
+    /// Error classification for the connection test. Message shapes come
+    /// from real sources: rust-s3's HttpFailWithBody Display ("Got HTTP {n}
+    /// with content '{body}'", error.rs:10-11 of rust-s3 0.35.1), reqwest
+    /// transport errors, and R2's auth-error-deserialize artefact already
+    /// documented on s3_credential_hint.
+    #[test]
+    fn connection_test_error_classification() {
+        // Transport: endpoint never answered S3.
+        assert_eq!(classify_s3_error("error sending request for url (https://x/)"), "unreachable");
+        assert_eq!(classify_s3_error("dns error: failed to lookup address information"), "unreachable");
+        assert_eq!(classify_s3_error("invalid peer certificate: UnknownIssuer"), "unreachable");
+        assert_eq!(classify_s3_error("timed out after 15s"), "unreachable");
+        // Auth: endpoint answered and rejected the credentials.
+        assert_eq!(
+            classify_s3_error("Got HTTP 403 with content '<Error><Code>AccessDenied</Code></Error>'"),
+            "auth"
+        );
+        assert_eq!(classify_s3_error("Got HTTP 401 with content ''"), "auth");
+        assert_eq!(classify_s3_error("SignatureDoesNotMatch"), "auth");
+        assert_eq!(classify_s3_error("missing field Name"), "auth"); // R2 artefact
+        // Everything else.
+        assert_eq!(classify_s3_error("Got HTTP 404 with content 'NoSuchBucket'"), "error");
+        assert_eq!(classify_s3_error("some parse failure"), "error");
+    }
+
+    /// Live-network verification of test_s3_connection against a real S3
+    /// server. Ignored in normal runs (needs a scratch server + env vars);
+    /// run explicitly with:
+    ///   WS_S3_TEST_ENDPOINT=http://127.0.0.1:19000 \
+    ///   WS_S3_TEST_KEY=... WS_S3_TEST_SECRET=... \
+    ///   cargo test connection_test_live -- --ignored --nocapture
+    /// A scratch server is one docker command:
+    ///   docker run -d --name ws-s3-test -p 127.0.0.1:19000:9000 \
+    ///     -e MINIO_ROOT_USER=... -e MINIO_ROOT_PASSWORD=... \
+    ///     minio/minio server /data
+    #[test]
+    #[ignore = "needs a scratch S3 server + WS_S3_TEST_* env vars — see doc comment"]
+    fn connection_test_live() {
+        let endpoint = std::env::var("WS_S3_TEST_ENDPOINT")
+            .expect("set WS_S3_TEST_ENDPOINT (e.g. http://127.0.0.1:19000)");
+        let key = std::env::var("WS_S3_TEST_KEY").expect("set WS_S3_TEST_KEY");
+        let secret = std::env::var("WS_S3_TEST_SECRET").expect("set WS_S3_TEST_SECRET");
+        // MinIO signs for us-east-1 by default; garage signs for "garage".
+        let region_env =
+            std::env::var("WS_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+
+        let remote = |k: &str, s: &str, ep: &str| S3Remote {
+            id: String::new(),
+            name: "live-test".to_string(),
+            provider: "Minio".to_string(),
+            endpoint: ep.to_string(),
+            region: region_env.clone(),
+            access_key_id: k.to_string(),
+            secret_access_key: s.to_string(),
+            origin: String::new(),
+        };
+
+        // Good credentials → ok, with a bucket count.
+        let good = test_s3_connection(&remote(&key, &secret, &endpoint), "");
+        assert!(good.ok, "good creds should pass: {}", good.message);
+        assert_eq!(good.verdict, "ok");
+        assert!(good.bucket_count.is_some(), "ListBuckets result must carry a count");
+
+        // Wrong secret → endpoint answers, credentials rejected.
+        let bad = test_s3_connection(&remote(&key, "definitely-wrong-secret", &endpoint), "");
+        assert!(!bad.ok);
+        assert_eq!(bad.verdict, "auth", "wrong secret must classify as auth: {}", bad.message);
+
+        // Wrong secret WITH a bucket → the scoped-key fallback probe runs
+        // and also fails; still auth, and the message names the bucket.
+        let bad2 = test_s3_connection(&remote(&key, "definitely-wrong-secret", &endpoint), "nosuch");
+        assert!(!bad2.ok);
+        assert_eq!(bad2.verdict, "auth", "{}", bad2.message);
+        assert!(bad2.message.contains("nosuch"), "fallback probe must be reported: {}", bad2.message);
+
+        // Nothing listening → unreachable, and fast.
+        let dead = test_s3_connection(&remote(&key, &secret, "http://127.0.0.1:1"), "");
+        assert!(!dead.ok);
+        assert_eq!(dead.verdict, "unreachable", "{}", dead.message);
+
+        // Optional scoped-key check: a key that may NOT ListBuckets but may
+        // read one bucket (set WS_S3_TEST_SCOPED_KEY/SECRET/BUCKET, and
+        // optionally SCOPED_ENDPOINT — MinIO FILTERS ListBuckets rather than
+        // denying it, so forcing the AWS-style 403 shape needs a different
+        // server, e.g. tools/s3stub or a real bucket-scoped cloud key).
+        if let (Ok(sk), Ok(ss), Ok(sb)) = (
+            std::env::var("WS_S3_TEST_SCOPED_KEY"),
+            std::env::var("WS_S3_TEST_SCOPED_SECRET"),
+            std::env::var("WS_S3_TEST_SCOPED_BUCKET"),
+        ) {
+            let scoped_endpoint =
+                std::env::var("WS_S3_TEST_SCOPED_ENDPOINT").unwrap_or_else(|_| endpoint.clone());
+            let scoped = test_s3_connection(&remote(&sk, &ss, &scoped_endpoint), &sb);
+            assert!(scoped.ok, "scoped key must pass: {}", scoped.message);
+            // Two valid server behaviours: AWS-style servers DENY ListBuckets
+            // for a scoped key (probe 2 runs, `bucket` set); MinIO's default
+            // is to FILTER ListBuckets instead (probe 1 succeeds). A policy
+            // with an explicit Deny on s3:ListAllMyBuckets forces the former.
+            match scoped.bucket.as_deref() {
+                Some(b) => {
+                    assert_eq!(b, sb.as_str());
+                    println!("scoped-key FALLBACK probe verified against bucket {}", sb);
+                }
+                None => println!("server filters ListBuckets for scoped keys; fallback probe not needed"),
+            }
+        } else {
+            println!("scoped-key env vars unset — fallback success path not exercised");
+        }
+
+        println!(
+            "live results: good={}ms bad={} dead={}ms",
+            good.latency_ms, bad.verdict, dead.latency_ms
+        );
+
+        // Bucket lifecycle against the same live server (needs a key with
+        // CreateBucket permission — garage: `key allow --create-bucket`).
+        // Skipped unless WS_S3_TEST_BUCKET_OPS=1 so a restricted key can
+        // still run the connection tests above.
+        if std::env::var("WS_S3_TEST_BUCKET_OPS").as_deref() == Ok("1") {
+            let r = remote(&key, &secret, &endpoint);
+            let name = "wolfstack-live-test-bucket";
+            create_bucket_on(&r, name).expect("create bucket");
+            let listed = {
+                // list via the same credentials
+                let s3 = r.to_s3_config("");
+                let creds = s3::creds::Credentials::new(
+                    Some(&s3.access_key_id), Some(&s3.secret_access_key), None, None, None,
+                ).unwrap();
+                let region = build_s3_region(&s3);
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let resp = rt.block_on(s3::bucket::Bucket::list_buckets(region, creds)).expect("list");
+                resp.bucket_names().collect::<Vec<_>>()
+            };
+            assert!(listed.iter().any(|b| b == name), "created bucket must list: {:?}", listed);
+            // A duplicate create should fail (garage: bucket exists).
+            assert!(create_bucket_on(&r, name).is_err(), "duplicate create must fail");
+            // Put an object, prove non-empty delete is refused.
+            {
+                let s3 = r.to_s3_config(name);
+                let creds = s3::creds::Credentials::new(
+                    Some(&s3.access_key_id), Some(&s3.secret_access_key), None, None, None,
+                ).unwrap();
+                let region = build_s3_region(&s3);
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let b = s3::bucket::Bucket::new(name, region, creds).unwrap().with_path_style();
+                rt.block_on(b.put_object("guard.txt", b"not empty")).expect("put");
+            }
+            let refused = delete_bucket_on(&r, name);
+            assert!(refused.is_err(), "non-empty delete must be refused");
+            assert!(refused.unwrap_err().contains("not empty"), "refusal must say why");
+            // Empty it, then delete for real.
+            {
+                let s3 = r.to_s3_config(name);
+                let creds = s3::creds::Credentials::new(
+                    Some(&s3.access_key_id), Some(&s3.secret_access_key), None, None, None,
+                ).unwrap();
+                let region = build_s3_region(&s3);
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let b = s3::bucket::Bucket::new(name, region, creds).unwrap().with_path_style();
+                rt.block_on(b.delete_object("guard.txt")).expect("delete object");
+            }
+            delete_bucket_on(&r, name).expect("empty delete");
+            println!("bucket lifecycle verified: create, duplicate-refused, non-empty-refused, delete");
+        } else {
+            println!("WS_S3_TEST_BUCKET_OPS unset — bucket lifecycle not exercised");
+        }
+    }
+
+    /// ONE test fn on purpose for the store round-trip: paths::set_for_test
+    /// mutates process-global state and cargo runs tests in parallel — a
+    /// second store test here could race another module's set_for_test.
+    /// Covers the full upsert contract: create requires both keys, update
+    /// with blank access key AND blank secret keeps the stored values, and
+    /// non-credential fields still change.
+    #[test]
+    fn save_remote_upsert_keeps_credentials_on_blank() {
+        let tmp = std::env::temp_dir()
+            .join(format!("ws-s3remote-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create temp dir");
+        let mut locs = crate::paths::get();
+        locs.storage_config = tmp.join("storage.json").to_string_lossy().into_owned();
+        crate::paths::set_for_test(locs);
+
+        let fresh = |key: &str, secret: &str| S3Remote {
+            id: String::new(),
+            name: "unit-remote".to_string(),
+            provider: "Other".to_string(),
+            endpoint: "https://s3.example.test".to_string(),
+            region: "us-east-1".to_string(),
+            access_key_id: key.to_string(),
+            secret_access_key: secret.to_string(),
+            origin: String::new(),
+        };
+
+        // Create with blank credentials must be refused.
+        assert!(save_s3_remote(fresh("", "sec")).is_err());
+        assert!(save_s3_remote(fresh("AKIAUNIT", "")).is_err());
+
+        // Create.
+        let saved = save_s3_remote(fresh("AKIAUNIT", "topsecret")).expect("create");
+        assert_eq!(saved.id, "wolfstack:unit-remote");
+
+        // Update with both credential fields blank: endpoint changes,
+        // stored key + secret survive.
+        let mut update = fresh("", "");
+        update.endpoint = "https://s3.other.test".to_string();
+        save_s3_remote(update).expect("update");
+        let stored = load_remote_store()
+            .remotes
+            .into_iter()
+            .find(|r| r.id == "wolfstack:unit-remote")
+            .expect("stored remote");
+        assert_eq!(stored.endpoint, "https://s3.other.test");
+        assert_eq!(stored.access_key_id, "AKIAUNIT");
+        assert_eq!(stored.secret_access_key, "topsecret");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
 

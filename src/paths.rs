@@ -41,6 +41,9 @@ pub struct FileLocations {
     // ── Storage ───────────────────────────────────
     #[serde(default = "default_storage_config")]
     pub storage_config: String,
+    /// Per-job rclone logs for S3 bucket-sync passes.
+    #[serde(default = "default_s3_sync_log_dir")]
+    pub s3_sync_log_dir: String,
     #[serde(default = "default_gluster_config")]
     pub gluster_config: String,
     #[serde(default = "default_storage_mount_base")]
@@ -293,6 +296,7 @@ fn default_backup_local_dir() -> String { "/var/lib/wolfstack/backups".into() }
 fn default_compose_dir() -> String { "/etc/wolfstack/compose".into() }
 
 fn default_storage_config() -> String { "/etc/wolfstack/storage.json".into() }
+fn default_s3_sync_log_dir() -> String { "/var/log/wolfstack/s3-sync".into() }
 fn default_gluster_config() -> String { "/etc/wolfstack/gluster.json".into() }
 fn default_storage_mount_base() -> String { "/mnt/wolfstack".into() }
 fn default_s3_credentials_dir() -> String { "/etc/wolfstack/s3".into() }

@@ -8072,6 +8072,52 @@ dns_cloudflare_api_token = your_token_here"
                     </p>
                 </div>
             </div>
+            <!-- Saved S3 credentials with background endpoint health
+                 (rendered by loadS3RemotesHealthCard). A dead remote
+                 endpoint should be visible HERE, not discovered from a
+                 failing mount — IDrive FRA2 outage, 2026-08-14. -->
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>S3 Remotes</h3>
+                    <button class="btn btn-sm" onclick="loadS3RemotesHealthCard()"
+                        style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
+                        Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div id="s3-remotes-health-body" style="overflow-x:auto;">
+                        <div style="color:var(--text-muted); text-align:center; padding:12px;">Loading S3
+                            remotes…</div>
+                    </div>
+                    <small id="s3-health-action-status" role="status" aria-live="polite"
+                        style="display:block; font-size:11px; color:var(--text-muted);"></small>
+                    <small id="s3-health-action-alert" role="alert" aria-live="assertive"
+                        style="display:block; font-size:11px; color:var(--danger);"></small>
+                </div>
+            </div>
+            <!-- S3 bucket-sync jobs (rendered by loadSyncJobsCard). rclone
+                 copy/sync between any two saved remotes — the wtgrid
+                 asset-mirror pattern productised. -->
+            <div class="card" style="margin-top:20px;">
+                <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3>Bucket Sync</h3>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn btn-sm" onclick="loadSyncJobsCard()"
+                            style="background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border); font-size:11px;">↻
+                            Refresh</button>
+                        <button class="btn btn-sm btn-primary" onclick="openSyncJobModal()">+ Add Sync Job</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="sync-jobs-body" style="overflow-x:auto;">
+                        <div style="color:var(--text-muted); text-align:center; padding:12px;">Loading sync
+                            jobs…</div>
+                    </div>
+                    <small id="sync-jobs-status" role="status" aria-live="polite"
+                        style="display:block; font-size:11px; color:var(--text-muted);"></small>
+                    <small id="sync-jobs-alert" role="alert" aria-live="assertive"
+                        style="display:block; font-size:11px; color:var(--danger);"></small>
+                </div>
+            </div>
             <!-- Unraid user shares across the cluster (rendered by loadUnraidSharesCard) -->
             <div id="unraid-shares-card"></div>
             <!-- GlusterFS distributed storage (cluster-scoped, rendered by renderGluster) -->
@@ -10126,6 +10172,12 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                     </select>
                                     <button type="button" class="btn btn-sm" onclick="loadS3Remotes()"
                                         title="Re-read saved credentials">Refresh</button>
+                                    <button type="button" class="btn btn-sm" id="s3-remote-test"
+                                        onclick="testS3SelectedRemote(this)" style="display:none;"
+                                        title="Verify these credentials against their endpoint">Test</button>
+                                    <button type="button" class="btn btn-sm" id="s3-remote-edit"
+                                        onclick="openEditS3RemoteModal()" style="display:none;"
+                                        title="Edit these saved credentials">Edit</button>
                                     <button type="button" class="btn btn-sm btn-danger" id="s3-remote-forget"
                                         onclick="forgetS3Remote()" style="display:none;"
                                         title="Delete these saved credentials">Forget</button>
@@ -10134,6 +10186,10 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                     style="color:var(--text-muted); font-size:11px;">Credential sets found in
                                     WolfStack, in <code>rclone.conf</code> on this host, and on existing S3
                                     mounts. Use <strong>Import rclone.conf</strong> to add more.</small>
+                                <small id="s3-remote-test-status" role="status" aria-live="polite"
+                                    style="display:block; font-size:11px; color:var(--text-muted);"></small>
+                                <small id="s3-remote-test-alert" role="alert" aria-live="assertive"
+                                    style="display:block; font-size:11px; color:var(--danger);"></small>
                             </div>
                             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                                 <div class="form-group" id="s3-bucket-picker-group" style="display:none;">
@@ -10147,16 +10203,22 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                 style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                                 <div class="form-group">
                                     <label for="s3-provider">Provider</label>
-                                    <select class="form-control" id="s3-provider">
+                                    <select class="form-control" id="s3-provider"
+                                        onchange="applyS3ProviderPreset('s3')">
                                         <option value="AWS">Amazon S3</option>
                                         <option value="Cloudflare">Cloudflare R2</option>
                                         <option value="DigitalOcean">DigitalOcean Spaces</option>
                                         <option value="Wasabi">Wasabi</option>
                                         <option value="Backblaze">Backblaze B2</option>
                                         <option value="IDrive">IDrive e2</option>
-                                        <option value="Minio">MinIO</option>
+                                        <option value="Hetzner">Hetzner Object Storage</option>
+                                        <option value="Scaleway">Scaleway Object Storage</option>
+                                        <option value="Minio">MinIO (self-hosted)</option>
+                                        <option value="Garage">Garage (self-hosted)</option>
                                         <option value="Other">Other S3-compatible</option>
                                     </select>
+                                    <small id="s3-provider-hint"
+                                        style="color:var(--text-muted); font-size:11px;"></small>
                                 </div>
                                 <div class="form-group">
                                     <label for="s3-bucket">Bucket</label>
@@ -10186,6 +10248,15 @@ pveum aclmod / -token 'root@pam!wolfstack' -role WolfStackMonitor</code></pre>
                                         <input type="checkbox" id="s3-save-remote">
                                         Save these credentials for reuse on other buckets
                                     </label>
+                                </div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <button type="button" class="btn btn-sm" onclick="testS3ManualCredentials(this)"
+                                        title="Verify these credentials against the endpoint before creating anything">Test
+                                        connection</button>
+                                    <small id="s3-test-status" role="status" aria-live="polite"
+                                        style="display:block; font-size:11px; color:var(--text-muted); margin-top:4px;"></small>
+                                    <small id="s3-test-alert" role="alert" aria-live="assertive"
+                                        style="display:block; font-size:11px; color:var(--danger); margin-top:4px;"></small>
                                 </div>
                             </div>
                         </div>
@@ -10362,6 +10433,254 @@ region = us-east-1"></textarea>
             </div>
         </div>
 
+        <!-- S3 Sync Job Modal -->
+        <div class="modal-overlay" id="sync-job-modal">
+            <div class="modal" style="max-width: 640px; width: 95%;">
+                <div class="modal-header">
+                    <h3 id="sync-job-modal-title">Add Sync Job</h3>
+                    <button class="modal-close" onclick="closeSyncJobModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="sync-job-id" value="">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="form-group" style="grid-column: 1 / -1;">
+                            <label for="sync-job-name">Name</label>
+                            <input type="text" class="form-control" id="sync-job-name"
+                                placeholder="mirror-assets-to-garage">
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-src-remote">Source remote</label>
+                            <select class="form-control" id="sync-src-remote"
+                                onchange="loadSyncBucketOptions('src')"></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-dst-remote">Destination remote</label>
+                            <select class="form-control" id="sync-dst-remote"
+                                onchange="loadSyncBucketOptions('dst')"></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-src-bucket">Source bucket</label>
+                            <select class="form-control" id="sync-src-bucket"></select>
+                            <small id="sync-src-bucket-status"
+                                style="color:var(--text-muted); font-size:11px;"></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-dst-bucket">Destination bucket</label>
+                            <select class="form-control" id="sync-dst-bucket"></select>
+                            <small id="sync-dst-bucket-status"
+                                style="color:var(--text-muted); font-size:11px;"></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-src-prefix">Source prefix (optional)</label>
+                            <input type="text" class="form-control" id="sync-src-prefix" placeholder="path/within/bucket">
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-dst-prefix">Destination prefix (optional)</label>
+                            <input type="text" class="form-control" id="sync-dst-prefix" placeholder="">
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-job-mode">Mode</label>
+                            <select class="form-control" id="sync-job-mode" onchange="onSyncModeChange()">
+                                <option value="copy">Copy — add new objects, never delete</option>
+                                <option value="sync">Sync — mirror exactly, DELETES at destination</option>
+                            </select>
+                            <small id="sync-mode-warning" style="display:none; color:var(--danger); font-size:11px;">
+                                Sync mode deletes destination objects that vanish from the source. For backups
+                                and append-only stores, Copy is safer — deletions and corruption can never
+                                propagate.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-job-schedule">Schedule</label>
+                            <select class="form-control" id="sync-job-schedule" onchange="onSyncScheduleChange()">
+                                <option value="back_to_back">Continuous — next pass after a gap</option>
+                                <option value="cron">Cron expression</option>
+                                <option value="manual">Manual only</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="sync-gap-group">
+                            <label for="sync-gap-minutes">Gap between passes (minutes)</label>
+                            <input type="number" class="form-control" id="sync-gap-minutes" value="15" min="1">
+                            <small style="color:var(--text-muted); font-size:11px;">The next pass starts this
+                                long after the previous one finishes — a pass that grows to hours can never
+                                pile up.</small>
+                        </div>
+                        <div class="form-group" id="sync-cron-group" style="display:none;">
+                            <label for="sync-cron-expr">Cron expression</label>
+                            <input type="text" class="form-control" id="sync-cron-expr" placeholder="0 4 * * *">
+                            <small style="color:var(--text-muted); font-size:11px;">5 fields: minute hour
+                                day-of-month month day-of-week. A pass still running when the next match fires
+                                is skipped, not doubled.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-job-window">Change window</label>
+                            <select class="form-control" id="sync-job-window" onchange="onSyncWindowChange()">
+                                <option value="auto">Auto — 4× last pass, at least 24h</option>
+                                <option value="full">Full — consider every object each pass</option>
+                                <option value="hours">Fixed hours…</option>
+                            </select>
+                            <small style="color:var(--text-muted); font-size:11px;">Only objects newer than the
+                                window are copied (first pass is always full). Auto keeps the window safely
+                                wider than a pass.</small>
+                        </div>
+                        <div class="form-group" id="sync-window-hours-group" style="display:none;">
+                            <label for="sync-window-hours">Window (hours)</label>
+                            <input type="number" class="form-control" id="sync-window-hours" value="24" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-transfers">Parallel transfers</label>
+                            <input type="number" class="form-control" id="sync-transfers" value="32" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-checkers">Parallel checkers</label>
+                            <input type="number" class="form-control" id="sync-checkers" value="16" min="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="sync-bwlimit">Bandwidth limit (optional)</label>
+                            <input type="text" class="form-control" id="sync-bwlimit" placeholder="e.g. 10M">
+                        </div>
+                        <div class="form-group" style="display:flex; align-items:flex-end;">
+                            <label style="display:flex; align-items:center; gap:8px; font-weight:500;">
+                                <input type="checkbox" id="sync-job-enabled" checked>
+                                Enabled (scheduler may run it)
+                            </label>
+                        </div>
+                    </div>
+                    <small id="sync-job-modal-alert" role="alert" aria-live="assertive"
+                        style="display:block; font-size:11px; color:var(--danger);"></small>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeSyncJobModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveSyncJob()">Save</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- S3 Sync Log Modal -->
+        <div class="modal-overlay" id="sync-log-modal">
+            <div class="modal" style="max-width: 780px; width: 95%;">
+                <div class="modal-header">
+                    <h3>Sync log — <span id="sync-log-job-name"></span></h3>
+                    <button class="modal-close" onclick="closeSyncLogModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <pre id="sync-log-content"
+                        style="background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border); border-radius:8px; padding:12px; font-size:11px; max-height:60vh; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere;">Loading…</pre>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="loadSyncJobLog()">Refresh</button>
+                    <button class="btn" onclick="closeSyncLogModal()">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- S3 Remote Buckets Modal -->
+        <div class="modal-overlay" id="s3-buckets-modal">
+            <div class="modal" style="max-width: 560px; width: 95%;">
+                <div class="modal-header">
+                    <h3>Buckets — <span id="s3-buckets-remote-name"></span></h3>
+                    <button class="modal-close" onclick="closeS3BucketsModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="s3-buckets-list" style="overflow-x:auto; margin-bottom:12px;">
+                        <div style="color:var(--text-muted); text-align:center; padding:12px;">Loading buckets…</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="s3-new-bucket-name">Create bucket</label>
+                        <div style="display:flex; gap:8px;">
+                            <input type="text" class="form-control" id="s3-new-bucket-name"
+                                placeholder="my-new-bucket" style="flex:1;"
+                                aria-describedby="s3-new-bucket-help">
+                            <button type="button" class="btn btn-sm btn-primary"
+                                onclick="createS3Bucket(this)">Create</button>
+                        </div>
+                        <small id="s3-new-bucket-help" style="color:var(--text-muted); font-size:11px;">3-63
+                            characters: lowercase letters, numbers, dots, hyphens. Must start and end with a
+                            letter or number.</small>
+                    </div>
+                    <small id="s3-buckets-status" role="status" aria-live="polite"
+                        style="display:block; font-size:11px; color:var(--text-muted);"></small>
+                    <small id="s3-buckets-alert" role="alert" aria-live="assertive"
+                        style="display:block; font-size:11px; color:var(--danger);"></small>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeS3BucketsModal()">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Edit Saved S3 Credentials Modal -->
+        <div class="modal-overlay" id="edit-s3-remote-modal">
+            <div class="modal" style="max-width: 560px; width: 95%;">
+                <div class="modal-header">
+                    <h3>Edit saved S3 credentials</h3>
+                    <button class="modal-close" onclick="closeEditS3RemoteModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="form-group" style="grid-column: 1 / -1;">
+                            <label for="remote-edit-name">Name</label>
+                            <input type="text" class="form-control" id="remote-edit-name" disabled>
+                            <small style="color:var(--text-muted); font-size:11px;">The name is this credential
+                                set's identity — mounts reference it. To rename, save a new set and forget this
+                                one.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="remote-edit-provider">Provider</label>
+                            <select class="form-control" id="remote-edit-provider"
+                                onchange="applyS3ProviderPreset('remote-edit')">
+                                <option value="AWS">Amazon S3</option>
+                                <option value="Cloudflare">Cloudflare R2</option>
+                                <option value="DigitalOcean">DigitalOcean Spaces</option>
+                                <option value="Wasabi">Wasabi</option>
+                                <option value="Backblaze">Backblaze B2</option>
+                                <option value="IDrive">IDrive e2</option>
+                                <option value="Hetzner">Hetzner Object Storage</option>
+                                <option value="Scaleway">Scaleway Object Storage</option>
+                                <option value="Minio">MinIO (self-hosted)</option>
+                                <option value="Garage">Garage (self-hosted)</option>
+                                <option value="Other">Other S3-compatible</option>
+                            </select>
+                            <small id="remote-edit-provider-hint"
+                                style="color:var(--text-muted); font-size:11px;"></small>
+                        </div>
+                        <div class="form-group">
+                            <label for="remote-edit-region">Region</label>
+                            <input type="text" class="form-control" id="remote-edit-region" placeholder="us-east-1">
+                        </div>
+                        <div class="form-group" style="grid-column: 1 / -1;">
+                            <label for="remote-edit-endpoint">Endpoint (optional)</label>
+                            <input type="text" class="form-control" id="remote-edit-endpoint"
+                                placeholder="https://s3.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label for="remote-edit-access-key">Access Key ID</label>
+                            <input type="text" class="form-control" id="remote-edit-access-key">
+                            <small style="color:var(--text-muted); font-size:11px;">Leave blank to keep the
+                                stored key.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="remote-edit-secret-key">Secret Access Key</label>
+                            <input type="password" class="form-control" id="remote-edit-secret-key"
+                                placeholder="Leave blank to keep unchanged">
+                        </div>
+                        <div class="form-group" style="grid-column: 1 / -1;">
+                            <button type="button" class="btn btn-sm" onclick="testS3RemoteEditCredentials(this)"
+                                title="Verify these credentials against the endpoint as configured above">Test
+                                connection</button>
+                            <small id="remote-edit-test-status" role="status" aria-live="polite"
+                                style="display:block; font-size:11px; color:var(--text-muted); margin-top:4px;"></small>
+                            <small id="remote-edit-test-alert" role="alert" aria-live="assertive"
+                                style="display:block; font-size:11px; color:var(--danger); margin-top:4px;"></small>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" onclick="closeEditS3RemoteModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveEditedS3Remote()">Save</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Edit Storage Mount Modal -->
         <div class="modal-overlay" id="edit-mount-modal">
             <div class="modal" style="max-width: 640px; width: 95%;">
@@ -10397,16 +10716,22 @@ region = us-east-1"></textarea>
                                     <span class="ws-icon-clean-wrap" data-icon="cloud"></span> S3 Configuration</div>
                                 <div class="form-group">
                                     <label>Provider</label>
-                                    <select class="form-control" id="edit-s3-provider">
+                                    <select class="form-control" id="edit-s3-provider"
+                                        onchange="applyS3ProviderPreset('edit-s3')">
                                         <option value="AWS">Amazon S3</option>
                                         <option value="Cloudflare">Cloudflare R2</option>
                                         <option value="DigitalOcean">DigitalOcean Spaces</option>
                                         <option value="Wasabi">Wasabi</option>
                                         <option value="Backblaze">Backblaze B2</option>
                                         <option value="IDrive">IDrive e2</option>
-                                        <option value="Minio">MinIO</option>
+                                        <option value="Hetzner">Hetzner Object Storage</option>
+                                        <option value="Scaleway">Scaleway Object Storage</option>
+                                        <option value="Minio">MinIO (self-hosted)</option>
+                                        <option value="Garage">Garage (self-hosted)</option>
                                         <option value="Other">Other S3-compatible</option>
                                     </select>
+                                    <small id="edit-s3-provider-hint"
+                                        style="color:var(--text-muted); font-size:11px;"></small>
                                 </div>
                                 <div class="form-group">
                                     <label>Bucket</label>
@@ -10432,6 +10757,15 @@ region = us-east-1"></textarea>
                                         placeholder="https://s3.example.com">
                                     <small style="color:var(--text-muted); font-size:11px;">For non-AWS
                                         providers</small>
+                                </div>
+                                <div class="form-group" style="grid-column: 1 / -1;">
+                                    <button type="button" class="btn btn-sm" onclick="testS3EditMountCredentials(this)"
+                                        title="Verify this mount's credentials against the endpoint as configured above">Test
+                                        connection</button>
+                                    <small id="edit-s3-test-status" role="status" aria-live="polite"
+                                        style="display:block; font-size:11px; color:var(--text-muted); margin-top:4px;"></small>
+                                    <small id="edit-s3-test-alert" role="alert" aria-live="assertive"
+                                        style="display:block; font-size:11px; color:var(--danger); margin-top:4px;"></small>
                                 </div>
                             </div>
                         </div>

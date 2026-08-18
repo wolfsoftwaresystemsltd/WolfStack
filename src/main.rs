@@ -2913,6 +2913,110 @@ async fn main() -> std::io::Result<()> {
             }
         });
 
+        // Boot: re-apply persisted "interface UP" intents from the UI.
+        // Retries every 10s for ~5 minutes because the motivating case is
+        // a USB NIC (RutgerDiehard, 2026-08-18) — USB enumeration can land
+        // well after this daemon starts, and a single early attempt would
+        // miss it. Each attempt only touches recorded NICs that exist and
+        // are down, so the loop is idle-cheap and fights no other manager.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            for attempt in 0..30 {
+                let outstanding =
+                    match tokio::task::spawn_blocking(networking::link_persist::apply_once).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!("link_persist::apply_once panicked: {}", e);
+                            break;
+                        }
+                    };
+                if outstanding.is_empty() {
+                    break;
+                }
+                if attempt == 29 {
+                    tracing::warn!(
+                        "boot link-up: gave up waiting for {:?} after 5 minutes — device never appeared",
+                        outstanding
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+
+        // Background: S3 remote endpoint health probes (every 60s tick; each
+        // remote is actually probed every ~5min with per-remote jitter — see
+        // storage::s3_health). run_due_probes builds its own current-thread
+        // runtime for the S3 calls, so it must run via spawn_blocking, not
+        // inline on the Tokio workers. Alert edges (outage after 3 misses,
+        // recovery) come back as values and are dispatched here, where
+        // awaiting send_local_alert is possible. First round waits 90s so a
+        // booting node isn't declared an outage while the network settles.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(90)).await;
+            loop {
+                match tokio::task::spawn_blocking(storage::s3_health::run_due_probes).await {
+                    Ok(alerts) => {
+                        for alert in alerts {
+                            // Outages at warn, recoveries at info — the
+                            // journal tells the story even with no alert
+                            // channels configured.
+                            if alert.recovered {
+                                tracing::info!("{}", alert.title);
+                            } else {
+                                tracing::warn!("{}", alert.title);
+                            }
+                            crate::alerting::send_local_alert(
+                                crate::alerting::AlertCategory::Threshold,
+                                &alert.title,
+                                &alert.body,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(e) => {
+                        // A panic inside run_due_probes surfaces as a
+                        // JoinError — log it so the probe loop's death is
+                        // visible, and keep looping (each round respawns).
+                        tracing::error!("s3_health::run_due_probes panicked: {}", e);
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+
+        // Background: S3 bucket-sync scheduler (every 60s). due_jobs_and_alerts
+        // is a cheap config read + schedule arithmetic; each due job's rclone
+        // pass runs on its own blocking thread (a pass can take hours — the
+        // engine's in-process single-flight stops the next tick doubling it
+        // up, and back-to-back schedules key off the previous pass's END).
+        // Lag alerts ("job hasn't succeeded in 3× its cadence") dispatch here.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            loop {
+                let (due, alerts) = storage::s3_sync::due_jobs_and_alerts();
+                for alert in alerts {
+                    tracing::warn!("{}", alert.title);
+                    crate::alerting::send_local_alert(
+                        crate::alerting::AlertCategory::Threshold,
+                        &alert.title,
+                        &alert.body,
+                    )
+                    .await;
+                }
+                for job_id in due {
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = storage::s3_sync::run_job(&job_id) {
+                            // "already running" lands here harmlessly if a
+                            // manual run raced the tick; real failures are
+                            // in the job's run record too.
+                            tracing::warn!("s3-sync scheduled run: {}", e);
+                        }
+                    });
+                }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+
         // Background: reclaim staging left by backups that died before they
         // could clean up (crash, OOM kill, restart mid-archive). Runs once
         // shortly after boot — which is when a node that filled its disk
