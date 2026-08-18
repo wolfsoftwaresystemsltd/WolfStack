@@ -2489,7 +2489,7 @@ function selectServerView(nodeId, view) {
         }
     }
     if (view === 'vms') loadVms().finally(() => hidePageLoadingOverlay(el));
-    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadS3RemotesHealthCard(), loadZfsStatus(), loadDiskInfo(), loadGlusterStatus(), loadDriveHealthCard()]).finally(() => hidePageLoadingOverlay(el));
+    if (view === 'storage') Promise.all([loadStorageProviders(), loadStorageMounts(), loadS3RemotesHealthCard().then(() => loadSyncJobsCard()), loadZfsStatus(), loadDiskInfo(), loadGlusterStatus(), loadDriveHealthCard()]).finally(() => hidePageLoadingOverlay(el));
     if (view === 'shares') { _gwClusterMode = null; gwLoad().finally(() => hidePageLoadingOverlay(el)); }
     if (view === 'syslogs') { loadSystemLogs(); hidePageLoadingOverlay(el); }
     if (view === 'files') { if (!window._skipFileReset) { containerFileMode = null; currentFilePath = '/'; } window._skipFileReset = false; loadFiles().finally(() => hidePageLoadingOverlay(el)); }
@@ -11075,8 +11075,7 @@ async function loadSyncJobsCard() {
         let stateDot, stateText, stateColor;
         if (j.running) {
             stateDot = '↻'; stateColor = 'var(--accent-light, #f87171)';
-            const startedSecs = last && !last.ended_epoch ? '' : '';
-            stateText = 'running' + startedSecs;
+            stateText = 'running';
         } else if (!j.enabled) {
             stateDot = '⏸'; stateText = 'paused'; stateColor = 'var(--text-muted)';
         } else if (last && !last.ok) {
@@ -45509,6 +45508,17 @@ function _startUpgradeTracking() {
     // id and the upgrade would be invisible in the log.
     trackers.forEach(function(t) {
         if (t.done) return;
+        // A tracker this old is not an upgrade in progress — the in-loop
+        // heuristics complete within 1h. It's a leftover (typically the node
+        // was deleted from the cluster mid-tracking, which used to spin
+        // "reconnecting..." forever and resurrect the task entry on every
+        // page load, even after the operator cleared the task log). Retire
+        // it silently — recreating an entry just to say so would put the
+        // ghost row back.
+        if (Date.now() - t.startedAt > 2 * 3600 * 1000) {
+            t.done = true;
+            return;
+        }
         var existing = t.taskId && _taskLogEntries.find(function (e) { return e.id === t.taskId; });
         if (!existing) {
             t.taskId = addTaskLogEntry({
@@ -45533,11 +45543,30 @@ function _startUpgradeTracking() {
             var elapsed = Math.floor((Date.now() - t.startedAt) / 1000);
             var timeStr = elapsed >= 60 ? Math.floor(elapsed/60) + 'm ' + (elapsed%60) + 's' : elapsed + 's';
 
-            if (!currentNode || allNodes.length === 0) {
+            if (allNodes.length === 0) {
+                // Node list not loaded yet — can't tell anything, keep waiting.
                 if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — reconnecting... (' + timeStr + ')', status: 'running' });
                 pending++;
                 return;
             }
+            if (!currentNode) {
+                // The node list IS loaded and the node isn't in it: it was
+                // removed from the cluster (a deleted node never reappears,
+                // unlike an offline one, which stays listed). A few
+                // consecutive misses guard against catching allNodes
+                // mid-rebuild; then stop tracking with a visible final state
+                // instead of spinning "reconnecting..." forever.
+                t.missingTicks = (t.missingTicks || 0) + 1;
+                if (t.missingTicks >= 6) {
+                    t.done = true;
+                    if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — node removed from cluster; upgrade tracking stopped', status: 'stopped' });
+                } else {
+                    if (t.taskId) updateTaskLogEntry(t.taskId, { description: t.hostname + ' — reconnecting... (' + timeStr + ')', status: 'running' });
+                    pending++;
+                }
+                return;
+            }
+            t.missingTicks = 0;
 
             if (currentNode.is_self && currentNode.online && elapsed > 10) {
                 // Local node — if we're running, the upgrade is done (we restarted)
