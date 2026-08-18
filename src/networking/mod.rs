@@ -649,15 +649,21 @@ fn detect_vlan(name: &str, entry: &serde_json::Value) -> (bool, Option<u32>, Opt
 fn get_link_speed(name: &str) -> Option<String> {
     let path = format!("/sys/class/net/{}/speed", name);
     std::fs::read_to_string(&path).ok()
-        .and_then(|s| {
-            let speed = s.trim().parse::<i64>().ok()?;
-            if speed <= 0 { return None; }
-            if speed >= 1000 {
-                Some(format!("{}Gb/s", speed / 1000))
-            } else {
-                Some(format!("{}Mb/s", speed))
-            }
-        })
+        .and_then(|s| format_link_speed(s.trim().parse::<i64>().ok()?))
+}
+
+/// sysfs speed (Mb/s) → display string. Integer division would show a
+/// 2.5GbE NIC (sysfs 2500) as "2Gb/s" — RutgerDiehard, 2026-08-18 — so
+/// non-whole gigabit rates keep their fraction.
+fn format_link_speed(speed: i64) -> Option<String> {
+    if speed <= 0 { return None; }
+    if speed < 1000 {
+        Some(format!("{}Mb/s", speed))
+    } else if speed % 1000 == 0 {
+        Some(format!("{}Gb/s", speed / 1000))
+    } else {
+        Some(format!("{}Gb/s", speed as f64 / 1000.0))
+    }
 }
 
 /// Get driver for an interface
@@ -4722,6 +4728,20 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn ip(s: &str) -> Ipv4Addr { s.parse().unwrap() }
+
+    // ── Link-speed display (RutgerDiehard 2.5GbE regression) ──
+    // sysfs reports Mb/s; 2500 must render as 2.5Gb/s, not 2Gb/s.
+    #[test]
+    fn link_speed_keeps_fractional_gigabit() {
+        assert_eq!(format_link_speed(2500).as_deref(), Some("2.5Gb/s"));
+        assert_eq!(format_link_speed(1000).as_deref(), Some("1Gb/s"));
+        assert_eq!(format_link_speed(2000).as_deref(), Some("2Gb/s"));
+        assert_eq!(format_link_speed(10000).as_deref(), Some("10Gb/s"));
+        assert_eq!(format_link_speed(100).as_deref(), Some("100Mb/s"));
+        // Unplugged/virtual NICs report -1 or 0 → no speed shown.
+        assert_eq!(format_link_speed(-1), None);
+        assert_eq!(format_link_speed(0), None);
+    }
 
     // ── IP-mapping purge marker regression (PapaSchlumpf throughput) ──
     // The FORWARD conntrack-ACCEPT rule accumulated to ~10k because the
