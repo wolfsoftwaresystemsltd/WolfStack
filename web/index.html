@@ -6816,6 +6816,11 @@
                         <div style="margin-top:20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
                             <button class="btn btn-primary" onclick="saveDockerUpdatesConfig()"><span class="ws-icon-clean-wrap" data-icon="save"></span> Save Settings</button>
                             <button class="btn" onclick="pushDockerUpdatesToCluster(this)" title="Force these saved settings onto every other node in the cluster. Use after upgrading all your hosts so they all start watching for image updates.">Push to all nodes</button>
+                            <!-- The watcher sweeps on its own six-hourly slot, so
+                                 enabling it (or pushing settings) shows nothing
+                                 until then. This runs a sweep on the selected
+                                 node right now. -->
+                            <button class="btn" onclick="dockerUpdatesCheckNow(this)" title="Check every container on the selected node for a newer image right now, instead of waiting for the next scheduled sweep.">Check for updates now</button>
                         </div>
                         <small style="color:var(--text-muted);display:block;margin-top:6px;max-width:640px;">"Save Settings" only syncs the other cluster nodes when you actually <em>change</em> a setting. After upgrading a whole cluster, click <strong>Push to all nodes</strong> to force every host onto these settings — otherwise nodes stay on their old (often disabled) config and never show image-update flags.</small>
 

@@ -146,6 +146,15 @@ struct Cli {
     #[arg(long)]
     show_token: bool,
 
+    /// Switch an unused portmapper (rpcbind) off and exit. Run by setup.sh
+    /// after the package step: `nfs-common` (needed to mount NFS shares) pulls
+    /// rpcbind in as a dependency, and its socket unit listens on 0.0.0.0:111
+    /// — a public-facing host then answers portmapper queries from the whole
+    /// internet, which is a 7-28x UDP amplification vector (CERT TA14-017A).
+    /// Refuses, and says why, on a host that actually uses RPC.
+    #[arg(long)]
+    secure_rpcbind: bool,
+
     /// Run in agent-only mode — exposes the cluster API for a master node to
     /// proxy through, but does NOT serve the management SPA. Use this on
     /// every node except the one you want to log into. Persisted via the
@@ -423,6 +432,27 @@ async fn main() -> std::io::Result<()> {
         let token = api::load_join_token();
         println!("{}", token);
         return Ok(());
+    }
+
+    // --secure-rpcbind: close an open portmapper and exit. One implementation
+    // shared with the inbox's one-click action (predictive::rpcbind) rather
+    // than a second copy of the same decision in shell.
+    if cli.secure_rpcbind {
+        let usage = predictive::rpcbind::inspect();
+        match predictive::rpcbind::lock_down() {
+            Ok(msg) => {
+                println!("{}", msg);
+                return Ok(());
+            }
+            Err(e) => {
+                // Not a fatal install error: the host needs RPC, or systemd
+                // refused. Say what was found and what to do instead, and exit
+                // non-zero so a script can tell the difference.
+                eprintln!("rpcbind left as it is: {}", e);
+                eprintln!("what was found: {}", usage.summary());
+                std::process::exit(1);
+            }
+        }
     }
 
     // --wolfrouter-recover: print recovery snapshots and exit. Used
@@ -1108,6 +1138,7 @@ async fn main() -> std::io::Result<()> {
             password_reset_tokens: Arc::new(auth::PasswordResetTokens::new()),
             oidc_pending_flows: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             image_watcher_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            image_watcher_wake: Arc::new(tokio::sync::Notify::new()),
             integrations: Arc::new(crate::integrations::IntegrationState::new(&cluster_secret)),
             router: Arc::new(crate::networking::router::RouterState::new()),
             predictive_proposals: predictive_proposals.clone(),
@@ -3159,6 +3190,7 @@ async fn main() -> std::io::Result<()> {
         // the operator has a full audit trail.
         {
             let iw_cache = app_state.image_watcher_cache.clone();
+            let iw_wake = app_state.image_watcher_wake.clone();
             tokio::spawn(async move {
                 use crate::containers::image_watcher as iw;
                 tokio::time::sleep(Duration::from_secs(120)).await;
@@ -3308,7 +3340,17 @@ async fn main() -> std::io::Result<()> {
                     let delay = crate::containers::image_watcher::secs_until_next_slot(
                         interval, now_unix,
                     );
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                    // Sleep to the slot OR until something asks for a sweep now
+                    // (settings enabled, "Check for updates now", a reconcile
+                    // that adopted a newer cluster rev). Without the wake arm,
+                    // enabling the watcher produced no results for up to six
+                    // hours — the floor on the interval — and looked broken.
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                        _ = iw_wake.notified() => {
+                            tracing::info!("image_watcher: woken early — running a sweep now");
+                        }
+                    }
                 }
             });
         }
@@ -3324,10 +3366,13 @@ async fn main() -> std::io::Result<()> {
         {
             let iw_rec_cluster = app_state.cluster.clone();
             let iw_rec_secret = app_state.cluster_secret.clone();
+            let iw_rec_wake = app_state.image_watcher_wake.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(180)).await;
                 loop {
-                    api::image_watcher_reconcile_from_peers(&iw_rec_cluster, &iw_rec_secret).await;
+                    api::image_watcher_reconcile_from_peers(
+                        &iw_rec_cluster, &iw_rec_secret, &iw_rec_wake,
+                    ).await;
                     tokio::time::sleep(Duration::from_secs(600)).await;
                 }
             });

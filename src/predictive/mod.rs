@@ -59,6 +59,9 @@ pub mod cert_expiry;
 pub mod backup_freshness;
 pub mod vm_disk;
 pub mod security_posture;
+/// Switching an unused portmapper off — the action behind
+/// `security_posture`'s rpcbind finding.
+pub mod rpcbind;
 pub mod vulnerability;
 pub mod osv;
 pub mod port_conflict;

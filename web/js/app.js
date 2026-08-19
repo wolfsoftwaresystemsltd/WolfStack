@@ -21566,10 +21566,19 @@ async function updateImageWatcherDisabledNote(resultCount) {
         if (!r.ok) return;
         const cfg = await r.json();
         if (cfg.enabled) {
-            // Enabled but no results yet — first sweep pending (runs within
-            // minutes of boot, then on the staggered interval). Not an error;
-            // stay quiet rather than alarm on every fresh boot.
-            note.style.display = 'none'; note.innerHTML = '';
+            // Enabled, but this node has produced no results. Staying silent
+            // here is what made "I'm not seeing updates for containers on that
+            // host" undiagnosable (RutgerDiehard 2026-08-19): the operator can't
+            // tell a pending first sweep from a broken one, and the sweep can be
+            // up to six hours away because the loop is phase-locked to a stagger
+            // slot. Say which state it is, and offer the sweep.
+            note.style.display = 'block';
+            note.innerHTML = `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-left:3px solid #3b82f6;border-radius:6px;background:var(--bg-input);color:var(--text-secondary);font-size:13px;">
+                <span class="ws-icon-clean-wrap" data-icon="updates" style="color:#3b82f6;"></span>
+                <span>Image update checks are <strong>on for this node</strong> but it hasn't completed a sweep yet — they run on a staggered schedule, so the first one can be hours away.
+                <a href="#" onclick="imageWatcherCheckNowHere(this); return false;" style="color:var(--accent);">Check now</a>,
+                or open <a href="#" onclick="openDockerUpdatesSettings(currentNodeId); return false;" style="color:var(--accent);">Image update settings</a>.</span>
+            </div>`;
             return;
         }
         note.style.display = 'block';
@@ -21583,6 +21592,31 @@ async function updateImageWatcherDisabledNote(resultCount) {
         // no manual pass needed.
     } catch (e) { /* silent — note is best-effort */ }
 }
+
+/// "Check now" from the containers page banner. Uses the PAGE scope (apiUrl),
+/// so it sweeps the node whose containers are on screen — not whichever node the
+/// settings panel happens to be configuring.
+async function imageWatcherCheckNowHere(link) {
+    const orig = link ? link.textContent : '';
+    if (link) { link.textContent = 'Checking…'; link.style.pointerEvents = 'none'; }
+    try {
+        const r = await fetch(apiUrl('/api/image-watcher/check-now'), { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            showToast(`Check failed: ${d.error || `HTTP ${r.status}`}`, 'error');
+            return;
+        }
+        showToast(`${d.checked} container(s) checked · ${d.updates_available} update(s) available`
+            + (d.errors > 0 ? ` · ${d.errors} check(s) failed` : ''),
+            d.errors > 0 ? 'error' : 'success', 8000);
+        fetchImageUpdateStatus();
+    } catch (e) {
+        showToast(`Check failed: ${e.message || e}`, 'error');
+    } finally {
+        if (link) { link.textContent = orig; link.style.pointerEvents = ''; }
+    }
+}
+window.imageWatcherCheckNowHere = imageWatcherCheckNowHere;
 
 function applyImageUpdateBadges() {
     document.querySelectorAll('[data-image-update-badge]').forEach(el => {
@@ -22028,10 +22062,15 @@ async function saveDockerUpdatesConfig() {
         // hosts. Error toasts don't auto-dismiss, so the operator can read the
         // list and re-save to retry.
         const d = await r.json().catch(() => ({}));
-        const failed = Array.isArray(d.peers) ? d.peers.filter(p => !p.ok) : [];
-        if (failed.length > 0) {
-            const names = failed.map(p => p.hostname || p.address).join(', ');
-            showToast(`Settings saved here, but ${failed.length} node(s) did not apply them: ${names}. Those hosts may show stale image-update flags until reachable — re-save to retry.`, 'error');
+        const peers = Array.isArray(d.peers) ? d.peers : [];
+        const failed = peers.filter(p => !p.ok && !p.skipped);
+        const skipped = peers.filter(p => p.skipped);
+        if (failed.length > 0 || skipped.length > 0) {
+            const lines = [
+                ...failed.map(p => `${p.hostname || p.address} — ${p.error || 'did not apply'}`),
+                ...skipped.map(p => `${p.hostname || p.address} — ${p.skipped}`),
+            ];
+            showToast(`Settings saved here, but ${lines.length} node(s) did not take them: ${lines.join('; ')}. Those hosts show stale image-update flags until they do.`, 'error');
         } else {
             const cluster = dockerUpdatesScopeCluster();
             showToast(cluster ? `Docker Updates settings saved for cluster "${cluster}"` : 'Docker Updates settings saved', 'success');
@@ -22058,16 +22097,31 @@ async function pushDockerUpdatesToCluster(btn) {
         }
         const d = await r.json().catch(() => ({}));
         const peers = Array.isArray(d.peers) ? d.peers : [];
-        const failed = peers.filter(p => !p.ok);
+        // A skipped peer carries ok:false because it did not take the settings,
+        // but it is NOT a failure — it was never asked. Counting it as one made
+        // the toast contradict itself ("did NOT apply on wolf6" for a node that
+        // was simply offline).
+        const failed = peers.filter(p => !p.ok && !p.skipped);
         const cluster = dockerUpdatesScopeCluster();
         const clusterSuffix = cluster ? ` in cluster "${cluster}"` : '';
-        if (peers.length === 0) {
-            showToast(`No other nodes to push to${clusterSuffix} — these settings apply to that node only.`, 'info');
+        // Peers the backend deliberately did not ask (offline, or in another
+        // cluster) come back as `skipped`. They used to be omitted entirely,
+        // which is how "pushed to 5 of my 6 nodes" became a mystery.
+        const skipped = peers.filter(p => p.skipped);
+        const asked = peers.filter(p => !p.skipped);
+        const skippedNote = skipped.length
+            ? ` Not pushed to ${skipped.length}: ${skipped.map(p => `${p.hostname || p.address} — ${p.skipped}`).join('; ')}.`
+            : '';
+        if (asked.length === 0) {
+            showToast(`No other nodes to push to${clusterSuffix}.${skippedNote}`,
+                skipped.length ? 'error' : 'info', skipped.length ? 0 : 5000);
         } else if (failed.length > 0) {
             const names = failed.map(p => `${p.hostname || p.address} (${p.error || 'failed'})`).join('; ');
-            showToast(`Pushed to ${peers.length - failed.length}/${peers.length} node(s). Did NOT apply on: ${names}. Those hosts keep their old settings until reachable — retry when they're back.`, 'error');
+            showToast(`Pushed to ${asked.length - failed.length}/${asked.length} node(s). Did NOT apply on: ${names}. Those hosts keep their old settings until reachable — retry when they're back.${skippedNote}`, 'error');
+        } else if (skipped.length) {
+            showToast(`Settings pushed to all ${asked.length} reachable node(s)${clusterSuffix}.${skippedNote}`, 'error');
         } else {
-            showToast(`Settings pushed to all ${peers.length} node(s)${clusterSuffix}. They pick up the new config on their next watch cycle — no restart needed.`, 'success');
+            showToast(`Settings pushed to all ${asked.length} node(s)${clusterSuffix}. They start checking within a minute — no restart needed.`, 'success');
         }
     } catch (e) {
         showToast('Push to cluster failed: ' + (e.message || e), 'error');
@@ -22076,9 +22130,46 @@ async function pushDockerUpdatesToCluster(btn) {
     }
 }
 
+/// Sweep every container on the selected node for newer images right now.
+///
+/// The background watcher runs on a stagger slot with the interval floored at
+/// six hours and only re-reads `enabled` when it wakes, so enabling it — or
+/// pushing settings to a node — produced nothing for hours, and editing a
+/// setting to "kick off a cycle" never did anything at all (RutgerDiehard
+/// 2026-08-19). This is the missing action; the backend also wakes the loop so
+/// its auto-apply pass isn't hours away either.
+async function dockerUpdatesCheckNow(btn) {
+    const orig = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = 'Checking…'; }
+    const scoped = dockerUpdatesScopeNode();
+    const where = scoped ? ` on ${scoped.hostname || scoped.address}` : '';
+    try {
+        const r = await fetch(dockerUpdatesApiUrl('/api/image-watcher/check-now'), { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            showToast(`Check failed${where}: ${d.error || `HTTP ${r.status}`}`, 'error');
+            return;
+        }
+        const parts = [`${d.checked} container(s) checked${where}`];
+        parts.push(d.updates_available === 1 ? '1 update available' : `${d.updates_available} updates available`);
+        if (d.errors > 0) parts.push(`${d.errors} check(s) failed — see the container rows for details`);
+        showToast(parts.join(' · '), d.errors > 0 ? 'error' : 'success', 8000);
+        // Refresh the badges only when the sweep ran on the node whose
+        // containers the page is showing — fetchImageUpdateStatus() follows the
+        // PAGE scope, so calling it after sweeping a remote node would reload
+        // the wrong host's results.
+        if (!scoped && typeof fetchImageUpdateStatus === 'function') fetchImageUpdateStatus();
+    } catch (e) {
+        showToast(`Check failed${where}: ${e.message || e}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    }
+}
+
 window.loadDockerUpdatesSettings = loadDockerUpdatesSettings;
 window.saveDockerUpdatesConfig = saveDockerUpdatesConfig;
 window.pushDockerUpdatesToCluster = pushDockerUpdatesToCluster;
+window.dockerUpdatesCheckNow = dockerUpdatesCheckNow;
 window.onDockerUpdatesScopeChange = onDockerUpdatesScopeChange;
 window.openDockerUpdatesSettings = openDockerUpdatesSettings;
 
@@ -75799,7 +75890,7 @@ function predictiveExpandedBody(p) {
             ${linksHtml}
         </div>
     `;}).join('');
-    const remediation = predictiveRemediationHtml(p.remediation, p.id);
+    const remediation = predictiveRemediationHtml(p.remediation, p.id, p);
 
     let snoozeNotice = '';
     if (p.status && p.status.kind === 'snoozed') {
@@ -76128,8 +76219,35 @@ function predictiveHistorySvg(data) {
     `;
 }
 
-function predictiveRemediationHtml(r, proposalId) {
+// Findings with a real one-click action behind POST /api/proposals/{id}/apply.
+// The server gates on the same finding type + port-111 resource id and executes
+// a fixed, compiled-in sequence — this list only decides whether the button is
+// drawn, exactly like PRED_AUTOFIX_TYPES mirrors AUTOFIX_FINDING_TYPES.
+// See src/predictive/rpcbind.rs (is_rpcbind_exposure).
+function predictiveOneClickAction(p) {
+    if (!p || p.finding_type !== 'service_bound_publicly') return null;
+    const rid = (p.scope && p.scope.resource_id) || '';
+    const port = rid.split('/')[0].split(':').pop();
+    if (port !== '111') return null;
+    return {
+        label: 'Switch rpcbind off',
+        confirm: 'Switch rpcbind off on this host?\n\n'
+            + 'WolfStack will first check that nothing is using RPC — no NFS mounts, no exports, '
+            + 'no NFS server, nothing but the portmapper registered — and refuse if anything is. '
+            + 'Both units are then stopped and masked, which closes port 111.\n\n'
+            + 'Publishing an NFS share through WolfStack turns it back on automatically.',
+    };
+}
+
+function predictiveRemediationHtml(r, proposalId, p) {
     if (!r) return '';
+    const oneClick = predictiveOneClickAction(p);
+    const oneClickHtml = oneClick ? `
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;background:var(--bg-tertiary,#2d2f3a);border-radius:6px;">
+            <button class="btn btn-sm btn-primary" style="font-size:11px;padding:3px 10px;"
+                onclick="predictiveApplyOneClick('${escapeAttr(proposalId)}', this)">${escapeHtml(oneClick.label)}</button>
+            <span style="font-size:11px;color:var(--text-muted);">Checks nothing needs RPC first, then stops and masks both units.</span>
+        </div>` : '';
     if (r.kind === 'manual') {
         const cmds = (r.commands || []).map((cmd, idx) => {
             // Comments and informational lines (lines starting with `#`)
@@ -76149,12 +76267,48 @@ function predictiveRemediationHtml(r, proposalId) {
             <div style="background:var(--bg-secondary,#16181f);padding:12px;border-radius:8px;margin-bottom:12px;border:1px solid var(--border-color,#2d2f3a);">
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Suggested remediation</div>
                 <div style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;">${escapeHtml(r.instructions)}</div>
+                ${oneClickHtml}
                 ${cmds}
             </div>
         `;
     }
-    return `<div style="font-size:12px;color:var(--text-muted);font-style:italic;margin-bottom:12px;">[Remediation kind "${escapeHtml(r.kind)}" — UI pending]</div>`;
+    return oneClickHtml
+        + `<div style="font-size:12px;color:var(--text-muted);font-style:italic;margin-bottom:12px;">[Remediation kind "${escapeHtml(r.kind)}" — UI pending]</div>`;
 }
+
+/// Run a finding's one-click action. A refusal (409 — the host turns out to need
+/// the service) is shown in a blocking dialog rather than a toast: it means the
+/// exposure is still open and the operator has to do something else about it, so
+/// it must not fade away unread.
+async function predictiveApplyOneClick(proposalId, btn) {
+    const p = (predictiveState.proposals || []).find(x => x.id === proposalId);
+    const action = predictiveOneClickAction(p);
+    if (!action) { showToast('This finding has no one-click action', 'error'); return; }
+    if (!await wolfConfirm(action.confirm, action.label, { okText: action.label })) return;
+    const orig = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = 'Applying…'; }
+    try {
+        const r = await fetch(`/api/proposals/${encodeURIComponent(proposalId)}/apply`, { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            // OK-only dialog, not a toast: the port is still open and the
+            // operator has to act on the reason (usually "firewall 111 to your
+            // storage network instead"), so it must stay on screen until read.
+            showModal(
+                (d.error || `HTTP ${r.status}`)
+                + '\n\nThe finding stays open — nothing was changed.',
+                'rpcbind left as it is');
+            return;
+        }
+        showToast(d.message || 'Applied', 'success', 8000);
+        if (typeof predictiveLoad === 'function') predictiveLoad();
+    } catch (e) {
+        showToast(`Apply failed: ${e.message || e}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+    }
+}
+window.predictiveApplyOneClick = predictiveApplyOneClick;
 
 /// Embedded terminal for the Predictive Inbox right pane.
 ///

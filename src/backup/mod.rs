@@ -456,6 +456,76 @@ mod tests {
         assert!(!members.contains("plex"), "plex MUST be excluded but was present:\n{}", members);
     }
 
+    /// klas 2026-08-19: a large Docker container's backup filled the system
+    /// drive, failed, and left its partial archive in staging. The guard now
+    /// refuses before writing — these pin the arithmetic it refuses on.
+    #[test]
+    fn staging_refuses_only_when_the_archive_plus_headroom_cannot_fit() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // 10 GiB of data needs 10 GiB + 1 GiB headroom.
+        assert_eq!(staging_shortfall(10 * GIB, 12 * GIB), None, "comfortable fit");
+        assert_eq!(staging_shortfall(10 * GIB, 11 * GIB), None, "exactly enough");
+        assert_eq!(
+            staging_shortfall(10 * GIB, 10 * GIB),
+            Some(GIB),
+            "free == data leaves no headroom, so it is short by the headroom",
+        );
+        assert_eq!(staging_shortfall(40 * GIB, 5 * GIB), Some(36 * GIB));
+        // An empty target never blocks.
+        assert_eq!(staging_shortfall(0, 2 * GIB), None);
+        // Absurd sizes must saturate rather than overflow into a pass.
+        assert!(staging_shortfall(u64::MAX, 1024).is_some());
+    }
+
+    #[test]
+    fn excluded_paths_are_not_counted_against_staging() {
+        let root = std::env::temp_dir().join(format!("wsstage-{}", uuid::Uuid::new_v4().simple()));
+        let big = root.join("media");
+        let small = root.join("config");
+        std::fs::create_dir_all(&big).unwrap();
+        std::fs::create_dir_all(&small).unwrap();
+        std::fs::write(big.join("blob"), vec![7u8; 512 * 1024]).unwrap();
+        std::fs::write(small.join("cfg"), b"x").unwrap();
+
+        let total = quick_dir_size_bytes(&root.to_string_lossy());
+        assert!(total > 512 * 1024, "du should see the blob: {}", total);
+
+        // Excluding the big directory takes its bytes off the requirement.
+        let excluded = vec![big.to_string_lossy().to_string()];
+        let after = subtract_excluded_bytes(total, &excluded);
+        assert!(after < total - 400 * 1024, "expected the blob to be discounted: {} -> {}", total, after);
+
+        // A named volume (no leading slash) has no measurable path, so it
+        // discounts nothing rather than silently subtracting zero-sized noise.
+        assert_eq!(subtract_excluded_bytes(total, &["some_volume".to_string()]), total);
+        // Over-subtraction floors at zero instead of wrapping.
+        assert_eq!(subtract_excluded_bytes(1, &excluded), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_refusal_names_the_numbers_and_the_way_out() {
+        // The message is the whole user-facing fix, so its content is asserted:
+        // an operator seeing it must learn what was too big, what was free, and
+        // what to change.
+        let staging = std::env::temp_dir();
+        let free = filesystem_free_bytes(&staging).expect("df should answer for /tmp");
+        let err = ensure_staging_space(
+            "Docker container 'plex'",
+            Some(free.saturating_add(64 * 1024 * 1024 * 1024)),
+            &staging,
+        ).expect_err("an archive 64 GiB larger than free space must be refused");
+        assert!(err.contains("plex"), "must name the target: {}", err);
+        assert!(err.contains("Nothing was written"), "must say no data was staged: {}", err);
+        assert!(err.contains("staging directory"), "must point at the setting: {}", err);
+        assert!(err.contains("exclude the large mounts"), "must offer the exclusion route: {}", err);
+
+        // A target that fits, and an unmeasurable one, both proceed.
+        assert!(ensure_staging_space("tiny", Some(1024), &staging).is_ok());
+        assert!(ensure_staging_space("unknown", None, &staging).is_ok());
+    }
+
     #[test]
     fn classify_folder_excludes_flags_out_of_folder() {
         // Leaf-mode folder: in-folder excludes apply, cross-root ones drop.
@@ -1574,6 +1644,163 @@ fn warn_if_staging_on_memory(path: &Path) {
     });
 }
 
+/// Headroom kept free in staging on top of the archive itself.
+///
+/// The archive is not the only thing that needs the disk while a backup runs:
+/// journald, the containers still serving traffic, and the backup's own metadata
+/// all write to it. Filling a system disk to the last byte takes a host down in
+/// ways a failed backup does not, so the guard reserves a gigabyte it will never
+/// hand out.
+const STAGING_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Bytes actually available on the filesystem holding `dir` (not the total, and
+/// not counting root's reserve — `df` already accounts for both).
+///
+/// `None` when df can't answer, which the caller treats as "don't block": a
+/// backup must not be refused because a size check failed.
+fn filesystem_free_bytes(dir: &Path) -> Option<u64> {
+    let out = Command::new("df")
+        .args(["-B1", "--output=avail"])
+        .arg(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// How many bytes short staging is for an archive of `uncompressed` bytes, or
+/// `None` when it fits.
+///
+/// Compares against the UNCOMPRESSED size and assumes NO compression. That is
+/// deliberate: a container full of media, encrypted volumes or already-gzipped
+/// data compresses by nothing, and this guard exists for the case where staging
+/// sits on the system disk — where being wrong fills the root filesystem and
+/// takes the host with it (klas 2026-08-19: a large Docker container filled the
+/// system drive, the backup failed, and the partial archive was left behind).
+/// A backup that would in fact have compressed to fit is refused with a message
+/// naming both numbers, which is recoverable; a filled root is not.
+fn staging_shortfall(uncompressed: u64, free: u64) -> Option<u64> {
+    let needed = uncompressed.saturating_add(STAGING_HEADROOM_BYTES);
+    (needed > free).then(|| needed - free)
+}
+
+/// Refuse a backup that cannot fit in staging, before a byte is written.
+///
+/// `uncompressed` is the size of what will be archived, as measured from the
+/// source (`du`, `docker inspect -s`, the disk image's own length). `None` means
+/// it could not be measured, and the backup proceeds — a guard that blocks
+/// backups on its own failure to measure would be worse than the problem.
+fn ensure_staging_space(
+    what: &str,
+    uncompressed: Option<u64>,
+    staging: &Path,
+) -> Result<(), String> {
+    let (Some(size), Some(free)) = (uncompressed, filesystem_free_bytes(staging)) else {
+        return Ok(());
+    };
+    let Some(short) = staging_shortfall(size, free) else {
+        // Comfortable case still worth a line in the log: when a backup DOES
+        // fill the disk despite this, the numbers it was working from are the
+        // first thing to look at.
+        info!(
+            "backup: staging {} has {} free for {} of {} data",
+            staging.display(), format_size_human(free), what, format_size_human(size),
+        );
+        return Ok(());
+    };
+    Err(format!(
+        "Not enough room in backup staging: {} holds about {} of data, and {} has {} \
+         free ({} short, including the {} kept free for the rest of the system). \
+         Nothing was written. Either point the backup staging directory (Settings -> \
+         File Locations) at a disk with room, exclude the large mounts from this \
+         target in the backup picker, or free space on that filesystem. Sizes are \
+         measured uncompressed, so a compressible target may well fit once staging \
+         has room.",
+        what,
+        format_size_human(size),
+        staging.display(),
+        format_size_human(free),
+        format_size_human(short),
+        format_size_human(STAGING_HEADROOM_BYTES),
+    ))
+}
+
+/// `total` minus the size of each excluded path, floored at zero.
+///
+/// The excludes are real directories the archive will skip, so counting them
+/// would refuse a backup for data it was never going to stage — the exact reason
+/// the mount-exclusion feature exists (a 4 TB media bind next to a 2 GB config
+/// volume).
+fn subtract_excluded_bytes(total: u64, exclude_mounts: &[String]) -> u64 {
+    let excluded: u64 = exclude_mounts
+        .iter()
+        .map(|e| e.trim())
+        .filter(|e| e.starts_with('/'))   // volume names have no size on their own
+        .map(quick_dir_size_bytes)
+        .sum();
+    total.saturating_sub(excluded)
+}
+
+/// Uncompressed bytes a Docker container's archive will hold: its image +
+/// writable layer (`docker inspect -s`) plus every mount that isn't excluded.
+///
+/// `None` when docker can't be asked at all — the guard then stands down rather
+/// than blocking the backup.
+fn docker_content_bytes(name: &str, exclude_mounts: &[String]) -> Option<u64> {
+    let out = Command::new("docker")
+        .args(["inspect", "-s", "--format", "{{.SizeRootFs}}", name])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let root_fs: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+
+    // Mounts are separate archives inside the wrapper, so they add to it. The
+    // same exclusion list the backup itself honours applies here — otherwise
+    // excluding a 4 TB media bind would still be refused for its size.
+    let mounts = discover_docker_mounts(name).unwrap_or_default();
+    let mount_bytes: u64 = mounts
+        .iter()
+        .filter(|m| !mount_is_excluded(&m.source, exclude_mounts))
+        .map(|m| m.size_bytes)
+        .sum();
+    Some(root_fs.saturating_add(mount_bytes))
+}
+
+/// Uncompressed bytes a native VM's archive will hold.
+///
+/// Two on-disk layouts exist and both are backed up: a per-VM subdirectory
+/// (`vms/<name>/`, used when a VM has extra volumes) and the common flat layout
+/// (`vms/<name>.json` + `vms/<name>.qcow2` beside each other). `None` when
+/// neither can be measured.
+fn vm_content_bytes(name: &str) -> Option<u64> {
+    const VM_BASE: &str = "/var/lib/wolfstack/vms";
+    let dir = format!("{}/{}", VM_BASE, name);
+    if Path::new(&dir).is_dir() {
+        return match quick_dir_size_bytes(&dir) { 0 => None, n => Some(n) };
+    }
+    // Flat layout: every entry whose name is `<name>` or starts with `<name>.`
+    // belongs to this VM (`.json` config, `.qcow2` disks, extra volumes).
+    let prefix = format!("{}.", name);
+    let total: u64 = fs::read_dir(VM_BASE)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            e.file_name().to_str()
+                .map(|f| f == name || f.starts_with(&prefix))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum();
+    (total > 0).then_some(total)
+}
+
 /// Create staging directory
 fn ensure_staging_dir() -> Result<PathBuf, String> {
     let path = PathBuf::from(backup_staging_dir());
@@ -1617,6 +1844,14 @@ impl Drop for DockerRestartGuard {
 
 pub fn backup_docker(name: &str, exclude_mounts: &[String], stop_for_backup: bool) -> Result<(PathBuf, u64, String, Vec<MountInfo>), String> {
     let staging = ensure_staging_dir()?;
+    // Refuse before writing anything if the archive cannot fit: this is the path
+    // that filled a system disk (klas 2026-08-19), because a container's image
+    // plus its volumes and binds all land in staging first.
+    ensure_staging_space(
+        &format!("Docker container '{}'", name),
+        docker_content_bytes(name, exclude_mounts),
+        &staging,
+    )?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("docker-{}-{}.tar.gz", name, timestamp);
     // Guarded from here: every early return below — including the `?` exits
@@ -2056,6 +2291,15 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String], stop_for_backup: bool) 
     }
 
     // Native LXC: tar the container directory (rootfs + config)
+    //
+    // Sized from the container directory itself; excluded mounts are subtracted
+    // because the archive won't contain them either.
+    let lxc_dir = format!("/var/lib/lxc/{}", name);
+    let lxc_bytes = match quick_dir_size_bytes(&lxc_dir) {
+        0 => None, // du couldn't read it — don't block the backup on that
+        total => Some(subtract_excluded_bytes(total, exclude_mounts)),
+    };
+    ensure_staging_space(&format!("LXC container '{}'", name), lxc_bytes, &staging)?;
     let filename = format!("lxc-{}-{}.tar.gz", name, timestamp);
     // Guarded: any error below deletes the half-written archive instead of
     // leaving it in staging forever.
@@ -2529,6 +2773,9 @@ fn backup_vm_native(name: &str) -> Result<(PathBuf, u64), String> {
     }
 
     let staging = ensure_staging_dir()?;
+    // A VM's qcow2 images are the largest thing WolfStack ever stages, so the
+    // space check matters most here.
+    ensure_staging_space(&format!("VM '{}'", name), vm_content_bytes(name), &staging)?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     let filename = format!("vm-{}-{}.tar.gz", name, timestamp);
     // Guarded: any error below deletes the half-written archive instead of
@@ -2968,6 +3215,11 @@ fn folder_exclude_pattern(raw: &str, src: &str, leaf: &str, contents_only: bool)
 pub fn backup_system_path(label: &str, path: &str, exclude_mounts: &[String]) -> Result<(PathBuf, u64), String> {
     validate_system_path(path)?;
     let staging = ensure_staging_dir()?;
+    let folder_bytes = match quick_dir_size_bytes(path) {
+        0 => None,
+        total => Some(subtract_excluded_bytes(total, exclude_mounts)),
+    };
+    ensure_staging_space(&format!("folder '{}'", path), folder_bytes, &staging)?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
     // Filename uses the SAME `systempath-` prefix the scanner/guesser key off.
     let safe_label = sanitize_archive_name(if label.trim().is_empty() {

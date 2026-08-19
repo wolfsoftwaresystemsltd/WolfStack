@@ -262,10 +262,12 @@ fn scan_listening_services(out: &mut Vec<DependencyCheck>) {
             if *rp != port { continue; }
             let name = format!("{}/{} exposed — {}", proto, port, service);
             let detail = format!("{} Listening on {}.", reason, local);
-            // rpcbind has no bind-address option, so the generic advice
-            // would be a dead end. On a host with no NFS it is not needed
-            // at all — mask BOTH units, because the socket unit is what
-            // actually holds port 111.
+            // The generic "bind it to 127.0.0.1" advice is a dead end here:
+            // rpcbind's `-h` option (see /etc/default/rpcbind) restricts UDP
+            // binds only — TCP/111 comes from `rpcbind.socket`'s ListenStream,
+            // so narrowing -h leaves the TCP listener wide open. On a host with
+            // no NFS rpcbind isn't needed at all, so mask BOTH units; the socket
+            // unit is the one that actually holds port 111.
             let fix = Some(if port == 111 {
                 "Check nothing uses RPC first:\n  rpcinfo -p 127.0.0.1\n  mount | grep 'type nfs'\nIf only 'portmapper' is registered and there are no NFS mounts, switch it off:\n  systemctl stop rpcbind.socket rpcbind.service\n  systemctl mask rpcbind.socket rpcbind.service\nIf you DO serve NFS, firewall 111 to your storage network instead."
                     .to_string()

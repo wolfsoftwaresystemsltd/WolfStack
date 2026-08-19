@@ -2850,6 +2850,30 @@ fi
 
 echo "✓ wolfstack installed to /usr/local/bin/wolfstack"
 
+# ─── Close an open portmapper (rpcbind) ─────────────────────────────────────
+# We install nfs-common/nfs-utils above so WolfStack can mount NFS shares, and
+# on every distro that pulls in rpcbind as a dependency. Its socket unit binds
+# 0.0.0.0:111 (tcp AND udp), so a host with a public IP and no firewall then
+# answers portmapper queries from the whole internet — a 7-28x UDP amplification
+# vector (CERT TA14-017A) that national CERTs scan for and report to the hosting
+# provider's abuse desk rather than to the operator. That is exactly how ours was
+# found: a BSI notice forwarded by Hetzner, four days after the host was built.
+#
+# The binary makes the call (`--secure-rpcbind`) so the "is anything actually
+# using RPC?" decision lives in one place, shared with the inbox's one-click fix.
+# It refuses on a host that serves or mounts NFS, and publishing an NFS share
+# through WolfStack unmasks rpcbind again — so this only ever closes a port
+# nothing was using.
+echo ""
+echo "Checking for an exposed portmapper (rpcbind)..."
+if RPCBIND_RESULT=$(/usr/local/bin/wolfstack --secure-rpcbind 2>&1); then
+    echo "  ✓ $RPCBIND_RESULT"
+else
+    echo "  • rpcbind left as it is:"
+    printf '    %s\n' "$RPCBIND_RESULT"
+    echo "    If port 111 is reachable from the internet, firewall it to your storage network."
+fi
+
 # ─── Drop a local copy of uninstall.sh ──────────────────────────────────────
 # Adam Cogswell's feedback: when DNS or networking gets broken (e.g. dnsmasq
 # vs Technitium collision) the user can't curl uninstall.sh to recover.
