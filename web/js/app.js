@@ -21547,7 +21547,41 @@ async function fetchImageUpdateStatus() {
             }
         }
         applyImageUpdateBadges();
+        updateImageWatcherDisabledNote(arr.length);
     } catch (e) { /* silent — image watcher may be disabled */ }
+}
+
+// An empty status list has two very different causes — the watcher is
+// disabled on this node, or it simply hasn't completed its first sweep —
+// and the operator can't tell them apart from a blank page. Rutger ran a
+// fleet where the newer nodes silently had the watcher off and read the
+// absence of badges as "no updates available" for weeks. Say which case
+// it is, in the page, where the badges would have been.
+async function updateImageWatcherDisabledNote(resultCount) {
+    const note = document.getElementById('image-watcher-disabled-note');
+    if (!note) return;
+    if (resultCount > 0) { note.style.display = 'none'; note.innerHTML = ''; return; }
+    try {
+        const r = await fetch(apiUrl('/api/image-watcher/config'));
+        if (!r.ok) return;
+        const cfg = await r.json();
+        if (cfg.enabled) {
+            // Enabled but no results yet — first sweep pending (runs within
+            // minutes of boot, then on the staggered interval). Not an error;
+            // stay quiet rather than alarm on every fresh boot.
+            note.style.display = 'none'; note.innerHTML = '';
+            return;
+        }
+        note.style.display = 'block';
+        note.innerHTML = `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-left:3px solid #f59e0b;border-radius:6px;background:var(--bg-input);color:var(--text-secondary);font-size:13px;">
+            <span class="ws-icon-clean-wrap" data-icon="updates" style="color:#f59e0b;"></span>
+            <span>Docker image update checks are <strong>disabled on this node</strong> — containers here get no update notifications. Enable them in
+            <a href="#" onclick="selectView('settings'); setTimeout(() => { switchSettingsTab('alerts'); switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings(); }, 60); return false;" style="color:var(--accent);">Image update settings</a>,
+            or use &quot;Push to Cluster&quot; from a node where they already work.</span>
+        </div>`;
+        // Icon spans hydrate via the observeForDataIcons MutationObserver —
+        // no manual pass needed.
+    } catch (e) { /* silent — note is best-effort */ }
 }
 
 function applyImageUpdateBadges() {
