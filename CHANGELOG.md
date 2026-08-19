@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.16.1: installs stop leaving an open portmapper, and a backup can no longer fill the system disk** _(2026-08-19 — [`1576015c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1576015cf7ebf497b583b6d7ca24e80ea57e6bcc))_
 - **v25.16.0: weekly/monthly backups pick their run day, and "back up everything" stops discarding cold-backup ticks** _(2026-08-19 — [`a59705d5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a59705d5c656e702f1569e728e653ed12df3ac33))_
 - **v25.15.4: image-watcher settings now converge on every cluster node** _(2026-08-19 — [`290eea80`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/290eea80f090deeafaddddb848514843b2efc4ba))_
 - **v25.15.3: AI chat works with newer Claude models that emit thinking blocks** _(2026-08-19 — [`85d0529b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/85d0529b8c0836c9ca978502b770438d412970cf))_
