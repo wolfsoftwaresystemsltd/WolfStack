@@ -3637,10 +3637,102 @@ async fn call_claude(
     let json: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| format!("Claude JSON error: {}", e))?;
 
-    json["content"][0]["text"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("Unexpected Claude response format: {}", text))
+    claude_text_from_response(&json).ok_or_else(|| {
+        let stop_reason = json["stop_reason"].as_str().unwrap_or("unknown");
+        let preview: String = text.chars().take(200).collect();
+        format!(
+            "Claude response contained no text blocks (stop_reason: {}, body starts: {})",
+            stop_reason, preview
+        )
+    })
+}
+
+/// Extract the assistant text from a Claude /v1/messages response.
+///
+/// Newer Claude models emit a `thinking` block *before* the `text`
+/// block in the `content` array, so `content[0]["text"]` is no longer
+/// a valid way to read the reply — it hits the thinking block, fails,
+/// and (pre-fix) dumped the entire raw response JSON into the chat
+/// window (Mancolt's Discord report, 2026-08-19). Walk every block,
+/// keep only `type == "text"`, and join them; all non-text block
+/// types (thinking, redacted_thinking, tool_use, …) are skipped.
+///
+/// Returns None when the content array holds no text blocks at all
+/// (e.g. max_tokens exhausted mid-thinking) so the caller can build
+/// a diagnostic error instead of showing an empty reply.
+fn claude_text_from_response(json: &serde_json::Value) -> Option<String> {
+    let blocks = json["content"].as_array()?;
+    let pieces: Vec<&str> = blocks
+        .iter()
+        .filter(|b| b["type"].as_str() == Some("text"))
+        .filter_map(|b| b["text"].as_str())
+        .collect();
+    if pieces.is_empty() {
+        return None;
+    }
+    Some(pieces.join("\n"))
+}
+
+#[cfg(test)]
+mod claude_response_tests {
+    use super::*;
+
+    #[test]
+    fn plain_text_response() {
+        let j = serde_json::json!({
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+        });
+        assert_eq!(claude_text_from_response(&j).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn thinking_block_before_text() {
+        // The shape from Mancolt's report: newer Claude models put a
+        // thinking block first, then the text block.
+        let j = serde_json::json!({
+            "content": [
+                {"type": "thinking", "thinking": "reasoning…", "signature": "sig"},
+                {"type": "text", "text": "Let me check your current resource headroom first."},
+            ],
+            "stop_reason": "end_turn",
+        });
+        assert_eq!(
+            claude_text_from_response(&j).as_deref(),
+            Some("Let me check your current resource headroom first.")
+        );
+    }
+
+    #[test]
+    fn multiple_text_blocks_joined() {
+        let j = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "part one"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "part two"},
+            ],
+        });
+        assert_eq!(claude_text_from_response(&j).as_deref(), Some("part one\npart two"));
+    }
+
+    #[test]
+    fn thinking_only_returns_none() {
+        // max_tokens exhausted while still thinking — no text block.
+        let j = serde_json::json!({
+            "content": [{"type": "thinking", "thinking": "…", "signature": "sig"}],
+            "stop_reason": "max_tokens",
+        });
+        assert_eq!(claude_text_from_response(&j), None);
+    }
+
+    #[test]
+    fn missing_or_non_array_content_returns_none() {
+        assert_eq!(claude_text_from_response(&serde_json::json!({})), None);
+        assert_eq!(
+            claude_text_from_response(&serde_json::json!({"content": "oops"})),
+            None
+        );
+    }
 }
 
 async fn call_gemini(
