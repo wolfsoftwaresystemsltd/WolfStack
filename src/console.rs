@@ -336,6 +336,13 @@ async fn console_session(
             // nfs-kernel-server (service: nfs-server or nfs-kernel-server
             // depending on version), Red Hat uses nfs-utils (service:
             // nfs-server), Arch uses nfs-utils (service: nfs-server).
+            //
+            // rpcbind is unmasked first: the installer masks it on hosts that
+            // don't use RPC, because its socket unit binds 0.0.0.0:111 and an
+            // open portmapper on a public IP is a UDP amplification reflector
+            // (see `predictive::rpcbind`). `nfs-server.service` wants
+            // `rpcbind.socket`, so without the unmask this install would enable
+            // a server that can't register mountd.
             let nfs_inline = "if command -v apt-get >/dev/null 2>&1; then \
                 apt-get update -qq && apt-get install -y nfs-kernel-server; \
                 elif command -v dnf >/dev/null 2>&1; then \
@@ -345,6 +352,8 @@ async fn console_session(
                 elif command -v pacman >/dev/null 2>&1; then \
                 pacman -S --noconfirm nfs-utils; \
                 else echo 'Unsupported package manager' && exit 1; fi && \
+                (systemctl unmask rpcbind.socket rpcbind.service 2>/dev/null || true) && \
+                (systemctl enable --now rpcbind.socket 2>/dev/null || true) && \
                 (systemctl enable --now nfs-server 2>/dev/null || systemctl enable --now nfs-kernel-server 2>/dev/null) && \
                 echo 'NFS server installed and enabled.'";
             let inline_script = match install_script {

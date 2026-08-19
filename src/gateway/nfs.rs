@@ -55,9 +55,26 @@ impl From<std::io::Error> for NfsError {
 pub fn require_nfs_server() -> Result<(), NfsError> {
     if super::sources::which_helper("exportfs").is_none() {
         return Err(NfsError::NotInstalled {
-            install_command: "apt-get install -y nfs-kernel-server".to_string(),
+            install_command:
+                "apt-get install -y nfs-kernel-server && systemctl unmask rpcbind.socket rpcbind.service"
+                    .to_string(),
             install_package: "nfs-kernel-server".to_string(),
         });
+    }
+    // Serving NFS needs the portmapper: `rpc.mountd` registers with it, and
+    // `nfs-server.service` wants `rpcbind.socket`. The installer masks rpcbind
+    // on hosts that don't use RPC (an open portmapper on a public IP is a DDoS
+    // reflector — see `predictive::rpcbind`), so publishing a share here has to
+    // bring it back. Idempotent, and a no-op on a host where it was never
+    // masked. A failure is logged, not fatal: an NFSv4-only client can still
+    // mount an export without it, so refusing the whole share would be worse
+    // than the degraded case.
+    if let Err(e) = crate::predictive::rpcbind::restore() {
+        tracing::warn!(
+            "nfs export: could not bring rpcbind up ({}); NFSv3 clients and file \
+             locking may fail until `systemctl unmask rpcbind.socket rpcbind.service` runs",
+            e,
+        );
     }
     Ok(())
 }

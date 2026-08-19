@@ -383,13 +383,19 @@ fn build_listening_proposal(
         },
     ];
 
-    // rpcbind gets its own remediation because "bind it to 127.0.0.1"
-    // is not actually achievable — rpcbind has no bind-address option on
-    // a modern distro. The real fix is to turn it off, and on a host with
-    // no NFS server and no NFSv3 client that costs nothing. Masking (not
-    // just disabling) is deliberate: the socket unit is what holds 111,
-    // and a masked unit cannot be pulled back up by a dependency or a
-    // package update.
+    // rpcbind gets its own remediation because "bind it to 127.0.0.1" does
+    // not actually close it: `-h` (/etc/default/rpcbind) restricts UDP binds
+    // only, while TCP/111 is held by `rpcbind.socket`'s ListenStream. The real
+    // fix is to turn it off, and on a host with no NFS server and no NFSv3
+    // client that costs nothing. Masking (not just disabling) is deliberate:
+    // the socket unit is what holds 111, and a masked unit cannot be pulled
+    // back up by a dependency or a package update.
+    //
+    // `predictive::rpcbind` performs exactly these steps behind
+    // POST /api/proposals/{id}/apply (the inbox's "Switch rpcbind off"
+    // button), after re-checking that nothing on the host uses RPC. The
+    // commands stay listed here so the manual route, and the audit of what
+    // the button does, are both visible.
     let remediation = if sock.port == 111 {
         RemediationPlan::Manual {
             instructions:
@@ -399,7 +405,11 @@ fn build_listening_proposal(
                  needs rpcbind and it can be switched off outright. Mask BOTH \
                  units — the socket unit is what holds port 111, so stopping \
                  only the service leaves the listener in place. If you do serve \
-                 NFS, firewall 111 to your storage network instead."
+                 NFS, firewall 111 to your storage network instead. \
+                 \n\n\"Switch rpcbind off\" below does all of this for you, \
+                 including the checks — it refuses if this host turns out to \
+                 need RPC, and publishing an NFS share through WolfStack later \
+                 switches rpcbind back on automatically."
                     .to_string(),
             commands: vec![
                 "rpcinfo -p 127.0.0.1".to_string(),

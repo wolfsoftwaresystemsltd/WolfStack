@@ -394,6 +394,16 @@ pub struct AppState {
     pub oidc_pending_flows: Arc<std::sync::RwLock<std::collections::HashMap<String, crate::auth::oidc::OidcPendingFlow>>>,
     /// Image update watcher cache (container name → last check result)
     pub image_watcher_cache: Arc<std::sync::RwLock<std::collections::HashMap<String, crate::containers::image_watcher::ImageCheckResult>>>,
+    /// Wakes the image-watcher loop early.
+    ///
+    /// That loop is phase-locked to this node's stagger slot with the interval
+    /// floored at six hours, and it re-reads `enabled` only when it wakes. So
+    /// enabling the watcher — by hand, by a settings push, or by the reconcile
+    /// adopting a newer cluster rev — used to produce nothing at all for up to
+    /// six hours, which reads exactly like a broken feature (RutgerDiehard
+    /// 2026-08-19: "I've changed update settings to kick off an update cycle but
+    /// it doesn't seem to help"). Notifying it makes the next sweep start now.
+    pub image_watcher_wake: Arc<tokio::sync::Notify>,
     /// Integration framework state
     pub integrations: Arc<crate::integrations::IntegrationState>,
     /// WolfRouter (native firewall/DHCP/DNS) state
@@ -34745,6 +34755,88 @@ pub async fn predictive_proposal_approve(
     }
 }
 
+/// POST /api/proposals/{id}/apply — run the finding's one-click action.
+///
+/// Only the `rpcbind-portmap` exposure has one today (see
+/// `predictive::rpcbind`): the analyzer has flagged an open portmapper on
+/// public-facing WolfStack hosts since it shipped, and the only way to act on it
+/// was to copy four commands into a terminal — which is how ours stayed open
+/// until a CERT-Bund notice arrived via the hosting provider's abuse desk.
+///
+/// Deliberately NOT a generic "run this proposal's commands" endpoint. The
+/// action is a fixed, compiled-in sequence chosen by finding type; nothing from
+/// the proposal store or the request body is ever executed. Every other finding
+/// is refused, so a new analyzer can't accidentally become executable and a
+/// direct API call can't turn an arbitrary remediation recipe into a shell.
+pub async fn predictive_proposal_apply(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let caller = match require_auth(&req, &state) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let id = path.into_inner();
+
+    // The action must run on the node that owns the finding, so a proposal this
+    // node doesn't have goes to the same peer/federation fan-out that approve,
+    // dismiss and snooze use.
+    let owned = {
+        let store = match state.predictive_proposals.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        store.get(&id).cloned()
+    };
+    let Some(proposal) = owned else {
+        // Cycle-breaker: a forwarded peer request must not re-fan-out
+        // (see `is_inter_node_forward`).
+        if is_inter_node_forward(&caller) {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": "proposal not found on this node",
+            }));
+        }
+        return forward_proposal_action_to_peers(&state, &id, "apply",
+            serde_json::json!({}), is_operator_request(&caller)).await;
+    };
+
+    if !crate::predictive::rpcbind::is_rpcbind_exposure(&proposal) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "this finding has no one-click action — follow its \
+                      remediation steps, which the inbox shows in full",
+        }));
+    }
+
+    // Host work (systemctl, rpcinfo, ss) off the async executor.
+    let outcome = web::block(crate::predictive::rpcbind::lock_down)
+        .await
+        .unwrap_or_else(|e| Err(format!("apply task failed to run: {}", e)));
+
+    match outcome {
+        Ok(message) => {
+            let mut store = match state.predictive_proposals.write() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            let _ = store.record_approval(&id, crate::predictive::ApprovalOutcome::Applied);
+            let _ = store.save();
+            drop(store);
+            invalidate_cluster_cache(&state);
+            tracing::info!("proposal {} applied by {}: {}", id, caller, message);
+            HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": message }))
+        }
+        Err(error) => {
+            // Nothing is recorded on a refusal or a failure. `record_approval`
+            // moves a proposal to Approved whatever the outcome, which would
+            // take a STILL-EXPOSED port out of the inbox — the finding has to
+            // stay pending until it is actually closed.
+            tracing::warn!("proposal {} apply refused for {}: {}", id, caller, error);
+            HttpResponse::Conflict().json(serde_json::json!({ "error": error }))
+        }
+    }
+}
+
 /// True when a proposal action (approve / snooze / dismiss / history)
 /// arrived from a cluster peer rather than from the operator's browser
 /// — i.e. it was authenticated with the inter-node secret, so
@@ -41123,6 +41215,15 @@ struct ImageWatcherPeerResult {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Set when this peer was never asked. A peer that is offline, or that
+    /// belongs to another cluster, used to be dropped from the list silently —
+    /// so a six-node cluster reported "pushed to five nodes" with nothing to say
+    /// which one was missing or why, while the sixth kept its old (usually
+    /// disabled) settings (RutgerDiehard 2026-08-19: "one host on cluster 1
+    /// doesn't show any updates"). A skipped-with-a-reason entry is the
+    /// difference between a silent gap and a fixable one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped: Option<String>,
 }
 
 async fn image_watcher_propagate_config_to_peers(
@@ -41137,13 +41238,43 @@ async fn image_watcher_propagate_config_to_peers(
     // those as different clusters silently drops it from every push.
     let self_cluster = nodes.iter().find(|n| n.is_self)
         .and_then(|n| n.cluster_name.clone());
-    let peers: Vec<(String, String, u16)> = nodes.iter()
-        .filter(|n| !n.is_self && n.online && n.node_type == "wolfstack"
-                    && crate::agent::same_display_cluster(
-                        n.cluster_name.as_deref(), self_cluster.as_deref()))
-        .map(|n| (n.hostname.clone(), n.address.clone(), n.port))
-        .collect();
-    if peers.is_empty() { return Vec::new(); }
+
+    // Split the fleet into "pushed to" and "deliberately not, because …", and
+    // report BOTH. An excluded peer is exactly the node the operator later finds
+    // has no update flags, so leaving it out of the result turned "pushed to 5
+    // of my 6 nodes" into a mystery (RutgerDiehard 2026-08-19).
+    let mut peers: Vec<(String, String, u16)> = Vec::new();
+    let mut skipped: Vec<ImageWatcherPeerResult> = Vec::new();
+    for n in nodes.iter().filter(|n| !n.is_self) {
+        // A non-WolfStack member (PVE, TrueNAS) has no watcher at all, so
+        // listing it would be noise rather than information.
+        if n.node_type != "wolfstack" { continue; }
+        let reason = if !crate::agent::same_display_cluster(
+            n.cluster_name.as_deref(), self_cluster.as_deref())
+        {
+            Some(format!(
+                "in cluster \"{}\", not \"{}\" — configure it from a node in its own cluster",
+                n.cluster_name.clone().unwrap_or_else(|| "unassigned".into()),
+                self_cluster.clone().unwrap_or_else(|| "unassigned".into()),
+            ))
+        } else if !n.online {
+            Some("offline — it adopts these settings from a peer within 10 \
+                  minutes of coming back".to_string())
+        } else {
+            None
+        };
+        match reason {
+            Some(r) => skipped.push(ImageWatcherPeerResult {
+                hostname: n.hostname.clone(),
+                address: n.address.clone(),
+                ok: false,
+                error: None,
+                skipped: Some(r),
+            }),
+            None => peers.push((n.hostname.clone(), n.address.clone(), n.port)),
+        }
+    }
+    if peers.is_empty() { return skipped; }
 
     let secret = state.cluster_secret.clone();
     let payload = serde_json::json!(cfg);
@@ -41166,7 +41297,9 @@ async fn image_watcher_propagate_config_to_peers(
                     Ok(resp) if resp.status().is_success() => {
                         let _ = resp.bytes().await;
                         tracing::info!("image_watcher: config propagated to peer '{}' ({})", hostname, address);
-                        return ImageWatcherPeerResult { hostname, address, ok: true, error: None };
+                        return ImageWatcherPeerResult {
+                            hostname, address, ok: true, error: None, skipped: None,
+                        };
                     }
                     Ok(resp) => {
                         // Reachable peer gave a definitive (non-2xx) answer —
@@ -41178,6 +41311,7 @@ async fn image_watcher_propagate_config_to_peers(
                         return ImageWatcherPeerResult {
                             hostname, address, ok: false,
                             error: Some(format!("HTTP {}: {}", status, snippet)),
+                            skipped: None,
                         };
                     }
                     Err(_) => continue, // connection failed — try next candidate URL
@@ -41187,10 +41321,13 @@ async fn image_watcher_propagate_config_to_peers(
             ImageWatcherPeerResult {
                 hostname, address, ok: false,
                 error: Some("unreachable on all known addresses".to_string()),
+                skipped: None,
             }
         });
     }
-    futures::future::join_all(futures).await
+    let mut results = futures::future::join_all(futures).await;
+    results.extend(skipped);
+    results
 }
 
 /// PUT /api/image-watcher/config
@@ -41262,6 +41399,15 @@ pub async fn image_watcher_config_save(
 
     if let Err(e) = cfg.save() {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
+    }
+
+    // A save that leaves the watcher enabled wakes the background loop, so the
+    // first sweep starts now instead of at this node's next stagger slot — up to
+    // six hours away, which is why enabling it looked like nothing happened
+    // (RutgerDiehard 2026-08-19). Applies to a propagated save too: that is how
+    // a peer that has just been switched on starts checking.
+    if cfg.enabled {
+        state.image_watcher_wake.notify_one();
     }
 
     // Operator-driven save that changed a cluster-wide setting (locally or via
@@ -41340,6 +41486,7 @@ pub async fn image_watcher_cluster_settings(
 pub async fn image_watcher_reconcile_from_peers(
     cluster: &crate::agent::ClusterState,
     secret: &str,
+    wake: &tokio::sync::Notify,
 ) {
     let nodes = cluster.get_all_nodes();
     let self_cluster = nodes.iter().find(|n| n.is_self)
@@ -41395,10 +41542,20 @@ pub async fn image_watcher_reconcile_from_peers(
         let was_enabled = merged.enabled;
         merged.merge_cluster_settings_from(&newer);
         match merged.save() {
-            Ok(()) => tracing::info!(
-                "image_watcher: reconciled cluster settings to rev {} (was rev {}, enabled {} -> {})",
-                newer.cluster_rev, was_rev, was_enabled, merged.enabled,
-            ),
+            Ok(()) => {
+                tracing::info!(
+                    "image_watcher: reconciled cluster settings to rev {} (was rev {}, enabled {} -> {})",
+                    newer.cluster_rev, was_rev, was_enabled, merged.enabled,
+                );
+                // Adopting settings that switch the watcher ON here has to
+                // start a sweep, not leave this node quiet until its next
+                // six-hourly slot. This is the path a node takes when it was
+                // offline for the operator's push, or joined later — the case
+                // where "no updates showing on that host" is reported.
+                if merged.enabled {
+                    wake.notify_one();
+                }
+            }
             Err(e) => tracing::warn!(
                 "image_watcher: reconcile found rev {} but saving failed: {}",
                 newer.cluster_rev, e,
@@ -41413,6 +41570,51 @@ pub async fn image_watcher_status(req: HttpRequest, state: web::Data<AppState>) 
     let cache = state.image_watcher_cache.read().unwrap();
     let results: Vec<&crate::containers::image_watcher::ImageCheckResult> = cache.values().collect();
     HttpResponse::Ok().json(results)
+}
+
+/// POST /api/image-watcher/check-now — sweep EVERY eligible container on this
+/// node immediately and return the results.
+///
+/// The background loop is phase-locked to this node's stagger slot with the
+/// interval floored at six hours, so after enabling the watcher (or pushing
+/// settings to a node) there was nothing an operator could do but wait — and
+/// nothing on screen said so. Editing a setting to "kick off a cycle" doesn't
+/// work either: a save propagates config, it does not schedule a sweep
+/// (RutgerDiehard 2026-08-19). This is that missing action.
+///
+/// Ignores per-container check frequency — "check now" means all of them, the
+/// same semantics as the WolfFlow step. Also wakes the background loop so its
+/// own next pass (which owns the auto-APPLY step) doesn't stay hours away.
+pub async fn image_watcher_check_now(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let config = crate::containers::image_watcher::ImageWatcherConfig::load();
+    if !config.enabled {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "image update checks are disabled on this node — enable them first",
+        }));
+    }
+    let results = crate::containers::image_watcher::check_all_containers(&config).await;
+    {
+        let mut cache = state.image_watcher_cache.write().unwrap();
+        for r in &results {
+            cache.insert(r.container_name.clone(), r.clone());
+        }
+    }
+    // Let the loop run its own pass too: this endpoint only CHECKS, while the
+    // loop owns the auto-apply pass gated on the maintenance window.
+    state.image_watcher_wake.notify_one();
+    let updates = results.iter().filter(|r| r.update_available && r.error.is_none()).count();
+    let errors = results.iter().filter(|r| r.error.is_some()).count();
+    tracing::info!(
+        "image_watcher: manual check swept {} container(s) — {} update(s), {} error(s)",
+        results.len(), updates, errors,
+    );
+    HttpResponse::Ok().json(serde_json::json!({
+        "checked": results.len(),
+        "updates_available": updates,
+        "errors": errors,
+        "results": results,
+    }))
 }
 
 /// POST /api/image-watcher/check/{container}
@@ -46138,6 +46340,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/image-watcher/config", web::get().to(image_watcher_config_get))
         .route("/api/image-watcher/config", web::put().to(image_watcher_config_save))
         .route("/api/image-watcher/propagate", web::post().to(image_watcher_config_propagate))
+        .route("/api/image-watcher/check-now", web::post().to(image_watcher_check_now))
         .route("/api/image-watcher/cluster-settings", web::get().to(image_watcher_cluster_settings))
         .route("/api/image-watcher/status", web::get().to(image_watcher_status))
         .route("/api/image-watcher/check/{container}", web::post().to(image_watcher_check))
@@ -46947,6 +47150,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/proposals/{id}/snooze", web::post().to(predictive_proposal_snooze))
         .route("/api/proposals/{id}/dismiss", web::post().to(predictive_proposal_dismiss))
         .route("/api/proposals/{id}/approve", web::post().to(predictive_proposal_approve))
+        .route("/api/proposals/{id}/apply", web::post().to(predictive_proposal_apply))
         .route("/api/proposal-acks", web::get().to(predictive_acks_list))
         .route("/api/proposal-acks", web::post().to(predictive_acks_create))
         .route("/api/proposal-acks/{id}", web::delete().to(predictive_acks_remove))
