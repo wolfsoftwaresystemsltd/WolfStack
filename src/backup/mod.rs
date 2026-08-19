@@ -1043,6 +1043,30 @@ pub struct BackupSchedule {
     /// backups that already succeeded.
     #[serde(default)]
     pub post_command: String,
+    /// `Weekly` schedules: which weekday to run on, ISO-numbered
+    /// (1 = Monday … 7 = Sunday, matching `Weekday::number_from_monday`).
+    /// `None` on every schedule saved before day pinning existed (JJ
+    /// 2026-08-19: weekly/monthly offered a time but no day), and those keep
+    /// the original behaviour — "any day, once seven days have passed" — so no
+    /// existing schedule changes when it is picked up.
+    #[serde(default)]
+    pub day_of_week: Option<u8>,
+    /// `Monthly` schedules: which day of the month to run on (1–31). A day
+    /// past the end of a short month runs on that month's LAST day (31 in
+    /// February fires on the 28th/29th) rather than being skipped. `None`
+    /// keeps the original behaviour — the first time-of-day match in a
+    /// calendar month.
+    #[serde(default)]
+    pub day_of_month: Option<u8>,
+    /// `backup_all` schedules: stop each container for the duration of its
+    /// backup (a cold, fully consistent archive) instead of backing it up
+    /// live. Per-target `BackupTarget::stop_for_backup` cannot express this
+    /// when the target list is resolved at run time, so a schedule-wide flag
+    /// carries it (JJ 2026-08-19: ticking the per-container box under "back up
+    /// everything" was silently discarded — `targets` is empty there).
+    /// Ignored when `backup_all` is false; the per-target flag governs then.
+    #[serde(default)]
+    pub stop_containers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3117,8 +3141,15 @@ pub fn restore_system_path(entry: &BackupEntry, target_dir: &str) -> Result<Stri
     Ok(format!("System folder restored into {}", dest))
 }
 
-/// Backup everything on the server
-pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
+/// Backup everything on the server.
+///
+/// `stop_containers` makes every Docker/LXC container a COLD backup — stopped
+/// for the duration of its archive, then restarted — which is the only way a
+/// "back up everything" schedule can ask for consistent container archives:
+/// its target list is resolved here, at run time, so there are no per-target
+/// `stop_for_backup` flags to read (JJ 2026-08-19). VMs and the config target
+/// are unaffected by it.
+pub fn backup_all(storage: &BackupStorage, stop_containers: bool) -> Vec<BackupEntry> {
     let mut entries = Vec::new();
 
     // Backup all Docker containers
@@ -3133,7 +3164,12 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
             .collect();
         for name in names {
             entries.push(create_backup_entry(
-                BackupTarget { target_type: BackupTargetType::Docker, name: name.clone(), ..Default::default() },
+                BackupTarget {
+                    target_type: BackupTargetType::Docker,
+                    name: name.clone(),
+                    stop_for_backup: stop_containers,
+                    ..Default::default()
+                },
                 storage,
             ));
         }
@@ -3148,7 +3184,12 @@ pub fn backup_all(storage: &BackupStorage) -> Vec<BackupEntry> {
             .collect();
         for name in names {
             entries.push(create_backup_entry(
-                BackupTarget { target_type: BackupTargetType::Lxc, name: name.clone(), ..Default::default() },
+                BackupTarget {
+                    target_type: BackupTargetType::Lxc,
+                    name: name.clone(),
+                    stop_for_backup: stop_containers,
+                    ..Default::default()
+                },
                 storage,
             ));
         }
@@ -6490,7 +6531,10 @@ pub fn create_backup(target: Option<BackupTarget>, storage: BackupStorage) -> Ve
 
     let new_entries = match target {
         Some(t) => vec![create_backup_entry(t, &storage)],
-        None => backup_all(&storage),
+        // On-demand "everything" from the UI: live (crash-consistent) container
+        // archives, as it always has been — cold backups are a scheduling
+        // decision, made per schedule.
+        None => backup_all(&storage, false),
     };
 
     config.entries.extend(new_entries.clone());
@@ -7502,7 +7546,7 @@ fn execute_schedule_run(schedule: &BackupSchedule) -> (Vec<BackupEntry>, Schedul
         let mut storage = schedule.storage.clone();
         merge_pbs_secrets(&mut storage);
         let backups: Vec<BackupEntry> = if schedule.backup_all {
-            backup_all(&storage)
+            backup_all(&storage, schedule.stop_containers)
         } else {
             schedule.targets.iter()
                 .map(|t| create_backup_entry(t.clone(), &storage))
@@ -7768,12 +7812,93 @@ fn lxc_config_hostname(name: &str) -> Option<String> {
 
 // ─── Scheduling ───
 
+/// Days in `month` of `year` — used to clamp a monthly schedule pinned to a day
+/// the month doesn't have (the 31st in February).
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|first_of_next| first_of_next.pred_opt())
+        .map(|last| last.day())
+        .unwrap_or(28)
+}
+
+/// The day a monthly schedule pinned to `day_of_month` actually runs in the
+/// month containing `now`: the chosen day, or the month's last day when the
+/// month is too short for it. Never skips a month.
+fn effective_day_of_month(day_of_month: u8, now: chrono::DateTime<Utc>) -> u32 {
+    let wanted = day_of_month.clamp(1, 31) as u32;
+    wanted.min(days_in_month(now.year(), now.month()))
+}
+
+/// Whether `schedule` should fire at `now`.
+///
+/// Split out of `check_schedules` so the day-pinning rules are unit-testable
+/// without touching config on disk, docker, or tar.
+///
+/// Three gates, in order: the schedule is enabled, the time-of-day matches to
+/// the minute (the caller ticks once a minute), and the calendar day is one this
+/// schedule runs on. Then the already-ran-this-period guard stops a second run
+/// within the same day/week/month.
+fn schedule_is_due(schedule: &BackupSchedule, now: chrono::DateTime<Utc>) -> bool {
+    if !schedule.enabled {
+        return false;
+    }
+    if now.format("%H:%M").to_string() != schedule.time {
+        return false;
+    }
+
+    // Day pinning. `None` (every pre-existing schedule) means "no pinned day",
+    // which leaves the interval guard below as the only constraint — exactly the
+    // behaviour before these fields existed.
+    let day_pinned = match schedule.frequency {
+        BackupFrequency::Daily => false,
+        BackupFrequency::Weekly => match schedule.day_of_week {
+            Some(dow) => {
+                if now.weekday().number_from_monday() as u8 != dow.clamp(1, 7) {
+                    return false;
+                }
+                true
+            }
+            None => false,
+        },
+        BackupFrequency::Monthly => match schedule.day_of_month {
+            Some(dom) => {
+                if now.day() != effective_day_of_month(dom, now) {
+                    return false;
+                }
+                true
+            }
+            None => false,
+        },
+    };
+
+    // Never ran → due now.
+    let last_utc = match chrono::DateTime::parse_from_rfc3339(&schedule.last_run) {
+        Ok(last) => last.with_timezone(&Utc),
+        Err(_) => return true, // empty or unparseable last_run
+    };
+
+    // With a pinned day the day itself is the period marker, so "already ran
+    // today" is the whole guard — a rolling 7-day window would push a Monday
+    // schedule to Tuesday whenever a run started a minute late.
+    if day_pinned {
+        return last_utc.date_naive() != now.date_naive();
+    }
+
+    match schedule.frequency {
+        BackupFrequency::Daily => last_utc.date_naive() != now.date_naive(),
+        BackupFrequency::Weekly => (now - last_utc).num_days() >= 7,
+        BackupFrequency::Monthly => {
+            last_utc.month() != now.month() || last_utc.year() != now.year()
+        }
+    }
+}
+
 /// Check all schedules and run any that are due
 /// Called from background task loop in main.rs
 pub fn check_schedules() {
     let mut config = load_config();
     let now = Utc::now();
-    let current_time = now.format("%H:%M").to_string();
     let mut changed = false;
     // (schedule_id, retention) for schedules that ran this pass — pruned AFTER the
     // loop, since prune_schedule_backups needs &mut config and we can't borrow that
@@ -7781,38 +7906,10 @@ pub fn check_schedules() {
     let mut to_prune: Vec<(String, usize)> = Vec::new();
 
     for schedule in config.schedules.iter_mut() {
-        if !schedule.enabled {
+        // Enabled + time-of-day + pinned day + not-already-run-this-period.
+        if !schedule_is_due(schedule, now) {
             continue;
         }
-
-        // Check if it's time to run
-        if current_time != schedule.time {
-            continue;
-        }
-
-        // Check if already ran today/this period
-        if !schedule.last_run.is_empty()
-            && let Ok(last) = chrono::DateTime::parse_from_rfc3339(&schedule.last_run) {
-                let last_utc = last.with_timezone(&Utc);
-                match schedule.frequency {
-                    BackupFrequency::Daily => {
-                        if last_utc.date_naive() == now.date_naive() {
-                            continue; // Already ran today
-                        }
-                    },
-                    BackupFrequency::Weekly => {
-                        let days_since = (now - last_utc).num_days();
-                        if days_since < 7 {
-                            continue; // Ran within last 7 days
-                        }
-                    },
-                    BackupFrequency::Monthly => {
-                        if last_utc.month() == now.month() && last_utc.year() == now.year() {
-                            continue; // Already ran this month
-                        }
-                    },
-                }
-            }
 
         // Time to run this schedule! Hooks + backups share one code path with
         // the on-demand runner (execute_schedule_run) — entries come back
@@ -9639,6 +9736,9 @@ mod schedule_hook_tests {
             created_at: String::new(),
             pre_command: pre.to_string(),
             post_command: post.to_string(),
+            day_of_week: None,
+            day_of_month: None,
+            stop_containers: false,
         }
     }
 
@@ -9910,5 +10010,184 @@ mod sweeper_tests {
     fn sweeping_a_missing_directory_is_harmless() {
         let missing = std::env::temp_dir().join(format!("ws-sweep-absent-{}", Uuid::new_v4().simple()));
         assert_eq!(sweep_staging_dir(&missing), (0, 0));
+    }
+}
+
+/// Day-pinned weekly/monthly schedules (JJ 2026-08-19: "when you select Backup
+/// Frequency — weekly or monthly you don't get to choose the day it will run").
+///
+/// These exercise `schedule_is_due` directly: no config on disk, no docker, no
+/// tar, so they run anywhere. The unpinned cases are the regression guard —
+/// every schedule saved before these fields existed carries `None` and must
+/// behave exactly as it did before.
+#[cfg(test)]
+mod schedule_day_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, hh, mm, 0).unwrap()
+    }
+
+    fn schedule(frequency: BackupFrequency) -> BackupSchedule {
+        BackupSchedule {
+            id: "sched".to_string(),
+            name: "test".to_string(),
+            frequency,
+            time: "02:00".to_string(),
+            retention: 0,
+            backup_all: false,
+            targets: Vec::new(),
+            storage: BackupStorage::default(),
+            enabled: true,
+            last_run: String::new(),
+            created_at: String::new(),
+            pre_command: String::new(),
+            post_command: String::new(),
+            day_of_week: None,
+            day_of_month: None,
+            stop_containers: false,
+        }
+    }
+
+    #[test]
+    fn a_disabled_or_off_time_schedule_is_never_due() {
+        let mut s = schedule(BackupFrequency::Daily);
+        s.enabled = false;
+        assert!(!schedule_is_due(&s, at(2026, 8, 17, 2, 0)));
+        s.enabled = true;
+        assert!(schedule_is_due(&s, at(2026, 8, 17, 2, 0)));
+        assert!(!schedule_is_due(&s, at(2026, 8, 17, 2, 1)));
+    }
+
+    #[test]
+    fn weekly_pinned_to_monday_fires_only_on_monday() {
+        let mut s = schedule(BackupFrequency::Weekly);
+        s.day_of_week = Some(1); // Monday, ISO
+        assert!(schedule_is_due(&s, at(2026, 8, 17, 2, 0)), "Monday must fire");
+        assert!(!schedule_is_due(&s, at(2026, 8, 18, 2, 0)), "Tuesday must not fire");
+        s.day_of_week = Some(7); // Sunday
+        assert!(!schedule_is_due(&s, at(2026, 8, 17, 2, 0)));
+        assert!(schedule_is_due(&s, at(2026, 8, 16, 2, 0)), "Sunday must fire");
+    }
+
+    #[test]
+    fn a_pinned_weekly_schedule_stays_on_its_weekday_after_a_late_run() {
+        // The drift this fixes: an unpinned weekly schedule uses a rolling
+        // 7×24h window, so a run that started a minute late pushes the next one
+        // to the following DAY, and a week later it has walked across the week.
+        let mut s = schedule(BackupFrequency::Weekly);
+        s.last_run = at(2026, 8, 17, 2, 1).to_rfc3339(); // last Monday, a minute late
+        let next_monday = at(2026, 8, 24, 2, 0);
+        assert!(!schedule_is_due(&s, next_monday), "unpinned: 6d23h59m — drifts to Tuesday");
+        s.day_of_week = Some(1);
+        assert!(schedule_is_due(&s, next_monday), "pinned: fires on Monday regardless");
+    }
+
+    #[test]
+    fn a_pinned_weekly_schedule_runs_once_on_its_day() {
+        let mut s = schedule(BackupFrequency::Weekly);
+        s.day_of_week = Some(1);
+        s.last_run = at(2026, 8, 17, 2, 0).to_rfc3339();
+        // Same Monday (the minute matcher can only fire once, but a restart
+        // inside that minute must not double-run).
+        assert!(!schedule_is_due(&s, at(2026, 8, 17, 2, 0)));
+        assert!(schedule_is_due(&s, at(2026, 8, 24, 2, 0)), "next Monday");
+    }
+
+    #[test]
+    fn unpinned_weekly_and_monthly_keep_their_original_behaviour() {
+        let mut weekly = schedule(BackupFrequency::Weekly);
+        weekly.last_run = at(2026, 8, 17, 2, 0).to_rfc3339();
+        assert!(!schedule_is_due(&weekly, at(2026, 8, 23, 2, 0)), "6 days — too soon");
+        assert!(schedule_is_due(&weekly, at(2026, 8, 24, 2, 0)), "7 days — due, any weekday");
+
+        let mut monthly = schedule(BackupFrequency::Monthly);
+        monthly.last_run = at(2026, 8, 3, 2, 0).to_rfc3339();
+        assert!(!schedule_is_due(&monthly, at(2026, 8, 28, 2, 0)), "already ran this month");
+        assert!(schedule_is_due(&monthly, at(2026, 9, 1, 2, 0)), "new month — first match wins");
+    }
+
+    #[test]
+    fn monthly_pinned_to_the_15th_fires_only_on_the_15th() {
+        let mut s = schedule(BackupFrequency::Monthly);
+        s.day_of_month = Some(15);
+        assert!(schedule_is_due(&s, at(2026, 8, 15, 2, 0)));
+        assert!(!schedule_is_due(&s, at(2026, 8, 14, 2, 0)));
+        assert!(!schedule_is_due(&s, at(2026, 9, 1, 2, 0)));
+        s.last_run = at(2026, 8, 15, 2, 0).to_rfc3339();
+        assert!(!schedule_is_due(&s, at(2026, 8, 15, 2, 0)), "no second run the same day");
+        assert!(schedule_is_due(&s, at(2026, 9, 15, 2, 0)), "next month");
+    }
+
+    #[test]
+    fn monthly_pinned_past_the_end_of_a_short_month_fires_on_its_last_day() {
+        let mut s = schedule(BackupFrequency::Monthly);
+        s.day_of_month = Some(31);
+        // February 2026 has 28 days — the 28th is the run day, not "skip February".
+        assert!(schedule_is_due(&s, at(2026, 2, 28, 2, 0)));
+        assert!(!schedule_is_due(&s, at(2026, 2, 27, 2, 0)));
+        // A leap February moves it to the 29th.
+        assert!(schedule_is_due(&s, at(2028, 2, 29, 2, 0)));
+        assert!(!schedule_is_due(&s, at(2028, 2, 28, 2, 0)));
+        // A 31-day month still fires on the 31st.
+        assert!(schedule_is_due(&s, at(2026, 3, 31, 2, 0)));
+        assert!(!schedule_is_due(&s, at(2026, 3, 30, 2, 0)));
+    }
+
+    #[test]
+    fn days_in_month_covers_every_month_length() {
+        assert_eq!(days_in_month(2026, 1), 31);
+        assert_eq!(days_in_month(2026, 2), 28);
+        assert_eq!(days_in_month(2028, 2), 29);
+        assert_eq!(days_in_month(2026, 4), 30);
+        assert_eq!(days_in_month(2026, 12), 31);
+        assert_eq!(effective_day_of_month(31, at(2026, 2, 10, 0, 0)), 28);
+        assert_eq!(effective_day_of_month(15, at(2026, 2, 10, 0, 0)), 15);
+        // Out-of-range values are clamped rather than skipping the month
+        // outright — the API rejects them at save time, so this only ever
+        // guards a hand-edited backups.json.
+        assert_eq!(effective_day_of_month(0, at(2026, 2, 10, 0, 0)), 1);
+        assert_eq!(effective_day_of_month(99, at(2026, 4, 10, 0, 0)), 30);
+    }
+
+    /// The whole point of JJ's first report: what the operator ticked has to
+    /// survive the trip to disk and back. `save_config`/`load_config` are plain
+    /// serde over this struct, so a JSON round trip is the persistence contract.
+    #[test]
+    fn a_schedule_round_trips_its_day_pinning_and_cold_backup_flags() {
+        let mut s = schedule(BackupFrequency::Weekly);
+        s.day_of_week = Some(3);
+        s.backup_all = true;
+        s.stop_containers = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: BackupSchedule = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.day_of_week, Some(3));
+        assert!(back.stop_containers);
+
+        // And a schedule written before these fields existed still loads, with
+        // the pre-existing behaviour (no pinned day, live container backups).
+        let legacy = r#"{"id":"x","name":"old","frequency":"daily","time":"02:00",
+            "retention":7,"backup_all":true,"storage":{"type":"local"},"enabled":true}"#;
+        let old: BackupSchedule = serde_json::from_str(legacy).unwrap();
+        assert_eq!(old.day_of_week, None);
+        assert_eq!(old.day_of_month, None);
+        assert!(!old.stop_containers);
+    }
+
+    /// Per-target cold-backup flags survive the same round trip — this is the
+    /// path that already worked, kept honest so a future refactor can't quietly
+    /// drop the field again.
+    #[test]
+    fn a_target_round_trips_its_stop_for_backup_flag() {
+        let t = BackupTarget {
+            target_type: BackupTargetType::Docker,
+            name: "plex".to_string(),
+            stop_for_backup: true,
+            ..Default::default()
+        };
+        let back: BackupTarget = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert!(back.stop_for_backup);
+        assert_eq!(back.target_type, BackupTargetType::Docker);
     }
 }
