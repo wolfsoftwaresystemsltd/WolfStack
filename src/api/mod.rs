@@ -21373,6 +21373,19 @@ pub struct CreateScheduleRequest {
     /// the operator narrowed it in the node picker.
     #[serde(default)]
     pub target_nodes: Vec<String>,
+    /// Weekly schedules: ISO weekday to run on (1 = Monday … 7 = Sunday).
+    /// Absent → unpinned, the pre-existing "seven days since the last run"
+    /// behaviour (JJ 2026-08-19).
+    #[serde(default)]
+    pub day_of_week: Option<u8>,
+    /// Monthly schedules: day of the month to run on (1–31; a day the month
+    /// doesn't have runs on its last day). Absent → unpinned.
+    #[serde(default)]
+    pub day_of_month: Option<u8>,
+    /// `backup_all` schedules: take COLD container backups (stop each container
+    /// for its archive). Absent → live backups, as before.
+    #[serde(default)]
+    pub stop_containers: bool,
 }
 
 #[derive(Deserialize)]
@@ -23072,6 +23085,21 @@ pub async fn backup_schedule_create(
         Err(e) => return HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
     };
     backup::merge_pbs_secrets(&mut storage);
+    // Day pinning is validated here, at the boundary: a bad value would be
+    // stored and then silently never match, so the schedule would simply never
+    // run — the failure mode that has to be loud, not tolerated.
+    if let Some(dow) = body.day_of_week
+        && !(1..=7).contains(&dow) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("day_of_week must be 1 (Monday) to 7 (Sunday), got {}", dow),
+            }));
+        }
+    if let Some(dom) = body.day_of_month
+        && !(1..=31).contains(&dom) {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("day_of_month must be 1 to 31, got {}", dom),
+            }));
+        }
     let is_edit = editing.is_some();
     let schedule = backup::BackupSchedule {
         id: editing.as_ref().map(|s| s.id.clone())
@@ -23090,6 +23118,12 @@ pub async fn backup_schedule_create(
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         pre_command: body.pre_command.clone(),
         post_command: body.post_command.clone(),
+        // Day pinning + cold-container backups. Only meaningful for the matching
+        // frequency / backup_all combination; stored verbatim either way so
+        // switching a schedule back to weekly keeps the day it had.
+        day_of_week: body.day_of_week,
+        day_of_month: body.day_of_month,
+        stop_containers: body.stop_containers,
     };
     // Node scope: unchanged from before fleet scope existed.
     if body.scope == BackupScope::Node {

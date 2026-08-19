@@ -21576,8 +21576,8 @@ async function updateImageWatcherDisabledNote(resultCount) {
         note.innerHTML = `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-left:3px solid #f59e0b;border-radius:6px;background:var(--bg-input);color:var(--text-secondary);font-size:13px;">
             <span class="ws-icon-clean-wrap" data-icon="updates" style="color:#f59e0b;"></span>
             <span>Docker image update checks are <strong>disabled on this node</strong> — containers here get no update notifications. Enable them in
-            <a href="#" onclick="selectView('settings'); setTimeout(() => { switchSettingsTab('alerts'); switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings(); }, 60); return false;" style="color:var(--accent);">Image update settings</a>,
-            or use &quot;Push to Cluster&quot; from a node where they already work.</span>
+            <a href="#" onclick="openDockerUpdatesSettings(currentNodeId); return false;" style="color:var(--accent);">Image update settings</a>,
+            or press &quot;Push to all nodes&quot; there from a node where they already work.</span>
         </div>`;
         // Icon spans hydrate via the observeForDataIcons MutationObserver —
         // no manual pass needed.
@@ -21708,13 +21708,13 @@ async function openImageUpdateModal(containerName, imageHint) {
                         <option value="include" ${_ebVal==='include'?'selected':''}>Include</option>
                     </select>
                 </div>
-                <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Named volumes are always captured. Skip bind mounts if this container binds large external data (e.g. NAS media) that would fill the backup staging area. The global default is set on the <a href="#" onclick="closeImageUpdateModal(); selectView('settings'); setTimeout(() => { switchSettingsTab('alerts'); switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings(); }, 60); return false;" style="color:var(--accent-light);text-decoration:underline;">Docker Updates page</a>.</div>
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Named volumes are always captured. Skip bind mounts if this container binds large external data (e.g. NAS media) that would fill the backup staging area. The global default is set on the <a href="#" onclick="const n = currentNodeId; closeImageUpdateModal(); openDockerUpdatesSettings(n); return false;" style="color:var(--accent-light);text-decoration:underline;">Docker Updates page</a>.</div>
 
                 <div style="margin-bottom:6px;font-size:12px;display:flex;align-items:center;gap:8px;">
                     <label style="white-space:nowrap;">Check for updates</label>
                     <select id="ium-check-interval" class="form-control" style="width:auto;font-size:12px;padding:3px 8px;">${_ciOptions}</select>
                 </div>
-                <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">How often WolfStack checks this container's registry for a newer image. "Default" uses the global setting on the <a href="#" onclick="closeImageUpdateModal(); selectView('settings'); setTimeout(() => { switchSettingsTab('alerts'); switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings(); }, 60); return false;" style="color:var(--accent-light);text-decoration:underline;">Docker Updates page</a>.</div>
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">How often WolfStack checks this container's registry for a newer image. "Default" uses the global setting on the <a href="#" onclick="const n = currentNodeId; closeImageUpdateModal(); openDockerUpdatesSettings(n); return false;" style="color:var(--accent-light);text-decoration:underline;">Docker Updates page</a>.</div>
 
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px;">
                     <button class="btn" onclick="closeImageUpdateModal()">Cancel</button>
@@ -21824,12 +21824,117 @@ window.closeImageUpdateModal = closeImageUpdateModal;
 window.saveImageUpdatePolicy = saveImageUpdatePolicy;
 window.applyImageUpdateNow = applyImageUpdateNow;
 
+// ─── Which node's image-watcher config the settings panel edits ───
+//
+// The watcher config is a per-node file that propagates to the SAME cluster's
+// peers. Settings pages always talk to the UI host (selectView clears the page
+// scope), so on a bastion that manages two clusters this panel could only ever
+// read, save and push the UI host's own cluster — the other cluster's nodes kept
+// reporting "disabled on this node" with no way to fix them from here
+// (RutgerDiehard 2026-08-19). null = this node.
+let _dockerUpdatesScopeNodeId = null;
+
+// Every image-watcher call from this panel goes through here so save, push and
+// load can never end up pointed at different nodes.
+function dockerUpdatesApiUrl(path) {
+    return _dockerUpdatesScopeNodeId ? nodeApiUrl(_dockerUpdatesScopeNodeId, path) : path;
+}
+
+// The node currently being configured (null when it's this one, or when the
+// selected node has since disappeared from the fleet).
+function dockerUpdatesScopeNode() {
+    const list = Array.isArray(allNodes) ? allNodes : [];
+    return list.find(n => n.id === _dockerUpdatesScopeNodeId) || null;
+}
+
+function dockerUpdatesScopeCluster() {
+    const n = dockerUpdatesScopeNode() || (Array.isArray(allNodes) ? allNodes.find(x => x.is_self) : null);
+    return n ? (n.cluster_name || 'WolfStack') : '';
+}
+
+// Build the "Settings for" picker: every WolfStack node, grouped by cluster, so
+// the operator can see which cluster a node belongs to while choosing it. Hidden
+// on a single-node install — nothing to choose (Golden Rule).
+function renderDockerUpdatesScopePicker() {
+    const group = document.getElementById('docker-updates-scope-group');
+    const sel = document.getElementById('docker-updates-scope-node');
+    const note = document.getElementById('docker-updates-scope-note');
+    if (!group || !sel) return;
+    const wsNodes = (Array.isArray(allNodes) ? allNodes : []).filter(n => n.node_type !== 'proxmox');
+    // A node id that is no longer in the fleet falls back to this node rather
+    // than leaving the panel reading and writing through a proxy for a node that
+    // isn't there — with the picker hidden, nothing would show that it had.
+    if (_dockerUpdatesScopeNodeId && !wsNodes.some(n => n.id === _dockerUpdatesScopeNodeId)) {
+        _dockerUpdatesScopeNodeId = null;
+    }
+    if (wsNodes.length < 2) {
+        group.style.display = 'none';
+        sel.innerHTML = '';
+        _dockerUpdatesScopeNodeId = null; // nothing to choose — this node it is
+        return;
+    }
+    const selfNode = wsNodes.find(n => n.is_self);
+    const selectedId = _dockerUpdatesScopeNodeId || (selfNode ? selfNode.id : '');
+    const clusters = [...new Set(wsNodes.map(n => n.cluster_name || 'WolfStack'))]
+        .sort((a, b) => a.localeCompare(b));
+    sel.innerHTML = clusters.map(cluster => {
+        const opts = wsNodes
+            .filter(n => (n.cluster_name || 'WolfStack') === cluster)
+            .sort((a, b) => (a.hostname || a.address || '').localeCompare(b.hostname || b.address || ''))
+            .map(n => {
+                const label = `${n.hostname || n.address}${n.is_self ? ' (this node)' : ''}${n.online === false ? ' — offline' : ''}`;
+                return `<option value="${escapeAttr(n.id)}"${n.id === selectedId ? ' selected' : ''}${n.online === false ? ' disabled' : ''}>${escapeHtml(label)}</option>`;
+            }).join('');
+        return `<optgroup label="${escapeAttr(cluster)}">${opts}</optgroup>`;
+    }).join('');
+    group.style.display = '';
+    if (note) {
+        const cluster = dockerUpdatesScopeCluster();
+        const scoped = dockerUpdatesScopeNode();
+        const where = scoped ? (scoped.hostname || scoped.address) : 'this node';
+        note.textContent = cluster
+            ? `Read from ${where}, and saved/pushed to every node in cluster "${cluster}". Pick a node in another cluster to configure that one.`
+            : `Read from ${where}, and saved/pushed to every node in its cluster.`;
+    }
+}
+
+function onDockerUpdatesScopeChange(nodeId) {
+    const selfNode = (Array.isArray(allNodes) ? allNodes : []).find(n => n.is_self);
+    // Selecting this node stores null so every call takes the direct (unproxied)
+    // path, exactly as it did before the picker existed.
+    _dockerUpdatesScopeNodeId = (!nodeId || (selfNode && nodeId === selfNode.id)) ? null : nodeId;
+    loadDockerUpdatesSettings();
+}
+
+// Open Settings → Alerts → Docker Updates, optionally scoped to a node's config.
+// Callers on a per-node page pass the node they were looking at, so the panel
+// configures the cluster the operator was actually complaining about.
+function openDockerUpdatesSettings(nodeId) {
+    const selfNode = (Array.isArray(allNodes) ? allNodes : []).find(n => n.is_self);
+    _dockerUpdatesScopeNodeId = (!nodeId || (selfNode && nodeId === selfNode.id)) ? null : nodeId;
+    selectView('settings');
+    setTimeout(() => {
+        switchSettingsTab('alerts');
+        switchAlertsSub('dockerupdates');
+        loadDockerUpdatesSettings();
+    }, 60);
+}
+
 // v23.12.20 — Settings → Docker Updates tab. Loads the watcher config
 // and renders the recent update history. Save POSTs back via PUT.
 async function loadDockerUpdatesSettings() {
+    renderDockerUpdatesScopePicker();
+    const scoped = dockerUpdatesScopeNode();
     try {
-        const r = await fetch(apiUrl('/api/image-watcher/config'));
-        if (!r.ok) return;
+        const r = await fetch(dockerUpdatesApiUrl('/api/image-watcher/config'));
+        if (!r.ok) {
+            // Say so rather than leaving the previous node's values on screen —
+            // silently keeping them is how a save lands on the wrong host.
+            showToast(scoped
+                ? `Could not read image-update settings from ${scoped.hostname || scoped.address} (HTTP ${r.status}). The form still shows the previous node's values — don't save until it loads.`
+                : `Could not read image-update settings (HTTP ${r.status}).`, 'error');
+            return;
+        }
         const cfg = await r.json();
         document.getElementById('docker-updates-enabled').checked = !!cfg.enabled;
         const ci = document.getElementById('docker-updates-check-interval');
@@ -21846,7 +21951,7 @@ async function loadDockerUpdatesSettings() {
         if (eb) eb.checked = !!cfg.exclude_bind_mounts_from_backup;
         renderDockerUpdatesHistory(cfg.update_history || []);
     } catch (e) {
-        showToast('Failed to load Docker Updates settings: ' + (e.message || e), 'error');
+        showToast(`Failed to load Docker Updates settings${scoped ? ` from ${scoped.hostname || scoped.address}` : ''}: ${e.message || e}`, 'error');
     }
 }
 
@@ -21893,7 +21998,7 @@ async function saveDockerUpdatesConfig() {
     // entries are owned by the Docker page popover).
     let cfg;
     try {
-        const r = await fetch(apiUrl('/api/image-watcher/config'));
+        const r = await fetch(dockerUpdatesApiUrl('/api/image-watcher/config'));
         cfg = await r.json();
     } catch (e) {
         showToast('Failed to load config: ' + (e.message || e), 'error');
@@ -21908,7 +22013,7 @@ async function saveDockerUpdatesConfig() {
     cfg.max_parallel_updates = parseInt(document.getElementById('docker-updates-max-parallel').value, 10) || 1;
     cfg.exclude_bind_mounts_from_backup = document.getElementById('docker-updates-exclude-binds').checked;
     try {
-        const r = await fetch(apiUrl('/api/image-watcher/config'), {
+        const r = await fetch(dockerUpdatesApiUrl('/api/image-watcher/config'), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cfg),
@@ -21928,7 +22033,8 @@ async function saveDockerUpdatesConfig() {
             const names = failed.map(p => p.hostname || p.address).join(', ');
             showToast(`Settings saved here, but ${failed.length} node(s) did not apply them: ${names}. Those hosts may show stale image-update flags until reachable — re-save to retry.`, 'error');
         } else {
-            showToast('Docker Updates settings saved', 'success');
+            const cluster = dockerUpdatesScopeCluster();
+            showToast(cluster ? `Docker Updates settings saved for cluster "${cluster}"` : 'Docker Updates settings saved', 'success');
         }
     } catch (e) {
         showToast('Save failed: ' + (e.message || e), 'error');
@@ -21945,7 +22051,7 @@ async function pushDockerUpdatesToCluster(btn) {
     const orig = btn ? btn.innerHTML : '';
     if (btn) { btn.disabled = true; btn.innerHTML = 'Pushing…'; }
     try {
-        const r = await fetch(apiUrl('/api/image-watcher/propagate'), { method: 'POST' });
+        const r = await fetch(dockerUpdatesApiUrl('/api/image-watcher/propagate'), { method: 'POST' });
         if (!r.ok) {
             const d = await r.json().catch(() => ({}));
             throw new Error(d.error || `HTTP ${r.status}`);
@@ -21953,13 +22059,15 @@ async function pushDockerUpdatesToCluster(btn) {
         const d = await r.json().catch(() => ({}));
         const peers = Array.isArray(d.peers) ? d.peers : [];
         const failed = peers.filter(p => !p.ok);
+        const cluster = dockerUpdatesScopeCluster();
+        const clusterSuffix = cluster ? ` in cluster "${cluster}"` : '';
         if (peers.length === 0) {
-            showToast('No other cluster nodes to push to — this looks like a single-node setup.', 'info');
+            showToast(`No other nodes to push to${clusterSuffix} — these settings apply to that node only.`, 'info');
         } else if (failed.length > 0) {
             const names = failed.map(p => `${p.hostname || p.address} (${p.error || 'failed'})`).join('; ');
             showToast(`Pushed to ${peers.length - failed.length}/${peers.length} node(s). Did NOT apply on: ${names}. Those hosts keep their old settings until reachable — retry when they're back.`, 'error');
         } else {
-            showToast(`Settings pushed to all ${peers.length} cluster node(s). They pick up the new config on their next watch cycle — no restart needed.`, 'success');
+            showToast(`Settings pushed to all ${peers.length} node(s)${clusterSuffix}. They pick up the new config on their next watch cycle — no restart needed.`, 'success');
         }
     } catch (e) {
         showToast('Push to cluster failed: ' + (e.message || e), 'error');
@@ -21971,6 +22079,8 @@ async function pushDockerUpdatesToCluster(btn) {
 window.loadDockerUpdatesSettings = loadDockerUpdatesSettings;
 window.saveDockerUpdatesConfig = saveDockerUpdatesConfig;
 window.pushDockerUpdatesToCluster = pushDockerUpdatesToCluster;
+window.onDockerUpdatesScopeChange = onDockerUpdatesScopeChange;
+window.openDockerUpdatesSettings = openDockerUpdatesSettings;
 
 // v23.12.20 — Dashboard onboarding nudge: surface "set up auto-updates"
 // once when the operator has Docker containers but image-watcher is
@@ -22545,7 +22655,7 @@ function ensureDockerUpdatesRelocated() {
         <div style="padding:18px; background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.3); border-radius:10px;">
             <div style="font-size:14px; font-weight:600; margin-bottom:6px;">Docker Updates settings have moved.</div>
             <div style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">All alerting-adjacent settings are now under the unified <strong>Alerts</strong> page.</div>
-            <button class="btn btn-primary" onclick="selectView('settings'); setTimeout(() => { switchSettingsTab('alerts'); switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings(); }, 50);">Open Settings → Alerts → Docker Updates</button>
+            <button class="btn btn-primary" onclick="openDockerUpdatesSettings(null);">Open Settings → Alerts → Docker Updates</button>
         </div>`;
     window[ALERTS_DU_MOVED] = true;
 }
@@ -36826,12 +36936,22 @@ function toggleStopForBackup(type, name, prefix, checked) {
     if (checked) map[key] = true; else delete map[key];
 }
 
+// Why a per-container tick is inert under "back up everything" — shown as the
+// tooltip on the greyed rows and kept in one place so the two spots agree.
+const STOP_FOR_BACKUP_COVERED_TIP =
+    'Covered by "Stop each container for a cold backup" while "back up everything" is on.';
+
 // Checkbox row for container targets (LXC + Docker): opt IN to stopping the
 // container for the backup. Default (unticked) backs it up live. For LXC on
 // ZFS/btrfs storage the backend snapshots either way, so a ticked box costs
 // only seconds of downtime; elsewhere (and for Docker) it stays down for the
 // backup. Proxmox LXC ignores the flag (vzdump snapshots there).
-function renderStopForBackupOption(t, prefix) {
+//
+// `disabled` greys the row out in the schedule modal while "back up everything"
+// is on: that mode resolves its targets at run time, so a per-container tick
+// there has nothing to attach to and used to be discarded on save (JJ
+// 2026-08-19). The schedule-level "Stop each container" flag covers that case.
+function renderStopForBackupOption(t, prefix, disabled = false) {
     if (t.type !== 'lxc' && t.type !== 'docker') return '';
     const key = `${t.type}:${t.name}`;
     const checked = stopMapFor(prefix)[key] ? 'checked' : '';
@@ -36839,9 +36959,9 @@ function renderStopForBackupOption(t, prefix) {
         ? "Ticked: the container is stopped while its volumes, bind mounts and image layer are captured, then restarted — fully consistent (quiesced databases). Unticked (default): backed up while running (crash-consistent)."
         : "Ticked: the container is stopped so the archive is fully consistent — on ZFS/btrfs storage a snapshot is taken and it restarts within seconds; elsewhere it stays down for the whole tar. Unticked (default): backed up while running (crash-consistent). Proxmox containers ignore this — vzdump snapshots there.";
     return `<div style="margin-top:3px;${prefix ? ' padding-left:24px;' : ''}">
-        <label style="font-size:11px; color:var(--text-muted); display:inline-flex; align-items:center; gap:5px; cursor:pointer;"
-               title="${escapeHtml(tip)}">
-            <input type="checkbox" ${checked} onchange="toggleStopForBackup('${escapeHtml(t.type)}','${escapeHtml(t.name)}','${prefix}', this.checked)">
+        <label data-stop-for-backup-row data-stop-tip="${escapeHtml(tip)}" style="font-size:11px; color:var(--text-muted); display:inline-flex; align-items:center; gap:5px; cursor:pointer;${disabled ? ' opacity:0.5;' : ''}"
+               title="${escapeHtml(disabled ? STOP_FOR_BACKUP_COVERED_TIP : tip)}">
+            <input type="checkbox" ${checked} ${disabled ? 'disabled' : ''} onchange="toggleStopForBackup('${escapeHtml(t.type)}','${escapeHtml(t.name)}','${prefix}', this.checked)">
             Stop container for cold backup
         </label>
     </div>`;
@@ -36988,7 +37108,7 @@ function renderScheduleTargets(selectedKeys, backupAll) {
                 <span style="color:var(--text-muted); font-size:10px; margin-left:6px;">${escapeHtml(t.type.toUpperCase())}</span></span>
             </label>
             ${mountsLink}
-            ${renderStopForBackupOption(t, 'sched-')}
+            ${renderStopForBackupOption(t, 'sched-', backupAll)}
         </div>`;
     };
 
@@ -37024,6 +37144,11 @@ function getScheduleTargets() {
 // "Back up everything" ticks + freezes the per-item checkboxes (the schedule
 // stores backup_all=true and resolves the live set each run). Turning it back OFF
 // restores whatever the operator had individually selected beforehand.
+//
+// It also swaps which cold-backup control is live. Under "everything" the
+// schedule has no stored targets, so the per-container ticks cannot be saved —
+// they used to be accepted and then silently dropped (JJ 2026-08-19). They go
+// disabled and the one schedule-level flag takes over.
 function onScheduleBackupAllToggle(checked) {
     document.querySelectorAll('#schedule-target-list .schedule-target-cb').forEach(cb => {
         if (checked) {
@@ -37035,6 +37160,76 @@ function onScheduleBackupAllToggle(checked) {
             if (cb.dataset.prevChecked !== undefined) cb.checked = cb.dataset.prevChecked === '1';
         }
     });
+    setScheduleStopContainersMode(checked);
+}
+
+// Show the schedule-level "stop each container" flag (and grey the per-container
+// ticks) only while "back up everything" is on. Called from the toggle and from
+// every modal-open path, so the two controls are never both live.
+function setScheduleStopContainersMode(backupAll) {
+    const row = document.getElementById('schedule-stop-containers-row');
+    if (row) row.style.display = backupAll ? 'flex' : 'none';
+    document.querySelectorAll('#schedule-target-list [data-stop-for-backup-row]').forEach(label => {
+        const cb = label.querySelector('input[type=checkbox]');
+        if (cb) cb.disabled = !!backupAll;
+        label.style.opacity = backupAll ? '0.5' : '';
+        // Toggling back off has to restore the real explanation, not leave the
+        // "covered by" text on a control that is live again.
+        label.title = backupAll
+            ? STOP_FOR_BACKUP_COVERED_TIP
+            : (label.getAttribute('data-stop-tip') || '');
+    });
+}
+
+// The Day-of-month options are built here rather than as 31 lines of HTML.
+function ensureScheduleDayOptions() {
+    const dom = document.getElementById('schedule-day-of-month');
+    if (!dom || dom.options.length) return;
+    const ordinal = (n) => {
+        const s = ['th', 'st', 'nd', 'rd'];
+        const v = n % 100;
+        return n + (s[(v - 20) % 10] || s[v] || s[0]);
+    };
+    dom.innerHTML = Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}">${ordinal(i + 1)}</option>`).join('');
+}
+
+// Reveal the day row that matches the chosen frequency (daily has none).
+function onScheduleFrequencyChange() {
+    ensureScheduleDayOptions();
+    const freq = (document.getElementById('schedule-frequency') || {}).value || 'daily';
+    const dowGroup = document.getElementById('schedule-day-of-week-group');
+    const domGroup = document.getElementById('schedule-day-of-month-group');
+    if (dowGroup) dowGroup.style.display = freq === 'weekly' ? '' : 'none';
+    if (domGroup) domGroup.style.display = freq === 'monthly' ? '' : 'none';
+}
+
+// Set the modal's day fields. Called on EVERY modal-open path — the modal is
+// shared, so an un-reset day would leak the previous schedule's choice into the
+// next one (same reasoning as setScheduleHookFields). `dow`/`dom` are null for a
+// new schedule, where we default to Monday / the 1st so the run day is always
+// explicit rather than "whichever day you happened to save on".
+function setScheduleDayFields(frequency, dow, dom) {
+    ensureScheduleDayOptions();
+    const dowEl = document.getElementById('schedule-day-of-week');
+    const domEl = document.getElementById('schedule-day-of-month');
+    if (dowEl) dowEl.value = String(dow || 1);
+    if (domEl) domEl.value = String(dom || 1);
+    const freqEl = document.getElementById('schedule-frequency');
+    if (freqEl && frequency) freqEl.value = frequency;
+    onScheduleFrequencyChange();
+}
+
+// Read the day field that applies to the chosen frequency. Weekly sends only
+// day_of_week, monthly only day_of_month, daily neither — so a schedule flipped
+// from weekly to daily stops carrying a stale weekday into the scheduler.
+function getScheduleDayFields() {
+    const freq = (document.getElementById('schedule-frequency') || {}).value || 'daily';
+    const dow = parseInt((document.getElementById('schedule-day-of-week') || {}).value, 10);
+    const dom = parseInt((document.getElementById('schedule-day-of-month') || {}).value, 10);
+    return {
+        day_of_week: freq === 'weekly' && dow >= 1 && dow <= 7 ? dow : null,
+        day_of_month: freq === 'monthly' && dom >= 1 && dom <= 31 ? dom : null,
+    };
 }
 
 // Set the modal title + submit-button label for create vs edit.
@@ -37355,6 +37550,23 @@ function renderBackupHistory(backups) {
     }).join('');
 }
 
+// "Mon" / "15th" for a schedule pinned to a run day, '' for daily schedules and
+// for weekly/monthly ones saved before day pinning existed (those still run on
+// the old "one interval since the last run" rule, so naming a day would lie).
+function formatScheduleRunDay(s) {
+    if (!s) return '';
+    if (s.frequency === 'weekly' && s.day_of_week >= 1 && s.day_of_week <= 7) {
+        return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][s.day_of_week - 1];
+    }
+    if (s.frequency === 'monthly' && s.day_of_month >= 1 && s.day_of_month <= 31) {
+        const n = s.day_of_month;
+        const suffixes = ['th', 'st', 'nd', 'rd'];
+        const v = n % 100;
+        return `${n}${suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]}`;
+    }
+    return '';
+}
+
 function renderSchedules(schedules) {
     const tbody = document.getElementById('schedules-table');
     const empty = document.getElementById('schedules-empty');
@@ -37378,11 +37590,13 @@ function renderSchedules(schedules) {
             ? '<span class="badge" style="background:#22c55e; color:#fff;">Active</span>'
             : '<span class="badge" style="background:#6b7280; color:#fff;">Disabled</span>';
         const bd = 'background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border);';
+        // "Weekly" alone never told the operator WHICH day it runs (JJ 2026-08-19).
+        const runDay = formatScheduleRunDay(s);
         const sid = escapeAttr(s.id);
 
         return `<tr>
             <td>${escapeHtml(s.name)}</td>
-            <td style="text-transform:capitalize;">${s.frequency}</td>
+            <td style="text-transform:capitalize;">${s.frequency}${runDay ? ` <span style="text-transform:none; color:var(--text-muted);">(${escapeHtml(runDay)})</span>` : ''}</td>
             <td>${s.time}</td>
             <td>${escapeHtml(targets)}</td>
             <td>${escapeHtml(storageLabel)}</td>
@@ -37517,6 +37731,11 @@ function editSchedule(id) {
     setVal('schedule-time', s.time);
     setVal('schedule-retention', s.retention);
     setScheduleHookFields(s.pre_command, s.post_command);
+    // Run day (weekly/monthly) and the "everything" cold-backup flag.
+    setScheduleDayFields(s.frequency, s.day_of_week, s.day_of_month);
+    const stopAllEl = document.getElementById('schedule-stop-containers');
+    if (stopAllEl) stopAllEl.checked = !!s.stop_containers;
+    setScheduleStopContainersMode(!!s.backup_all);
 
     const schedTargets = Array.isArray(s.targets) ? s.targets : [];
     // Pre-load this schedule's per-target mount exclusions + stop-for-backup
@@ -37779,6 +37998,11 @@ async function scheduleSystemFolder() {
     setScheduleModalChrome(false);
     document.getElementById('schedule-name').value = (targets.length === 1 ? targets[0].name : 'Folders') + ' folder';
     setScheduleHookFields('', '');
+    // Folders have no containers to stop; the day fields still apply.
+    setScheduleDayFields((document.getElementById('schedule-frequency') || {}).value, null, null);
+    const stopAllEl = document.getElementById('schedule-stop-containers');
+    if (stopAllEl) stopAllEl.checked = false;
+    setScheduleStopContainersMode(false);
     document.getElementById('create-schedule-modal').classList.add('active');
 }
 
@@ -38225,6 +38449,17 @@ async function showScheduleSelectedModal() {
     setScheduleModalChrome(false);
     document.getElementById('schedule-name').value = '';
     setScheduleHookFields('', '');
+    // Fresh schedule: default run day, and the cold-backup flag off. The
+    // schedule-level flag is only relevant (and only visible) when the operator
+    // ticked "back up everything", which selecting every item does for them.
+    setScheduleDayFields((document.getElementById('schedule-frequency') || {}).value, null, null);
+    const stopAllEl = document.getElementById('schedule-stop-containers');
+    // Selecting every item switches the modal into "back up everything", where
+    // per-container ticks no longer apply — so carry the operator's intent over
+    // rather than dropping it: if any selected container was marked for a cold
+    // backup on the page, the schedule-level flag starts on.
+    if (stopAllEl) stopAllEl.checked = allSelected && targets.some(t => t.stop_for_backup);
+    setScheduleStopContainersMode(allSelected);
     document.getElementById('create-schedule-modal').classList.add('active');
 }
 
@@ -38287,6 +38522,7 @@ async function createSchedule() {
     _editScheduleTargetsLocked = false;
     _editFolderTargets = null;
 
+    const days = getScheduleDayFields();
     const body = {
         name,
         frequency,
@@ -38298,6 +38534,13 @@ async function createSchedule() {
         enabled: editing ? !!editing.enabled : true,
         pre_command: (document.getElementById('schedule-pre-command')?.value || '').trim(),
         post_command: (document.getElementById('schedule-post-command')?.value || '').trim(),
+        // Weekly/monthly run day (null on the frequencies it doesn't apply to).
+        day_of_week: days.day_of_week,
+        day_of_month: days.day_of_month,
+        // Cold container backups for a "back up everything" schedule — the only
+        // place that mode can express it, since it has no stored targets.
+        stop_containers: backup_all
+            && !!(document.getElementById('schedule-stop-containers') || {}).checked,
     };
     if (editing) body.id = editing.id; // update in place
 
@@ -40487,11 +40730,12 @@ function renderClusterSchedules(schedules) {
             ? '<span class="badge" style="background:#22c55e; color:#fff;">Active</span>'
             : '<span class="badge" style="background:#6b7280; color:#fff;">Disabled</span>';
         const nodeName = s._node ? escapeHtml(s._node.hostname) : '—';
+        const runDay = formatScheduleRunDay(s);
 
         return `<tr>
             <td><span class="server-dot ${s._node?.online ? 'online' : 'offline'}" style="display:inline-block; margin-right:4px;"></span>${nodeName}</td>
             <td>${escapeHtml(s.name)}</td>
-            <td style="text-transform:capitalize;">${s.frequency}</td>
+            <td style="text-transform:capitalize;">${s.frequency}${runDay ? ` <span style="text-transform:none; color:var(--text-muted);">(${escapeHtml(runDay)})</span>` : ''}</td>
             <td>${s.time}</td>
             <td>${escapeHtml(targets)}</td>
             <td>${escapeHtml(storageLabel)}</td>
@@ -40857,6 +41101,36 @@ function renderClusterScheduleTargets() {
     container.innerHTML = html || '<p style="color:var(--text-muted); font-size:13px;">Click "Load Targets from Nodes" to fetch available backup targets.</p>';
 }
 
+// Cluster-page twins of the schedule modal's day fields. Same rules: the row
+// matching the frequency is the only one shown, and only that day is sent.
+function onClusterScheduleFrequencyChange() {
+    const dom = document.getElementById('cb-schedule-day-of-month');
+    if (dom && !dom.options.length) {
+        const ordinal = (n) => {
+            const s = ['th', 'st', 'nd', 'rd'];
+            const v = n % 100;
+            return n + (s[(v - 20) % 10] || s[v] || s[0]);
+        };
+        dom.innerHTML = Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}">${ordinal(i + 1)}</option>`).join('');
+    }
+    const freq = (document.getElementById('cb-schedule-frequency') || {}).value || 'daily';
+    const dowGroup = document.getElementById('cb-schedule-day-of-week-group');
+    const domGroup = document.getElementById('cb-schedule-day-of-month-group');
+    if (dowGroup) dowGroup.style.display = freq === 'weekly' ? '' : 'none';
+    if (domGroup) domGroup.style.display = freq === 'monthly' ? '' : 'none';
+}
+
+function getClusterScheduleDayFields() {
+    onClusterScheduleFrequencyChange(); // guarantees the day-of-month options exist
+    const freq = (document.getElementById('cb-schedule-frequency') || {}).value || 'daily';
+    const dow = parseInt((document.getElementById('cb-schedule-day-of-week') || {}).value, 10);
+    const dom = parseInt((document.getElementById('cb-schedule-day-of-month') || {}).value, 10);
+    return {
+        day_of_week: freq === 'weekly' && dow >= 1 && dow <= 7 ? dow : null,
+        day_of_month: freq === 'monthly' && dom >= 1 && dom <= 31 ? dom : null,
+    };
+}
+
 async function pushClusterSchedule() {
     const name = (document.getElementById('cb-schedule-name') || {}).value?.trim();
     if (!name) { showToast('Enter a schedule name', 'error'); return; }
@@ -40866,6 +41140,8 @@ async function pushClusterSchedule() {
     const retention = parseInt((document.getElementById('cb-schedule-retention') || {}).value) || 0;
     const storageType = (document.getElementById('cb-schedule-storage') || {}).value || 'local';
     const scope = document.querySelector('input[name="cb-schedule-scope"]:checked')?.value || 'all';
+    const days = getClusterScheduleDayFields();
+    const stopContainers = !!(document.getElementById('cb-schedule-stop-containers') || {}).checked;
 
     const selectedIds = [...document.querySelectorAll('.cb-sched-node-cb:checked')].map(cb => cb.value);
     if (selectedIds.length === 0) { showToast('No nodes selected', 'error'); return; }
@@ -40893,7 +41169,8 @@ async function pushClusterSchedule() {
 
     const summary = scope === 'all' ? 'backing up everything'
         : 'backing up selected targets';
-    if (!await showConfirm(`Create schedule "${name}" (${frequency} at ${time} UTC) on ${nodes.length} node(s), ${summary}?\n\n${nodes.map(n => n.hostname).join(', ')}`)) return;
+    const dayLabel = formatScheduleRunDay({ frequency, day_of_week: days.day_of_week, day_of_month: days.day_of_month });
+    if (!await showConfirm(`Create schedule "${name}" (${frequency}${dayLabel ? ` on ${dayLabel}` : ''} at ${time} UTC${stopContainers ? ', containers stopped for a cold backup' : ''}) on ${nodes.length} node(s), ${summary}?\n\n${nodes.map(n => n.hostname).join(', ')}`)) return;
 
     await refreshBackupLocalDir();
     let storage;
@@ -40918,7 +41195,11 @@ async function pushClusterSchedule() {
     // "select" scope keeps the per-node path — there the body genuinely differs
     // per node.
     if (scope === 'select') {
-        return pushClusterSchedulePerNode(nodes, perNodeTargets, { name, frequency, time, retention, storage });
+        return pushClusterSchedulePerNode(nodes, perNodeTargets, {
+            name, frequency, time, retention, storage,
+            day_of_week: days.day_of_week, day_of_month: days.day_of_month,
+            stop_containers: stopContainers,
+        });
     }
 
     let data;
@@ -40929,6 +41210,8 @@ async function pushClusterSchedule() {
             body: JSON.stringify({
                 name, frequency, time, retention,
                 backup_all: true, targets: [], storage, enabled: true,
+                day_of_week: days.day_of_week, day_of_month: days.day_of_month,
+                stop_containers: stopContainers,
                 scope: 'fleet',
                 target_nodes: nodes.map(n => n.id),
             }),
@@ -40959,7 +41242,7 @@ async function pushClusterSchedule() {
 // Per-node fallback for "select" scope, where each node gets a different
 // target list and so genuinely needs its own request.
 async function pushClusterSchedulePerNode(nodes, perNodeTargets, common) {
-    const { name, frequency, time, retention, storage } = common;
+    const { name, frequency, time, retention, storage, day_of_week, day_of_month, stop_containers } = common;
     let success = 0;
     const failures = [];
     const results = await Promise.allSettled(nodes.map(async (node) => {
@@ -40973,7 +41256,20 @@ async function pushClusterSchedulePerNode(nodes, perNodeTargets, common) {
                 targets = perNodeTargets[node.id];
             }
         }
-        const body = { name, frequency, time, retention, backup_all: backupAll, targets, storage, enabled: true };
+        // One tick on the page has to mean the same thing on every node, and
+        // the two modes carry it differently: a node whose whole target set was
+        // selected runs in backup_all mode and takes the schedule-wide flag,
+        // while a node with an explicit list carries the flag per container.
+        const coldTargets = stop_containers
+            ? targets.map(t => (t.type === 'docker' || t.type === 'lxc')
+                ? { ...t, stop_for_backup: true } : t)
+            : targets;
+        const body = {
+            name, frequency, time, retention, backup_all: backupAll,
+            targets: coldTargets, storage, enabled: true,
+            day_of_week, day_of_month,
+            stop_containers: backupAll ? !!stop_containers : false,
+        };
         try {
             const res = await fetch(nodeApiUrl(node.id, '/api/backups/schedules'), {
                 method: 'POST',

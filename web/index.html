@@ -4588,12 +4588,31 @@
                             <input type="text" id="cb-schedule-name" class="form-control" placeholder="Nightly Cluster Backup">
                         </div>
                         <div class="form-group">
-                            <label style="font-size:12px; color:var(--text-secondary);">Frequency</label>
-                            <select id="cb-schedule-frequency" class="form-control">
+                            <label style="font-size:12px; color:var(--text-secondary);" for="cb-schedule-frequency">Frequency</label>
+                            <select id="cb-schedule-frequency" class="form-control" onchange="onClusterScheduleFrequencyChange()">
                                 <option value="daily">Daily</option>
                                 <option value="weekly">Weekly</option>
                                 <option value="monthly">Monthly</option>
                             </select>
+                        </div>
+                        <!-- Run day for weekly/monthly cluster schedules — same
+                             fields as the per-node schedule modal (JJ 2026-08-19). -->
+                        <div class="form-group" id="cb-schedule-day-of-week-group" style="display:none;">
+                            <label style="font-size:12px; color:var(--text-secondary);" for="cb-schedule-day-of-week">Day of the week</label>
+                            <select id="cb-schedule-day-of-week" class="form-control">
+                                <option value="1">Monday</option>
+                                <option value="2">Tuesday</option>
+                                <option value="3">Wednesday</option>
+                                <option value="4">Thursday</option>
+                                <option value="5">Friday</option>
+                                <option value="6">Saturday</option>
+                                <option value="7">Sunday</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="cb-schedule-day-of-month-group" style="display:none;">
+                            <label style="font-size:12px; color:var(--text-secondary);" for="cb-schedule-day-of-month">Day of the month</label>
+                            <select id="cb-schedule-day-of-month" class="form-control"></select>
+                            <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0;">A day the month doesn't have runs on that month's last day.</p>
                         </div>
                         <div class="form-group">
                             <label style="font-size:12px; color:var(--text-secondary);">Time (UTC, HH:MM)</label>
@@ -4634,6 +4653,14 @@
                             </div>
                             <div id="cb-schedule-targets-list"></div>
                         </div>
+                        <!-- Cold container backups. These schedules resolve their
+                             containers on each node at run time, so this is a
+                             schedule-wide flag rather than a per-container one. -->
+                        <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12px; color:var(--text-secondary); cursor:pointer;"
+                               title="Ticked: each container is stopped while it is archived, then restarted — fully consistent (quiesced databases). Unticked (default): archived while running (crash-consistent). Proxmox LXC ignores this — vzdump snapshots there.">
+                            <input type="checkbox" id="cb-schedule-stop-containers">
+                            Stop each container for a cold backup
+                        </label>
                     </div>
                     <!-- Node selection for schedule -->
                     <div style="margin-bottom:16px;">
@@ -4736,12 +4763,32 @@
                         <input type="text" id="schedule-name" class="form-control" placeholder="Nightly Backup">
                     </div>
                     <div class="form-group">
-                        <label>Frequency</label>
-                        <select id="schedule-frequency" class="form-control">
+                        <label for="schedule-frequency">Frequency</label>
+                        <select id="schedule-frequency" class="form-control" onchange="onScheduleFrequencyChange()">
                             <option value="daily">Daily</option>
                             <option value="weekly">Weekly</option>
                             <option value="monthly">Monthly</option>
                         </select>
+                    </div>
+                    <!-- Weekly/monthly run day (JJ 2026-08-19). Only the row that
+                         matches the chosen frequency is shown; the value is kept
+                         either way so switching back restores the day. -->
+                    <div class="form-group" id="schedule-day-of-week-group" style="display:none;">
+                        <label for="schedule-day-of-week">Day of the week</label>
+                        <select id="schedule-day-of-week" class="form-control">
+                            <option value="1">Monday</option>
+                            <option value="2">Tuesday</option>
+                            <option value="3">Wednesday</option>
+                            <option value="4">Thursday</option>
+                            <option value="5">Friday</option>
+                            <option value="6">Saturday</option>
+                            <option value="7">Sunday</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="schedule-day-of-month-group" style="display:none;">
+                        <label for="schedule-day-of-month">Day of the month</label>
+                        <select id="schedule-day-of-month" class="form-control"></select>
+                        <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0;">A day the month doesn't have runs on that month's last day — the 31st backs up on 28/29 February.</p>
                     </div>
                     <div class="form-group">
                         <label>Time (UTC, HH:MM)</label>
@@ -4769,6 +4816,18 @@
                         <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:12px; color:var(--text-secondary); cursor:pointer;">
                             <input type="checkbox" id="schedule-backup-all" onchange="onScheduleBackupAllToggle(this.checked)">
                             Back up everything currently present (auto-includes new containers/VMs)
+                        </label>
+                        <!-- "Back up everything" resolves its containers at run
+                             time, so the per-container cold-backup ticks above
+                             have nothing to attach to. This one flag covers them
+                             all (JJ 2026-08-19 — the per-container ticks were
+                             silently discarded here). Only shown while
+                             "everything" is on. -->
+                        <label id="schedule-stop-containers-row"
+                               style="display:none; align-items:center; gap:8px; margin-top:6px; padding-left:22px; font-size:12px; color:var(--text-secondary); cursor:pointer;"
+                               title="Ticked: every container is stopped while it is archived, then restarted — fully consistent (quiesced databases). Unticked (default): archived while running (crash-consistent). Proxmox LXC ignores this — vzdump snapshots there.">
+                            <input type="checkbox" id="schedule-stop-containers">
+                            Stop each container for a cold backup
                         </label>
                     </div>
                     <p id="schedule-folder-summary" style="font-size:12px; color:var(--text-muted); display:none;"></p>
@@ -5225,7 +5284,7 @@
                 <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
                     <h3>Docker Containers</h3>
                     <div style="display:flex;gap:8px;align-items:center;">
-                        <a href="#" onclick="selectView('settings'); setTimeout(() => { switchSettingsTab('alerts'); switchAlertsSub('dockerupdates'); loadDockerUpdatesSettings(); }, 60); return false;" title="Global image-update settings — enable checks, set the interval, auto-update policy, and push to all cluster nodes" style="font-size:12px;color:var(--text-muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;"><span class="ws-icon-clean-wrap" data-icon="updates"></span> Image update settings</a>
+                        <a href="#" onclick="openDockerUpdatesSettings(currentNodeId); return false;" title="Image-update settings for this node's cluster — enable checks, set the interval, auto-update policy, and push to all cluster nodes" style="font-size:12px;color:var(--text-muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;"><span class="ws-icon-clean-wrap" data-icon="updates"></span> Image update settings</a>
                         <div id="docker-view-toggle" style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
                             <button onclick="setContainerView('docker','table')" class="view-toggle-btn" data-view="table" style="padding:4px 8px;border:none;background:none;cursor:pointer;font-size:14px;" title="Table view"><span class="ws-icon-clean-wrap" data-icon="menu"></span></button>
                             <button onclick="setContainerView('docker','card')" class="view-toggle-btn" data-view="card" style="padding:4px 8px;border:none;background:none;cursor:pointer;font-size:14px;" title="Card view">▦</button>
@@ -6681,6 +6740,20 @@
                     <div id="settings-tab-dockerupdates" class="settings-tab-panel">
                         <h4 style="margin:0 0 8px 0; font-size:16px; font-weight:600;">Automatic Docker Image Updates</h4>
                         <p style="font-size:13px; color:var(--text-muted); margin:0 0 20px 0;">Watch upstream registries for newer image digests on your running Docker containers, optionally apply them on a maintenance schedule with backup + health-check + auto-rollback. Per-container overrides on the Docker page.</p>
+
+                        <!-- Which node/cluster these settings belong to. These are
+                             per-node files that propagate within a cluster, and
+                             Settings pages otherwise always talk to the UI host —
+                             so on a bastion managing two clusters this panel could
+                             only ever configure (and push to) its own
+                             (RutgerDiehard 2026-08-19). Hidden entirely on a
+                             single-node install. -->
+                        <div class="form-group" id="docker-updates-scope-group" style="display:none; margin-bottom:20px; padding:12px 14px; background:var(--bg-input); border:1px solid var(--border); border-left:3px solid var(--accent, #7c5cff); border-radius:var(--radius-sm);">
+                            <label for="docker-updates-scope-node">Settings for</label>
+                            <select id="docker-updates-scope-node" class="form-control" style="max-width:360px;"
+                                onchange="onDockerUpdatesScopeChange(this.value)"></select>
+                            <small id="docker-updates-scope-note" style="color:var(--text-muted); display:block; margin-top:6px;"></small>
+                        </div>
 
                         <div class="form-group" style="margin-bottom:16px;">
                             <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
