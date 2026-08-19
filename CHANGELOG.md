@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.16.0: weekly/monthly backups pick their run day, and "back up everything" stops discarding cold-backup ticks** _(2026-08-19 — [`a59705d5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a59705d5c656e702f1569e728e653ed12df3ac33))_
 - **v25.15.4: image-watcher settings now converge on every cluster node** _(2026-08-19 — [`290eea80`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/290eea80f090deeafaddddb848514843b2efc4ba))_
 - **v25.15.3: AI chat works with newer Claude models that emit thinking blocks** _(2026-08-19 — [`85d0529b`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/85d0529b8c0836c9ca978502b770438d412970cf))_
 - **v25.15.2: 2.5GbE link speeds display as 2.5Gb/s, not 2Gb/s** _(2026-08-18 — [`72635074`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/7263507424986df0ad30e3c3c4f529d31382a791))_
