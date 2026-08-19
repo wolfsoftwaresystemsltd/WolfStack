@@ -3313,6 +3313,26 @@ async fn main() -> std::io::Result<()> {
             });
         }
 
+        // Background: image-watcher cluster-settings reconcile (every 10
+        // minutes). Save-time propagation only reaches peers online at that
+        // instant; this pull-based pass is what lets a node that was offline,
+        // rebuilt, or joined the cluster later converge on the fleet's watcher
+        // settings (rev-gated — see image_watcher_reconcile_from_peers). One
+        // tiny GET per same-cluster peer per pass; first pass 3 minutes after
+        // boot so a freshly joined node starts checking within minutes, not
+        // whenever an operator next edits settings.
+        {
+            let iw_rec_cluster = app_state.cluster.clone();
+            let iw_rec_secret = app_state.cluster_secret.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(180)).await;
+                loop {
+                    api::image_watcher_reconcile_from_peers(&iw_rec_cluster, &iw_rec_secret).await;
+                    tokio::time::sleep(Duration::from_secs(600)).await;
+                }
+            });
+        }
+
         // Background: integration health checks (every 60 seconds)
         {
             let int_state = app_state.integrations.clone();

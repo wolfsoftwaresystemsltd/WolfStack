@@ -41192,9 +41192,39 @@ pub async fn image_watcher_config_save(
     let existing = crate::containers::image_watcher::ImageWatcherConfig::load();
     let incoming = body.into_inner();
     let cluster_changed = !existing.cluster_settings_eq(&incoming);
-    let cfg = crate::containers::image_watcher::ImageWatcherConfig::resolve_on_save(
+
+    // Stale-propagation guard: a rev-carrying peer push that isn't newer than
+    // what this node already has is dropped, not applied. Without this, two
+    // saves racing across the cluster could re-apply older settings on top of
+    // newer ones. rev 0 = legacy sender (pre-rev release) — apply it like the
+    // old code always did, so mixed-version clusters keep converging.
+    if is_propagation
+        && incoming.cluster_rev != 0
+        && incoming.cluster_rev <= existing.cluster_rev
+    {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "message": format!(
+                "propagation rev {} not newer than local rev {} — ignored",
+                incoming.cluster_rev, existing.cluster_rev,
+            ),
+            "peers": [],
+            "peers_failed": 0,
+        }));
+    }
+
+    let existing_rev = existing.cluster_rev;
+    let mut cfg = crate::containers::image_watcher::ImageWatcherConfig::resolve_on_save(
         existing, incoming, is_propagation,
     );
+    if !is_propagation {
+        // Operator edit: the client echoes whatever rev it loaded, which may
+        // be stale (old tab). The authoritative base is what's on disk.
+        cfg.cluster_rev = if cluster_changed {
+            existing_rev.max(cfg.cluster_rev) + 1
+        } else {
+            existing_rev
+        };
+    }
 
     if let Err(e) = cfg.save() {
         return HttpResponse::InternalServerError().json(serde_json::json!({ "error": e }));
@@ -41240,6 +41270,107 @@ pub async fn image_watcher_config_propagate(
         "peers": peers,
         "peers_failed": peers_failed,
     }))
+}
+
+/// GET /api/image-watcher/cluster-settings — this node's image-watcher config
+/// with the host-local state (per-container policies, audit history) stripped
+/// out. Served to cluster peers by the periodic reconcile so every node can
+/// discover a newer `cluster_rev` and adopt it via `merge_cluster_settings_from`.
+/// The strip matters twice over: history can be hundreds of events the peer
+/// must not download every cycle, and neither field may ever be merged onto
+/// another host (they key on THAT host's containers).
+pub async fn image_watcher_cluster_settings(
+    req: HttpRequest, state: web::Data<AppState>,
+) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let mut cfg = crate::containers::image_watcher::ImageWatcherConfig::load();
+    cfg.container_policies.clear();
+    cfg.update_history.clear();
+    HttpResponse::Ok().json(cfg)
+}
+
+/// One pass of the image-watcher settings reconcile: ask every online peer in
+/// this node's cluster for its cluster-settings revision and adopt the highest
+/// one that is strictly newer than ours. Called from a background loop in
+/// main.rs (10-minute cadence).
+///
+/// This is the healing half of the sync design. Save-time propagation
+/// (`image_watcher_propagate_config_to_peers`) is instant but only reaches
+/// peers that are online at that exact moment — a node that was offline,
+/// being rebuilt, or joined the cluster afterwards silently kept
+/// `enabled: false` forever, which is how RutgerDiehard's newer hosts
+/// (2026-08-19) never ran a single image check while the older fleet worked.
+/// Pull-based + rev-gated: no wall-clock trust, no thundering pushes, and a
+/// peer still on a pre-rev release (404 on the endpoint, or rev 0) is simply
+/// skipped.
+pub async fn image_watcher_reconcile_from_peers(
+    cluster: &crate::agent::ClusterState,
+    secret: &str,
+) {
+    let nodes = cluster.get_all_nodes();
+    let self_cluster = nodes.iter().find(|n| n.is_self)
+        .and_then(|n| n.cluster_name.clone());
+    let local_rev = crate::containers::image_watcher::ImageWatcherConfig::load().cluster_rev;
+
+    let mut best: Option<crate::containers::image_watcher::ImageWatcherConfig> = None;
+    let mut best_rev = local_rev;
+    for n in nodes.iter().filter(|n| {
+        !n.is_self && n.online && n.node_type == "wolfstack"
+            && crate::agent::same_display_cluster(
+                n.cluster_name.as_deref(), self_cluster.as_deref())
+    }) {
+        let urls = build_node_urls(&n.address, n.port, "/api/image-watcher/cluster-settings");
+        for url in &urls {
+            match API_HTTP_CLIENT.get(url)
+                .timeout(std::time::Duration::from_secs(10))
+                .header("X-WolfStack-Secret", secret)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(peer_cfg) = resp
+                        .json::<crate::containers::image_watcher::ImageWatcherConfig>()
+                        .await
+                        && peer_cfg.cluster_rev > best_rev
+                    {
+                        best_rev = peer_cfg.cluster_rev;
+                        best = Some(peer_cfg);
+                    }
+                    break; // definitive answer from this peer
+                }
+                Ok(resp) => {
+                    // Reachable but non-2xx — an older release without the
+                    // endpoint (404). Drain and skip; don't try other URLs.
+                    let _ = resp.bytes().await;
+                    break;
+                }
+                Err(_) => continue, // connection failed — try next candidate URL
+            }
+        }
+    }
+
+    if let Some(newer) = best {
+        // Reload rather than reusing the copy from the top of the pass: an
+        // operator save or an inbound propagation may have landed while we
+        // were querying peers, and merge must apply onto the latest state.
+        let mut merged = crate::containers::image_watcher::ImageWatcherConfig::load();
+        if newer.cluster_rev <= merged.cluster_rev {
+            return; // something newer arrived mid-pass — nothing to do
+        }
+        let was_rev = merged.cluster_rev;
+        let was_enabled = merged.enabled;
+        merged.merge_cluster_settings_from(&newer);
+        match merged.save() {
+            Ok(()) => tracing::info!(
+                "image_watcher: reconciled cluster settings to rev {} (was rev {}, enabled {} -> {})",
+                newer.cluster_rev, was_rev, was_enabled, merged.enabled,
+            ),
+            Err(e) => tracing::warn!(
+                "image_watcher: reconcile found rev {} but saving failed: {}",
+                newer.cluster_rev, e,
+            ),
+        }
+    }
 }
 
 /// GET /api/image-watcher/status
@@ -45973,6 +46104,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/image-watcher/config", web::get().to(image_watcher_config_get))
         .route("/api/image-watcher/config", web::put().to(image_watcher_config_save))
         .route("/api/image-watcher/propagate", web::post().to(image_watcher_config_propagate))
+        .route("/api/image-watcher/cluster-settings", web::get().to(image_watcher_cluster_settings))
         .route("/api/image-watcher/status", web::get().to(image_watcher_status))
         .route("/api/image-watcher/check/{container}", web::post().to(image_watcher_check))
         // Operator-triggered "Update now" — singular and bulk. Bulk

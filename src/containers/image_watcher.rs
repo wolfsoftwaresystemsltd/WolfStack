@@ -75,6 +75,22 @@ pub struct ImageWatcherConfig {
     /// it. Cluster-wide setting (see `merge_cluster_settings_from`).
     #[serde(default)]
     pub exclude_bind_mounts_from_backup: bool,
+    /// Monotonic revision of the CLUSTER-WIDE fields, bumped by the save
+    /// handler on every operator edit that changes one of them. This is
+    /// what lets nodes converge WITHOUT trusting wall clocks: the
+    /// periodic reconcile (`image_watcher_reconcile_from_peers`) adopts
+    /// a peer's cluster settings only when the peer's rev is strictly
+    /// higher. Before this existed, settings only ever moved at the
+    /// instant of a save, to peers online at that moment — a node that
+    /// was offline, being rebuilt, or joined the cluster later kept
+    /// `enabled: false` forever with no indication (RutgerDiehard's
+    /// Docker-29 hosts, 2026-08-19: the new hosts never got the config;
+    /// the Docker version was a red herring). 0 = pre-rev config from an
+    /// older release: reconcile never adopts it, but save-time
+    /// propagation still applies it (legacy behaviour) so mixed-version
+    /// clusters keep working.
+    #[serde(default)]
+    pub cluster_rev: u64,
 }
 
 /// Hard floor on how often an image check may run, for the global setting
@@ -188,6 +204,7 @@ impl Default for ImageWatcherConfig {
             schedule_window_minutes: default_window_minutes(),
             max_parallel_updates: default_max_parallel_updates(),
             exclude_bind_mounts_from_backup: false,
+            cluster_rev: 0,
         }
     }
 }
@@ -265,6 +282,12 @@ impl ImageWatcherConfig {
         self.schedule_window_minutes = other.schedule_window_minutes;
         self.max_parallel_updates = other.max_parallel_updates;
         self.exclude_bind_mounts_from_backup = other.exclude_bind_mounts_from_backup;
+        // Adopt the sender's revision, but never move backwards: a
+        // legacy peer (pre-rev release) always sends 0, and adopting 0
+        // here would make THIS node look older than peers it already
+        // synced with, causing the next reconcile to re-fetch settings
+        // it already has.
+        self.cluster_rev = self.cluster_rev.max(other.cluster_rev);
     }
 
     /// True when the CLUSTER-WIDE settings (the ones `merge_cluster_settings_from`
@@ -272,6 +295,10 @@ impl ImageWatcherConfig {
     /// a cluster fan-out when only host-local state changed — e.g. an operator
     /// pinning a single container — so a per-container edit never triggers (or
     /// blocks on) peer propagation.
+    ///
+    /// `cluster_rev` is deliberately NOT compared: it's sync metadata, not a
+    /// setting. Comparing it would make every save look like a cluster change
+    /// (the client echoes the rev it loaded) and re-trigger fan-out forever.
     pub fn cluster_settings_eq(&self, other: &Self) -> bool {
         self.enabled == other.enabled
             && self.check_interval_secs == other.check_interval_secs
@@ -619,9 +646,15 @@ pub async fn get_local_digest(container_name: &str) -> Result<String, String> {
         return Err(format!("No image found for container '{}'", container_name));
     }
 
-    // Get the repo digest for the image
+    // Get the repo digests for the image. `{{json .RepoDigests}}` instead of
+    // `{{index .RepoDigests 0}}`: the index template HARD-ERRORS ("index out
+    // of range") on an empty list instead of reporting the real problem, and
+    // blindly taking entry 0 picks whatever repo happens to sort first — an
+    // image tagged into several repos (retag + push workflows, or multiple
+    // tags under the containerd image store) can put a DIFFERENT repo's
+    // digest at index 0, and the check then compares apples to oranges.
     let digest_out = tokio::process::Command::new("docker")
-        .args(["image", "inspect", "--format", "{{index .RepoDigests 0}}", &image])
+        .args(["image", "inspect", "--format", "{{json .RepoDigests}}", &image])
         .output()
         .await
         .map_err(|e| format!("Failed to inspect image '{}': {}", image, e))?;
@@ -634,12 +667,39 @@ pub async fn get_local_digest(container_name: &str) -> Result<String, String> {
         ));
     }
 
-    let digest = String::from_utf8_lossy(&digest_out.stdout).trim().to_string();
-    if digest.is_empty() {
-        return Err(format!("No repo digest available for image '{}' (locally built?)", image));
-    }
+    let raw = String::from_utf8_lossy(&digest_out.stdout).trim().to_string();
+    // `{{json}}` prints the literal `null` for a nil slice — from_str then
+    // fails and unwrap_or_default gives the same empty Vec as `[]`.
+    let repo_digests: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
 
-    Ok(digest)
+    select_repo_digest(&image, &repo_digests).ok_or_else(|| {
+        format!(
+            "No repo digest available for image '{}' (locally built or docker-loaded?)",
+            image
+        )
+    })
+}
+
+/// Pick the RepoDigests entry that belongs to `image`'s own repository.
+///
+/// Entries look like `nginx@sha256:…` or `ghcr.io/org/app@sha256:…`. Both
+/// sides are normalised through [`ImageRef::parse`] (which strips the digest
+/// pin and expands Hub shorthand like `redis` → `library/redis`), so
+/// `docker.io/redis:6` matches an entry written as `redis@sha256:…`. Falls
+/// back to the first entry when nothing matches — the pre-existing behaviour,
+/// still right for the common single-repo case where the entry's spelling
+/// differs in a way normalisation doesn't cover. None only when the list is
+/// empty.
+fn select_repo_digest(image: &str, repo_digests: &[String]) -> Option<String> {
+    let want = ImageRef::parse(image);
+    repo_digests
+        .iter()
+        .find(|entry| {
+            let have = ImageRef::parse(entry);
+            have.registry == want.registry && have.repo == want.repo
+        })
+        .or_else(|| repo_digests.first())
+        .cloned()
 }
 
 // ═══════════════════════════════════════════════
@@ -1429,6 +1489,107 @@ async fn check_containers_impl(
 // ═══════════════════════════════════════════════
 // ─── Tests ───
 // ═══════════════════════════════════════════════
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Live end-to-end check against the local Docker daemon + real
+    /// registry. Ignored by default (needs Docker, network, and a
+    /// container to inspect). Run with:
+    ///   IW_CONTAINER=<name> cargo test live_check -- --ignored --nocapture
+    /// Used to verify the watcher against Docker 29's containerd image
+    /// store (RutgerDiehard report, 2026-08-19).
+    #[tokio::test]
+    #[ignore]
+    async fn live_check() {
+        let name = std::env::var("IW_CONTAINER").unwrap_or_else(|_| "iwtest".into());
+        let result = check_container_update(&name).await;
+        println!("check_container_update({name:?}) = {result:#?}");
+        let r = result.expect("check should not hard-error");
+        assert!(r.error.is_none(), "check error: {:?}", r.error);
+    }
+}
+
+#[cfg(test)]
+mod repo_digest_selection_tests {
+    use super::*;
+
+    #[test]
+    fn single_entry_returned() {
+        let d = vec!["alpine@sha256:aaa".to_string()];
+        assert_eq!(select_repo_digest("alpine:3.19", &d).as_deref(), Some("alpine@sha256:aaa"));
+    }
+
+    #[test]
+    fn empty_list_is_none() {
+        assert_eq!(select_repo_digest("alpine:3.19", &[]), None);
+    }
+
+    #[test]
+    fn matching_repo_wins_over_first_entry() {
+        let d = vec![
+            "someuser/mirror@sha256:aaa".to_string(),
+            "ghcr.io/org/app@sha256:bbb".to_string(),
+        ];
+        assert_eq!(
+            select_repo_digest("ghcr.io/org/app:v2", &d).as_deref(),
+            Some("ghcr.io/org/app@sha256:bbb")
+        );
+    }
+
+    #[test]
+    fn hub_shorthand_normalisation_matches() {
+        // Container created as docker.io/redis:6 — RepoDigests writes the
+        // familiar form "redis@…". Both normalise to library/redis.
+        let d = vec!["redis@sha256:ccc".to_string()];
+        assert_eq!(select_repo_digest("docker.io/redis:6", &d).as_deref(), Some("redis@sha256:ccc"));
+    }
+
+    #[test]
+    fn no_match_falls_back_to_first() {
+        let d = vec![
+            "someuser/mirror@sha256:aaa".to_string(),
+            "otheruser/copy@sha256:bbb".to_string(),
+        ];
+        assert_eq!(select_repo_digest("ghcr.io/org/app:v2", &d).as_deref(), Some("someuser/mirror@sha256:aaa"));
+    }
+}
+
+#[cfg(test)]
+mod cluster_rev_tests {
+    use super::*;
+
+    #[test]
+    fn rev_defaults_to_zero_from_old_config_json() {
+        let cfg: ImageWatcherConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(cfg.cluster_rev, 0);
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn merge_adopts_higher_rev_but_never_regresses() {
+        let mut local = ImageWatcherConfig { cluster_rev: 5, ..Default::default() };
+        let newer = ImageWatcherConfig { cluster_rev: 9, enabled: true, ..Default::default() };
+        local.merge_cluster_settings_from(&newer);
+        assert_eq!(local.cluster_rev, 9);
+        assert!(local.enabled);
+
+        // Legacy peer (rev 0) still applies its settings on a save-time
+        // propagation, but must not drag the revision backwards.
+        let legacy = ImageWatcherConfig { cluster_rev: 0, enabled: false, ..Default::default() };
+        local.merge_cluster_settings_from(&legacy);
+        assert_eq!(local.cluster_rev, 9);
+        assert!(!local.enabled);
+    }
+
+    #[test]
+    fn rev_is_not_a_cluster_setting_for_change_detection() {
+        let a = ImageWatcherConfig { cluster_rev: 1, ..Default::default() };
+        let b = ImageWatcherConfig { cluster_rev: 7, ..Default::default() };
+        assert!(a.cluster_settings_eq(&b));
+    }
+}
 
 #[cfg(test)]
 mod tests {
