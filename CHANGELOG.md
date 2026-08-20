@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.17.0: a trailing slash on an S3 endpoint no longer breaks every S3 call, and a backup asks before it copies a 20 TB mount** _(2026-08-20 — [`5dbc24dc`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/5dbc24dc6888b9b19114a95351727894f9f9a9ca))_
 - **v25.16.1: installs stop leaving an open portmapper, and a backup can no longer fill the system disk** _(2026-08-19 — [`1576015c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/1576015cf7ebf497b583b6d7ca24e80ea57e6bcc))_
 - **v25.16.0: weekly/monthly backups pick their run day, and "back up everything" stops discarding cold-backup ticks** _(2026-08-19 — [`a59705d5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a59705d5c656e702f1569e728e653ed12df3ac33))_
 - **v25.15.4: image-watcher settings now converge on every cluster node** _(2026-08-19 — [`290eea80`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/290eea80f090deeafaddddb848514843b2efc4ba))_
