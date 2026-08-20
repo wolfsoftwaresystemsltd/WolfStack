@@ -1271,18 +1271,48 @@ pub struct DiscoveredMount {
     pub source: String,
     /// Mount point inside the container.
     pub destination: String,
-    /// On-disk size of the source in bytes, 0 if not cheaply known.
+    /// On-disk size of the source in bytes. 0 when `size_basis` says there was
+    /// nothing to measure ("missing") or it could not be measured ("unknown").
     #[serde(default)]
     pub size_bytes: u64,
+    /// How `size_bytes` was arrived at, so nothing downstream has to guess
+    /// whether it is a measurement or a bound:
+    ///   "walked"     — a full `du` of the tree completed: exact.
+    ///   "filesystem" — the source IS a filesystem root, so its used bytes
+    ///                  are the filesystem's used bytes. Instant, and an
+    ///                  upper bound if anything else shares that filesystem.
+    ///   "declared"   — the size the container config declares for a
+    ///                  storage-backed volume (Proxmox `size=8G`): provisioned,
+    ///                  not used, so an upper bound.
+    ///   "missing"    — the source is not on this host, so it holds nothing.
+    ///   "unknown"    — too big to walk inside the deadline, or unstattable.
+    ///                  `size_bytes` is 0 and `fs_used_bytes`, when non-zero,
+    ///                  is the only ceiling available.
+    #[serde(default)]
+    pub size_basis: String,
+    /// Used bytes of the filesystem the source lives on, 0 when `df` could not
+    /// say. The one number available for an unmeasurable tree — a mount whose
+    /// size is unknown cannot hold more than this.
+    #[serde(default)]
+    pub fs_used_bytes: u64,
+    /// Absolute path whose contents this mount contributes to an archive: the
+    /// host source for a bind, the resolved `_data` directory for a named
+    /// volume, empty for a storage-backed Proxmox volume that has no host path.
+    /// Internal plumbing (the size guard and the pxar packer both need it);
+    /// the browser has no use for it, so it is not serialized.
+    #[serde(default, skip_serializing)]
+    pub data_path: String,
 }
 
-/// Cheap directory size — used only for the mount-inventory UI so the
-/// operator can see which binds are the huge ones worth excluding. Bounded
-/// by `du`'s own traversal; failures return 0 rather than blocking the UI.
+/// Exact directory size, by walking the whole tree. Slow on a big one by
+/// definition — every caller of this must be somewhere minutes of `du` is
+/// acceptable (the pre-backup staging guard, which is followed by an archive
+/// of the same tree). The inventory and warning paths use
+/// `measure_mount_size` instead. Failure (missing path, permission) → 0.
 fn quick_dir_size_bytes(path: &str) -> u64 {
     // `du -sb` reports apparent total bytes for the whole tree. It's the
     // same tool the rest of the codebase shells out to and avoids a manual
-    // recursive walk here. Failure (missing path, permission) → 0.
+    // recursive walk here.
     let out = match Command::new("du").args(["-sb", path]).output() {
         Ok(o) if o.status.success() => o,
         _ => return 0,
@@ -1291,6 +1321,120 @@ fn quick_dir_size_bytes(path: &str) -> u64 {
     s.split_whitespace().next()
         .and_then(|first| first.parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+/// Wall-clock cap on measuring ONE mount for the inventory / warning paths.
+/// Those run while an operator waits on a click, so a tree that cannot be
+/// walked in this long is reported as unmeasured rather than holding the
+/// request open. 5s walks millions of inodes on a warm cache.
+const MOUNT_SIZE_DEADLINE_SECS: u64 = 5;
+
+/// `du -sb`, abandoned (and the child killed) if it outlives `deadline`.
+/// `None` on timeout, failure, or unparseable output.
+fn dir_size_bytes_within(path: &str, deadline: std::time::Duration) -> Option<u64> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = Command::new("du")
+        .args(["-sb", path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                // `du -sb` writes one short line, so this read cannot block on
+                // a full pipe — and the child has already exited.
+                let mut out = String::new();
+                child.stdout.as_mut()?.read_to_string(&mut out).ok()?;
+                return out.split_whitespace().next()?.parse::<u64>().ok();
+            }
+            Ok(None) => {
+                if started.elapsed() >= deadline {
+                    // Killed rather than left running: it would keep churning
+                    // the page cache on a 20 TB array for nothing.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    warn!(
+                        "backup: gave up measuring {} after {}s — reported as unmeasured",
+                        path, deadline.as_secs()
+                    );
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Mount point and used bytes of the filesystem holding `path`.
+/// `--output=used,target` puts the number first, so the remainder of the line
+/// is the mount point even when it contains spaces.
+fn filesystem_usage(path: &str) -> Option<(String, u64)> {
+    let out = Command::new("df")
+        .args(["-B1", "--output=used,target"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().nth(1)?.trim();
+    let (used, target) = line.split_once(char::is_whitespace)?;
+    Some((target.trim().to_string(), used.parse::<u64>().ok()?))
+}
+
+/// True when the two paths are the same directory, comparing what the
+/// filesystem resolves them to (`df` prints the canonical mount point, the
+/// bind source may reach it through a symlink).
+fn same_directory(a: &str, b: &str) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Fast, bounded size estimate for one mount source: `(bytes, basis,
+/// filesystem used bytes)` as described on `DiscoveredMount::size_basis`.
+///
+/// Deliberately NOT what the staging-space guard uses. The guard refuses
+/// backups, so it needs the true size and takes the slow walk; this one feeds
+/// a checklist and a warning dialog, where a bound the operator can see the
+/// basis of beats a spinner. The filesystem-root shortcut is the case that
+/// matters: a 20 TB datastore bound into a container (klas 2026-08-20) is a
+/// mounted array, and walking it is minutes of disk churn for a number `df`
+/// already knows.
+fn measure_mount_size(path: &str) -> (u64, &'static str, u64) {
+    if path.is_empty() {
+        return (0, "missing", 0);
+    }
+    match Path::new(path).try_exists() {
+        Ok(true) => {}
+        // Not on this host: an absent bind source (Docker creates it on start)
+        // holds nothing. Distinct from "unknown" so it is never warned about
+        // as an unmeasurable mount — a distinction the live probe forced, since
+        // every unreadable volume directory looked like a 20 TB array.
+        Ok(false) => return (0, "missing", 0),
+        // Cannot even stat it — permission, or a hung network mount. Genuinely
+        // unknown, and worth saying so rather than calling it empty.
+        Err(_) => return (0, "unknown", 0),
+    }
+    let usage = filesystem_usage(path);
+    let fs_used = usage.as_ref().map(|(_, used)| *used).unwrap_or(0);
+    if let Some((_, used)) = usage.as_ref().filter(|(mp, _)| same_directory(mp, path)) {
+        return (*used, "filesystem", fs_used);
+    }
+    match dir_size_bytes_within(path, std::time::Duration::from_secs(MOUNT_SIZE_DEADLINE_SECS)) {
+        Some(bytes) => (bytes, "walked", fs_used),
+        None => (0, "unknown", fs_used),
+    }
 }
 
 /// Enumerate a Docker container's bind/volume mounts (no backup performed).
@@ -1332,21 +1476,27 @@ pub fn discover_docker_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String
                 } else {
                     String::new()
                 };
-                let size = if data_dir.is_empty() { 0 } else { quick_dir_size_bytes(&data_dir) };
+                let (size, basis, fs_used) = measure_mount_size(&data_dir);
                 out.push(DiscoveredMount {
                     mount_type: "volume".into(),
                     source: label,
                     destination,
                     size_bytes: size,
+                    size_basis: basis.into(),
+                    fs_used_bytes: fs_used,
+                    data_path: data_dir,
                 });
             }
             "bind" => {
-                let size = if Path::new(&source).exists() { quick_dir_size_bytes(&source) } else { 0 };
+                let (size, basis, fs_used) = measure_mount_size(&source);
                 out.push(DiscoveredMount {
                     mount_type: "bind".into(),
+                    data_path: source.clone(),
                     source,
                     destination,
                     size_bytes: size,
+                    size_basis: basis.into(),
+                    fs_used_bytes: fs_used,
                 });
             }
             _ => { /* tmpfs/npipe — never backed up, omit from the checklist */ }
@@ -1359,6 +1509,12 @@ pub fn discover_docker_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String
 /// Native LXC: parse `lxc.mount.entry` lines in the container config.
 /// Proxmox: parse `mp<N>:` mountpoints from `pct config`.
 pub fn discover_lxc_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String> {
+    // The native path builds a filesystem path out of this name, so it is
+    // validated here rather than trusted: a container name is a name, and a
+    // caller-supplied `../..` has no business reaching `read_to_string`.
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return Err(format!("Invalid container name '{}'", name));
+    }
     let mut out = Vec::new();
     if crate::containers::is_proxmox() {
         // `pct config <vmid>` → lines like `mp0: storage:vm-105-disk-1,mp=/data,size=8G`
@@ -1393,22 +1549,36 @@ pub fn discover_lxc_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String> {
                 }
             }
             if volume.starts_with('/') {
-                let size = if Path::new(volume).exists() { quick_dir_size_bytes(volume) } else { 0 };
+                let (size, basis, fs_used) = measure_mount_size(volume);
                 out.push(DiscoveredMount {
                     mount_type: "bind".into(),
                     source: volume.to_string(),
                     destination: mountpoint,
                     size_bytes: size,
+                    size_basis: basis.into(),
+                    fs_used_bytes: fs_used,
+                    data_path: volume.to_string(),
                 });
             } else {
                 // Storage-backed mountpoint (ZFS/LVM/dir volume). It IS part of
                 // the vzdump backup; expose it so the operator can exclude it
-                // by its volume id.
+                // by its volume id. There is no host path to walk, but `pct
+                // config` states what was provisioned for it (`size=8G`) — an
+                // upper bound, and the only figure available. Without even
+                // that, the size is honestly unknown: with no filesystem
+                // figure either, `mount_is_large` leaves it alone rather than
+                // warning about every such mountpoint forever.
+                let declared = spec.split(',')
+                    .filter_map(|opt| opt.trim().strip_prefix("size="))
+                    .find_map(crate::containers::lxc_storage::parse_size);
                 out.push(DiscoveredMount {
                     mount_type: "volume".into(),
                     source: volume.to_string(),
                     destination: mountpoint,
-                    size_bytes: 0,
+                    size_bytes: declared.unwrap_or(0),
+                    size_basis: if declared.is_some() { "declared" } else { "unknown" }.into(),
+                    fs_used_bytes: 0,
+                    data_path: String::new(),
                 });
             }
         }
@@ -1432,16 +1602,142 @@ pub fn discover_lxc_mounts(name: &str) -> Result<Vec<DiscoveredMount>, String> {
             // Only host-path bind mounts are interesting — skip the kernel
             // pseudo-filesystems (proc/sysfs/etc.) whose source isn't a path.
             if !source.starts_with('/') { continue; }
-            let size = if Path::new(source).exists() { quick_dir_size_bytes(source) } else { 0 };
+            let (size, basis, fs_used) = measure_mount_size(source);
             out.push(DiscoveredMount {
                 mount_type: "bind".into(),
                 source: source.to_string(),
                 destination: mountpoint.to_string(),
                 size_bytes: size,
+                size_basis: basis.into(),
+                fs_used_bytes: fs_used,
+                data_path: source.to_string(),
             });
         }
     }
     Ok(out)
+}
+
+// ─── Large-mount warning ────────────────────────────────────────────────────
+//
+// A container can be two gigabytes of application and twenty terabytes of
+// bind-mounted array, and nothing in the picker said so until the backup was
+// already running: the mount inventory is only opened by operators who already
+// suspect a problem (klas 2026-08-20 — "I have one docker connected to a
+// datastore that is 20TB in size. I obviously do not want to back that up").
+// The staging-space guard eventually refuses such a backup, but only at run
+// time, once a night, from a schedule saved days earlier. This is the same
+// question asked while the operator is still looking at the screen.
+
+/// A mount big enough that including it in a backup is more likely an
+/// oversight than a decision.
+///
+/// 50 GB, not the 1 GB the report suggested: application volumes in the 1-20 GB
+/// range are the *normal* thing to back up, and a dialog that fires on every
+/// save is a dialog operators learn to dismiss without reading — which would
+/// cost exactly the protection this exists to give. Anything past 50 GB is an
+/// array, a media library or a dataset, and worth one question.
+///
+/// Binary, because the web UI's `formatBytes` divides by 1024 while labelling
+/// the result "GB": 50 GiB is the value that prints as the "50 GB" the dialog
+/// and the docs both promise. A decimal 50_000_000_000 rendered as "46.6 GB"
+/// — verified in the browser, which is how this came to be a comment.
+pub const LARGE_MOUNT_WARN_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+
+/// Total wall-clock budget for one mount-check request. Each mount is capped
+/// by `MOUNT_SIZE_DEADLINE_SECS`, but a fleet-wide selection has many, and an
+/// operator clicking Save is waiting on this. Targets not reached inside the
+/// budget are reported as unchecked rather than silently dropped.
+const MOUNT_CHECK_BUDGET_SECS: u64 = 15;
+
+/// True when this mount is big enough to warn about.
+fn mount_is_large(m: &DiscoveredMount) -> bool {
+    match m.size_basis.as_str() {
+        // Unmeasured: the filesystem it sits on is the only ceiling available,
+        // and that ceiling is the warning — a tree that outran a 5s `du` on a
+        // 20 TB array is exactly the case to flag. With no filesystem figure
+        // either (a storage-backed volume with no host path) nothing is known
+        // at all, and a warning with no number in it is noise, not protection.
+        "unknown" => m.fs_used_bytes >= LARGE_MOUNT_WARN_BYTES,
+        // Not on this host: it holds nothing, whatever its filesystem holds.
+        "missing" => false,
+        _ => m.size_bytes >= LARGE_MOUNT_WARN_BYTES,
+    }
+}
+
+/// One target's large mounts, as the warning dialog needs them.
+#[derive(Debug, Clone, Serialize)]
+pub struct LargeMountFinding {
+    #[serde(rename = "type")]
+    pub target_type: String,
+    pub name: String,
+    /// Large mounts this backup WOULD include (exclusions already applied).
+    pub mounts: Vec<DiscoveredMount>,
+    /// Why this target could not be inspected, when it could not be. A
+    /// stopped/removed container is not an error worth blocking a save over,
+    /// so it is reported and the save continues.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Large mounts across `targets`, each `(type, name, already-excluded)`.
+///
+/// Only `docker` and `lxc` carry mounts; every other target type is skipped
+/// silently so callers can pass a whole selection. Returns the findings and
+/// the names of any targets the time budget did not reach.
+pub fn large_mounts_for_targets(
+    targets: &[(String, String, Vec<String>)],
+) -> (Vec<LargeMountFinding>, Vec<String>) {
+    let started = std::time::Instant::now();
+    let budget = std::time::Duration::from_secs(MOUNT_CHECK_BUDGET_SECS);
+    let mut findings = Vec::new();
+    let mut unchecked = Vec::new();
+
+    for (kind, name, exclude) in targets {
+        if kind != "docker" && kind != "lxc" {
+            continue;
+        }
+        if started.elapsed() >= budget {
+            unchecked.push(name.clone());
+            continue;
+        }
+        let discovered = if kind == "docker" {
+            discover_docker_mounts(name)
+        } else {
+            discover_lxc_mounts(name)
+        };
+        match discovered {
+            Ok(mounts) => {
+                let large: Vec<DiscoveredMount> = mounts
+                    .into_iter()
+                    .filter(|m| !mount_is_excluded(&m.source, exclude))
+                    .filter(mount_is_large)
+                    .collect();
+                if !large.is_empty() {
+                    findings.push(LargeMountFinding {
+                        target_type: kind.clone(),
+                        name: name.clone(),
+                        mounts: large,
+                        error: None,
+                    });
+                }
+            }
+            Err(e) => findings.push(LargeMountFinding {
+                target_type: kind.clone(),
+                name: name.clone(),
+                mounts: Vec::new(),
+                error: Some(e),
+            }),
+        }
+    }
+    if !unchecked.is_empty() {
+        warn!(
+            "backup: mount check ran out of its {}s budget with {} target(s) unchecked: {}",
+            MOUNT_CHECK_BUDGET_SECS,
+            unchecked.len(),
+            unchecked.join(", ")
+        );
+    }
+    (findings, unchecked)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1763,11 +2059,16 @@ fn docker_content_bytes(name: &str, exclude_mounts: &[String]) -> Option<u64> {
     // Mounts are separate archives inside the wrapper, so they add to it. The
     // same exclusion list the backup itself honours applies here — otherwise
     // excluding a 4 TB media bind would still be refused for its size.
+    // Re-measured here rather than taken from the inventory: discovery reports
+    // a fast BOUND (`measure_mount_size`), and this guard REFUSES backups, so
+    // it must work from the true figure. A wrong number either blocks a backup
+    // that would have fit or lets one fill the disk.
     let mounts = discover_docker_mounts(name).unwrap_or_default();
     let mount_bytes: u64 = mounts
         .iter()
         .filter(|m| !mount_is_excluded(&m.source, exclude_mounts))
-        .map(|m| m.size_bytes)
+        .filter(|m| !m.data_path.is_empty())
+        .map(|m| quick_dir_size_bytes(&m.data_path))
         .sum();
     Some(root_fs.saturating_add(mount_bytes))
 }
@@ -3918,13 +4219,18 @@ fn store_s3(local_path: &Path, storage: &BackupStorage, filename: &str) -> Resul
             } else {
                 region_str.clone()
             };
-            let region = s3::Region::Custom {
-                region: aws_region.clone(),
-                endpoint: if endpoint_str.is_empty() {
-                    format!("https://s3.{}.amazonaws.com", aws_region)
-                } else {
-                    endpoint_str
-                },
+            // A custom endpoint goes through the storage module's normaliser:
+            // it supplies the scheme a bare hostname needs and strips a
+            // trailing slash, which `Region::host()` would otherwise put in
+            // the Host header and make every request a 400 (see
+            // storage::endpoint_url). Real AWS keeps the derived host.
+            let region = if endpoint_str.is_empty() {
+                s3::Region::Custom {
+                    region: aws_region.clone(),
+                    endpoint: format!("https://s3.{}.amazonaws.com", aws_region),
+                }
+            } else {
+                crate::storage::s3_custom_region(&endpoint_str, &aws_region)?
             };
 
             let credentials = s3::creds::Credentials::new(
@@ -4527,11 +4833,8 @@ fn build_pxar_pairs(target: &BackupTarget) -> Result<(String, String, Vec<PxarPa
                     if mount_is_excluded(&m.source, &target.exclude_mounts) { continue; }
                     match m.mount_type.as_str() {
                         "volume" => {
-                            let data_dir = if Path::new(&m.source).is_dir() {
-                                m.source.clone()
-                            } else {
-                                format!("/var/lib/docker/volumes/{}/_data", m.source)
-                            };
+                            // Resolved once, by discovery.
+                            let data_dir = m.data_path.clone();
                             if Path::new(&data_dir).is_dir() {
                                 pairs.push(PxarPair {
                                     archive: format!("volume-{}.pxar", vol_idx),
@@ -5078,13 +5381,18 @@ fn retrieve_from_s3(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
             } else {
                 region_str.clone()
             };
-            let region = s3::Region::Custom {
-                region: aws_region.clone(),
-                endpoint: if endpoint_str.is_empty() {
-                    format!("https://s3.{}.amazonaws.com", aws_region)
-                } else {
-                    endpoint_str
-                },
+            // A custom endpoint goes through the storage module's normaliser:
+            // it supplies the scheme a bare hostname needs and strips a
+            // trailing slash, which `Region::host()` would otherwise put in
+            // the Host header and make every request a 400 (see
+            // storage::endpoint_url). Real AWS keeps the derived host.
+            let region = if endpoint_str.is_empty() {
+                s3::Region::Custom {
+                    region: aws_region.clone(),
+                    endpoint: format!("https://s3.{}.amazonaws.com", aws_region),
+                }
+            } else {
+                crate::storage::s3_custom_region(&endpoint_str, &aws_region)?
             };
 
             let credentials = s3::creds::Credentials::new(
@@ -7164,13 +7472,18 @@ fn delete_s3_object(storage: &BackupStorage, filename: &str) -> Result<(), Strin
             } else {
                 region_str.clone()
             };
-            let region = s3::Region::Custom {
-                region: aws_region.clone(),
-                endpoint: if endpoint_str.is_empty() {
-                    format!("https://s3.{}.amazonaws.com", aws_region)
-                } else {
-                    endpoint_str
-                },
+            // A custom endpoint goes through the storage module's normaliser:
+            // it supplies the scheme a bare hostname needs and strips a
+            // trailing slash, which `Region::host()` would otherwise put in
+            // the Host header and make every request a 400 (see
+            // storage::endpoint_url). Real AWS keeps the derived host.
+            let region = if endpoint_str.is_empty() {
+                s3::Region::Custom {
+                    region: aws_region.clone(),
+                    endpoint: format!("https://s3.{}.amazonaws.com", aws_region),
+                }
+            } else {
+                crate::storage::s3_custom_region(&endpoint_str, &aws_region)?
             };
             let credentials = s3::creds::Credentials::new(
                 Some(&access_key), Some(&secret_key), None, None, None,
@@ -10441,5 +10754,109 @@ mod schedule_day_tests {
         let back: BackupTarget = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert!(back.stop_for_backup);
         assert_eq!(back.target_type, BackupTargetType::Docker);
+    }
+}
+
+#[cfg(test)]
+mod large_mount_tests {
+    use super::*;
+
+    fn mount(basis: &str, size: u64, fs_used: u64) -> DiscoveredMount {
+        DiscoveredMount {
+            mount_type: "bind".into(),
+            source: "/mnt/data".into(),
+            destination: "/data".into(),
+            size_bytes: size,
+            size_basis: basis.into(),
+            fs_used_bytes: fs_used,
+            data_path: "/mnt/data".into(),
+        }
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn measured_mounts_warn_only_past_the_threshold() {
+        assert!(!mount_is_large(&mount("walked", 2 * GIB, 0)));
+        assert!(!mount_is_large(&mount("walked", LARGE_MOUNT_WARN_BYTES - 1, 0)));
+        assert!(mount_is_large(&mount("walked", LARGE_MOUNT_WARN_BYTES, 0)));
+        assert!(mount_is_large(&mount("filesystem", 20_000 * GIB, 20_000 * GIB)));
+    }
+
+    /// The 20 TB array case: `du` cannot finish, so the mount's own size is
+    /// unknown and the filesystem's used bytes are the only figure. Warn on it.
+    /// The inverse matters just as much — an unmeasurable mount on a small
+    /// filesystem CANNOT be large, and warning about it would be noise.
+    #[test]
+    fn unmeasurable_mounts_warn_only_on_a_large_filesystem() {
+        assert!(mount_is_large(&mount("unknown", 0, 20_000 * GIB)));
+        assert!(!mount_is_large(&mount("unknown", 0, 3 * GIB)));
+        // Nothing measurable AND no filesystem behind it: silence. Found by
+        // running the check against live containers, where every volume
+        // directory the process could not stat looked like a 20 TB array.
+        assert!(!mount_is_large(&mount("unknown", 0, 0)));
+    }
+
+    /// A mount source that is not on this host holds nothing — never a warning,
+    /// however little we know about it.
+    #[test]
+    fn absent_sources_are_never_large() {
+        assert!(!mount_is_large(&mount("missing", 0, 0)));
+        assert!(!mount_is_large(&mount("missing", 0, 20_000 * GIB)));
+    }
+
+    /// A Proxmox storage-backed volume has no host path to walk, so the size
+    /// its config declares is the figure — provisioned, and treated as the
+    /// upper bound it is.
+    #[test]
+    fn declared_volume_sizes_are_used() {
+        assert!(!mount_is_large(&mount("declared", 8 * GIB, 0)));
+        assert!(mount_is_large(&mount("declared", 800 * GIB, 0)));
+    }
+
+    #[test]
+    fn size_basis_survives_the_api_round_trip() {
+        let json = serde_json::to_string(&mount("filesystem", 7 * GIB, 9 * GIB)).unwrap();
+        assert!(json.contains("\"size_basis\":\"filesystem\""));
+        assert!(json.contains("\"fs_used_bytes\""));
+        // Internal plumbing stays out of the browser's copy.
+        assert!(!json.contains("data_path"), "{}", json);
+    }
+
+    /// `df --output=used,target` puts the number first precisely so a mount
+    /// point containing spaces still parses.
+    #[test]
+    fn filesystem_usage_reads_the_root_filesystem() {
+        let (mountpoint, used) = filesystem_usage("/").expect("df knows about /");
+        assert_eq!(mountpoint, "/");
+        assert!(used > 0);
+    }
+
+    /// The bounded walk returns a real figure for a small tree, and the
+    /// mountpoint shortcut avoids walking a filesystem root at all.
+    #[test]
+    fn sizing_is_bounded_and_takes_the_filesystem_shortcut() {
+        let dir = std::env::temp_dir().join(format!(
+            "wolfstack-mount-size-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("payload"), vec![7u8; 4096]).unwrap();
+        let walked = dir_size_bytes_within(
+            dir.to_str().unwrap(),
+            std::time::Duration::from_secs(MOUNT_SIZE_DEADLINE_SECS),
+        );
+        let _ = fs::remove_dir_all(&dir);
+        assert!(walked.unwrap_or(0) >= 4096, "{:?}", walked);
+
+        // "/" is its own mount point, so this must come back from df, not du.
+        let (bytes, basis, fs_used) = measure_mount_size("/");
+        assert_eq!(basis, "filesystem");
+        assert!(bytes > 0);
+        assert_eq!(bytes, fs_used);
+
+        // A path that is not there is reported as absent — not as an
+        // unmeasurable mount, which would warn about nothing.
+        assert_eq!(measure_mount_size("/nonexistent-wolfstack-test-path"), (0, "missing", 0));
     }
 }

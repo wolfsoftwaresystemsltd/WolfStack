@@ -848,7 +848,7 @@ Transferred:     12952476 / 12952476, 100%\n";
             let creds = s3::creds::Credentials::new(
                 Some(&cfg.access_key_id), Some(&cfg.secret_access_key), None, None, None,
             ).unwrap();
-            s3::bucket::Bucket::new(bucket, crate::storage::build_s3_region(&cfg), creds)
+            s3::bucket::Bucket::new(bucket, crate::storage::build_s3_region(&cfg).unwrap(), creds)
                 .unwrap()
                 .with_path_style()
         };
