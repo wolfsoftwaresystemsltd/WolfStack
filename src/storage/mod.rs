@@ -959,31 +959,133 @@ fn effective_s3_region(s3: &S3Config) -> String {
     }
 }
 
-/// Prefix a bare `host[:port]` endpoint with https://. The GUI field accepts
-/// what the provider's dashboard prints (`l8k1.fra21.idrivee2-12.com`), which
-/// is not a URL — s3fs and rust-s3 both need the scheme.
-fn endpoint_url(endpoint: &str) -> String {
+/// Split an endpoint into (scheme, everything-after-the-scheme). A bare
+/// `host[:port]` carries no scheme and is treated as https — which is what
+/// aws-region already assumes for a scheme-less custom endpoint
+/// (aws-region-0.25.5 src/region.rs:290-298), so this only makes it explicit.
+/// `None` for any other scheme: not ours to rewrite.
+fn split_endpoint_scheme(endpoint: &str) -> Option<(&'static str, &str)> {
     let e = endpoint.trim();
-    if e.starts_with("http://") || e.starts_with("https://") {
-        e.to_string()
-    } else {
-        format!("https://{}", e)
+    match e.split_once("://") {
+        Some(("http", rest)) => Some(("http", rest)),
+        Some(("https", rest)) => Some(("https", rest)),
+        Some(_) => None,
+        None => Some(("https", e)),
     }
+}
+
+/// Normalise a GUI-entered S3 endpoint into what the S3 clients here need:
+/// a scheme, then `host[:port]`, with no trailing slash.
+///
+/// Two repairs, both from real reports:
+///
+///  * **Scheme.** The field accepts what the provider's dashboard prints
+///    (`l8k1.fra21.idrivee2-12.com`), which is not a URL — s3fs and rust-s3
+///    both need one.
+///  * **Trailing slash.** `Region::host()` returns EVERYTHING after `://`
+///    (aws-region-0.25.5 src/region.rs:300-308), and rust-s3 sends that
+///    verbatim as the `Host` header (rust-s3-0.35.1
+///    src/request/request_trait.rs:197 `host_header()`, inserted at :536-538).
+///    So an endpoint of `https://s3.example.com/` went out as
+///    `Host: s3.example.com/` — an invalid Host header, which a fronting proxy
+///    answers with its own HTML error page instead of anything S3-shaped.
+///    klas 2026-08-20: `https://s3.hexabyte.se/` failed every connection test
+///    and every health probe with HAProxy's "400 Bad request — Your browser
+///    sent an invalid request", while the same endpoint mounted fine under
+///    s3fs (s3fs derives its Host header from the parsed URL, so the slash
+///    never reached it). Confirmed against that endpoint by hand:
+///    `Host: s3.hexabyte.se` → 200, `Host: s3.hexabyte.se/` → that exact page.
+pub(crate) fn endpoint_url(endpoint: &str) -> String {
+    let e = endpoint.trim();
+    let Some((scheme, rest)) = split_endpoint_scheme(e) else {
+        return e.to_string();
+    };
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() {
+        // Nothing but a scheme (or an empty field). Hand back what we were
+        // given rather than inventing a host; callers guard on empty.
+        return e.to_string();
+    }
+    format!("{}://{}", scheme, rest)
+}
+
+/// The path an endpoint carries beyond `host[:port]`, e.g. `https://h/minio`
+/// → "/minio". Empty for a plain host, and for a trailing slash alone (which
+/// `endpoint_url` strips, and which every client treats as no path at all).
+fn endpoint_path(endpoint: &str) -> String {
+    let Some((_, rest)) = split_endpoint_scheme(endpoint) else {
+        return String::new();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let path = rest[authority_end..].trim_end_matches('/');
+    path.to_string()
+}
+
+/// Why this endpoint cannot be used for WolfStack's own S3 API calls, or
+/// `None` when it can.
+///
+/// rust-s3 signs and sends `Region::host()` as the Host header, and that is
+/// the whole authority *and path* (see `endpoint_url`), so an endpoint with a
+/// path prefix can only ever produce a malformed Host header — no combination
+/// of settings fixes it. Refuse it by name instead of firing a request that
+/// comes back as an unexplained 400 from someone else's reverse proxy.
+///
+/// s3fs and rclone mounts are NOT put through this: they parse the URL
+/// themselves, so a prefixed endpoint that works for them keeps working.
+fn s3_endpoint_unusable(endpoint: &str) -> Option<String> {
+    let path = endpoint_path(endpoint);
+    if path.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "S3 endpoint “{}” includes the path “{}”. WolfStack's S3 calls need just \
+         the host — enter it as “{}” (scheme, host and port only, no path). The \
+         bucket is chosen separately.",
+        endpoint.trim(),
+        path,
+        endpoint_url(endpoint)
+            .split_once("://")
+            .map(|(scheme, rest)| format!(
+                "{}://{}",
+                scheme,
+                rest.split(['/', '?', '#']).next().unwrap_or(rest)
+            ))
+            .unwrap_or_else(|| endpoint.trim().to_string()),
+    ))
 }
 
 /// The rust-s3 `Region` for a config. Single definition so the mount path,
 /// the sync-back path and the bucket lister can't drift apart on endpoint
 /// scheme handling or on R2's mandatory "auto" region.
-fn build_s3_region(s3: &S3Config) -> s3::region::Region {
+///
+/// Fallible because an endpoint can be unusable in a way no request can
+/// recover from (`s3_endpoint_unusable`) — returning `Result` is what makes
+/// the compiler prove every rust-s3 call site reports that instead of
+/// sending a doomed request.
+fn build_s3_region(s3: &S3Config) -> Result<s3::region::Region, String> {
     use s3::region::Region;
     if s3.endpoint.trim().is_empty() {
-        return s3.region.parse::<Region>().unwrap_or(Region::UsEast1);
+        return Ok(s3.region.parse::<Region>().unwrap_or(Region::UsEast1));
     }
-    let region = effective_s3_region(s3);
-    Region::Custom {
-        region: if region.is_empty() { "us-east-1".to_string() } else { region },
-        endpoint: endpoint_url(&s3.endpoint),
+    s3_custom_region(&s3.endpoint, &effective_s3_region(s3))
+}
+
+/// `build_s3_region` for callers that hold an endpoint and a signing region
+/// rather than an `S3Config` — the backup destinations, which carry their own
+/// storage struct. Empty `signing_region` falls back to "us-east-1", the
+/// AWS/MinIO/Wasabi default.
+pub(crate) fn s3_custom_region(
+    endpoint: &str,
+    signing_region: &str,
+) -> Result<s3::region::Region, String> {
+    if let Some(why) = s3_endpoint_unusable(endpoint) {
+        return Err(why);
     }
+    let region = signing_region.trim();
+    Ok(s3::region::Region::Custom {
+        region: if region.is_empty() { "us-east-1".to_string() } else { region.to_string() },
+        endpoint: endpoint_url(endpoint),
+    })
 }
 
 /// True when `err` looks like an S3 authentication/signature failure — the
@@ -1005,9 +1107,29 @@ fn s3_credential_hint(err: &str) -> bool {
     .any(|m| e.contains(m))
 }
 
-/// Append a plain-language credentials hint to `err` when it matches
-/// `s3_credential_hint`, otherwise return it unchanged.
-fn with_s3_credential_hint(err: String) -> String {
+/// True when an error carries an HTML document rather than an S3 response.
+/// Something that is not the S3 API answered — a console/dashboard URL, a
+/// reverse proxy, or a plain web server on the same host — and no credential
+/// or region change will ever fix that.
+fn s3_html_response(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("<html") || e.contains("<!doctype html") || e.contains("<body")
+}
+
+/// Append whatever plain-language hint fits `err`: the credentials hint when
+/// it matches `s3_credential_hint`, the "that is not an S3 endpoint" hint when
+/// the body is HTML, otherwise return it unchanged. One funnel so every S3
+/// surface — mount, bucket ops, connection test, health probe — explains a
+/// failure the same way.
+fn explain_s3_error(err: String) -> String {
+    if s3_html_response(&err) {
+        return format!(
+            "{} — the endpoint replied with an HTML page instead of an S3 response, so \
+             something other than the S3 API answered it. Check the endpoint: it wants the \
+             S3 API host and port only (no console/dashboard URL, no path).",
+            err
+        );
+    }
     if s3_credential_hint(&err) {
         format!(
             "{} — this looks like an S3 credentials problem: re-check the Access Key and Secret Key for this mount and re-enter the Secret in the GUI (a wrong or truncated secret is the usual cause; for Cloudflare R2 leave the Region blank).",
@@ -1111,7 +1233,7 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
         // mount that appears later self-corrects on the next status refresh.
         warn!("s3fs started but the mount never came up for {}", mount.mount_point);
         match read_s3fs_error(&log_path) {
-            Some(detail) => Err(with_s3_credential_hint(format!(
+            Some(detail) => Err(explain_s3_error(format!(
                 "s3fs failed to mount: {}", detail
             ))),
             // No daemon log either — s3fs older than 1.85 has no `logfile`
@@ -1131,7 +1253,7 @@ fn mount_s3_via_s3fs(mount: &StorageMount, s3: &S3Config) -> Result<String, Stri
             Some(logged) => format!("{} ({})", stderr.trim(), logged),
             None => stderr.trim().to_string(),
         };
-        Err(with_s3_credential_hint(format!("s3fs mount failed: {}", detail)))
+        Err(explain_s3_error(format!("s3fs mount failed: {}", detail)))
     }
 }
 
@@ -1215,7 +1337,7 @@ fn mount_s3_via_rust_s3(mount: &StorageMount, s3: &S3Config) -> Result<String, S
         None, None, None,
     ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
 
-    let region = build_s3_region(s3);
+    let region = build_s3_region(s3)?;
 
     // Create bucket handle
     let bucket = Bucket::new(&s3.bucket, region, credentials)
@@ -2014,7 +2136,7 @@ pub fn sync_to_s3(id: &str) -> Result<String, String> {
     // endpoint needs — the local copy this replaced passed the endpoint
     // through verbatim, so a sync against `s3.example.com` (no scheme, the
     // form WolfStack's own placeholder invites) never reached the provider.
-    let region = build_s3_region(s3);
+    let region = build_s3_region(s3)?;
 
     let bucket = Bucket::new(&s3.bucket, region, credentials)
         .map_err(|e| format!("Failed to create bucket handle: {}", e))?
@@ -2388,6 +2510,13 @@ pub fn save_s3_remote(mut remote: S3Remote) -> Result<S3Remote, String> {
     }
     remote.id = format!("wolfstack:{}", remote.name);
     remote.origin = "WolfStack".to_string();
+    // Store the endpoint in the form the S3 clients will actually use, so the
+    // remotes list, the bucket picker and the health card all show the value
+    // the requests are made against — and so a pasted trailing slash can't
+    // survive in the store to break every rust-s3 call (see `endpoint_url`).
+    if !remote.endpoint.trim().is_empty() {
+        remote.endpoint = endpoint_url(&remote.endpoint);
+    }
 
     let mut store = load_remote_store();
     match store.remotes.iter_mut().find(|r| r.id == remote.id) {
@@ -2485,7 +2614,7 @@ pub fn list_remote_buckets(id: &str) -> Result<Vec<String>, String> {
         None, None, None,
     ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
 
-    let region = build_s3_region(&s3);
+    let region = build_s3_region(&s3)?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2493,7 +2622,7 @@ pub fn list_remote_buckets(id: &str) -> Result<Vec<String>, String> {
         .map_err(|e| format!("Failed to create runtime: {}", e))?;
 
     let response = rt.block_on(Bucket::list_buckets(region, credentials))
-        .map_err(|e| with_s3_credential_hint(format!("Could not list buckets: {}", e)))?;
+        .map_err(|e| explain_s3_error(format!("Could not list buckets: {}", e)))?;
 
     let mut names: Vec<String> = response.bucket_names().collect();
     names.sort();
@@ -2563,7 +2692,7 @@ pub fn create_bucket_on(remote: &S3Remote, bucket: &str) -> Result<(), String> {
         Some(&s3.secret_access_key),
         None, None, None,
     ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
-    let region = build_s3_region(&s3);
+    let region = build_s3_region(&s3)?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2577,7 +2706,7 @@ pub fn create_bucket_on(remote: &S3Remote, bucket: &str) -> Result<(), String> {
         BucketConfiguration::default(),
     ))
     .map(|_| ())
-    .map_err(|e| with_s3_credential_hint(format!("Could not create bucket '{}': {}", bucket, e)))
+    .map_err(|e| explain_s3_error(format!("Could not create bucket '{}': {}", bucket, e)))
 }
 
 /// Delete a bucket on a saved remote — only when it is EMPTY. The 1-key
@@ -2599,7 +2728,7 @@ pub fn delete_bucket_on(remote: &S3Remote, bucket: &str) -> Result<(), String> {
         Some(&s3.secret_access_key),
         None, None, None,
     ).map_err(|e| format!("Invalid S3 credentials: {}", e))?;
-    let region = build_s3_region(&s3);
+    let region = build_s3_region(&s3)?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2613,7 +2742,7 @@ pub fn delete_bucket_on(remote: &S3Remote, bucket: &str) -> Result<(), String> {
         let (listing, _status) = b
             .list_page(String::new(), None, None, None, Some(1))
             .await
-            .map_err(|e| with_s3_credential_hint(format!("Could not check whether '{}' is empty: {}", bucket, e)))?;
+            .map_err(|e| explain_s3_error(format!("Could not check whether '{}' is empty: {}", bucket, e)))?;
         if !listing.contents.is_empty() {
             return Err(format!(
                 "Bucket '{}' is not empty — WolfStack only deletes empty buckets. Empty it first with your S3 tools.",
@@ -2623,7 +2752,7 @@ pub fn delete_bucket_on(remote: &S3Remote, bucket: &str) -> Result<(), String> {
         b.delete()
             .await
             .map(|_| ())
-            .map_err(|e| with_s3_credential_hint(format!("Could not delete bucket '{}': {}", bucket, e)))
+            .map_err(|e| explain_s3_error(format!("Could not delete bucket '{}': {}", bucket, e)))
     })
 }
 
@@ -2715,7 +2844,15 @@ pub fn test_s3_connection(remote: &S3Remote, bucket: &str) -> S3TestResult {
         Ok(c) => c,
         Err(e) => return fail("error", format!("Invalid S3 credentials: {}", e), started),
     };
-    let region = build_s3_region(&s3);
+    // An endpoint rust-s3 can't address at all (a path prefix — see
+    // `s3_endpoint_unusable`) is reported as the configuration error it is.
+    // Without this the request still goes out, with a malformed Host header,
+    // and comes back as a bare 400 from whatever proxy fronts the endpoint —
+    // which is exactly the dead end klas hit on 2026-08-20.
+    let region = match build_s3_region(&s3) {
+        Ok(r) => r,
+        Err(e) => return fail("error", e, started),
+    };
 
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -2754,7 +2891,7 @@ pub fn test_s3_connection(remote: &S3Remote, bucket: &str) -> S3TestResult {
             // bucket-scoped key. Anything else (unreachable, malformed)
             // would fail the per-bucket probe identically, so don't retry.
             if verdict != "auth" || bucket.trim().is_empty() {
-                return fail(verdict, with_s3_credential_hint(format!("Connection test failed: {}", e)), started);
+                return fail(verdict, explain_s3_error(format!("Connection test failed: {}", e)), started);
             }
         }
     }
@@ -2789,7 +2926,7 @@ pub fn test_s3_connection(remote: &S3Remote, bucket: &str) -> S3TestResult {
         },
         Err(e) => fail(
             classify_s3_error(&e),
-            with_s3_credential_hint(format!(
+            explain_s3_error(format!(
                 "Connection test failed (both account listing and bucket “{}”): {}",
                 bucket_name, e
             )),
@@ -4394,8 +4531,8 @@ mod mount_dropin_tests {
         assert!(!s3_credential_hint("No such file or directory"));
         assert!(!s3_credential_hint("ensure_diskfree=1024 exceeded"));
         // The wrapper appends only on a match.
-        assert!(with_s3_credential_hint("sigv4 rejected".to_string()).contains("credentials problem"));
-        assert_eq!(with_s3_credential_hint("disk full".to_string()), "disk full");
+        assert!(explain_s3_error("sigv4 rejected".to_string()).contains("credentials problem"));
+        assert_eq!(explain_s3_error("disk full".to_string()), "disk full");
     }
 
     #[test]
@@ -4575,6 +4712,73 @@ access_key_id = AKIAEXAMPLEKEY123456
         assert_eq!(endpoint_url("https://s3.example.com"), "https://s3.example.com");
         assert_eq!(endpoint_url("http://minio.lan:9000"), "http://minio.lan:9000");
         assert_eq!(endpoint_url("  s3.example.com  "), "https://s3.example.com");
+    }
+
+    /// A trailing slash on the endpoint ended up in the Host header and made
+    /// every rust-s3 call a 400 from the endpoint's own front-end proxy (klas
+    /// 2026-08-20, `https://s3.hexabyte.se/`). It carries no meaning for any
+    /// S3 client, so it never reaches one.
+    #[test]
+    fn trailing_slashes_are_stripped_from_endpoints() {
+        assert_eq!(endpoint_url("https://s3.hexabyte.se/"), "https://s3.hexabyte.se");
+        assert_eq!(endpoint_url("https://s3.hexabyte.se///"), "https://s3.hexabyte.se");
+        assert_eq!(endpoint_url(" http://minio.lan:9000/ "), "http://minio.lan:9000");
+        assert_eq!(endpoint_url("s3.example.com/"), "https://s3.example.com");
+        // Degenerate input keeps its shape rather than growing an invented
+        // host — the callers all guard on empty before getting here.
+        assert_eq!(endpoint_url(""), "");
+        assert_eq!(endpoint_url("https://"), "https://");
+    }
+
+    /// A path prefix cannot work with rust-s3 at all: `Region::host()` hands
+    /// the whole thing to the Host header. It is reported as a config error
+    /// rather than sent, and it is NOT rewritten — s3fs and rclone parse the
+    /// URL themselves, so a prefixed endpoint that works for them keeps working.
+    #[test]
+    fn endpoint_paths_are_detected_not_rewritten() {
+        assert_eq!(endpoint_path("https://s3.example.com"), "");
+        assert_eq!(endpoint_path("https://s3.example.com/"), "");
+        assert_eq!(endpoint_path("s3.example.com:9000"), "");
+        assert_eq!(endpoint_path("https://example.com/minio/"), "/minio");
+        assert_eq!(endpoint_path("https://example.com/minio/api"), "/minio/api");
+
+        assert!(s3_endpoint_unusable("https://s3.example.com").is_none());
+        assert!(s3_endpoint_unusable("https://s3.example.com/").is_none());
+        let why = s3_endpoint_unusable("https://example.com/minio").expect("path is unusable");
+        assert!(why.contains("/minio"), "{}", why);
+        assert!(why.contains("https://example.com"), "{}", why);
+
+        // Untouched by the normaliser, and refused by the region builder.
+        assert_eq!(endpoint_url("https://example.com/minio/"), "https://example.com/minio");
+        let cfg = S3Config {
+            access_key_id: "k".into(),
+            secret_access_key: "s".into(),
+            region: String::new(),
+            endpoint: "https://example.com/minio".into(),
+            provider: default_s3_provider(),
+            bucket: "b".into(),
+        };
+        assert!(build_s3_region(&cfg).is_err());
+    }
+
+    /// The endpoint the requests are actually made against is what gets
+    /// stored, so the remotes list and the health card can't show one thing
+    /// while the client uses another.
+    #[test]
+    fn saved_endpoints_are_normalised() {
+        assert_eq!(endpoint_url("https://s3.hexabyte.se/"), "https://s3.hexabyte.se");
+        assert_eq!(endpoint_url("s3.hexabyte.se"), "https://s3.hexabyte.se");
+    }
+
+    /// An HTML body means something that is not the S3 API answered — say so
+    /// instead of leaving the operator with a raw 400 page (klas 2026-08-20).
+    #[test]
+    fn html_error_bodies_are_explained() {
+        let raw = "Got HTTP 400 with content '<html><body><h1>400 Bad request</h1> \
+                   Your browser sent an invalid request. </body></html>'".to_string();
+        let out = explain_s3_error(raw);
+        assert!(out.contains("HTML page instead of an S3 response"), "{}", out);
+        assert_eq!(explain_s3_error("disk full".to_string()), "disk full");
     }
 }
 
@@ -4819,7 +5023,7 @@ mod config_guard_tests {
                 let creds = s3::creds::Credentials::new(
                     Some(&s3.access_key_id), Some(&s3.secret_access_key), None, None, None,
                 ).unwrap();
-                let region = build_s3_region(&s3);
+                let region = build_s3_region(&s3).unwrap();
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 let resp = rt.block_on(s3::bucket::Bucket::list_buckets(region, creds)).expect("list");
                 resp.bucket_names().collect::<Vec<_>>()
@@ -4833,7 +5037,7 @@ mod config_guard_tests {
                 let creds = s3::creds::Credentials::new(
                     Some(&s3.access_key_id), Some(&s3.secret_access_key), None, None, None,
                 ).unwrap();
-                let region = build_s3_region(&s3);
+                let region = build_s3_region(&s3).unwrap();
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 let b = s3::bucket::Bucket::new(name, region, creds).unwrap().with_path_style();
                 rt.block_on(b.put_object("guard.txt", b"not empty")).expect("put");
@@ -4847,7 +5051,7 @@ mod config_guard_tests {
                 let creds = s3::creds::Credentials::new(
                     Some(&s3.access_key_id), Some(&s3.secret_access_key), None, None, None,
                 ).unwrap();
-                let region = build_s3_region(&s3);
+                let region = build_s3_region(&s3).unwrap();
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 let b = s3::bucket::Bucket::new(name, region, creds).unwrap().with_path_style();
                 rt.block_on(b.delete_object("guard.txt")).expect("delete object");

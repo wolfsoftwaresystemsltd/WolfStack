@@ -37084,6 +37084,32 @@ async function toggleMountExcludePanel(type, name, prefix = '') {
     }
 }
 
+/// How big a discovered mount is, in the operator's terms, honest about how the
+/// figure was arrived at (backend `DiscoveredMount::size_basis`):
+///   walked     — a full measurement.
+///   filesystem — the mount IS a filesystem root, so this is that filesystem's
+///                used bytes: right for a dedicated array, an upper bound if
+///                anything else shares it.
+///   declared   — the size the container config provisions for a storage-backed
+///                volume, which is a ceiling rather than a measurement.
+///   missing    — the source is not on this host.
+///   unknown    — too big to measure while someone waits; all we can honestly
+///                offer is the ceiling its filesystem puts on it.
+function mountSizeLabel(m) {
+    const bytes = m.size_bytes || 0;
+    switch (m.size_basis) {
+        case 'walked': return formatBytes(bytes);
+        case 'filesystem': return `~${formatBytes(bytes)} (whole filesystem)`;
+        case 'declared': return `up to ${formatBytes(bytes)} (provisioned)`;
+        case 'missing': return 'not on this host';
+        case 'unknown':
+            return m.fs_used_bytes
+                ? `size unknown, up to ${formatBytes(m.fs_used_bytes)}`
+                : 'size unknown';
+        default: return bytes ? formatBytes(bytes) : '';
+    }
+}
+
 function renderMountExcludePanel(panel, type, name, mounts, prefix = '') {
     const key = `${type}:${name}`;
     if (!mounts.length) {
@@ -37094,7 +37120,7 @@ function renderMountExcludePanel(panel, type, name, mounts, prefix = '') {
     const rows = mounts.map((m, i) => {
         const src = m.source || '';
         const dest = m.destination || '';
-        const size = m.size_bytes ? formatBytes(m.size_bytes) : '';
+        const size = mountSizeLabel(m);
         const checked = excluded.has(src) ? '' : 'checked'; // checked = INCLUDE
         const cbId = `mexcl-${key}-${i}`.replace(/[^a-zA-Z0-9_-]/g, '_');
         return `<label for="${cbId}" style="display:flex; align-items:center; gap:8px; padding:3px 0; font-size:11px; cursor:pointer;">
@@ -37121,6 +37147,161 @@ function onMountIncludeToggle(key, included, source, prefix = '') {
     const list = new Set(map[key] || []);
     if (included) list.delete(source); else list.add(source);
     map[key] = Array.from(list);
+}
+
+// ─── Large-mount warning ────────────────────────────────────────────────────
+//
+// A container can be two gigabytes of application and twenty terabytes of
+// bind-mounted array, and until now nothing said so until the backup was
+// already running (klas 2026-08-20: a Docker container bound to a 20 TB
+// datastore — "I obviously do not want to back that up"). The mount inventory
+// has always been there, but it is opened by operators who already suspect a
+// problem. This asks the question unprompted, while the operator is still
+// looking at the screen, on both paths that commit to a backup: Backup Now and
+// saving a schedule.
+
+/// Ask the backend which of `targets` carry a mount big enough to warn about.
+/// Returns `{ threshold_bytes, findings, unchecked }`, or null when the check
+/// itself could not run — the caller then proceeds rather than blocking a
+/// backup on the failure of its own advisory check.
+async function fetchLargeMounts(targets) {
+    const payload = targets
+        .filter(t => t && (t.type === 'docker' || t.type === 'lxc'))
+        .map(t => ({ type: t.type, name: t.name, exclude_mounts: t.exclude_mounts || [] }));
+    if (!payload.length) return null;
+    try {
+        const res = await fetch(apiUrl('/api/backup/mount-check'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ targets: payload }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return (data && Array.isArray(data.findings)) ? data : null;
+    } catch (e) {
+        console.warn('mount check failed', e);
+        return null;
+    }
+}
+
+/// The warning itself. Resolves 'exclude' | 'include' | 'cancel'.
+///
+/// role="alertdialog", not a toast: this blocks an action that would otherwise
+/// copy terabytes, so it has to be acknowledged rather than drift past. Cancel
+/// is pre-focused and styled as the primary button — an accidental Enter should
+/// abandon the save, never silently strip mounts out of a backup or start the
+/// very copy being warned about. Escape and a click outside both cancel.
+function showLargeMountWarning(findings, thresholdBytes, unchecked, canExclude) {
+    const rows = findings.map(f => {
+        if (f.error) {
+            return `<div style="margin-top:8px;"><strong>${escapeHtml(f.name)}</strong>
+                <div style="font-size:12px; color:var(--text-muted);">Could not read its mounts: ${escapeHtml(f.error)}</div></div>`;
+        }
+        const mounts = f.mounts.map(m => `<li style="font-family:var(--font-mono); font-size:12px;">
+            ${escapeHtml(m.source || '')} <span style="color:var(--text-muted);">-&gt; ${escapeHtml(m.destination || '')}</span>
+            <strong style="margin-left:6px;">${escapeHtml(mountSizeLabel(m))}</strong></li>`).join('');
+        return `<div style="margin-top:8px;"><strong>${escapeHtml(f.name)}</strong>
+            <ul style="margin:4px 0 0 18px; padding:0;">${mounts}</ul></div>`;
+    }).join('');
+    const uncheckedNote = (unchecked && unchecked.length)
+        ? `<div style="margin-top:12px; font-size:12px; color:var(--text-muted);">
+             ${unchecked.length} more container${unchecked.length === 1 ? '' : 's'} could not be
+             measured in time and ${unchecked.length === 1 ? 'was' : 'were'} not checked:
+             ${escapeHtml(unchecked.join(', '))}.</div>`
+        : '';
+    const excludeNote = canExclude
+        ? ''
+        : `<div style="margin-top:12px; font-size:12px; color:var(--text-muted);">
+             This schedule backs up everything, so it has no per-container mount list to
+             exclude these from. To leave a mount out, select the containers individually
+             instead of "back up everything".</div>`;
+
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:100000;display:flex;align-items:center;justify-content:center';
+        const modal = document.createElement('div');
+        modal.setAttribute('role', 'alertdialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-label', 'Large mounts in this backup');
+        modal.style.cssText = 'background:var(--bg-card,#1e2028);border:1px solid var(--warning,#f59e0b);border-radius:12px;padding:24px 28px;max-width:620px;width:92%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);color:var(--text-primary,#e4e4e7)';
+        modal.innerHTML = `
+            <div style="font-size:15px;font-weight:600;margin-bottom:10px;color:var(--warning,#f59e0b);">
+                Large mounts in this backup</div>
+            <div style="font-size:13px;line-height:1.6;color:var(--text-secondary,#a1a1aa);">
+                These mounts are larger than ${escapeHtml(formatBytes(thresholdBytes))} and would be
+                copied into the archive in full:
+                ${rows}
+                ${uncheckedNote}
+                ${excludeNote}
+            </div>`;
+        const btnWrap = document.createElement('div');
+        btnWrap.style.cssText = 'margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap';
+        const mk = (label, primary) => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            b.style.cssText = primary
+                ? 'background:var(--accent,#3b82f6);color:#fff;border:none;border-radius:6px;padding:8px 18px;cursor:pointer;font-size:13px;font-weight:500'
+                : 'background:var(--bg-tertiary,#2d2f3a);color:var(--text-secondary,#a1a1aa);border:1px solid var(--border-color,#3f4150);border-radius:6px;padding:8px 18px;cursor:pointer;font-size:13px;font-weight:500';
+            return b;
+        };
+        // Installed at document level so Escape works whatever has focus, and
+        // removed by done() on EVERY exit — a listener per dialog call would
+        // otherwise accumulate for the life of the page.
+        const escHandler = (e) => { if (e.key === 'Escape') done('cancel'); };
+        const done = (answer) => {
+            document.removeEventListener('keydown', escHandler);
+            overlay.remove();
+            resolve(answer);
+        };
+        document.addEventListener('keydown', escHandler);
+        const cancelBtn = mk('Cancel', true);
+        cancelBtn.onclick = () => done('cancel');
+        const includeBtn = mk('Include them anyway', false);
+        includeBtn.onclick = () => done('include');
+        btnWrap.appendChild(cancelBtn);
+        if (canExclude) {
+            const excludeBtn = mk('Exclude these mounts', false);
+            excludeBtn.onclick = () => done('exclude');
+            btnWrap.appendChild(excludeBtn);
+        }
+        btnWrap.appendChild(includeBtn);
+        modal.appendChild(btnWrap);
+        overlay.onclick = (e) => { if (e.target === overlay) done('cancel'); };
+        overlay.appendChild(modal);
+        (document.fullscreenElement || document.body).appendChild(overlay);
+        cancelBtn.focus();
+    });
+}
+
+/// Pre-flight `targets` for oversized mounts and act on the operator's answer.
+///
+/// Returns true when the caller should go ahead. On "exclude" the mounts are
+/// added to each target's own exclude_mounts (and to `prefix`'s exclude map, so
+/// the picker's panel agrees with what was just sent) and the caller goes ahead
+/// with the smaller backup. `canExclude` is false for a "back up everything"
+/// schedule, which resolves its targets at run time and so has nowhere to store
+/// a per-container exclusion.
+async function confirmLargeMounts(targets, prefix = '', canExclude = true) {
+    const result = await fetchLargeMounts(targets);
+    if (!result || !result.findings.length) return true;
+
+    const answer = await showLargeMountWarning(
+        result.findings, result.threshold_bytes, result.unchecked, canExclude);
+    if (answer === 'cancel') return false;
+    if (answer === 'include') return true;
+
+    const map = excludeMapFor(prefix);
+    result.findings.forEach(f => {
+        const target = targets.find(t => t.type === f.type && t.name === f.name);
+        if (!target) return;
+        const list = new Set(target.exclude_mounts || []);
+        f.mounts.forEach(m => { if (m.source) list.add(m.source); });
+        target.exclude_mounts = Array.from(list);
+        map[`${f.type}:${f.name}`] = target.exclude_mounts.slice();
+    });
+    const total = result.findings.reduce((n, f) => n + f.mounts.length, 0);
+    showToast(`${total} large mount${total === 1 ? '' : 's'} excluded from this backup`, 'success');
+    return true;
 }
 
 function toggleAllBackupTargets(checked) {
@@ -37957,6 +38138,10 @@ async function backupSelected() {
         return;
     }
 
+    // One question before terabytes move: a container bound to an array copies
+    // the whole array into the archive unless the mount is excluded.
+    if (!(await confirmLargeMounts(targets, '', true))) return;
+
     const storage = await getSelectedStorage();
     // Pre-flight the destination — pops the install-in-terminal prompt if
     // mount.cifs / mount.nfs is missing so the backup doesn't silently
@@ -38608,6 +38793,18 @@ async function createSchedule() {
         // a new schedule reads the chosen storage from the page.
         storage = editing ? editing.storage : await getSelectedStorage();
     }
+
+    // Oversized mounts get their question here, before the schedule is saved —
+    // it runs unattended tonight, so this is the last moment anyone is looking.
+    // Non-container targets are filtered out inside the check, so folder and
+    // config schedules pass straight through. Under "back up everything" the
+    // target list is resolved at each run, which leaves nowhere to store a
+    // per-container exclusion: warn about what is present now, and say so.
+    const mountCheckTargets = backup_all
+        ? (Array.isArray(window._backupTargets) ? window._backupTargets : [])
+        : finalTargets;
+    if (!(await confirmLargeMounts(mountCheckTargets, 'sched-', !backup_all))) return;
+
     _scheduleFolderTarget = null; // consumed — don't leak into the next schedule
     _editingSchedule = null;
     _editScheduleTargetsLocked = false;

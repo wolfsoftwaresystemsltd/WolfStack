@@ -22705,6 +22705,59 @@ pub async fn backup_container_mounts(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MountCheckTarget {
+    #[serde(rename = "type")]
+    pub target_type: String,
+    pub name: String,
+    /// Mounts the operator has already excluded for this target — skipped, so
+    /// a decision they have already made isn't re-asked every save.
+    #[serde(default)]
+    pub exclude_mounts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MountCheckRequest {
+    #[serde(default)]
+    pub targets: Vec<MountCheckTarget>,
+}
+
+/// POST /api/backup/mount-check — which of these targets carry a bind/volume
+/// mount big enough to warn about before the backup is saved or started.
+///
+/// Body: `{"targets":[{"type":"docker","name":"nextcloud","exclude_mounts":[…]},…]}`
+/// — the same shape the picker already holds, exclusions included, so the
+/// answer reflects what this backup would ACTUALLY archive. Non-container
+/// targets are ignored rather than rejected: the caller passes its whole
+/// selection.
+///
+/// The threshold comes back with the answer so the dialog's wording can never
+/// drift from the figure the backend applied.
+pub async fn backup_mount_check(
+    req: HttpRequest, state: web::Data<AppState>,
+    body: web::Json<MountCheckRequest>,
+) -> HttpResponse {
+    if let Err(e) = require_auth(&req, &state) { return e; }
+    let targets: Vec<(String, String, Vec<String>)> = body
+        .into_inner()
+        .targets
+        .into_iter()
+        .filter(|t| !t.name.trim().is_empty())
+        .map(|t| (t.target_type, t.name, t.exclude_mounts))
+        .collect();
+    // Sizing shells out to df/du — blocking work, off the runtime.
+    match web::block(move || backup::large_mounts_for_targets(&targets)).await {
+        Ok((findings, unchecked)) => HttpResponse::Ok().json(serde_json::json!({
+            "threshold_bytes": backup::LARGE_MOUNT_WARN_BYTES,
+            "findings": findings,
+            "unchecked": unchecked,
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("mount check task: {}", e),
+        })),
+    }
+}
+
 /// GET /api/backups/schedules — list schedules
 // ─── Fleet-scope backup configuration ───
 //
@@ -46814,6 +46867,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/backups/delete-failed", web::post().to(backup_delete_failed))
         .route("/api/backups/targets", web::get().to(backup_targets))
         .route("/api/backup/mounts/{type}/{name}", web::get().to(backup_container_mounts))
+        .route("/api/backup/mount-check", web::post().to(backup_mount_check))
         .route("/api/backups/schedules", web::get().to(backup_schedules_list))
         .route("/api/backups/schedules", web::post().to(backup_schedule_create))
         .route("/api/backups/schedules/fleet-apply", web::post().to(backup_schedule_fleet_apply))
@@ -49312,5 +49366,40 @@ mod migration_task_retention_tests {
         // The newest survive: t299 is newest (started_at closest to now).
         assert!(map.contains_key("t299"), "newest finished task must survive");
         assert!(!map.contains_key("t000"), "oldest finished task is dropped first");
+    }
+}
+
+#[cfg(test)]
+mod mount_check_request_tests {
+    use super::MountCheckRequest;
+
+    /// The exact body `confirmLargeMounts` in app.js posts. This is the whole
+    /// contract between the picker and the check, so it is pinned here: a
+    /// renamed field would otherwise turn every warning into silence, which
+    /// looks identical to "nothing is large".
+    #[test]
+    fn parses_the_body_the_ui_sends() {
+        let body = r#"{"targets":[
+            {"type":"docker","name":"nextcloud","exclude_mounts":["/mnt/media"]},
+            {"type":"lxc","name":"104","exclude_mounts":[]}
+        ]}"#;
+        let parsed: MountCheckRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.targets.len(), 2);
+        assert_eq!(parsed.targets[0].target_type, "docker");
+        assert_eq!(parsed.targets[0].name, "nextcloud");
+        assert_eq!(parsed.targets[0].exclude_mounts, vec!["/mnt/media".to_string()]);
+        assert_eq!(parsed.targets[1].target_type, "lxc");
+        assert!(parsed.targets[1].exclude_mounts.is_empty());
+    }
+
+    /// A target with no exclusions at all, and an empty selection, are both
+    /// ordinary — neither may fail the request.
+    #[test]
+    fn missing_fields_default_rather_than_failing() {
+        let parsed: MountCheckRequest =
+            serde_json::from_str(r#"{"targets":[{"type":"docker","name":"a"}]}"#).unwrap();
+        assert!(parsed.targets[0].exclude_mounts.is_empty());
+        let empty: MountCheckRequest = serde_json::from_str("{}").unwrap();
+        assert!(empty.targets.is_empty());
     }
 }
