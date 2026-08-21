@@ -394,37 +394,20 @@ pub fn attach_vm_proxmox(p: &AttachParams) -> Result<AttachOutcome, String> {
     run_qm(&["set", vmid, &format!("-net{}", next_idx), &spec])?;
 
     // 2. Ensure the VM has a cloud-init drive — add one if not.
-    let mut ci_note = String::new();
-    if !cfg_has_cloudinit_drive(&cfg) {
-        match (free_ide_slot(&cfg), os_disk_storage(&cfg)) {
-            (Some(slot), Some(storage)) => {
-                if let Err(e) = run_qm(&["set", vmid,
-                    &format!("--ide{}", slot), &format!("{}:cloudinit", storage)])
-                {
-                    return Ok(AttachOutcome {
-                        message: format!(
-                            "Attached net{} on {}, but adding a cloud-init drive failed: {}. \
-                             Add one in Proxmox (Hardware → Add → CloudInit Drive), then \
-                             re-attach, or set IP {} inside the guest.",
-                            next_idx, p.bridge, e, p.ip_cidr),
-                        restarted: false,
-                    });
-                }
-                ci_note = format!(" Added a cloud-init drive on ide{}.", slot);
-            }
-            _ => {
-                return Ok(AttachOutcome {
-                    message: format!(
-                        "Attached net{} on {}, but the VM has no cloud-init drive and WolfStack \
-                         could not add one (no free IDE slot, or the VM's disk storage is \
-                         unknown). Add a cloud-init drive in Proxmox, then re-attach — or set \
-                         IP {} inside the guest.",
-                        next_idx, p.bridge, p.ip_cidr),
-                    restarted: false,
-                });
-            }
+    let ci_note = match ensure_cloudinit_drive(vmid, &cfg) {
+        Ok(Some(slot)) => format!(" Added a cloud-init drive on ide{}.", slot),
+        Ok(None) => String::new(),
+        Err(e) => {
+            return Ok(AttachOutcome {
+                message: format!(
+                    "Attached net{} on {}, but {}. Add a cloud-init drive in Proxmox \
+                     (Hardware → Add → CloudInit Drive), then re-attach, or set IP {} \
+                     inside the guest.",
+                    next_idx, p.bridge, e, p.ip_cidr),
+                restarted: false,
+            });
         }
-    }
+    };
 
     // 3. Stage the IP on the matching ipconfig index. Proxmox
     //    ipconfigN carries only ip + gw; a vSwitch NIC is a secondary
@@ -601,6 +584,267 @@ pub fn detach_vm_proxmox(target_id: &str, bridge: &str) -> Result<AttachOutcome,
             indexes.len(), target_id),
         restarted: false,
     })
+}
+
+/// Ensure a Proxmox VM has a cloud-init drive, adding one on a free IDE
+/// slot when it doesn't. `Ok(Some(slot))` = we added one, `Ok(None)` = it
+/// already had one. Shared by the vSwitch attach and the primary-NIC IP
+/// staging: without a drive, Proxmox has nowhere to write the config and
+/// the guest never sees the IP.
+fn ensure_cloudinit_drive(vmid: &str, cfg: &str) -> Result<Option<u32>, String> {
+    if cfg_has_cloudinit_drive(cfg) {
+        return Ok(None);
+    }
+    match (free_ide_slot(cfg), os_disk_storage(cfg)) {
+        (Some(slot), Some(storage)) => {
+            run_qm(&["set", vmid, &format!("--ide{}", slot), &format!("{}:cloudinit", storage)])
+                .map_err(|e| format!("adding a cloud-init drive failed: {}", e))?;
+            Ok(Some(slot))
+        }
+        _ => Err("the VM has no cloud-init drive and WolfStack could not add one \
+                  (no free IDE slot, or the VM's disk storage is unknown)".to_string()),
+    }
+}
+
+/// Rebuild a libvirt VM's NoCloud seed from every per-NIC block it has and
+/// attach it as a CD-ROM if it isn't already. Idempotent: on a re-stage the
+/// ISO is rebuilt in place, so the existing CD-ROM serves the new config.
+/// Config-only (`--config`) — cloud-init reads it at the next boot.
+fn restage_vm_seed(domain: &str) -> Result<(), String> {
+    let netcfg = assemble_vm_netcfg(domain)
+        .ok_or("the cloud-init netcfg could not be assembled")?;
+    let seed = build_vm_seed_iso(domain, &netcfg)
+        .map_err(|e| format!("the cloud-init seed could not be built: {}", e))?;
+    if seed_already_attached(domain, &seed) {
+        return Ok(());
+    }
+    let target = free_cdrom_target(domain)
+        .ok_or("no free CD-ROM slot was available for the cloud-init seed")?;
+    let cd = Command::new("virsh").args([
+        "attach-disk", domain, &seed, &target,
+        "--type", "cdrom", "--mode", "readonly", "--config",
+    ]).output().map_err(|e| format!("spawn virsh attach-disk: {}", e))?;
+    if !cd.status.success() {
+        return Err(format!(
+            "attaching the cloud-init seed CD-ROM failed: {}",
+            String::from_utf8_lossy(&cd.stderr).trim()));
+    }
+    Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Primary NIC (net0) IP — VM Settings, not a vSwitch attach
+// ────────────────────────────────────────────────────────────────────
+//
+// The operator's "Bridged LAN + static IP" choice in VM Settings was
+// stored and echoed back for two years but never applied to anything, so
+// the guest just kept DHCPing and its /etc/network/interfaces still said
+// dhcp (RutgerDiehard 2026-08-21). A VM's IP lives inside the guest and
+// cannot be set from the hypervisor at runtime, so — exactly like the
+// vSwitch path above — we STAGE it via cloud-init and the guest applies it
+// on its next boot.
+//
+// The one thing that differs from a vSwitch NIC: this is the VM's primary
+// interface, so it DOES take the default route. A vSwitch NIC is secondary
+// and deliberately never gets one.
+
+/// What the operator asked for on a VM's primary NIC.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrimaryIp {
+    /// Static address (CIDR) plus the gateway that becomes the guest's
+    /// default route. `gateway: None` = address only, no default route.
+    Static { ip_cidr: String, gateway: Option<String> },
+    /// Hand the NIC back to DHCP.
+    Dhcp,
+}
+
+/// True for a plain dotted-quad IPv4 address.
+fn is_ipv4(s: &str) -> bool {
+    s.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+/// True for an IPv4 CIDR ("192.168.1.50/24"). Prefix must be 0-32.
+fn is_ipv4_cidr(s: &str) -> bool {
+    match s.split_once('/') {
+        Some((ip, pfx)) => is_ipv4(ip) && pfx.parse::<u8>().map(|p| p <= 32).unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Reject anything that isn't a clean address before it reaches `qm` or a
+/// generated YAML document.
+fn validate_primary_ip(plan: &PrimaryIp) -> Result<(), String> {
+    if let PrimaryIp::Static { ip_cidr, gateway } = plan {
+        if !is_ipv4_cidr(ip_cidr) {
+            return Err(format!(
+                "'{}' is not a valid IPv4 address with a prefix (e.g. 192.168.1.50/24)", ip_cidr));
+        }
+        if let Some(gw) = gateway
+            && !gw.is_empty() && !is_ipv4(gw) {
+            return Err(format!("'{}' is not a valid IPv4 gateway", gw));
+        }
+    }
+    Ok(())
+}
+
+/// Stage a Proxmox VM's PRIMARY NIC IP via cloud-init (`ipconfig0`, which
+/// Proxmox pairs with `net0`). Returns the advisory to show the operator.
+///
+/// Verified syntax (Proxmox `qm.1`): `--ipconfig[n]` carries
+/// `[gw=<GatewayIPv4>] [,ip=<IPv4Format/CIDR>]` and `ip=dhcp` is accepted
+/// for DHCP; `qm cloudinit update` regenerates the drive.
+/// `Ok(None)` = nothing needed doing (a DHCP request on a VM we never staged
+/// an address for — the guest already DHCPs, and giving it a cloud-init drive
+/// it never had, purely to say "use DHCP", would change its hardware for no
+/// gain).
+pub fn stage_primary_ip_proxmox(vmid: &str, plan: &PrimaryIp) -> Result<Option<String>, String> {
+    validate_primary_ip(plan)?;
+    let cfg = qm_config(vmid)?;
+    let (value, what, ci_note) = match plan {
+        PrimaryIp::Static { ip_cidr, gateway } => {
+            // A static address is an explicit request, so adding the drive
+            // that makes it possible is justified — and reported.
+            let ci_note = match ensure_cloudinit_drive(vmid, &cfg)? {
+                Some(slot) => format!(" Added a cloud-init drive on ide{}.", slot),
+                None => String::new(),
+            };
+            let mut v = format!("ip={}", ip_cidr);
+            if let Some(gw) = gateway.as_deref().filter(|g| !g.is_empty()) {
+                v.push_str(&format!(",gw={}", gw));
+            }
+            (v, format!("static IP {}", ip_cidr), ci_note)
+        }
+        PrimaryIp::Dhcp => {
+            if !cfg_has_ipconfig0(&cfg) {
+                return Ok(None);
+            }
+            ("ip=dhcp".to_string(), "DHCP".to_string(), String::new())
+        }
+    };
+    run_qm(&["set", vmid, "--ipconfig0", &value])?;
+    let _ = run_qm(&["cloudinit", "update", vmid]);
+    Ok(Some(format!(
+        "Staged {} on the primary NIC via cloud-init.{} It applies the next time the VM boots \
+         (requires cloud-init in the guest).",
+        what, ci_note)))
+}
+
+/// True if a `qm config` dump already stages a primary-NIC IP.
+fn cfg_has_ipconfig0(cfg: &str) -> bool {
+    cfg.lines().any(|l| l.trim_start().starts_with("ipconfig0:"))
+}
+
+/// One netplan `ethernets` entry for a VM's primary NIC, matched by MAC.
+/// Separate from [`vm_ethernet_block`] because the primary NIC takes the
+/// default route and must not have an MTU forced on it.
+fn vm_primary_ethernet_block(mac: &str, plan: &PrimaryIp) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("  wsprimary{}:\n", mac.replace(':', "")));
+    s.push_str("    match:\n");
+    s.push_str(&format!("      macaddress: \"{}\"\n", mac));
+    match plan {
+        PrimaryIp::Static { ip_cidr, gateway } => {
+            s.push_str("    dhcp4: false\n");
+            s.push_str("    dhcp6: false\n");
+            s.push_str("    addresses:\n");
+            s.push_str(&format!("      - \"{}\"\n", ip_cidr));
+            if let Some(gw) = gateway.as_deref().filter(|g| !g.is_empty()) {
+                // The primary NIC owns the guest's default route.
+                s.push_str("    routes:\n");
+                s.push_str("      - to: \"default\"\n");
+                s.push_str(&format!("        via: \"{}\"\n", gw));
+            }
+        }
+        PrimaryIp::Dhcp => {
+            // Stated explicitly rather than by omission, so switching back
+            // from static actually tells the guest to go get a lease.
+            s.push_str("    dhcp4: true\n");
+        }
+    }
+    s
+}
+
+/// Stage a libvirt VM's PRIMARY NIC IP via its NoCloud seed. `mac` is the
+/// primary NIC's MAC — the seed matches on it, so the config binds to that
+/// interface and not to whichever name the guest happened to assign.
+/// `Ok(None)` = nothing needed doing, for the same reason as the Proxmox
+/// version: a DHCP request on a VM we never staged an address for must not
+/// attach a cloud-init seed ISO it never had.
+pub fn stage_primary_ip_libvirt(domain: &str, mac: &str, plan: &PrimaryIp)
+    -> Result<Option<String>, String>
+{
+    validate_primary_ip(plan)?;
+    if mac.is_empty() {
+        return Err("the VM's primary NIC has no MAC address to match on".to_string());
+    }
+    if matches!(plan, PrimaryIp::Dhcp)
+        && !std::path::Path::new(&mac_block_file(domain, mac)).exists() {
+        return Ok(None);
+    }
+    let dir = vm_blocks_dir(domain);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {}", dir, e))?;
+    std::fs::write(mac_block_file(domain, mac), vm_primary_ethernet_block(mac, plan))
+        .map_err(|e| format!("write cloud-init block: {}", e))?;
+    restage_vm_seed(domain)?;
+    let what = match plan {
+        PrimaryIp::Static { ip_cidr, .. } => format!("static IP {}", ip_cidr),
+        PrimaryIp::Dhcp => "DHCP".to_string(),
+    };
+    Ok(Some(format!(
+        "Staged {} on the primary NIC ({}) via a cloud-init seed. It applies the next time the \
+         VM boots (requires cloud-init + the NoCloud datasource in the guest).",
+        what, mac)))
+}
+
+/// Undo a primary-NIC IP WolfStack previously staged, when the VM leaves
+/// bridge mode. Returns whether anything was actually cleared.
+///
+/// Deliberately a no-op when we never staged one: a VM that has nothing to
+/// do with cloud-init must not be handed a seed (or, on Proxmox, a new
+/// cloud-init drive) just because the operator moved it to WolfNet. Without
+/// this, a static address staged for bridge mode would keep being applied by
+/// the guest long after the operator moved that VM somewhere else.
+pub fn clear_primary_ip_libvirt(domain: &str, mac: &str) -> Result<bool, String> {
+    if mac.is_empty() {
+        return Ok(false);
+    }
+    let block = mac_block_file(domain, mac);
+    if !std::path::Path::new(&block).exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&block).map_err(|e| format!("remove cloud-init block: {}", e))?;
+    // Any remaining blocks (other vSwitch NICs) still need a seed; with none
+    // left there is nothing to rebuild and the stale ISO simply goes unused.
+    if assemble_vm_netcfg(domain).is_some() {
+        restage_vm_seed(domain)?;
+    }
+    Ok(true)
+}
+
+/// Proxmox counterpart of [`clear_primary_ip_libvirt`]. Only acts when the CT
+/// config already carries an `ipconfig0` — we hand the NIC back to DHCP rather
+/// than `--delete`, which errors when the key was never set.
+pub fn clear_primary_ip_proxmox(vmid: &str) -> Result<bool, String> {
+    let cfg = qm_config(vmid)?;
+    if !cfg.lines().any(|l| l.trim_start().starts_with("ipconfig0:")) {
+        return Ok(false);
+    }
+    run_qm(&["set", vmid, "--ipconfig0", "ip=dhcp"])?;
+    let _ = run_qm(&["cloudinit", "update", vmid]);
+    Ok(true)
+}
+
+/// The primary NIC's MAC for a libvirt domain: the first interface on
+/// `bridge` as `virsh domiflist` lists it. None = the domain has no NIC on
+/// that bridge (so there's nothing to stage an IP for).
+pub fn primary_nic_mac_libvirt(domain: &str, bridge: &str) -> Option<String> {
+    let out = Command::new("virsh").args(["domiflist", domain]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_libvirt_macs_for_bridge(&String::from_utf8_lossy(&out.stdout), bridge)
+        .into_iter()
+        .next()
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -827,34 +1071,9 @@ pub fn attach_vm_libvirt(p: &AttachParams) -> Result<AttachOutcome, String> {
     if let Err(e) = write_vm_block(domain, &mac, p.ip_cidr, p.mtu, p.routes) {
         return Ok(degraded(format!("the cloud-init block could not be written: {}", e)));
     }
-    let netcfg = match assemble_vm_netcfg(domain) {
-        Some(n) => n,
-        None => return Ok(degraded("the cloud-init netcfg could not be assembled".into())),
-    };
-    let seed = match build_vm_seed_iso(domain, &netcfg) {
-        Ok(s) => s,
-        Err(e) => return Ok(degraded(format!("the cloud-init seed could not be built: {}", e))),
-    };
-
-    // 3. Attach the seed as a CD-ROM if it isn't already attached. On
-    //    a re-attach the seed ISO was just rebuilt in place, so the
-    //    existing CD-ROM already serves the refreshed config.
-    //    Config-only (`--config`): cloud-init reads it at boot.
-    if !seed_already_attached(domain, &seed) {
-        let target = match free_cdrom_target(domain) {
-            Some(t) => t,
-            None => return Ok(degraded(
-                "no free CD-ROM slot was available for the cloud-init seed".into())),
-        };
-        let cd = Command::new("virsh").args([
-            "attach-disk", domain, &seed, &target,
-            "--type", "cdrom", "--mode", "readonly", "--config",
-        ]).output().map_err(|e| format!("spawn virsh attach-disk: {}", e))?;
-        if !cd.status.success() {
-            return Ok(degraded(format!(
-                "attaching the cloud-init seed CD-ROM failed: {}",
-                String::from_utf8_lossy(&cd.stderr).trim())));
-        }
+    // 3. Rebuild the seed from every block and make sure it's attached.
+    if let Err(e) = restage_vm_seed(domain) {
+        return Ok(degraded(e));
     }
 
     // 4. Reboot only if asked.
@@ -1407,5 +1626,102 @@ lxc.net.2.link = vmbr4000
     fn mac_block_file_strips_colons() {
         let path = mac_block_file("web01", "02:ab:cd:ef:01:02");
         assert!(path.ends_with("/web01.d/02abcdef0102.block"));
+    }
+}
+
+#[cfg(test)]
+mod primary_ip_tests {
+    use super::*;
+
+    #[test]
+    fn only_clean_addresses_reach_a_generated_config() {
+        assert!(validate_primary_ip(&PrimaryIp::Static {
+            ip_cidr: "192.168.1.50/24".into(), gateway: Some("192.168.1.1".into()) }).is_ok());
+        assert!(validate_primary_ip(&PrimaryIp::Dhcp).is_ok());
+        // A bare address is not enough — qm and netplan both want the prefix.
+        assert!(validate_primary_ip(&PrimaryIp::Static {
+            ip_cidr: "192.168.1.50".into(), gateway: None }).is_err());
+        assert!(validate_primary_ip(&PrimaryIp::Static {
+            ip_cidr: "192.168.1.50/33".into(), gateway: None }).is_err());
+        // YAML/CLI injection attempts die at the boundary.
+        assert!(validate_primary_ip(&PrimaryIp::Static {
+            ip_cidr: "1.2.3.4/24\"\n    gateway4: 6.6.6.6".into(), gateway: None }).is_err());
+        assert!(validate_primary_ip(&PrimaryIp::Static {
+            ip_cidr: "1.2.3.4/24".into(), gateway: Some("6.6.6.6,ip=9.9.9.9".into()) }).is_err());
+        // An empty gateway is "no default route", not an error.
+        assert!(validate_primary_ip(&PrimaryIp::Static {
+            ip_cidr: "1.2.3.4/24".into(), gateway: Some(String::new()) }).is_ok());
+    }
+
+    /// The primary NIC takes the default route — this is what a vSwitch NIC
+    /// deliberately never gets, and it's why it needs its own block builder.
+    #[test]
+    fn the_primary_block_carries_the_default_route() {
+        let yaml = vm_primary_ethernet_block("52:54:00:ab:cd:ef", &PrimaryIp::Static {
+            ip_cidr: "192.168.1.50/24".into(), gateway: Some("192.168.1.1".into()) });
+        assert_eq!(yaml, "  wsprimary525400abcdef:\n    match:\n      macaddress: \"52:54:00:ab:cd:ef\"\n    dhcp4: false\n    dhcp6: false\n    addresses:\n      - \"192.168.1.50/24\"\n    routes:\n      - to: \"default\"\n        via: \"192.168.1.1\"\n");
+    }
+
+    #[test]
+    fn a_static_block_without_a_gateway_sets_no_route() {
+        let yaml = vm_primary_ethernet_block("52:54:00:ab:cd:ef", &PrimaryIp::Static {
+            ip_cidr: "10.0.0.5/24".into(), gateway: None });
+        assert!(yaml.contains("addresses:"));
+        assert!(!yaml.contains("routes:"), "{}", yaml);
+    }
+
+    /// Switching back to DHCP must SAY dhcp4: true — leaving the NIC out of
+    /// the seed would let the previous static config stand.
+    #[test]
+    fn dhcp_is_stated_explicitly() {
+        let yaml = vm_primary_ethernet_block("52:54:00:ab:cd:ef", &PrimaryIp::Dhcp);
+        assert!(yaml.contains("dhcp4: true"), "{}", yaml);
+        assert!(!yaml.contains("addresses:"), "{}", yaml);
+    }
+
+    /// The primary block and a vSwitch block must key differently so a VM
+    /// with both keeps both entries when the seed is assembled.
+    #[test]
+    fn primary_and_vswitch_blocks_do_not_collide() {
+        let primary = vm_primary_ethernet_block("52:54:00:aa:bb:cc", &PrimaryIp::Dhcp);
+        let vlan = vm_ethernet_block("02:11:22:33:44:55", "10.9.0.5/24", 1400, &[]);
+        assert!(primary.starts_with("  wsprimary"));
+        assert!(vlan.starts_with("  wsvlan"));
+    }
+}
+
+#[cfg(test)]
+mod primary_ip_drive_tests {
+    use super::*;
+
+    /// A DHCP save must never be the reason a VM gains cloud-init hardware:
+    /// the guest already DHCPs by default, so adding an IDE drive (Proxmox) or
+    /// a seed ISO (libvirt) purely to say "use DHCP" would change the VM's
+    /// hardware for no gain. Only an explicit static address earns that.
+    #[test]
+    fn ipconfig0_presence_is_what_gates_a_dhcp_restage() {
+        assert!(cfg_has_ipconfig0("name: test\nipconfig0: ip=10.0.0.5/24,gw=10.0.0.1\n"));
+        assert!(cfg_has_ipconfig0("ipconfig0: ip=dhcp\n"));
+        assert!(!cfg_has_ipconfig0("name: test\nnet0: virtio,bridge=vmbr0\n"));
+        // A different index is not ours to touch.
+        assert!(!cfg_has_ipconfig0("ipconfig1: ip=10.0.0.5/24\n"));
+    }
+
+    #[test]
+    fn a_dhcp_stage_on_an_unstaged_libvirt_vm_does_nothing() {
+        let domain = format!("wolfstack-dhcptest-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(vm_blocks_dir(&domain));
+        // No block file for this MAC => nothing was ever staged => no-op, and
+        // crucially no seed ISO is built or attached.
+        let r = stage_primary_ip_libvirt(&domain, "52:54:00:11:22:33", &PrimaryIp::Dhcp);
+        assert_eq!(r, Ok(None));
+        assert!(!std::path::Path::new(&vm_blocks_dir(&domain)).exists());
+    }
+
+    #[test]
+    fn clearing_an_unstaged_libvirt_vm_does_nothing() {
+        let domain = format!("wolfstack-cleartest-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(vm_blocks_dir(&domain));
+        assert_eq!(clear_primary_ip_libvirt(&domain, "52:54:00:11:22:33"), Ok(false));
     }
 }
