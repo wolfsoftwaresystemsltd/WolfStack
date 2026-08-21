@@ -3138,7 +3138,11 @@ async function poolWizardLoadBackendRef(errEl) {
             if (refLabel) refLabel.textContent = 'Proxmox node (WolfStack cluster member)';
             // Filter cluster nodes to only ones with PVE creds.
             const r = await fetch(apiUrl('/api/nodes'));
-            const list = r.ok ? await r.json() : [];
+            // /api/nodes answers { version, nodes, tls_enabled } — the bare
+            // array is the legacy shape. Filtering the envelope threw
+            // "list.filter is not a function" and left this picker empty.
+            const nd = r.ok ? await r.json() : [];
+            const list = Array.isArray(nd) ? nd : (nd.nodes || []);
             const pve = list.filter(n => n.pve_token && n.pve_node_name);
             if (!pve.length) {
                 refSel.innerHTML = '<option value="">No PVE-capable nodes in this cluster</option>';
@@ -54282,8 +54286,10 @@ async function loadLeaveClusterContext() {
     try {
         var resp = await fetch('/api/nodes');
         if (!resp.ok) return;
-        var nodes = await resp.json();
-        var self = (nodes || []).find(function (n) { return n.is_self; });
+        var data = await resp.json();
+        // { version, nodes, tls_enabled } envelope (bare array = legacy).
+        var nodes = Array.isArray(data) ? data : (data.nodes || []);
+        var self = nodes.find(function (n) { return n.is_self; });
         if (!self) return;
         var name = self.cluster_name || 'WolfStack';
         leaveClusterCurrentName = name;
@@ -81042,7 +81048,16 @@ async function showGaleraForCluster(clusterName) {
     const t = document.getElementById('page-title');
     if (t) t.textContent = 'Galera — ' + clusterName;
     if (!Array.isArray(allNodes) || allNodes.length === 0) {
-        try { const r = await fetch('/api/nodes'); if (r.ok) allNodes = await r.json(); } catch (_) {}
+        // Envelope-aware: assigning the raw { version, nodes } object to
+        // allNodes left every Array.isArray(allNodes) consumer thinking the
+        // fleet was empty.
+        try {
+            const r = await fetch('/api/nodes');
+            if (r.ok) {
+                const d = await r.json();
+                allNodes = Array.isArray(d) ? d : (d.nodes || []);
+            }
+        } catch (_) {}
     }
     await galeraLoadClusters();
     // Periodic status refresh while viewing — keeps status live and grows the
