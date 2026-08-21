@@ -14120,6 +14120,7 @@ function buildVmNetSection(prefix) {
                 <div id="${prefix}-bridge-static" style="display:none;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
                     <div><label style="font-size:12px;">IP + CIDR</label><input id="${prefix}-bridge-ip" placeholder="192.168.10.50/24" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px;margin-top:3px;"/></div>
                     <div><label style="font-size:12px;">Gateway</label><input id="${prefix}-bridge-gw" placeholder="192.168.10.1" style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-primary);font-size:12px;margin-top:3px;"/></div>
+                    <div style="grid-column:1/-1;font-size:11px;color:var(--text-muted);">A VM's IP lives inside the guest, so WolfStack stages it via cloud-init and it applies on the VM's <strong>next boot</strong> — the guest needs cloud-init installed. Proxmox VMs use <code>ipconfig0</code>; libvirt VMs get a NoCloud seed. Native QEMU VMs can't be staged this way; set the address in the guest.</div>
                 </div>
                 <div id="${prefix}-bridge-warn" style="display:none;font-size:11px;margin-top:6px;padding:7px 9px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.35);border-radius:6px;color:var(--text-primary);"></div>
                 <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">VM is attached to this bridge and gets a LAN IP. Use this when the VM should be reachable from your physical network.</div>
@@ -14657,22 +14658,18 @@ async function wireVmNetSection(prefix, existing) {
     let initialBridge = existing.bridge || '';
     let initialVswUplink = '';
     let initialVlanTag = '';
-    // If the persisted bridge is a vSwitch attachment (vmbr<vlan>),
-    // recover the uplink + VLAN from /api/networking/vlan so the
-    // editor shows the vSwitch card instead of bare Bridge mode.
-    if (mode === 'bridge' && initialBridge) {
-        try {
-            const r = await fetch(apiUrl('/api/networking/vlan'));
-            if (r.ok) {
-                const data = await r.json();
-                const att = (data.vlans || []).find(v => v.bridge_name === initialBridge);
-                if (att && att.parent_iface && att.vlan_id) {
-                    initialMode = 'vswitch';
-                    initialVswUplink = att.parent_iface;
-                    initialVlanTag = String(att.vlan_id);
-                }
-            }
-        } catch (_) { /* keep plain bridge mode */ }
+    // Show the vSwitch card only when the VM actually RECORDS a vSwitch
+    // selection. This used to be inferred by looking `bridge` up in the VLAN
+    // attachment store, which cannot tell "created via the vSwitch preset"
+    // apart from "operator deliberately attached this VM to an existing VLAN
+    // bridge" — so picking Bridge + vmbr101 re-opened on the vSwitch card and
+    // read as the setting reverting (RutgerDiehard 2026-08-21). A VM saved
+    // before this field existed opens on the Bridge card with its bridge
+    // preselected, which is lossless: the bridge is what's actually attached.
+    if (mode === 'bridge' && existing.vsw_uplink && existing.vsw_vlan) {
+        initialMode = 'vswitch';
+        initialVswUplink = existing.vsw_uplink;
+        initialVlanTag = String(existing.vsw_vlan);
     }
     await populateVmBridges(prefix, initialBridge);
     await populateVmVswitchUplinks(prefix, initialVswUplink);
@@ -14714,6 +14711,11 @@ async function collectVmNetFields(prefix) {
         bridge_ip_mode: null,
         bridge_ip: null,
         bridge_gateway: null,
+        // The vSwitch selection is PERSISTED, not re-derived from the bridge
+        // name on load. '' clears it — a plain-bridge save must be able to say
+        // "this is no longer a vSwitch VM".
+        vsw_uplink: '',
+        vsw_vlan: null,
     };
     if (mode === 'wolfnet') {
         const ip = ((document.getElementById(`${prefix}-wolfnet-ip`) || {}).value || '').trim();
@@ -14748,6 +14750,11 @@ async function collectVmNetFields(prefix) {
         out.network_mode = 'bridge';
         out.bridge = bridge.name;
         out.bridge_ip_mode = 'dhcp';
+        // Record WHICH vSwitch this is, so reopening the editor doesn't have
+        // to guess from the bridge name (and mislabel every VM that's simply
+        // attached to an existing VLAN bridge).
+        out.vsw_uplink = up;
+        out.vsw_vlan = vlan;
     } else {
         out.network_mode = 'nat';
     }
@@ -15267,6 +15274,8 @@ async function createVm() {
                 bridge_ip_mode: netFields.bridge_ip_mode,
                 bridge_ip: netFields.bridge_ip,
                 bridge_gateway: netFields.bridge_gateway,
+                vsw_uplink: netFields.vsw_uplink,
+                vsw_vlan: netFields.vsw_vlan,
                 notes,
                 extra_qemu_args: extraQemuArgs
             })
@@ -36345,6 +36354,8 @@ async function saveVmSettings(name) {
                 bridge_ip_mode: netFields.bridge_ip_mode,
                 bridge_ip: netFields.bridge_ip,
                 bridge_gateway: netFields.bridge_gateway,
+                vsw_uplink: netFields.vsw_uplink,
+                vsw_vlan: netFields.vsw_vlan,
                 notes,
                 extra_qemu_args: extraQemuArgs,
             })

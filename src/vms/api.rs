@@ -419,6 +419,13 @@ struct CreateVmRequest {
     /// Static gateway for bridge mode when `bridge_ip_mode == "static"`.
     #[serde(default)]
     bridge_gateway: Option<String>,
+    /// The vSwitch selection behind `bridge`, when the VM is being created
+    /// from the vSwitch preset. Persisted so the editor re-opens on the
+    /// vSwitch card instead of inferring it from the bridge name.
+    #[serde(default)]
+    vsw_uplink: Option<String>,
+    #[serde(default)]
+    vsw_vlan: Option<u32>,
     /// Free-text operator notes / description. Defaults to empty.
     #[serde(default)]
     notes: String,
@@ -515,6 +522,14 @@ async fn create_vm(req: HttpRequest, state: web::Data<AppState>, body: web::Json
     config.bridge_ip_mode = body.bridge_ip_mode.clone().filter(|s| !s.is_empty());
     config.bridge_ip = body.bridge_ip.clone().filter(|s| !s.is_empty());
     config.bridge_gateway = body.bridge_gateway.clone().filter(|s| !s.is_empty());
+    // Only a complete uplink+VLAN pair marks this as a vSwitch VM; a half-set
+    // pair would make the editor open a vSwitch card it can't populate.
+    config.vsw_uplink = body.vsw_uplink.clone().filter(|s| !s.is_empty());
+    config.vsw_vlan = body.vsw_vlan;
+    if config.vsw_uplink.is_none() || config.vsw_vlan.is_none() {
+        config.vsw_uplink = None;
+        config.vsw_vlan = None;
+    }
 
     // Bridge/NAT VMs carry no WolfNet IP — mirror the update path so a
     // create-with-bridge can't persist a stale/auto wolfnet_ip.
@@ -592,6 +607,11 @@ struct UpdateVmRequest {
     bridge_ip_mode: Option<String>,
     bridge_ip: Option<String>,
     bridge_gateway: Option<String>,
+    /// The vSwitch selection behind `bridge`, when the operator used the
+    /// vSwitch preset. Persisted so the editor re-opens on the right card
+    /// instead of guessing from the bridge name. Empty uplink clears it.
+    vsw_uplink: Option<String>,
+    vsw_vlan: Option<u32>,
     /// Free-text operator notes / description. Empty string clears it.
     notes: Option<String>,
     /// Operator-supplied extra QEMU args (e.g. Windows-11 audio). Empty
@@ -663,6 +683,8 @@ async fn update_vm(req: HttpRequest, state: web::Data<AppState>, path: web::Path
                             body.bridge_ip_mode.clone(),
                             body.bridge_ip.clone(),
                             body.bridge_gateway.clone(),
+                            body.vsw_uplink.clone(),
+                            body.vsw_vlan,
                             body.boot_order.clone(),
                             body.vnc_external,
                             body.notes.clone(),

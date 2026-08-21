@@ -129,6 +129,58 @@ impl PciDevice {
     }
 }
 
+/// Turn the operator's bridge-mode IP fields into a cloud-init staging plan,
+/// or `None` when this save has no primary-NIC IP to apply. Only bridge mode
+/// has one: WolfNet and NAT own their own addressing.
+fn primary_ip_plan(network_mode: &Option<String>, bridge_ip_mode: &Option<String>,
+                   bridge_ip: &Option<String>, bridge_gateway: &Option<String>)
+    -> Option<crate::networking::vlan_attach::PrimaryIp>
+{
+    use crate::networking::vlan_attach::PrimaryIp;
+    if network_mode.as_deref() != Some("bridge") {
+        return None;
+    }
+    match bridge_ip_mode.as_deref() {
+        Some("static") => {
+            let ip = bridge_ip.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+            Some(PrimaryIp::Static {
+                ip_cidr: ip.to_string(),
+                gateway: bridge_gateway.as_deref().map(str::trim)
+                    .filter(|s| !s.is_empty()).map(str::to_string),
+            })
+        }
+        Some("dhcp") => Some(PrimaryIp::Dhcp),
+        _ => None,
+    }
+}
+
+/// The WolfStack-only primary-NIC settings an update carries. Grouped so
+/// the sidecar writer both backends share isn't a nine-argument function,
+/// and so neither branch can quietly persist a different subset than the
+/// other. `None` on a field means "the request didn't mention it".
+#[derive(Debug, Default, Clone)]
+pub struct VmNetSettings {
+    pub network_mode: Option<String>,
+    pub bridge: Option<String>,
+    pub bridge_ip_mode: Option<String>,
+    pub bridge_ip: Option<String>,
+    pub bridge_gateway: Option<String>,
+    pub vsw_uplink: Option<String>,
+    pub vsw_vlan: Option<u32>,
+    pub wolfnet_ip: Option<String>,
+}
+
+impl VmNetSettings {
+    /// True when the request mentioned none of these fields, so there is
+    /// nothing to persist and the sidecar must not be created or rewritten.
+    fn is_empty(&self) -> bool {
+        self.network_mode.is_none() && self.bridge.is_none()
+            && self.bridge_ip_mode.is_none() && self.bridge_ip.is_none()
+            && self.bridge_gateway.is_none() && self.vsw_uplink.is_none()
+            && self.vsw_vlan.is_none() && self.wolfnet_ip.is_none()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VmConfig {
     pub name: String,
@@ -265,6 +317,23 @@ pub struct VmConfig {
     /// `bridge_ip_mode == "static"`. Paired with `bridge_ip`.
     #[serde(default)]
     pub bridge_gateway: Option<String>,
+
+    /// The vSwitch selection behind `bridge`, recorded when the operator
+    /// used the vSwitch preset rather than picking a plain bridge.
+    ///
+    /// `bridge` alone cannot answer "was this a vSwitch?": a WolfStack VLAN
+    /// bridge is an equally valid target for plain Bridge mode, and the
+    /// editor used to guess by looking the bridge name up in the VLAN
+    /// attachment store. That guess mislabelled every VM attached directly
+    /// to an existing production VLAN bridge — the operator picked Bridge +
+    /// vmbr101, and the editor re-opened on the vSwitch card, which read as
+    /// the setting "reverting" (RutgerDiehard 2026-08-21). The choice is
+    /// persisted here instead of being inferred. `None` = plain bridge.
+    #[serde(default)]
+    pub vsw_uplink: Option<String>,
+    /// VLAN tag paired with [`Self::vsw_uplink`]. Both are set together.
+    #[serde(default)]
+    pub vsw_vlan: Option<u32>,
 
     /// Free-text operator notes / description shown on the VM's General tab.
     /// Persisted in the hypervisor's own description field where one exists
@@ -594,6 +663,8 @@ impl VmConfig {
             bridge: None,
             bridge_ip_mode: None,
             bridge_ip: None,
+            vsw_uplink: None,
+            vsw_vlan: None,
             bridge_gateway: None,
             notes: String::new(),
             extra_qemu_args: String::new(),
@@ -1113,6 +1184,8 @@ impl VmManager {
                     bridge_ip_mode: None,
                     bridge_ip: None,
                     bridge_gateway: None,
+                    vsw_uplink: None,
+                    vsw_vlan: None,
                     notes,
                     extra_qemu_args,
                 })
@@ -1153,6 +1226,84 @@ impl VmManager {
 
     fn vm_config_path(&self, name: &str) -> PathBuf {
         self.base_dir.join(format!("{}.json", name))
+    }
+
+    /// Persist the WolfStack-only primary-NIC fields into the VM's JSON
+    /// sidecar.
+    ///
+    /// Neither hypervisor has a home for these: libvirt's domain XML has no
+    /// concept of "the operator picked the vSwitch card and wants .50/24",
+    /// and `qm` carries the bridge but not the intent behind it. Both update
+    /// branches call this so they persist exactly the same set — the Proxmox
+    /// branch previously wrote no sidecar at all, which is why a Proxmox VM's
+    /// IP hints never survived a save.
+    /// Returns true when the primary-NIC IP intent (mode + bridge IP mode +
+    /// address + gateway) actually changed, so the caller only re-stages
+    /// cloud-init on a real change instead of on every unrelated save.
+    fn persist_vm_net_sidecar(&self, name: &str, net: &VmNetSettings) -> bool {
+        if net.is_empty() {
+            return false;
+        }
+        let sidecar_path = self.vm_config_path(name);
+        // Load the existing sidecar or build a minimal one; we only touch the
+        // network fields and leave everything else as it was.
+        let mut sidecar = fs::read_to_string(&sidecar_path).ok()
+            .and_then(|t| serde_json::from_str::<VmConfig>(&t).ok())
+            .unwrap_or_else(|| VmConfig::new(name.to_string(), 1, 512, 1));
+        let before = (sidecar.network_mode.clone(), sidecar.bridge_ip_mode.clone(),
+                      sidecar.bridge_ip.clone(), sidecar.bridge_gateway.clone());
+        if let Some(ref nm) = net.network_mode {
+            sidecar.network_mode = if nm.is_empty() { None } else { Some(nm.clone()) };
+            if nm != "bridge" {
+                sidecar.bridge = None;
+                sidecar.bridge_ip_mode = None;
+                sidecar.bridge_ip = None;
+                sidecar.bridge_gateway = None;
+                // Leaving bridge mode ends any vSwitch association too.
+                sidecar.vsw_uplink = None;
+                sidecar.vsw_vlan = None;
+            }
+        }
+        if let Some(ref br) = net.bridge {
+            sidecar.bridge = if br.is_empty() { None } else { Some(br.clone()) };
+        }
+        if let Some(ref ipm) = net.bridge_ip_mode {
+            sidecar.bridge_ip_mode = if ipm.is_empty() { None } else { Some(ipm.clone()) };
+        }
+        if let Some(ref bi) = net.bridge_ip {
+            sidecar.bridge_ip = if bi.is_empty() { None } else { Some(bi.clone()) };
+        }
+        if let Some(ref bg) = net.bridge_gateway {
+            sidecar.bridge_gateway = if bg.is_empty() { None } else { Some(bg.clone()) };
+        }
+        // The vSwitch selection. An empty uplink means the operator moved this
+        // VM to a plain bridge — clear the pair so the editor stops offering
+        // the vSwitch card for it.
+        if let Some(ref up) = net.vsw_uplink {
+            if up.is_empty() {
+                sidecar.vsw_uplink = None;
+                sidecar.vsw_vlan = None;
+            } else {
+                sidecar.vsw_uplink = Some(up.clone());
+                sidecar.vsw_vlan = net.vsw_vlan;
+            }
+        }
+        if let Some(ref wip) = net.wolfnet_ip {
+            sidecar.wolfnet_ip = if wip.is_empty() { None } else { Some(wip.clone()) };
+        }
+        // A bridge/NAT VM has no WolfNet IP. Force it off authoritatively
+        // (after the wip assignment above) so switching a VM from WolfNet to
+        // bridge never leaves the dead 10.x address in config, even if the UI
+        // form still carried the old value (Gary KO4BSR 2026-06-18).
+        if matches!(sidecar.network_mode.as_deref(), Some("bridge") | Some("nat")) {
+            sidecar.wolfnet_ip = None;
+        }
+        let ip_changed = before != (sidecar.network_mode.clone(), sidecar.bridge_ip_mode.clone(),
+                                    sidecar.bridge_ip.clone(), sidecar.bridge_gateway.clone());
+        let _ = serde_json::to_string_pretty(&sidecar)
+            .map_err(|_| ())
+            .and_then(|json| fs::write(&sidecar_path, json).map_err(|_| ()));
+        ip_changed
     }
 
     /// Public form of [`Self::vm_config_path`] — WolfHA writes a replica's
@@ -1890,6 +2041,8 @@ impl VmManager {
                      bridge_ip_mode: Option<String>,
                      bridge_ip: Option<String>,
                      bridge_gateway: Option<String>,
+                     vsw_uplink: Option<String>,
+                     vsw_vlan: Option<u32>,
                      boot_order: Option<Vec<String>>,
                      vnc_external: Option<bool>,
                      notes: Option<String>,
@@ -2215,12 +2368,57 @@ impl VmManager {
                     apply_failures.join("\n  - ")
                 ));
             }
+            // Persist the WolfStack-only network fields. `qm` has no home for
+            // the vSwitch selection or the operator's IP hints, and this branch
+            // previously wrote no sidecar at all — so both were lost on every
+            // Proxmox save and the editor had nothing to read back.
+            let ip_changed = self.persist_vm_net_sidecar(name, &VmNetSettings {
+                network_mode: network_mode.clone(),
+                bridge: bridge.clone(),
+                bridge_ip_mode: bridge_ip_mode.clone(),
+                bridge_ip: bridge_ip.clone(),
+                bridge_gateway: bridge_gateway.clone(),
+                vsw_uplink: vsw_uplink.clone(),
+                vsw_vlan,
+                wolfnet_ip: wolfnet_ip.clone(),
+            });
+            // Apply the primary NIC's IP choice to the guest. A VM's IP lives
+            // inside the guest, so it is staged via cloud-init and applied on
+            // the next boot — before this, the choice was stored and never
+            // acted on (RutgerDiehard 2026-08-21).
+            let mut advisories: Vec<String> = Vec::new();
             if changed_next_boot && is_pve_vmid_running(vmid) {
-                return Ok(Some(
-                    "Saved. ISO and BIOS changes take effect the next time this VM is started.".to_string()
-                ));
+                advisories.push(
+                    "ISO and BIOS changes take effect the next time this VM is started.".to_string());
             }
-            return Ok(None);
+            if ip_changed {
+                match primary_ip_plan(&network_mode, &bridge_ip_mode, &bridge_ip, &bridge_gateway) {
+                    Some(plan) => {
+                        match crate::networking::vlan_attach::stage_primary_ip_proxmox(&vmid_str, &plan) {
+                            Ok(Some(note)) => advisories.push(note),
+                            Ok(None) => {}
+                            // The settings ARE saved at this point, so a
+                            // staging failure is an advisory, not an error —
+                            // but it must say plainly that the IP did not take.
+                            Err(e) => advisories.push(format!(
+                                "The IP could NOT be staged: {}. Set it inside the guest.", e)),
+                        }
+                    }
+                    // The VM left bridge mode (or cleared its addressing):
+                    // drop any IP we staged for it earlier.
+                    None => {
+                        if let Ok(true) = crate::networking::vlan_attach::clear_primary_ip_proxmox(&vmid_str) {
+                            advisories.push(
+                                "The previously staged static IP was cleared back to DHCP."
+                                    .to_string());
+                        }
+                    }
+                }
+            }
+            if advisories.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(format!("Saved. {}", advisories.join(" "))));
         }
         // On libvirt, delegate to virsh (VM must be stopped for CPU/memory
         // changes). Pre-libvirt native VMs fall through to the JSON config
@@ -2376,49 +2574,46 @@ impl VmManager {
             // first-class fields. (mode/bridge are read back from the domain
             // XML, which we just edited; the sidecar keeps them in sync for
             // the subprocess fallback path and adoption.)
-            if network_mode.is_some() || bridge.is_some()
-                || bridge_ip_mode.is_some() || bridge_ip.is_some() || bridge_gateway.is_some() {
-                let sidecar_path = self.vm_config_path(name);
-                // Load existing sidecar or build a minimal one. We only
-                // touch the network fields; everything else falls back to
-                // whatever was there (or VmConfig::new defaults).
-                let mut sidecar = fs::read_to_string(&sidecar_path).ok()
-                    .and_then(|t| serde_json::from_str::<VmConfig>(&t).ok())
-                    .unwrap_or_else(|| VmConfig::new(name.to_string(), 1, 512, 1));
-                if let Some(ref nm) = network_mode {
-                    sidecar.network_mode = if nm.is_empty() { None } else { Some(nm.clone()) };
-                    if nm != "bridge" {
-                        sidecar.bridge = None;
-                        sidecar.bridge_ip_mode = None;
-                        sidecar.bridge_ip = None;
-                        sidecar.bridge_gateway = None;
+            let mut ip_advisory: Option<String> = None;
+            let ip_changed = self.persist_vm_net_sidecar(name, &VmNetSettings {
+                network_mode: network_mode.clone(),
+                bridge: bridge.clone(),
+                bridge_ip_mode: bridge_ip_mode.clone(),
+                bridge_ip: bridge_ip.clone(),
+                bridge_gateway: bridge_gateway.clone(),
+                vsw_uplink: vsw_uplink.clone(),
+                vsw_vlan,
+                wolfnet_ip: wolfnet_ip.clone(),
+            });
+            // Stage the primary NIC's IP into the guest's NoCloud seed. Same
+            // reasoning as the Proxmox branch above: the hypervisor can't set
+            // a guest IP at runtime, so cloud-init applies it on next boot.
+            if ip_changed {
+                let br = bridge.as_deref().unwrap_or_default();
+                let mac = crate::networking::vlan_attach::primary_nic_mac_libvirt(name, br);
+                match (primary_ip_plan(&network_mode, &bridge_ip_mode, &bridge_ip, &bridge_gateway), mac) {
+                    (Some(plan), Some(mac)) => {
+                        match crate::networking::vlan_attach::stage_primary_ip_libvirt(name, &mac, &plan) {
+                            Ok(note) => ip_advisory = note,
+                            Err(e) => ip_advisory = Some(format!(
+                                "The IP could NOT be staged: {}. Set it inside the guest.", e)),
+                        }
                     }
+                    (Some(_), None) => ip_advisory = Some(format!(
+                        "The IP could NOT be staged: this VM has no NIC on bridge '{}' yet. \
+                         Start the VM once so the NIC exists, then save again.", br)),
+                    // Left bridge mode (or cleared its addressing) — drop any
+                    // IP we staged for this NIC earlier, so the guest stops
+                    // re-applying an address that no longer belongs to it.
+                    (None, Some(mac)) => {
+                        if let Ok(true) = crate::networking::vlan_attach::clear_primary_ip_libvirt(name, &mac) {
+                            ip_advisory = Some(
+                                "The previously staged static IP was removed from this VM's \
+                                 cloud-init seed.".to_string());
+                        }
+                    }
+                    (None, None) => {}
                 }
-                if let Some(ref br) = bridge {
-                    sidecar.bridge = if br.is_empty() { None } else { Some(br.clone()) };
-                }
-                if let Some(ref ipm) = bridge_ip_mode {
-                    sidecar.bridge_ip_mode = if ipm.is_empty() { None } else { Some(ipm.clone()) };
-                }
-                if let Some(ref bi) = bridge_ip {
-                    sidecar.bridge_ip = if bi.is_empty() { None } else { Some(bi.clone()) };
-                }
-                if let Some(ref bg) = bridge_gateway {
-                    sidecar.bridge_gateway = if bg.is_empty() { None } else { Some(bg.clone()) };
-                }
-                if let Some(ref wip) = wolfnet_ip {
-                    sidecar.wolfnet_ip = if wip.is_empty() { None } else { Some(wip.clone()) };
-                }
-                // A bridge/NAT VM has no WolfNet IP. Force it off authoritatively
-                // (after the wip assignment above) so switching a VM from WolfNet
-                // to bridge never leaves the dead 10.x address in config, even if
-                // the UI form still carried the old value (Gary KO4BSR 2026-06-18).
-                if matches!(sidecar.network_mode.as_deref(), Some("bridge") | Some("nat")) {
-                    sidecar.wolfnet_ip = None;
-                }
-                let _ = serde_json::to_string_pretty(&sidecar)
-                    .map_err(|_| ())
-                    .and_then(|json| fs::write(&sidecar_path, json).map_err(|_| ()));
             }
             // Hardware/NIC edits land via virt-xml --define (next boot). When
             // the VM is running, tell the operator so they're not surprised
@@ -2427,12 +2622,19 @@ impl VmManager {
             let running = std::path::Path::new(
                 &format!("/var/run/libvirt/qemu/{}.xml", name)
             ).exists();
+            let mut advisories: Vec<String> = Vec::new();
             if changed_next_boot && running {
-                return Ok(Some(
-                    "Saved. Network and hardware changes take effect the next time this VM is started.".to_string()
-                ));
+                advisories.push(
+                    "Network and hardware changes take effect the next time this VM is started."
+                        .to_string());
             }
-            return Ok(None);
+            if let Some(note) = ip_advisory {
+                advisories.push(note);
+            }
+            if advisories.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(format!("Saved. {}", advisories.join(" "))));
         }
 
         if self.check_running(name) {
@@ -2451,6 +2653,8 @@ impl VmManager {
         let old_nics_count = config.extra_nics.len();
         let old_network_mode = config.network_mode.clone();
         let old_bridge = config.bridge.clone();
+        let old_bridge_ip_mode = config.bridge_ip_mode.clone();
+        let old_bridge_ip = config.bridge_ip.clone();
 
         if let Some(c) = cpus && c > 0 { config.cpus = c; }
         if let Some(m) = memory_mb && m >= 256 { config.memory_mb = m; }
@@ -2632,6 +2836,21 @@ impl VmManager {
         // PVE actually have a NIC on that bridge.
         if config.wolfnet_ip != old_wolfnet_ip {
             self.reconcile_wolfnet_for_vm(name, &config, old_wolfnet_ip.as_deref());
+        }
+
+        // Native QEMU has no cloud-init path: WolfStack stages a guest IP
+        // through libvirt's NoCloud seed or Proxmox's ipconfig, and this VM
+        // runs under neither. Say so rather than storing the operator's
+        // static IP and silently doing nothing with it — the exact failure
+        // this whole change exists to remove.
+        if (config.bridge_ip_mode != old_bridge_ip_mode || config.bridge_ip != old_bridge_ip)
+            && matches!(primary_ip_plan(&config.network_mode, &config.bridge_ip_mode,
+                                        &config.bridge_ip, &config.bridge_gateway),
+                        Some(crate::networking::vlan_attach::PrimaryIp::Static { .. }))
+        {
+            return Ok(Some(
+                "Saved, but WolfStack cannot apply an IP to a native QEMU VM — it stages guest                  IPs through cloud-init, which needs libvirt or Proxmox. Set the address inside                  the guest.".to_string()
+            ));
         }
 
         Ok(None)
@@ -5670,6 +5889,8 @@ impl VmManager {
             bridge: derived_bridge,
             bridge_ip_mode: None,
             bridge_ip: None,
+            vsw_uplink: None,
+            vsw_vlan: None,
             bridge_gateway: None,
             // Notes from the domain's <description> element. libvirt owns this
             // field (set via `virsh desc`), so the XML is authoritative.
@@ -5702,6 +5923,8 @@ impl VmManager {
                 if config.bridge_ip_mode.is_none() { config.bridge_ip_mode = sidecar.bridge_ip_mode; }
                 if config.bridge_ip.is_none() { config.bridge_ip = sidecar.bridge_ip; }
                 if config.bridge_gateway.is_none() { config.bridge_gateway = sidecar.bridge_gateway; }
+                if config.vsw_uplink.is_none() { config.vsw_uplink = sidecar.vsw_uplink; }
+                if config.vsw_vlan.is_none() { config.vsw_vlan = sidecar.vsw_vlan; }
             }
 
         Some(config)
@@ -5867,6 +6090,8 @@ impl VmManager {
             bridge: derived_bridge,
             bridge_ip_mode: None,
             bridge_ip: None,
+            vsw_uplink: None,
+            vsw_vlan: None,
             bridge_gateway: None,
             // Notes from the persistent domain XML's <description> element.
             notes: libvirt_xml_description(&persistent),
@@ -5890,6 +6115,8 @@ impl VmManager {
                 if config.bridge_ip_mode.is_none() { config.bridge_ip_mode = sidecar.bridge_ip_mode; }
                 if config.bridge_ip.is_none() { config.bridge_ip = sidecar.bridge_ip; }
                 if config.bridge_gateway.is_none() { config.bridge_gateway = sidecar.bridge_gateway; }
+                if config.vsw_uplink.is_none() { config.vsw_uplink = sidecar.vsw_uplink; }
+                if config.vsw_vlan.is_none() { config.vsw_vlan = sidecar.vsw_vlan; }
             }
 
         Some(config)
@@ -6354,6 +6581,8 @@ impl VmManager {
             bridge: None,
             bridge_ip_mode: None,
             bridge_ip: None,
+            vsw_uplink: None,
+            vsw_vlan: None,
             bridge_gateway: None,
             // Carry over any existing libvirt <description> as the VM's notes.
             notes: libvirt_xml_description(&dumpxml),
@@ -8266,6 +8495,8 @@ fn parse_pve_qemu_conf(vmid: u32, text: &str) -> Option<VmConfig> {
         bridge_ip_mode: None,
         bridge_ip: None,
         bridge_gateway: None,
+        vsw_uplink: None,
+        vsw_vlan: None,
         notes,
         extra_qemu_args,
         paused: false,
@@ -10156,5 +10387,155 @@ mod extra_qemu_args_tests {
         assert_eq!(&argv[n-2..], &["-audiodev".to_string(), "pa,id=snd0".to_string()]);
         // And the standard -name flag must precede them.
         assert!(argv.iter().any(|a| a == "-name"));
+    }
+}
+
+#[cfg(test)]
+mod vm_net_sidecar_tests {
+    use super::*;
+
+    fn temp_manager(tag: &str) -> VmManager {
+        let dir = std::env::temp_dir()
+            .join(format!("wolfstack-vmnet-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        VmManager { base_dir: dir }
+    }
+
+    fn read_back(m: &VmManager, name: &str) -> VmConfig {
+        let text = fs::read_to_string(m.vm_config_path(name)).unwrap();
+        serde_json::from_str::<VmConfig>(&text).unwrap()
+    }
+
+    /// The reported bug: a VM on a bridge that happens to be a WolfStack VLAN
+    /// bridge must NOT come back looking like a vSwitch VM. Only an explicitly
+    /// recorded uplink+VLAN pair marks one.
+    #[test]
+    fn a_plain_bridge_save_records_no_vswitch_selection() {
+        let m = temp_manager("plain");
+        m.persist_vm_net_sidecar("vm1", &VmNetSettings {
+            network_mode: Some("bridge".into()),
+            bridge: Some("vmbr101".into()),
+            bridge_ip_mode: Some("static".into()),
+            bridge_ip: Some("192.168.1.50/24".into()),
+            bridge_gateway: Some("192.168.1.1".into()),
+            vsw_uplink: Some(String::new()),   // '' = "not a vSwitch VM"
+            vsw_vlan: None,
+            wolfnet_ip: None,
+        });
+        let cfg = read_back(&m, "vm1");
+        assert_eq!(cfg.bridge.as_deref(), Some("vmbr101"));
+        assert_eq!(cfg.bridge_ip.as_deref(), Some("192.168.1.50/24"));
+        assert_eq!(cfg.vsw_uplink, None, "a plain-bridge save must not look like a vSwitch");
+        assert_eq!(cfg.vsw_vlan, None);
+        let _ = fs::remove_dir_all(&m.base_dir);
+    }
+
+    #[test]
+    fn a_vswitch_save_records_the_selection_and_a_later_bridge_save_clears_it() {
+        let m = temp_manager("vsw");
+        m.persist_vm_net_sidecar("vm1", &VmNetSettings {
+            network_mode: Some("bridge".into()),
+            bridge: Some("vmbr4000".into()),
+            vsw_uplink: Some("eno2".into()),
+            vsw_vlan: Some(4000),
+            ..Default::default()
+        });
+        let cfg = read_back(&m, "vm1");
+        assert_eq!(cfg.vsw_uplink.as_deref(), Some("eno2"));
+        assert_eq!(cfg.vsw_vlan, Some(4000));
+
+        // Operator moves it to a plain bridge — the vSwitch label must go.
+        m.persist_vm_net_sidecar("vm1", &VmNetSettings {
+            network_mode: Some("bridge".into()),
+            bridge: Some("br0".into()),
+            vsw_uplink: Some(String::new()),
+            vsw_vlan: None,
+            ..Default::default()
+        });
+        let cfg = read_back(&m, "vm1");
+        assert_eq!(cfg.bridge.as_deref(), Some("br0"));
+        assert_eq!(cfg.vsw_uplink, None);
+        assert_eq!(cfg.vsw_vlan, None);
+        let _ = fs::remove_dir_all(&m.base_dir);
+    }
+
+    /// Leaving bridge mode entirely drops the bridge details AND the vSwitch
+    /// pair — otherwise a VM moved to WolfNet would re-open on a vSwitch card.
+    #[test]
+    fn leaving_bridge_mode_clears_the_bridge_details() {
+        let m = temp_manager("leave");
+        m.persist_vm_net_sidecar("vm1", &VmNetSettings {
+            network_mode: Some("bridge".into()),
+            bridge: Some("vmbr4000".into()),
+            bridge_ip_mode: Some("static".into()),
+            bridge_ip: Some("10.0.0.5/24".into()),
+            vsw_uplink: Some("eno2".into()),
+            vsw_vlan: Some(4000),
+            ..Default::default()
+        });
+        m.persist_vm_net_sidecar("vm1", &VmNetSettings {
+            network_mode: Some("wolfnet".into()),
+            wolfnet_ip: Some("10.10.10.7".into()),
+            ..Default::default()
+        });
+        let cfg = read_back(&m, "vm1");
+        assert_eq!(cfg.network_mode.as_deref(), Some("wolfnet"));
+        assert_eq!(cfg.bridge, None);
+        assert_eq!(cfg.bridge_ip, None);
+        assert_eq!(cfg.vsw_uplink, None);
+        assert_eq!(cfg.vsw_vlan, None);
+        assert_eq!(cfg.wolfnet_ip.as_deref(), Some("10.10.10.7"));
+        let _ = fs::remove_dir_all(&m.base_dir);
+    }
+
+    /// A save that mentions no network field must not create a sidecar at all.
+    #[test]
+    fn an_unrelated_save_writes_no_sidecar() {
+        let m = temp_manager("noop");
+        m.persist_vm_net_sidecar("vm1", &VmNetSettings::default());
+        assert!(!m.vm_config_path("vm1").exists());
+        let _ = fs::remove_dir_all(&m.base_dir);
+    }
+}
+
+#[cfg(test)]
+mod primary_ip_plan_tests {
+    use super::*;
+    use crate::networking::vlan_attach::PrimaryIp;
+
+    fn s(v: &str) -> Option<String> { Some(v.to_string()) }
+
+    #[test]
+    fn only_bridge_mode_has_a_primary_ip_to_stage() {
+        // WolfNet and NAT own their own addressing.
+        assert_eq!(primary_ip_plan(&s("wolfnet"), &s("static"), &s("10.0.0.5/24"), &None), None);
+        assert_eq!(primary_ip_plan(&s("nat"), &s("static"), &s("10.0.0.5/24"), &None), None);
+        assert_eq!(primary_ip_plan(&None, &s("static"), &s("10.0.0.5/24"), &None), None);
+    }
+
+    #[test]
+    fn a_static_bridge_save_produces_a_static_plan() {
+        assert_eq!(
+            primary_ip_plan(&s("bridge"), &s("static"), &s("192.168.1.50/24"), &s("192.168.1.1")),
+            Some(PrimaryIp::Static {
+                ip_cidr: "192.168.1.50/24".into(),
+                gateway: Some("192.168.1.1".into()),
+            })
+        );
+        // Static with the address left blank is not a plan — nothing to apply.
+        assert_eq!(primary_ip_plan(&s("bridge"), &s("static"), &s("  "), &None), None);
+        // A blank gateway means "address only, no default route".
+        assert_eq!(
+            primary_ip_plan(&s("bridge"), &s("static"), &s("10.0.0.5/24"), &s("")),
+            Some(PrimaryIp::Static { ip_cidr: "10.0.0.5/24".into(), gateway: None })
+        );
+    }
+
+    #[test]
+    fn a_dhcp_bridge_save_produces_a_dhcp_plan() {
+        assert_eq!(primary_ip_plan(&s("bridge"), &s("dhcp"), &None, &None), Some(PrimaryIp::Dhcp));
+        // No IP mode in the request = the save didn't touch addressing.
+        assert_eq!(primary_ip_plan(&s("bridge"), &None, &None, &None), None);
     }
 }
