@@ -31491,6 +31491,23 @@ async function openLxcSettings(name) {
                     <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Gateway is handled automatically by WolfNet — no need to configure it here.</div>
                     <div id="wolfnet-ip-warning" style="display:none;font-size:11px;color:var(--warning);margin-top:4px;"></div>
                 </div>
+
+                <div style="margin-top:12px;padding:12px;background:var(--bg-tertiary);border-radius:8px;border:1px solid var(--border);">
+                    <h4 style="margin:0 0 8px 0;font-size:13px;">DNS</h4>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                        <div class="form-group" style="margin:0;">
+                            <label for="lxc-dns-servers">Nameservers</label>
+                            <input type="text" id="lxc-dns-servers" class="form-control" value="${escapeHtml(cfg.dns_servers || '')}"
+                                placeholder="e.g. 192.168.1.1 1.1.1.1">
+                        </div>
+                        <div class="form-group" style="margin:0;">
+                            <label for="lxc-dns-search">Search Domains</label>
+                            <input type="text" id="lxc-dns-search" class="form-control" value="${escapeHtml(cfg.dns_search || '')}"
+                                placeholder="e.g. lan home.arpa">
+                        </div>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Pins the resolvers WolfStack writes into this container's network config. <strong>Leave blank</strong> and WolfStack keeps whatever DNS the container is already using instead of replacing it on restart.</div>
+                </div>
             </div>
 
             <!-- ═══ Tab 3: Resources ═══ -->
@@ -31836,6 +31853,10 @@ async function _saveLxcSettingsImpl(name) {
         nfs_enabled: (document.getElementById('lxc-feat-nfs') || {}).checked || false,
         keyctl_enabled: (document.getElementById('lxc-feat-keyctl') || {}).checked || false,
         wolfnet_ip: (document.getElementById('lxc-wolfnet-ip') || {}).value || '',
+        // DNS: send the raw values (empty string clears the override and hands
+        // DNS back to whatever the container itself is configured with).
+        dns_servers: (document.getElementById('lxc-dns-servers') || {}).value ?? '',
+        dns_search: (document.getElementById('lxc-dns-search') || {}).value ?? '',
         // Notes: send the raw value (empty string clears it). The field always
         // exists in the General tab, so a missing element is unexpected — fall
         // back to '' rather than undefined so a clear isn't silently dropped.

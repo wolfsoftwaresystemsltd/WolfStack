@@ -4091,6 +4091,647 @@ fn wolfnet_subnet_from_ip(ip: &str) -> Option<String> {
     Some(format!("{}.{}.{}.0/24", parts[0], parts[1], parts[2]))
 }
 
+// ─── Per-container DNS ───────────────────────────────────────────────────
+//
+// WolfStack rewrites a container's in-container network config every time it
+// starts it (see `reconcile_bridge_static_on_start`). Through v25.17.0 that
+// write hardcoded 1.1.1.1/8.8.8.8, so an operator who had set their own
+// resolver inside the container watched it revert to Cloudflare/Google on
+// every UI Restart — while an in-container `reboot`, which never runs our
+// writer, kept it (RutgerDiehard, 2026-08-21). Two things fix that:
+//
+//   1. An explicit per-container DNS setting the writers honour. Proxmox CTs
+//      already have a native place for it (the CT config's `nameserver:` /
+//      `searchdomain:` fields, which PVE itself applies on start); native LXC
+//      has none, so it goes in a WolfStack sidecar next to `.wolfstack/notes`.
+//   2. When nothing is set, PRESERVE whatever the container already resolves
+//      with instead of overwriting it. The public fallback is used only when
+//      the container names no resolver at all.
+
+/// Public resolvers written only when neither the operator nor the container
+/// itself names one — a container with no nameserver would otherwise boot with
+/// no DNS at all.
+const FALLBACK_DNS: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
+
+/// Upper bound on stored/rendered DNS entries. glibc only reads the first 3
+/// nameservers, but netplan/NM configs legitimately carry more; this exists to
+/// bound the size of what we interpolate into config files.
+const MAX_DNS_ENTRIES: usize = 6;
+
+/// A container's DNS configuration: resolvers plus search domains.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContainerDns {
+    #[serde(default)]
+    pub servers: Vec<String>,
+    #[serde(default)]
+    pub search: Vec<String>,
+}
+
+impl ContainerDns {
+    fn is_empty(&self) -> bool {
+        self.servers.is_empty() && self.search.is_empty()
+    }
+}
+
+/// Parse an operator-typed resolver list ("1.1.1.1, 9.9.9.9") into validated
+/// addresses.
+///
+/// Anything that isn't a bare IP is dropped. This is the validation boundary
+/// for the whole feature: these strings are interpolated into resolv.conf,
+/// `/etc/network/interfaces`, netplan YAML and NetworkManager keyfiles, where a
+/// stray newline or `;` would corrupt the file — or inject a directive into it.
+/// Parsing to `IpAddr` makes that structurally impossible.
+pub fn parse_dns_servers(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in input.split(|c: char| c == ',' || c == ';' || c.is_whitespace()) {
+        if tok.is_empty() || out.len() >= MAX_DNS_ENTRIES {
+            continue;
+        }
+        if let Ok(ip) = tok.parse::<std::net::IpAddr>() {
+            let s = ip.to_string();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Parse an operator-typed search-domain list. Hostname charset only, for the
+/// same injection reasons as [`parse_dns_servers`].
+pub fn parse_dns_search(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in input.split(|c: char| c == ',' || c == ';' || c.is_whitespace()) {
+        if tok.is_empty() || out.len() >= MAX_DNS_ENTRIES {
+            continue;
+        }
+        let ok = tok.len() <= 253
+            && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            && tok.chars().any(|c| c.is_ascii_alphanumeric());
+        if ok && !out.iter().any(|e| e == tok) {
+            out.push(tok.to_string());
+        }
+    }
+    out
+}
+
+/// Re-validate a stored/parsed pair through the same boundary the UI input
+/// goes through, so a hand-edited sidecar or CT config can't smuggle junk into
+/// a rendered config file.
+fn sanitize_dns(dns: ContainerDns) -> ContainerDns {
+    ContainerDns {
+        servers: parse_dns_servers(&dns.servers.join(" ")),
+        search: parse_dns_search(&dns.search.join(" ")),
+    }
+}
+
+/// Path to the WolfStack DNS sidecar for a NATIVE LXC container. Mirrors
+/// [`lxc_notes_path`] — native LXC has no `nameserver` directive of its own.
+fn lxc_dns_path(container: &str) -> String {
+    format!("{}/{}/.wolfstack/dns", lxc_base_dir(container), container)
+}
+
+/// Pull `nameserver:` / `searchdomain:` out of a Proxmox CT config. PVE's own
+/// fields, so a DNS set with `pct set --nameserver` (or in the PVE web UI) is
+/// honoured by WolfStack too instead of being overwritten by our writers.
+fn parse_pve_dns(conf: &str) -> ContainerDns {
+    let mut dns = ContainerDns::default();
+    for line in conf.lines() {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        match k.trim() {
+            "nameserver" => dns.servers = parse_dns_servers(v),
+            "searchdomain" => dns.search = parse_dns_search(v),
+            _ => {}
+        }
+    }
+    dns
+}
+
+/// The operator's explicit DNS choice for `container`, or an empty
+/// [`ContainerDns`] when they haven't made one.
+pub fn lxc_get_dns(container: &str) -> ContainerDns {
+    if is_proxmox() {
+        let conf = std::fs::read_to_string(format!("/etc/pve/lxc/{}.conf", container))
+            .unwrap_or_default();
+        return parse_pve_dns(&conf);
+    }
+    let dns = std::fs::read_to_string(lxc_dns_path(container))
+        .ok()
+        .and_then(|t| serde_json::from_str::<ContainerDns>(&t).ok())
+        .unwrap_or_default();
+    sanitize_dns(dns)
+}
+
+/// Write (or clear) the native-LXC DNS sidecar. Clearing removes the file so
+/// the container falls back to "preserve whatever is inside it".
+fn lxc_write_dns(container: &str, dns: &ContainerDns) -> Result<(), String> {
+    let path = lxc_dns_path(container);
+    if dns.is_empty() {
+        if std::path::Path::new(&path).exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Failed to clear DNS {}: {}", path, e))?;
+        }
+        return Ok(());
+    }
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Failed to create DNS dir {}: {}", dir.display(), e))?;
+    }
+    let body = serde_json::to_string(dns).map_err(|e| format!("Failed to encode DNS: {}", e))?;
+    std::fs::write(&path, body).map_err(|e| format!("Failed to write DNS {}: {}", path, e))
+}
+
+/// `nameserver` / `search` / `domain` out of a resolv.conf body. The
+/// systemd-resolved stub (127.0.0.53) is dropped: it is a pointer to the
+/// guest's own resolver, not an upstream, and copying it into a netplan or NM
+/// config would leave the container resolving against nothing. Same exclusion
+/// the host-side detection makes (see `crate::networking`).
+fn parse_resolv_conf_dns(text: &str) -> ContainerDns {
+    let mut dns = ContainerDns::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once(char::is_whitespace) else { continue };
+        match k {
+            "nameserver" => dns.servers.extend(parse_dns_servers(v)),
+            // `search` supersedes `domain`; taking both and de-duplicating in
+            // parse_dns_search keeps whichever the file actually carries.
+            "search" | "domain" => dns.search.extend(parse_dns_search(v)),
+            _ => {}
+        }
+    }
+    dns.servers.retain(|s| s != "127.0.0.53");
+    sanitize_dns(dns)
+}
+
+/// `dns-nameservers` / `dns-search` out of an ifupdown interfaces body.
+fn parse_interfaces_dns(text: &str) -> ContainerDns {
+    let mut dns = ContainerDns::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("dns-nameservers") {
+            dns.servers.extend(parse_dns_servers(v));
+        } else if let Some(v) = line.strip_prefix("dns-search") {
+            dns.search.extend(parse_dns_search(v));
+        }
+    }
+    sanitize_dns(dns)
+}
+
+/// `DNS=` / `Domains=` out of a systemd-networkd unit body.
+fn parse_networkd_dns(text: &str) -> ContainerDns {
+    let mut dns = ContainerDns::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("DNS=") {
+            dns.servers.extend(parse_dns_servers(v));
+        } else if let Some(v) = line.strip_prefix("Domains=") {
+            dns.search.extend(parse_dns_search(v));
+        }
+    }
+    sanitize_dns(dns)
+}
+
+/// `nameservers:` out of a netplan document. Scoped to the block: a bare
+/// `addresses:` at any other level is the interface's OWN addresses, and
+/// hoovering those up would hand the container its own IP as a resolver.
+fn parse_netplan_dns(text: &str) -> ContainerDns {
+    let mut dns = ContainerDns::default();
+    let mut in_ns = false;
+    let mut ns_indent = 0usize;
+    for line in text.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+        if in_ns && indent <= ns_indent {
+            in_ns = false;
+        }
+        if trimmed == "nameservers:" {
+            in_ns = true;
+            ns_indent = indent;
+            continue;
+        }
+        if !in_ns {
+            continue;
+        }
+        if let Some(v) = trimmed.strip_prefix("addresses:") {
+            dns.servers.extend(parse_dns_servers(v.trim_matches(|c| c == '[' || c == ']' || c == ' ')));
+        } else if let Some(v) = trimmed.strip_prefix("search:") {
+            dns.search.extend(parse_dns_search(v.trim_matches(|c| c == '[' || c == ']' || c == ' ')));
+        }
+    }
+    sanitize_dns(dns)
+}
+
+/// `dns=` / `dns-search=` out of a NetworkManager keyfile body.
+fn parse_nm_dns(text: &str) -> ContainerDns {
+    let mut dns = ContainerDns::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("dns=") {
+            dns.servers.extend(parse_dns_servers(v));
+        } else if let Some(v) = line.strip_prefix("dns-search=") {
+            dns.search.extend(parse_dns_search(v));
+        }
+    }
+    sanitize_dns(dns)
+}
+
+/// What the container is ALREADY configured to resolve with, so a reconcile
+/// write can preserve it. resolv.conf first — it is the file every resolver
+/// actually reads — then each backend in the order the writers emit them.
+fn read_rootfs_dns(rootfs: &str) -> ContainerDns {
+    let read = |p: String| std::fs::read_to_string(p).unwrap_or_default();
+
+    let mut found = parse_resolv_conf_dns(&read(format!("{}/etc/resolv.conf", rootfs)));
+    if !found.servers.is_empty() {
+        return found;
+    }
+    found = parse_interfaces_dns(&read(format!("{}/etc/network/interfaces", rootfs)));
+    if !found.servers.is_empty() {
+        return found;
+    }
+    found = parse_networkd_dns(&read(format!("{}/etc/systemd/network/eth0.network", rootfs)));
+    if !found.servers.is_empty() {
+        return found;
+    }
+    if let Ok(entries) = std::fs::read_dir(format!("{}/etc/netplan", rootfs)) {
+        let mut files: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|x| x == "yaml" || x == "yml").unwrap_or(false))
+            .collect();
+        files.sort();
+        for f in files {
+            found = parse_netplan_dns(&std::fs::read_to_string(&f).unwrap_or_default());
+            if !found.servers.is_empty() {
+                return found;
+            }
+        }
+    }
+    found = parse_nm_dns(&read(format!(
+        "{}/etc/NetworkManager/system-connections/eth0.nmconnection", rootfs
+    )));
+    if !found.servers.is_empty() {
+        return found;
+    }
+    ContainerDns::default()
+}
+
+/// The DNS a writer should emit for one container, and whether the operator
+/// asked for it explicitly (which decides whether we may replace a
+/// resolver-managed /etc/resolv.conf symlink).
+#[derive(Debug, Clone, PartialEq)]
+struct ResolvedDns {
+    servers: Vec<String>,
+    search: Vec<String>,
+    explicit: bool,
+}
+
+/// Pure resolution order behind [`resolve_container_dns`], split out so the
+/// precedence is unit-testable without a rootfs. `defaults` is the writer's own
+/// fallback (public resolvers for a LAN bridge, the lxcbr0 gateway for
+/// WolfNet), used only when nothing else names a resolver.
+fn decide_dns(set: ContainerDns, found: ContainerDns, defaults: &[&str]) -> ResolvedDns {
+    let explicit = !set.servers.is_empty();
+    let servers = if explicit {
+        set.servers
+    } else if !found.servers.is_empty() {
+        found.servers
+    } else {
+        defaults.iter().map(|s| s.to_string()).collect()
+    };
+    let search = if set.search.is_empty() { found.search } else { set.search };
+    ResolvedDns { servers, search, explicit }
+}
+
+/// Resolve the DNS to write into `container`'s rootfs: the operator's explicit
+/// choice, else what the container already resolves with, else `defaults`.
+fn resolve_container_dns(container: &str, rootfs: &str, defaults: &[&str]) -> ResolvedDns {
+    decide_dns(lxc_get_dns(container), read_rootfs_dns(rootfs), defaults)
+}
+
+/// `DNS=`/`Domains=` lines for a systemd-networkd `[Network]` section.
+fn dns_networkd_lines(dns: &ResolvedDns) -> String {
+    let mut out = String::new();
+    for s in &dns.servers {
+        out.push_str(&format!("DNS={}\n", s));
+    }
+    if !dns.search.is_empty() {
+        out.push_str(&format!("Domains={}\n", dns.search.join(" ")));
+    }
+    out
+}
+
+/// The `nameservers:` block for a netplan ethernet, at netplan's 6-space
+/// key indent.
+fn dns_netplan_block(dns: &ResolvedDns) -> String {
+    let mut out = format!(
+        "      nameservers:\n        addresses: [{}]\n",
+        dns.servers.join(", ")
+    );
+    if !dns.search.is_empty() {
+        out.push_str(&format!("        search: [{}]\n", dns.search.join(", ")));
+    }
+    out
+}
+
+/// `dns-nameservers`/`dns-search` lines for an ifupdown iface stanza.
+fn dns_interfaces_lines(dns: &ResolvedDns) -> String {
+    let mut out = format!("    dns-nameservers {}\n", dns.servers.join(" "));
+    if !dns.search.is_empty() {
+        out.push_str(&format!("    dns-search {}\n", dns.search.join(" ")));
+    }
+    out
+}
+
+/// `dns=`/`dns-search=` lines for a NetworkManager `[ipv4]` section.
+fn dns_nm_lines(dns: &ResolvedDns) -> String {
+    let mut out = format!("dns={};\n", dns.servers.join(";"));
+    if !dns.search.is_empty() {
+        out.push_str(&format!("dns-search={};\n", dns.search.join(";")));
+    }
+    out
+}
+
+/// A complete resolv.conf body.
+fn dns_resolv_conf(dns: &ResolvedDns) -> String {
+    let mut out = String::new();
+    for s in &dns.servers {
+        out.push_str(&format!("nameserver {}\n", s));
+    }
+    if !dns.search.is_empty() {
+        out.push_str(&format!("search {}\n", dns.search.join(" ")));
+    }
+    out
+}
+
+/// True when `/etc/resolv.conf` in the rootfs is a symlink into a resolver's
+/// generated state (systemd-resolved's stub, resolvconf's run dir). Replacing
+/// one of those with a static file breaks the guest's own resolver
+/// integration, so we leave it alone unless the operator explicitly asked for
+/// specific servers.
+fn resolv_conf_manager_owned(path: &str) -> bool {
+    let Ok(target) = std::fs::read_link(path) else { return false };
+    let t = target.to_string_lossy();
+    t.contains("systemd/resolve") || t.contains("resolvconf") || t.contains("stub-resolv.conf")
+}
+
+/// Write the container's `/etc/resolv.conf`, unless the guest's own resolver
+/// generates it (see [`resolv_conf_manager_owned`]). Returns whether the file
+/// was written, so a caller can tell the operator whether their DNS change is
+/// already live or only takes effect on the next start.
+fn write_rootfs_resolv_conf(rootfs: &str, dns: &ResolvedDns) -> bool {
+    let path = format!("{}/etc/resolv.conf", rootfs);
+    if !dns.explicit && resolv_conf_manager_owned(&path) {
+        return false;
+    }
+    let _ = std::fs::remove_file(&path); // might be a symlink
+    std::fs::write(&path, dns_resolv_conf(dns)).is_ok()
+}
+
+#[cfg(test)]
+mod container_dns_tests {
+    use super::*;
+
+    #[test]
+    fn dns_servers_reject_anything_that_is_not_an_ip() {
+        // The parse IS the validation boundary — these values are interpolated
+        // into resolv.conf / netplan / NM keyfiles.
+        assert_eq!(parse_dns_servers("1.1.1.1, 9.9.9.9"), vec!["1.1.1.1", "9.9.9.9"]);
+        assert_eq!(parse_dns_servers("192.168.1.1\nnameserver 6.6.6.6"), vec!["192.168.1.1", "6.6.6.6"]);
+        assert!(parse_dns_servers("$(curl evil)").is_empty());
+        assert!(parse_dns_servers("not-an-ip").is_empty());
+        assert_eq!(parse_dns_servers("2001:4860:4860::8888"), vec!["2001:4860:4860::8888"]);
+        // Duplicates collapse, and the list is bounded.
+        assert_eq!(parse_dns_servers("1.1.1.1 1.1.1.1"), vec!["1.1.1.1"]);
+        assert_eq!(parse_dns_servers("1.1.1.1 1.1.1.2 1.1.1.3 1.1.1.4 1.1.1.5 1.1.1.6 1.1.1.7").len(), MAX_DNS_ENTRIES);
+    }
+
+    #[test]
+    fn dns_search_keeps_hostname_charset_only() {
+        assert_eq!(parse_dns_search("lan, home.arpa"), vec!["lan", "home.arpa"]);
+        // A newline can't survive: the split makes each token its own entry and
+        // the charset check drops the injected directive, leaving one label.
+        assert_eq!(parse_dns_search("evil\nGateway=6.6.6.6"), vec!["evil"]);
+        // `;` is a separator (NM keyfiles use it), not a smuggled character.
+        assert_eq!(parse_dns_search("a;b"), vec!["a", "b"]);
+        assert!(parse_dns_search("...").is_empty());
+    }
+
+    #[test]
+    fn pve_dns_fields_are_read_back() {
+        let conf = "arch: amd64\nnameserver: 192.168.1.1 1.1.1.1\nsearchdomain: lan\nnet0: name=eth0,bridge=vmbr0\n";
+        assert_eq!(
+            parse_pve_dns(conf),
+            ContainerDns { servers: vec!["192.168.1.1".into(), "1.1.1.1".into()], search: vec!["lan".into()] }
+        );
+        assert_eq!(parse_pve_dns("arch: amd64\n"), ContainerDns::default());
+    }
+
+    #[test]
+    fn resolv_conf_parses_and_drops_the_resolved_stub() {
+        let text = "# Generated\nnameserver 192.168.1.1\nsearch lan\n";
+        assert_eq!(
+            parse_resolv_conf_dns(text),
+            ContainerDns { servers: vec!["192.168.1.1".into()], search: vec!["lan".into()] }
+        );
+        // 127.0.0.53 is a pointer to the guest's own resolver, not an upstream:
+        // copying it into a netplan/NM config would leave DNS resolving nowhere.
+        assert!(parse_resolv_conf_dns("nameserver 127.0.0.53\noptions edns0\n").servers.is_empty());
+        assert_eq!(parse_resolv_conf_dns("domain lan\n").search, vec!["lan"]);
+    }
+
+    #[test]
+    fn each_backend_config_is_parsed_back() {
+        assert_eq!(
+            parse_interfaces_dns("iface eth0 inet static\n    dns-nameservers 10.0.0.1 10.0.0.2\n    dns-search lan\n"),
+            ContainerDns { servers: vec!["10.0.0.1".into(), "10.0.0.2".into()], search: vec!["lan".into()] }
+        );
+        assert_eq!(
+            parse_networkd_dns("[Network]\nAddress=10.0.0.5/24\nDNS=10.0.0.1\nDomains=lan\n"),
+            ContainerDns { servers: vec!["10.0.0.1".into()], search: vec!["lan".into()] }
+        );
+        assert_eq!(
+            parse_nm_dns("[ipv4]\nmethod=manual\naddress1=10.0.0.5/24,10.0.0.1\ndns=10.0.0.1;9.9.9.9;\ndns-search=lan;\n"),
+            ContainerDns { servers: vec!["10.0.0.1".into(), "9.9.9.9".into()], search: vec!["lan".into()] }
+        );
+    }
+
+    #[test]
+    fn netplan_nameservers_do_not_swallow_the_interface_addresses() {
+        // The `addresses:` under `eth0:` is the container's OWN IP — reading it
+        // as a resolver would hand the container itself as its nameserver.
+        let yaml = "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n        - 10.0.0.5/24\n      routes:\n        - to: default\n          via: 10.0.0.1\n      nameservers:\n        addresses: [10.0.0.1, 9.9.9.9]\n        search: [lan]\n";
+        assert_eq!(
+            parse_netplan_dns(yaml),
+            ContainerDns { servers: vec!["10.0.0.1".into(), "9.9.9.9".into()], search: vec!["lan".into()] }
+        );
+        let no_dns = "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n        - 10.0.0.5/24\n";
+        assert!(parse_netplan_dns(no_dns).servers.is_empty());
+    }
+
+    #[test]
+    fn explicit_dns_wins_then_the_container_s_own_then_the_fallback() {
+        let set = ContainerDns { servers: vec!["192.168.1.1".into()], search: vec![] };
+        let found = ContainerDns { servers: vec!["10.0.0.1".into()], search: vec!["lan".into()] };
+
+        let r = decide_dns(set.clone(), found.clone(), &FALLBACK_DNS);
+        assert_eq!(r.servers, vec!["192.168.1.1"]);
+        assert!(r.explicit);
+        // An override with no search domains still inherits the container's.
+        assert_eq!(r.search, vec!["lan"]);
+
+        // This is the RutgerDiehard case: nothing pinned in WolfStack, so the
+        // container's own resolver must survive the restart rewrite.
+        let r = decide_dns(ContainerDns::default(), found, &FALLBACK_DNS);
+        assert_eq!(r.servers, vec!["10.0.0.1"]);
+        assert!(!r.explicit);
+
+        // Only when the container names no resolver at all do we invent one.
+        let r = decide_dns(ContainerDns::default(), ContainerDns::default(), &FALLBACK_DNS);
+        assert_eq!(r.servers, vec!["1.1.1.1", "8.8.8.8"]);
+        assert!(!r.explicit);
+    }
+
+    #[test]
+    fn renderers_match_the_formats_the_writers_used_before() {
+        let dns = ResolvedDns {
+            servers: vec!["10.0.3.1".into(), "8.8.8.8".into()],
+            search: vec![],
+            explicit: false,
+        };
+        assert_eq!(dns_networkd_lines(&dns), "DNS=10.0.3.1\nDNS=8.8.8.8\n");
+        assert_eq!(dns_netplan_block(&dns), "      nameservers:\n        addresses: [10.0.3.1, 8.8.8.8]\n");
+        assert_eq!(dns_interfaces_lines(&dns), "    dns-nameservers 10.0.3.1 8.8.8.8\n");
+        assert_eq!(dns_nm_lines(&dns), "dns=10.0.3.1;8.8.8.8;\n");
+        assert_eq!(dns_resolv_conf(&dns), "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
+
+        let with_search = ResolvedDns { search: vec!["lan".into()], ..dns };
+        assert_eq!(dns_networkd_lines(&with_search), "DNS=10.0.3.1\nDNS=8.8.8.8\nDomains=lan\n");
+        assert_eq!(dns_interfaces_lines(&with_search), "    dns-nameservers 10.0.3.1 8.8.8.8\n    dns-search lan\n");
+        assert_eq!(dns_nm_lines(&with_search), "dns=10.0.3.1;8.8.8.8;\ndns-search=lan;\n");
+        assert_eq!(dns_resolv_conf(&with_search), "nameserver 10.0.3.1\nnameserver 8.8.8.8\nsearch lan\n");
+    }
+
+    #[test]
+    fn a_hand_edited_store_cannot_smuggle_junk_into_a_config_file() {
+        let dirty = ContainerDns {
+            servers: vec!["1.1.1.1\nDNS=6.6.6.6".into(), "nope".into()],
+            search: vec!["lan\nGateway=6.6.6.6".into()],
+        };
+        // "DNS=6.6.6.6" is not a parseable address and "Gateway=6.6.6.6" is not
+        // a hostname, so both injected directives are dropped outright.
+        assert_eq!(
+            sanitize_dns(dirty),
+            ContainerDns { servers: vec!["1.1.1.1".into()], search: vec!["lan".into()] }
+        );
+    }
+
+    /// End-to-end over a real rootfs: run the writer that fires on EVERY start
+    /// and prove it no longer reverts the container's DNS. This is the exact
+    /// path that made `pulse` snap back to 1.1.1.1/8.8.8.8 on every UI restart.
+    #[test]
+    fn the_start_rewrite_keeps_the_container_s_own_resolver() {
+        // On a PVE host lxc_get_dns reads the CT config instead of the sidecar,
+        // and this fixture is a native-layout container — skip rather than
+        // assert against a layout that isn't in play.
+        if is_proxmox() {
+            return;
+        }
+        let name = "wolfstack-dnstest-ct";
+        let base = std::env::temp_dir().join(format!("wolfstack-dnstest-{}", std::process::id()));
+        let base_str = base.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&base);
+        let etc = base.join(name).join("rootfs/etc");
+        std::fs::create_dir_all(etc.join("network")).unwrap();
+        LXC_STORAGE_PATHS.lock().unwrap().push(base_str.clone());
+
+        // The operator's own resolver, as it looks inside a Debian container.
+        std::fs::write(etc.join("resolv.conf"), "nameserver 192.168.1.1\nsearch lan\n").unwrap();
+        std::fs::write(
+            etc.join("network/interfaces"),
+            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address 192.168.1.50\n    netmask 255.255.255.0\n    gateway 192.168.1.1\n    dns-nameservers 192.168.1.1\n",
+        ).unwrap();
+
+        // 1. A restart rewrite must preserve it.
+        write_lxc_bridge_static_config(name, "192.168.1.50/24", Some("192.168.1.1")).unwrap();
+        let resolv = std::fs::read_to_string(etc.join("resolv.conf")).unwrap();
+        let ifaces = std::fs::read_to_string(etc.join("network/interfaces")).unwrap();
+        assert_eq!(resolv, "nameserver 192.168.1.1\nsearch lan\n");
+        assert!(ifaces.contains("dns-nameservers 192.168.1.1"), "{}", ifaces);
+        assert!(ifaces.contains("dns-search lan"), "{}", ifaces);
+        assert!(!ifaces.contains("8.8.8.8"), "the start rewrite reintroduced public DNS:\n{}", ifaces);
+        // The addressing it exists to write is still written.
+        assert!(ifaces.contains("address 192.168.1.50"), "{}", ifaces);
+        assert!(ifaces.contains("gateway 192.168.1.1"), "{}", ifaces);
+
+        // 2. A pinned override beats what's in the container.
+        lxc_write_dns(name, &ContainerDns { servers: vec!["10.0.0.53".into()], search: vec![] }).unwrap();
+        write_lxc_bridge_static_config(name, "192.168.1.50/24", Some("192.168.1.1")).unwrap();
+        let resolv = std::fs::read_to_string(etc.join("resolv.conf")).unwrap();
+        assert!(resolv.contains("nameserver 10.0.0.53"), "{}", resolv);
+        assert!(!resolv.contains("nameserver 192.168.1.1"), "{}", resolv);
+        // Search domains the operator didn't override are still inherited.
+        assert!(resolv.contains("search lan"), "{}", resolv);
+        assert_eq!(lxc_get_dns(name).servers, vec!["10.0.0.53"]);
+
+        // 3. Clearing the override hands DNS back to the container.
+        lxc_write_dns(name, &ContainerDns::default()).unwrap();
+        assert_eq!(lxc_get_dns(name), ContainerDns::default());
+
+        // 4. A container naming no resolver at all still gets working DNS.
+        std::fs::remove_file(etc.join("resolv.conf")).unwrap();
+        std::fs::write(etc.join("network/interfaces"), "auto lo\niface lo inet loopback\n").unwrap();
+        write_lxc_bridge_static_config(name, "192.168.1.50/24", Some("192.168.1.1")).unwrap();
+        let resolv = std::fs::read_to_string(etc.join("resolv.conf")).unwrap();
+        assert_eq!(resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+
+        LXC_STORAGE_PATHS.lock().unwrap().retain(|p| p != &base_str);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The guest's own resolver keeps ownership of /etc/resolv.conf: a symlink
+    /// into systemd-resolved's run dir must survive a start rewrite, or the
+    /// guest boots with a static file its resolver no longer maintains.
+    #[test]
+    fn a_resolved_managed_resolv_conf_symlink_is_left_alone() {
+        if is_proxmox() {
+            return;
+        }
+        let name = "wolfstack-dnstest-stub";
+        let base = std::env::temp_dir().join(format!("wolfstack-dnsstub-{}", std::process::id()));
+        let base_str = base.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&base);
+        let etc = base.join(name).join("rootfs/etc");
+        std::fs::create_dir_all(etc.join("network")).unwrap();
+        LXC_STORAGE_PATHS.lock().unwrap().push(base_str.clone());
+
+        std::os::unix::fs::symlink("../run/systemd/resolve/stub-resolv.conf", etc.join("resolv.conf")).unwrap();
+        std::fs::write(etc.join("network/interfaces"), "auto lo\niface lo inet loopback\n").unwrap();
+
+        write_lxc_bridge_static_config(name, "192.168.1.50/24", Some("192.168.1.1")).unwrap();
+        assert!(
+            std::fs::symlink_metadata(etc.join("resolv.conf")).unwrap().file_type().is_symlink(),
+            "the start rewrite replaced a resolver-managed resolv.conf symlink with a static file"
+        );
+
+        // An explicit pin is the operator overruling that, so it does replace it.
+        lxc_write_dns(name, &ContainerDns { servers: vec!["10.0.0.53".into()], search: vec![] }).unwrap();
+        write_lxc_bridge_static_config(name, "192.168.1.50/24", Some("192.168.1.1")).unwrap();
+        let md = std::fs::symlink_metadata(etc.join("resolv.conf")).unwrap();
+        assert!(!md.file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(etc.join("resolv.conf")).unwrap(), "nameserver 10.0.0.53\n");
+
+        LXC_STORAGE_PATHS.lock().unwrap().retain(|p| p != &base_str);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
 /// Write persistent network config into the container's rootfs, covering
 /// every renderer we support (NM, systemd-networkd, netplan, ifupdown).
 ///
@@ -4113,6 +4754,20 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
     // NIC's gateway. See lxc_has_external_gateway.
     let wolfnet_only = lxc_has_external_gateway(container);
 
+    // DNS: the operator's explicit choice when they made one, otherwise the
+    // defaults this path has always written. Preserving the container's own
+    // resolvers is deliberately NOT the default here — on a WolfNet NAT
+    // container the lxcbr0 resolver (10.0.3.1, lxc-net's dnsmasq) is the one
+    // that answers sibling-container names, and whatever the image left behind
+    // usually is not reachable from the NAT subnet.
+    let dns_set = lxc_get_dns(container);
+    let dns_defaults: &[&str] = if wolfnet_only {
+        &["8.8.8.8", "1.1.1.1"]
+    } else {
+        &["10.0.3.1", "8.8.8.8"]
+    };
+    let dns = decide_dns(dns_set.clone(), ContainerDns::default(), dns_defaults);
+
     // Method 1: systemd-networkd (Debian Trixie, Arch, etc.)
     let networkd_dir = format!("{}/etc/systemd/network", rootfs);
     if std::path::Path::new(&networkd_dir).exists() {
@@ -4126,9 +4781,10 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
         if wolfnet_only {
             // eth0 is WolfNet-only — no default gateway; the container's
             // vSwitch / public NIC owns the default route.
-            conf.push_str("DNS=8.8.8.8\nDNS=1.1.1.1\n");
+            conf.push_str(&dns_networkd_lines(&dns));
         } else {
-            conf.push_str("Gateway=10.0.3.1\nDNS=10.0.3.1\nDNS=8.8.8.8\n");
+            conf.push_str("Gateway=10.0.3.1\n");
+            conf.push_str(&dns_networkd_lines(&dns));
         }
         if let (Some(wip), Some(subnet)) = (wolfnet_ip, &wn_subnet) {
             // Source-pinned route so reply traffic uses the WolfNet IP, not the bridge IP.
@@ -4165,14 +4821,9 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
         } else {
             format!("      routes:\n{}", route_lines)
         };
-        let nameservers = if wolfnet_only {
-            "        addresses: [8.8.8.8, 1.1.1.1]\n"
-        } else {
-            "        addresses: [10.0.3.1, 8.8.8.8]\n"
-        };
         let conf = format!(
-            "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n{}{}      nameservers:\n{}",
-            addresses, routes, nameservers
+            "network:\n  version: 2\n  ethernets:\n    eth0:\n      addresses:\n{}{}{}",
+            addresses, routes, dns_netplan_block(&dns)
         );
         // Remove conflicting configs
         if let Ok(entries) = std::fs::read_dir(&netplan_dir) {
@@ -4190,11 +4841,10 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
             "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address {}\n    netmask 255.255.255.0\n",
             bridge_ip
         );
-        if wolfnet_only {
-            conf.push_str("    dns-nameservers 8.8.8.8 1.1.1.1\n");
-        } else {
-            conf.push_str("    gateway 10.0.3.1\n    dns-nameservers 10.0.3.1 8.8.8.8\n");
+        if !wolfnet_only {
+            conf.push_str("    gateway 10.0.3.1\n");
         }
+        conf.push_str(&dns_interfaces_lines(&dns));
         if let (Some(wip), Some(subnet)) = (wolfnet_ip, &wn_subnet) {
             // post-up adds the WolfNet IP as a secondary + the source-pinned subnet route
             conf.push_str(&format!(
@@ -4229,11 +4879,7 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
             ipv4.push_str(&format!("route1={},10.0.3.1\n", subnet));
             ipv4.push_str(&format!("route1_options=src={}\n", wip));
         }
-        if wolfnet_only {
-            ipv4.push_str("dns=8.8.8.8;1.1.1.1;\n");
-        } else {
-            ipv4.push_str("dns=10.0.3.1;8.8.8.8;\n");
-        }
+        ipv4.push_str(&dns_nm_lines(&dns));
 
         let conf = format!(
             "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
@@ -4250,10 +4896,14 @@ fn write_container_network_config(container: &str, bridge_ip: &str, wolfnet_ip: 
         let _ = std::fs::remove_file(&ifcfg_path);
     }
 
-    // Always write resolv.conf as a fallback
-    let resolv_path = format!("{}/etc/resolv.conf", rootfs);
-    let _ = std::fs::remove_file(&resolv_path); // might be a symlink
-    let _ = std::fs::write(&resolv_path, "nameserver 10.0.3.1\nnameserver 8.8.8.8\n");
+    // resolv.conf keeps the lxcbr0 resolver first in BOTH branches: lxc-net's
+    // dnsmasq answers sibling-container names there, and that is what this file
+    // has always said — including in the no-default-route case, whose backend
+    // configs list public resolvers instead. Left untouched when the guest's own
+    // resolver generates it and the operator set nothing (see
+    // write_rootfs_resolv_conf).
+    let dns_resolv = decide_dns(dns_set, ContainerDns::default(), &["10.0.3.1", "8.8.8.8"]);
+    write_rootfs_resolv_conf(&rootfs, &dns_resolv);
 }
 
 /// Convert a CIDR prefix length to a dotted-quad netmask (24 -> 255.255.255.0).
@@ -4307,6 +4957,13 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
     };
     let netmask = prefix_to_netmask(prefix);
     let gw = gateway.map(str::trim).filter(|g| !g.is_empty());
+    // DNS: the operator's explicit choice → whatever the container already
+    // resolves with → public fallback. The middle step is what stops a UI
+    // restart reverting an operator's own resolver: this writer runs on EVERY
+    // start (reconcile_bridge_static_on_start), and hardcoding public DNS here
+    // is what made a container's /etc/resolv.conf snap back to 1.1.1.1/8.8.8.8
+    // after every restart from the UI (RutgerDiehard 2026-08-21).
+    let dns = resolve_container_dns(container, &rootfs, &FALLBACK_DNS);
     let mut errors: Vec<String> = Vec::new();
     let mut wrote_any = false;
 
@@ -4316,7 +4973,7 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
     if std::path::Path::new(&networkd_dir).exists() {
         let mut conf = format!("[Match]\nName=eth0\n\n[Network]\nDHCP=no\nAddress={}\n", cidr);
         if let Some(g) = gw { conf.push_str(&format!("Gateway={}\n", g)); }
-        conf.push_str("DNS=1.1.1.1\nDNS=8.8.8.8\n");
+        conf.push_str(&dns_networkd_lines(&dns));
         match std::fs::write(format!("{}/eth0.network", networkd_dir), &conf) {
             Ok(()) => wrote_any = true,
             Err(e) => errors.push(format!("systemd-networkd: {}", e)),
@@ -4333,8 +4990,8 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
             .map(|g| format!("      routes:\n        - to: default\n          via: {}\n", g))
             .unwrap_or_default();
         let conf = format!(
-            "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: false\n      addresses:\n        - {}\n{}      nameservers:\n        addresses: [1.1.1.1, 8.8.8.8]\n",
-            cidr, routes
+            "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: false\n      addresses:\n        - {}\n{}{}",
+            cidr, routes, dns_netplan_block(&dns)
         );
         match std::fs::write(format!("{}/99-wolfstack-eth0.yaml", netplan_dir), &conf) {
             Ok(()) => wrote_any = true,
@@ -4350,7 +5007,7 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
             ip, netmask
         );
         if let Some(g) = gw { conf.push_str(&format!("    gateway {}\n", g)); }
-        conf.push_str("    dns-nameservers 1.1.1.1 8.8.8.8\n");
+        conf.push_str(&dns_interfaces_lines(&dns));
         match std::fs::write(&ifaces_path, &conf) {
             Ok(()) => wrote_any = true,
             Err(e) => errors.push(format!("interfaces: {}", e)),
@@ -4368,8 +5025,8 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
         };
         let conf = format!(
             "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
-             [ipv4]\nmethod=manual\n{}dns=1.1.1.1;8.8.8.8;\n\n[ipv6]\nmethod=auto\n",
-            addr_line
+             [ipv4]\nmethod=manual\n{}{}\n[ipv6]\nmethod=auto\n",
+            addr_line, dns_nm_lines(&dns)
         );
         let nm_file = format!("{}/eth0.nmconnection", nm_dir);
         match std::fs::write(&nm_file, &conf) {
@@ -4382,10 +5039,9 @@ pub fn write_lxc_bridge_static_config(container: &str, cidr: &str, gateway: Opti
         }
     }
 
-    // Fallback resolv.conf so DNS works regardless of which manager runs.
-    let resolv = format!("{}/etc/resolv.conf", rootfs);
-    let _ = std::fs::remove_file(&resolv); // might be a symlink
-    let _ = std::fs::write(&resolv, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+    // resolv.conf so DNS works regardless of which manager runs — skipped when
+    // the guest's own resolver generates the file and the operator set nothing.
+    write_rootfs_resolv_conf(&rootfs, &dns);
 
     if !errors.is_empty() {
         Err(errors.join("; "))
@@ -4411,9 +5067,24 @@ fn write_lxc_bridge_dhcp_config(container: &str) -> Result<(), String> {
     let mut errors: Vec<String> = Vec::new();
     let mut wrote_any = false;
 
+    // A DHCP NIC still honours an explicit DNS override: each backend is told
+    // to ignore the lease's resolvers so the operator's choice survives every
+    // renewal. With no override the lease supplies DNS exactly as before.
+    let dns_set = lxc_get_dns(container);
+    let dns: Option<ResolvedDns> = if dns_set.servers.is_empty() {
+        None
+    } else {
+        Some(decide_dns(dns_set, ContainerDns::default(), &FALLBACK_DNS))
+    };
+
     let networkd_dir = format!("{}/etc/systemd/network", rootfs);
     if std::path::Path::new(&networkd_dir).exists() {
-        match std::fs::write(format!("{}/eth0.network", networkd_dir), "[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n") {
+        let mut conf = String::from("[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n");
+        if let Some(ref d) = dns {
+            conf.push_str(&dns_networkd_lines(d));
+            conf.push_str("\n[DHCP]\nUseDNS=no\n");
+        }
+        match std::fs::write(format!("{}/eth0.network", networkd_dir), &conf) {
             Ok(()) => wrote_any = true,
             Err(e) => errors.push(format!("systemd-networkd: {}", e)),
         }
@@ -4424,8 +5095,12 @@ fn write_lxc_bridge_dhcp_config(container: &str) -> Result<(), String> {
     // writer uses, so this overrides our own earlier static stanza.
     let netplan_dir = format!("{}/etc/netplan", rootfs);
     if std::path::Path::new(&netplan_dir).exists() {
-        match std::fs::write(format!("{}/99-wolfstack-eth0.yaml", netplan_dir),
-            "network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n") {
+        let mut conf = String::from("network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n");
+        if let Some(ref d) = dns {
+            conf.push_str("      dhcp4-overrides:\n        use-dns: false\n");
+            conf.push_str(&dns_netplan_block(d));
+        }
+        match std::fs::write(format!("{}/99-wolfstack-eth0.yaml", netplan_dir), &conf) {
             Ok(()) => wrote_any = true,
             Err(e) => errors.push(format!("netplan: {}", e)),
         }
@@ -4433,8 +5108,14 @@ fn write_lxc_bridge_dhcp_config(container: &str) -> Result<(), String> {
 
     let ifaces_path = format!("{}/etc/network/interfaces", rootfs);
     if std::path::Path::new(&ifaces_path).exists() {
-        match std::fs::write(&ifaces_path,
-            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n") {
+        let mut conf = String::from("auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n");
+        if let Some(ref d) = dns {
+            // resolvconf/openresolv apply this over the lease's servers; on a
+            // guest without either it is inert, which is why the explicit
+            // resolv.conf write below is the one that actually guarantees it.
+            conf.push_str(&dns_interfaces_lines(d));
+        }
+        match std::fs::write(&ifaces_path, &conf) {
             Ok(()) => wrote_any = true,
             Err(e) => errors.push(format!("interfaces: {}", e)),
         }
@@ -4445,14 +5126,27 @@ fn write_lxc_bridge_dhcp_config(container: &str) -> Result<(), String> {
         let nm_dir = format!("{}/system-connections", nm_base);
         let _ = std::fs::create_dir_all(&nm_dir);
         let nm_file = format!("{}/eth0.nmconnection", nm_dir);
-        match std::fs::write(&nm_file,
-            "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n") {
+        let mut nm_conf = String::from(
+            "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n[ipv4]\nmethod=auto\n");
+        if let Some(ref d) = dns {
+            nm_conf.push_str("ignore-auto-dns=true\n");
+            nm_conf.push_str(&dns_nm_lines(d));
+        }
+        nm_conf.push_str("\n[ipv6]\nmethod=auto\n");
+        match std::fs::write(&nm_file, &nm_conf) {
             Ok(()) => {
                 let _ = std::fs::set_permissions(&nm_file, std::fs::Permissions::from_mode(0o600));
                 wrote_any = true;
             }
             Err(e) => errors.push(format!("NetworkManager: {}", e)),
         }
+    }
+
+    // With an override in force, resolv.conf is written outright — dhclient
+    // would otherwise replace it with the lease's servers on the next renewal
+    // regardless of what the backend configs say.
+    if let Some(ref d) = dns {
+        write_rootfs_resolv_conf(&rootfs, d);
     }
 
     if !errors.is_empty() { Err(errors.join("; ")) }
@@ -8343,6 +9037,15 @@ pub struct LxcParsedConfig {
     // WolfNet
     pub wolfnet_ip: String,
 
+    // DNS the operator pinned for this container, space-separated for the
+    // settings form. Proxmox CTs use PVE's own `nameserver:`/`searchdomain:`
+    // fields; native LXC uses the WolfStack sidecar. Empty means "no override"
+    // — the writers then preserve whatever the container already resolves with.
+    #[serde(default)]
+    pub dns_servers: String,
+    #[serde(default)]
+    pub dns_search: String,
+
     // Free-text operator notes / description. Read back from the PVE
     // `description:` line (Proxmox CTs) or the WolfStack sidecar (native LXC).
     #[serde(default)]
@@ -8861,6 +9564,11 @@ pub fn lxc_parse_config(container: &str) -> Option<LxcParsedConfig> {
         cfg.notes = n;
     }
 
+    // Pinned DNS, from whichever store this backend keeps it in.
+    let dns = lxc_get_dns(container);
+    cfg.dns_servers = dns.servers.join(" ");
+    cfg.dns_search = dns.search.join(" ");
+
     Some(cfg)
 }
 
@@ -8983,6 +9691,11 @@ pub struct LxcSettingsUpdate {
     // WolfNet
     pub wolfnet_ip: Option<String>,
 
+    // DNS override. Space/comma separated; an empty string clears the override
+    // and hands DNS back to whatever the container itself is configured with.
+    pub dns_servers: Option<String>,
+    pub dns_search: Option<String>,
+
     // Free-text operator notes / description. Empty string clears it.
     // Proxmox CTs store it in the PVE config (`pct set --description`);
     // native LXC has no description field, so WolfStack keeps it in a
@@ -8993,6 +9706,12 @@ pub struct LxcSettingsUpdate {
 fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<String, String> {
     let current = lxc_parse_config(container).unwrap_or_default();
     let mut args: Vec<String> = vec!["set".to_string(), container.to_string()];
+    // Keys the operator cleared. `pct set` takes `delete` as ONE comma-separated
+    // configid list and Getopt keeps only the last occurrence of a repeated
+    // option, so pushing `--delete` per key silently dropped all but the final
+    // one (clearing CPU cores and notes in the same save lost the cores clear).
+    // Collect them and emit a single `--delete a,b,c`.
+    let mut deletes: Vec<&str> = Vec::new();
 
     // Hostname
     if let Some(ref h) = settings.hostname
@@ -9045,8 +9764,7 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
     } else if new_cpus.is_some() && !current.cpus.is_empty() {
         // Operator explicitly cleared a previously-set cores value —
         // tell pct to drop the limit entirely.
-        args.push("--delete".to_string());
-        args.push("cores".to_string());
+        deletes.push("cores");
     }
 
     // Autostart
@@ -9054,14 +9772,42 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
     args.push("--onboot".to_string());
     args.push(if autostart { "1" } else { "0" }.to_string());
 
+    // DNS. PVE has native CT fields for this and regenerates the container's
+    // /etc/resolv.conf from them on start, so `pct set` is the whole job — and
+    // WolfStack's own writers read the same fields back as the operator's
+    // explicit choice. `--delete` is only sent when the field is actually set:
+    // deleting an unset key would fail the whole `pct set`, and the UI sends
+    // these on every save.
+    if let Some(ref v) = settings.dns_servers {
+        let parsed = parse_dns_servers(v);
+        if parsed.is_empty() {
+            if !current.dns_servers.is_empty() {
+                deletes.push("nameserver");
+            }
+        } else {
+            args.push("--nameserver".to_string());
+            args.push(parsed.join(" "));
+        }
+    }
+    if let Some(ref v) = settings.dns_search {
+        let parsed = parse_dns_search(v);
+        if parsed.is_empty() {
+            if !current.dns_search.is_empty() {
+                deletes.push("searchdomain");
+            }
+        } else {
+            args.push("--searchdomain".to_string());
+            args.push(parsed.join(" "));
+        }
+    }
+
     // Notes / description. `pct set --description <text>` stores it in the PVE
     // config (read back from the `description:` line). An empty string clears
     // it via `--delete description`, so a cleared notes field actually drops
     // the stored value rather than leaving the old one in place.
     if let Some(ref n) = settings.notes {
         if n.is_empty() {
-            args.push("--delete".to_string());
-            args.push("description".to_string());
+            deletes.push("description");
         } else {
             args.push("--description".to_string());
             args.push(n.clone());
@@ -9107,6 +9853,11 @@ fn pct_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Result<
 
         args.push(format!("--net{}", nic.index));
         args.push(parts.join(","));
+    }
+
+    if !deletes.is_empty() {
+        args.push("--delete".to_string());
+        args.push(deletes.join(","));
     }
 
     // Execute pct set
@@ -9607,6 +10358,27 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
     let wolfnet_active = settings.wolfnet_ip.as_deref()
         .map(|s| !s.trim().is_empty()).unwrap_or(false)
         || lxc_get_wolfnet_ip(container).is_some();
+    // DNS is a sidecar too (native LXC has no nameserver directive). Persisted
+    // BEFORE the in-container network write below, which re-renders every
+    // backend from this store — stale here would mean a save that changes both
+    // the IP and the DNS writes the old resolvers into the new config.
+    let mut dns_changed = false;
+    if settings.dns_servers.is_some() || settings.dns_search.is_some() {
+        let current_dns = lxc_get_dns(container);
+        let new_dns = ContainerDns {
+            servers: settings.dns_servers.as_deref()
+                .map(parse_dns_servers)
+                .unwrap_or_else(|| current_dns.servers.clone()),
+            search: settings.dns_search.as_deref()
+                .map(parse_dns_search)
+                .unwrap_or_else(|| current_dns.search.clone()),
+        };
+        if new_dns != current_dns {
+            lxc_write_dns(container, &new_dns)?;
+            dns_changed = true;
+        }
+    }
+
     let net_applied = apply_primary_nic_in_container_config(
         container, &nics, &current.network_interfaces, wolfnet_active);
 
@@ -9662,15 +10434,27 @@ pub fn lxc_update_settings(container: &str, settings: &LxcSettingsUpdate) -> Res
         lxc_write_notes(container, n)?;
     }
 
+    // Push the new DNS into the container's /etc/resolv.conf now: a running
+    // container re-reads that file on every lookup, so the change takes effect
+    // without a restart. The other backends are re-rendered from the same store
+    // on the next start (or just above, if the NIC changed too).
+    let mut dns_live = false;
+    if dns_changed {
+        let rootfs = format!("{}/{}/rootfs", base, container);
+        let dns = resolve_container_dns(container, &rootfs, &FALLBACK_DNS);
+        dns_live = write_rootfs_resolv_conf(&rootfs, &dns);
+    }
+
     // Drop the cached LXC list so the UI re-render picks up the new
     // settings immediately (see the equivalent invalidate in
     // pct_update_settings for the full rationale).
     invalidate_list_caches();
 
-    Ok(if net_applied {
-        format!("Settings updated for '{}'. Restart the container to apply the network changes.", container)
-    } else {
-        format!("Settings updated for '{}'", container)
+    Ok(match (net_applied, dns_changed, dns_live) {
+        (true, _, _) => format!("Settings updated for '{}'. Restart the container to apply the network changes.", container),
+        (false, true, true) => format!("Settings updated for '{}'. DNS applied — no restart needed.", container),
+        (false, true, false) => format!("Settings updated for '{}'. DNS saved — restart the container to apply it.", container),
+        (false, false, _) => format!("Settings updated for '{}'", container),
     })
 }
 
@@ -10838,6 +11622,11 @@ fn pct_fix_nm_networking(
     }
 
     let rootfs = format!("/var/lib/lxc/{}/rootfs", vmid);
+    // Same resolution order as every other writer: the CT config's own
+    // `nameserver:` field wins, then whatever PVE seeded into the fresh rootfs
+    // (it copies the host's resolvers when no --nameserver was given), then the
+    // public fallback this path used unconditionally before.
+    let dns = resolve_container_dns(vmid, &rootfs, &["8.8.8.8", "1.1.1.1"]);
 
     // Write NetworkManager keyfile for eth0 (static if a CIDR was supplied,
     // otherwise DHCP). A static bridge IP must NOT be clobbered by a DHCP
@@ -10853,14 +11642,17 @@ fn pct_fix_nm_networking(
                     .unwrap_or_default();
                 format!(
                     "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
-                     [ipv4]\nmethod=manual\naddress1={}\n{}dns=8.8.8.8;1.1.1.1;\n\n\
+                     [ipv4]\nmethod=manual\naddress1={}\n{}{}\n\
                      [ipv6]\nmethod=auto\n",
-                    cidr, gw_line
+                    cidr, gw_line, dns_nm_lines(&dns)
                 )
             }
-            None => "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
-                    [ipv4]\nmethod=auto\ndns=8.8.8.8;1.1.1.1;\n\n\
-                    [ipv6]\nmethod=auto\n".to_string(),
+            None => format!(
+                "[connection]\nid=eth0\ntype=ethernet\ninterface-name=eth0\nautoconnect=true\n\n\
+                 [ipv4]\nmethod=auto\n{}\n\
+                 [ipv6]\nmethod=auto\n",
+                dns_nm_lines(&dns)
+            ),
         };
         let nm_file = format!("{}/eth0.nmconnection", nm_dir);
         let _ = std::fs::write(&nm_file, &conf);
@@ -10874,10 +11666,8 @@ fn pct_fix_nm_networking(
         ));
     }
 
-    // Write fallback resolv.conf (DHCP will overwrite if it gets DNS from server)
-    let resolv_path = format!("{}/etc/resolv.conf", rootfs);
-    let _ = std::fs::remove_file(&resolv_path); // might be a symlink
-    let _ = std::fs::write(&resolv_path, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n");
+    // Fallback resolv.conf (DHCP will overwrite if it gets DNS from server)
+    write_rootfs_resolv_conf(&rootfs, &dns);
 
     // Unmount
     let _ = Command::new("pct").args(["unmount", vmid]).output();
