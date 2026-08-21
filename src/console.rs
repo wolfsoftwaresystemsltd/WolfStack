@@ -64,6 +64,47 @@ pub async fn console_ws(
     Ok(response)
 }
 
+/// The PVE node that owns LXC `vmid`, when it is NOT this node.
+///
+/// pmxcfs publishes every cluster member's config tree under
+/// `/etc/pve/nodes/<node>/lxc/<vmid>.conf` — that relative path is exactly what
+/// `pct` quotes when it can't find a config — and `/etc/pve/lxc` is the symlink
+/// to the local node's own directory. So: if the config isn't under
+/// `/etc/pve/lxc`, whichever node directory does hold it is the owner.
+///
+/// Returns None when the container is local, when no node owns the VMID, or
+/// when the tree isn't readable (single-node PVE, no PVE at all, permissions).
+fn pve_foreign_ct_owner(vmid: &str) -> Option<String> {
+    if vmid.is_empty() || !vmid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let local_dir = std::path::Path::new("/etc/pve/lxc");
+    if local_dir.join(format!("{}.conf", vmid)).exists() {
+        return None;
+    }
+    // Resolved local directory, so a node entry pointing at our own tree is
+    // never reported as a foreign owner (e.g. if /etc/pve/lxc is missing).
+    let local_real = std::fs::canonicalize(local_dir).ok();
+    for entry in std::fs::read_dir("/etc/pve/nodes").ok()?.flatten() {
+        let node_lxc = entry.path().join("lxc");
+        if !node_lxc.join(format!("{}.conf", vmid)).exists() {
+            continue;
+        }
+        if let (Some(local), Ok(this)) = (local_real.as_ref(), std::fs::canonicalize(&node_lxc))
+            && *local == this
+        {
+            continue;
+        }
+        // The name is written into the operator's terminal stream, so accept
+        // only PVE-shaped node names — never raw bytes from a directory entry.
+        return entry.file_name().to_str()
+            .filter(|s| !s.is_empty()
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_'))
+            .map(|s| s.to_string());
+    }
+    None
+}
+
 async fn console_session(
     mut session: actix_ws::Session,
     mut msg_stream: actix_ws::MessageStream,
@@ -112,6 +153,19 @@ async fn console_session(
                 // No lxc-attach fallback here: on Proxmox it's exactly what's
                 // broken, and chaining it with `||` would spawn a second shell
                 // whenever the user's pct-enter shell exits non-zero.
+                //
+                // If the CT belongs to another PVE node, say so first: pct's own
+                // "Configuration file 'nodes/<node>/lxc/<vmid>.conf' does not
+                // exist" reads like a broken install rather than "you're on the
+                // wrong host" (masterpier 2026-08-21).
+                if let Some(owner) = pve_foreign_ct_owner(&name) {
+                    let _ = session.text(format!(
+                        "\r\n\x1b[33m[wolfstack] CT {} is not on this node — its config lives on \
+                         PVE node '{}'. Open the console from that node (or migrate the container \
+                         here) — `pct enter` can only attach to a container this node owns.\x1b[0m\r\n",
+                        name, owner
+                    )).await;
+                }
                 cmd.arg(format!("pct enter {}", name));
             } else {
                 let base = crate::containers::lxc_base_dir(&name);

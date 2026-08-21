@@ -129,8 +129,20 @@
             // the engine builds /ws/console (local) vs /ws/remote-console.
             function loadNodesThenMount() {
                 fetch('/api/nodes')
-                    .then(r => r.ok ? r.json() : [])
-                    .then(nodes => mountConsole(Array.isArray(nodes) ? nodes : []))
+                    .then(r => r.ok ? r.json() : null)
+                    // /api/nodes answers `{ version, nodes, tls_enabled }`
+                    // (get_nodes in src/api/mod.rs); only pre-envelope builds
+                    // answered a bare array. Testing Array.isArray() on the
+                    // envelope meant this window ALWAYS mounted with an empty
+                    // node list: no `is_self` entry, so the engine's selfNode()
+                    // fell through to nodes[0] — the synthesised remote stub
+                    // below — and a LOCAL tab was proxied to that remote node,
+                    // running `pct enter <vmid>` on the wrong host
+                    // ("Configuration file 'nodes/<other>/lxc/<vmid>.conf' does
+                    // not exist", masterpier 2026-08-21).
+                    .then(data => mountConsole(
+                        Array.isArray(data) ? data
+                            : (data && Array.isArray(data.nodes) ? data.nodes : [])))
                     .catch(() => mountConsole([]));
             }
 
@@ -158,8 +170,12 @@
                     initial = { nodeId: nodeId, type: type, name: name };
                     // If that node isn't in /api/nodes (older peer / minimal
                     // response), synthesise a stub so the engine can resolve it.
+                    // No hostname: the engine labels it by id, which is at least
+                    // truthful. It used to carry `hostname: name` — the
+                    // CONTAINER's name — so tabs claimed to be on a host called
+                    // e.g. "203" when 203 was a VMID.
                     if (!nodes.some(n => n.id === nodeId)) {
-                        nodes = nodes.concat([{ id: nodeId, hostname: name || nodeId, is_self: false }]);
+                        nodes = nodes.concat([{ id: nodeId, is_self: false }]);
                     }
                 } else {
                     // Local session — anchor to the self node.

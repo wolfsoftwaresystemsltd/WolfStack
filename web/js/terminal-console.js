@@ -117,12 +117,20 @@
             const v = opts.selfNodeId;
             return (typeof v === 'function') ? v() : v;
         }
+        // The node serving this page, or null when this window can't identify
+        // it. NEVER fall back to nodes[0]: a descriptor with no nodeId means
+        // "the serving node", and picking an arbitrary list entry instead sent
+        // local sessions through /ws/remote-console to somebody else's host —
+        // `pct enter <vmid>` on a node that doesn't own the container
+        // ("Configuration file 'nodes/<other>/lxc/<vmid>.conf' does not
+        // exist"). A null node is handled everywhere: wsUrlForPane builds the
+        // local /ws/console, descriptorKey keys it 'local'.
         function selfNode() {
             const nodes = getNodes();
             const id = selfNodeId();
             return (id && nodes.find(x => x.id === id))
                 || nodes.find(x => x.is_self)
-                || nodes[0] || null;
+                || null;
         }
         function nodeById(id) {
             const nodes = getNodes();
