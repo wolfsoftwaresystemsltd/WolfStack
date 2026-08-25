@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.20.0: backup retention actually prunes a PBS datastore, and a failing backup finally tells you** _(2026-08-25 — [`05a980d6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/05a980d6281e96b1d0908b162d20ad7d03c5aa66))_
 - **v25.19.1: an LXC terminal opens on the node that owns the container** _(2026-08-21 — [`0b517a2c`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0b517a2cb900b95fac7845b0ae06079fa0e2c16c))_
 - **v25.19.0: a VM stays on the bridge you picked, and its static IP finally reaches the guest** _(2026-08-21 — [`f7471be5`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/f7471be56ac1ae2198ef87c55b554c414539b31d))_
 - **v25.18.0: a container's DNS survives a restart, and you can pin it per container** _(2026-08-21 — [`a10e124a`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/a10e124af9b02dc94b9faa3864cfc08c5e1231f9))_
