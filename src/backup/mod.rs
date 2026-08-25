@@ -761,6 +761,45 @@ mod tests {
         assert!(!id.contains(' '), "sanitized: {}", id);
     }
 
+    /// Every node used to emit `config-wolfstack-<ts>.tar.gz`, so all of them
+    /// landed in the single PBS group `host/wolfstack` (67 snapshots from four
+    /// machines, live fleet 2026-08-25). The node must be part of the id.
+    #[test]
+    fn config_archive_id_is_node_scoped() {
+        assert_ne!(config_archive_node_id("wolfstack-1"), config_archive_node_id("wolfstack-2"));
+        assert_eq!(config_archive_node_id("wolfstack-1"), "wolfstack-1");
+        // Round-trips through the filename back to a per-node PBS group.
+        let f1 = format!("config-{}-20260825-020530.tar.gz", config_archive_node_id("wolfstack-1"));
+        let f2 = format!("config-{}-20260825-020530.tar.gz", config_archive_node_id("wolfstack-2"));
+        assert_eq!(pbs_group_for_filename(&f1), "host/wolfstack-1");
+        assert_eq!(pbs_group_for_filename(&f2), "host/wolfstack-2");
+    }
+
+    /// `extract_backup_id_from_filename` stops at the first 8-digit segment,
+    /// treating it as the timestamp. A hostname that IS eight digits would be
+    /// eaten, collapsing every node back onto one group.
+    #[test]
+    fn config_archive_id_survives_an_all_digit_hostname() {
+        let id = config_archive_node_id("12345678");
+        let f = format!("config-{}-20260825-020530.tar.gz", id);
+        assert_eq!(pbs_group_for_filename(&f), format!("host/{}", id));
+        assert_ne!(pbs_group_for_filename(&f), "host/");
+    }
+
+    /// Store and restore derive the PBS type from the same helper. They had
+    /// drifted: `docker-…` was stored as "ct" but looked up as "host".
+    #[test]
+    fn pbs_backup_type_covers_docker_on_every_path() {
+        assert_eq!(pbs_backup_type_for_filename("docker-myapp-20260825-1.tar.gz"), "ct");
+        assert_eq!(pbs_backup_type_for_filename("vzdump-docker-myapp-20260825-1.tar.zst"), "ct");
+        assert_eq!(pbs_backup_type_for_filename("vzdump-lxc-131-2026_08_25-03_00_00.tar.zst"), "ct");
+        assert_eq!(pbs_backup_type_for_filename("lxc-myct-20260825-1.tar.gz"), "ct");
+        assert_eq!(pbs_backup_type_for_filename("vm-myvm-20260825-1.tar.gz"), "vm");
+        assert_eq!(pbs_backup_type_for_filename("vzdump-qemu-101-2026_08_25-03_00_00.vma.zst"), "vm");
+        assert_eq!(pbs_backup_type_for_filename("config-wolfstack-1-20260825-020530.tar.gz"), "host");
+        assert_eq!(pbs_group_for_filename("vzdump-lxc-131-2026_08_25-03_00_00.tar.zst"), "ct/131");
+    }
+
     #[test]
     fn pbs_notes_positionals_never_emit_dashdash_separator() {
         // The PBS CLI (proxmox-router) does NOT honour `--` as an end-of-options
@@ -3272,7 +3311,10 @@ pub fn backup_config() -> Result<(PathBuf, u64), String> {
 
     let staging = ensure_staging_dir()?;
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
-    let filename = format!("config-wolfstack-{}.tar.gz", timestamp);
+    // Node-scoped: see `config_archive_node_id`. A fleet-wide constant here put
+    // every node's config into the one PBS group `host/wolfstack`.
+    let filename = format!("config-{}-{}.tar.gz",
+        config_archive_node_id(&local_hostname()), timestamp);
     // Guarded: any error below deletes the half-written archive instead of
     // leaving it in staging forever.
     let staged = StagedPath::new(staging.join(&filename));
@@ -4358,14 +4400,7 @@ fn store_pbs_with_notes_and_log(local_path: &Path, storage: &BackupStorage, file
     // then made the PBS-list restore refuse them ("host snapshot isn't
     // supported here"). The container name is still parsed correctly by
     // extract_backup_id_from_filename, which already understands `docker-`.
-    let backup_type = if filename.starts_with("vzdump-lxc-") || filename.starts_with("lxc-")
-        || filename.starts_with("vzdump-docker-") || filename.starts_with("docker-") {
-        "ct"
-    } else if filename.starts_with("vm-") || filename.starts_with("vzdump-qemu-") {
-        "vm"
-    } else {
-        "host"
-    };
+    let backup_type = pbs_backup_type_for_filename(filename);
 
     // Isolate this one backup file in its own subdirectory before
     // handing the directory to `proxmox-backup-client backup …pxar:DIR`.
@@ -5311,6 +5346,56 @@ fn extract_backup_id_from_filename(filename: &str) -> String {
         return parts[0].to_string();
     }
     filename.split('.').next().unwrap_or("unknown").to_string()
+}
+
+/// PBS `backup-type` for a stored archive filename.
+///
+/// Single source of truth: store, restore and retention-prune must all derive
+/// the SAME type for a given filename or they address different groups. This
+/// was previously inlined in two places that had already drifted — the store
+/// path typed `docker-…` archives as "ct" while the restore path fell through
+/// to "host", so Docker PBS backups uploaded fine and then could not be found
+/// again.
+fn pbs_backup_type_for_filename(filename: &str) -> &'static str {
+    if filename.starts_with("vzdump-lxc-") || filename.starts_with("lxc-")
+        || filename.starts_with("vzdump-docker-") || filename.starts_with("docker-") {
+        "ct"
+    } else if filename.starts_with("vm-") || filename.starts_with("vzdump-qemu-") {
+        "vm"
+    } else {
+        "host"
+    }
+}
+
+/// PBS group (`<backup-type>/<backup-id>`) that a stored archive belongs to.
+fn pbs_group_for_filename(filename: &str) -> String {
+    format!("{}/{}", pbs_backup_type_for_filename(filename),
+            extract_backup_id_from_filename(filename))
+}
+
+/// Node component of the config-archive filename.
+///
+/// Every node used to emit the literal `config-wolfstack-<ts>.tar.gz`, which
+/// `extract_backup_id_from_filename` maps to the backup-id "wolfstack" — so
+/// EVERY node in a fleet wrote its own `/etc/wolfstack` into the single shared
+/// PBS group `host/wolfstack`. Observed 2026-08-25 on a 4-node fleet: 67
+/// snapshots in one group from four different machines, which makes a restore
+/// ambiguous and makes any per-group retention destructive (pruning it from one
+/// node deletes the other three nodes' config backups). The PBS *file-level*
+/// path already got this right via `config_pxar_backup_id`; the archive path
+/// did not. Scoping by hostname gives each node its own group.
+fn config_archive_node_id(hostname: &str) -> String {
+    let host = sanitize_archive_name(hostname);
+    let host = if host.is_empty() { "unknown".to_string() } else { host };
+    // `extract_backup_id_from_filename` treats the first 8-digit segment as the
+    // start of the timestamp. A hostname that is itself exactly 8 digits would
+    // be swallowed as that timestamp, collapsing every node back onto one
+    // group — precisely the collision this id exists to prevent.
+    if host.len() == 8 && host.chars().all(|c| c.is_ascii_digit()) {
+        format!("{}n", host)
+    } else {
+        host
+    }
 }
 
 /// Retrieve a backup file from storage for restore
@@ -7567,10 +7652,15 @@ fn delete_backup_file(entry: &BackupEntry) {
                     entry.filename, entry.storage.remote_url, e);
             }
         },
-        // PBS snapshots are content-addressed/deduplicated; PBS reclaims space
-        // via its own prune + garbage-collect schedule. WolfStack deliberately
-        // does NOT `snapshot forget` on delete — consistent with the retention
-        // path, and avoids forgetting the wrong snapshot for a shared backup-id.
+        // No per-ENTRY forget for PBS. A `BackupEntry` records the archive
+        // filename but not the PBS snapshot timestamp the server assigned, so
+        // there is no way to name the exact snapshot this entry produced —
+        // forgetting "the oldest in the group" instead can delete a snapshot
+        // another node wrote. Retention is applied at GROUP level in
+        // `prune_pbs_groups_for_schedule`, which is safe because a group has a
+        // single writer (see `config_archive_node_id`). An explicit one-off
+        // delete therefore removes the index entry and leaves the snapshot to
+        // the next retention pass.
         StorageType::Pbs => {},
     }
 }
@@ -7896,33 +7986,176 @@ pub fn set_schedule_enabled(id: &str, enabled: bool) -> Result<String, String> {
     Ok(format!("Schedule '{}' {}", name, if enabled { "enabled" } else { "disabled" }))
 }
 
-/// Prune a schedule's completed backups down to `retention`, deleting the oldest
-/// files + entries first. Shared by the nightly scheduler and the on-demand
-/// "Run Now" so both prune identically.
+/// Identity that a retention policy counts against: one target = one series.
+/// Two backups of the same container are the same series; a container and a VM
+/// that happen to share a name are not.
+fn retention_target_key(e: &BackupEntry) -> String {
+    format!("{:?}\u{1}{}", e.target.target_type, e.target.name)
+}
+
+/// Prune a schedule's completed backups down to `retention` **per target**,
+/// deleting the oldest files + entries first. Shared by the nightly scheduler
+/// and the on-demand "Run Now" so both prune identically.
+///
+/// Retention is PER TARGET, not per schedule. It used to keep `retention`
+/// entries for the schedule as a whole, so a schedule covering 11 containers
+/// with `retention: 7` kept 7 records TOTAL and could not hold even one
+/// complete night. Observed on a live fleet 2026-08-25: the surviving set was
+/// 3 containers from one night plus 4 from the night before, and the other
+/// containers' archives had already been deleted. "Keep 7" means seven backups
+/// of each thing — which is what the UI offers.
 fn prune_schedule_backups(config: &mut BackupConfig, schedule_id: &str, retention: usize) {
-    let mut schedule_entries: Vec<usize> = config.entries.iter().enumerate()
-        .filter(|(_, e)| e.schedule_id == schedule_id && e.status == BackupStatus::Completed)
-        .map(|(i, _)| i)
-        .collect();
-    // Newest first; anything past `retention` is removed.
-    schedule_entries.sort_by(|a, b| config.entries[*b].created_at.cmp(&config.entries[*a].created_at));
-    if schedule_entries.len() > retention {
+    use std::collections::HashMap;
+
+    let mut by_target: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, e) in config.entries.iter().enumerate() {
+        if e.schedule_id == schedule_id && e.status == BackupStatus::Completed {
+            by_target.entry(retention_target_key(e)).or_default().push(i);
+        }
+    }
+
+    let mut to_remove: Vec<usize> = Vec::new();
+    for idxs in by_target.values_mut() {
+        // Newest first; anything past `retention` is removed.
+        idxs.sort_by(|a, b| config.entries[*b].created_at.cmp(&config.entries[*a].created_at));
+        if idxs.len() > retention {
+            to_remove.extend_from_slice(&idxs[retention..]);
+        }
+    }
+
+    if !to_remove.is_empty() {
         // Remove strictly highest-index-first: `Vec::remove` shifts every
         // later element down, so any other order leaves stale indices that
         // panic (observed 2026-07-05: "len is 9 but the index is 9") or —
-        // worse — silently delete the WRONG backup's file. The slice is
-        // ordered by created_at, which is NOT index order (entries from
-        // different targets interleave), so it must be re-sorted here.
-        let mut to_remove: Vec<usize> = schedule_entries[retention..].to_vec();
+        // worse — silently delete the WRONG backup's file. Collected across
+        // per-target buckets, so this is NOT index order and must be sorted.
         to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        to_remove.dedup();
         for &idx in &to_remove {
             // Single source of truth for removing a backup's stored artifact
-            // (local file / S3 object / remote copy; PBS delegated to its GC).
-            // Keeps retention and explicit-delete from drifting.
+            // (local file / S3 object / remote copy). PBS is handled
+            // separately, per group, immediately below.
             delete_backup_file(&config.entries[idx]);
             config.entries.remove(idx);
         }
     }
+
+    // The index prune above does not touch PBS (see `delete_backup_file`'s Pbs
+    // arm — a per-entry forget cannot be done safely). Without this call the
+    // operator's `retention` silently means "keep forever" on a PBS datastore.
+    prune_pbs_groups_for_schedule(config, schedule_id, retention);
+}
+
+/// Apply `retention` to the PBS datastore itself for every group this schedule
+/// writes to.
+///
+/// WolfStack used to leave this entirely to "PBS's own prune + GC schedule".
+/// That assumption holds for a self-managed PBS where the operator configured a
+/// prune job, and fails completely on a hosted datastore that has none: a fleet
+/// running `retention: 7` was found on 2026-08-25 holding 15-19 snapshots per
+/// group across 18 days, having filled a 2 TB datastore to 100% and failed
+/// every backup for the previous 8 days.
+///
+/// Derived from the entries that SURVIVED the index prune, so a group is only
+/// touched while this schedule still owns backups in it.
+///
+/// NOTE: `prune` unlinks snapshot indexes; PBS only returns the underlying
+/// chunks to free space when garbage collection runs. GC is a datastore-admin
+/// operation and is frequently NOT granted to a backup token on hosted PBS
+/// (`permission check failed`), so WolfStack deliberately does not attempt it —
+/// on such a datastore GC remains the provider's scheduled job.
+fn prune_pbs_groups_for_schedule(config: &BackupConfig, schedule_id: &str, retention: usize) {
+    if retention == 0 {
+        return;
+    }
+    // Distinct (repository, group) pairs this schedule writes to.
+    let mut groups: Vec<(String, String, BackupStorage)> = Vec::new();
+    for e in config.entries.iter() {
+        if e.schedule_id != schedule_id
+            || e.storage.storage_type != StorageType::Pbs
+            || e.status != BackupStatus::Completed
+        {
+            continue;
+        }
+        let group = pbs_group_for_filename(&e.filename);
+        let repo = pbs_repo_string(&e.storage);
+        if groups.iter().any(|(r, g, _)| r == &repo && g == &group) {
+            continue;
+        }
+        groups.push((repo, group, e.storage.clone()));
+    }
+
+    for (repo, group, storage) in groups {
+        let keep = pbs_group_keep_count(config, &repo, &group, retention);
+        if let Err(err) = pbs_prune_group(&storage, &group, keep) {
+            warn!("PBS retention prune failed for group {}: {}", group, err);
+        }
+    }
+}
+
+/// How many snapshots to keep in one PBS group.
+///
+/// Two schedules on the SAME node can legitimately write the same group — two
+/// schedules that both include the `config` target is the ordinary case, and
+/// was present on a live node (schedules `8b4106ae…` and `7163fba1…`). Pruning
+/// such a group to just the retention of whichever schedule happens to run
+/// would let the stricter one silently delete snapshots the looser one is still
+/// keeping. Take the LARGEST retention asked for by any schedule that owns
+/// backups in the group.
+///
+/// This keeps more than a single schedule asked for rather than less: with a
+/// 7-day and a 30-day schedule sharing a group, the group holds 30 snapshots
+/// covering both. Erring long is recoverable (disk); erring short destroys
+/// backups. Giving each schedule its own group — or its own PBS namespace —
+/// is the only way to honour both numbers exactly.
+fn pbs_group_keep_count(
+    config: &BackupConfig,
+    repo: &str,
+    group: &str,
+    own_retention: usize,
+) -> usize {
+    config.entries.iter()
+        .filter(|e| {
+            e.storage.storage_type == StorageType::Pbs
+                && e.status == BackupStatus::Completed
+                && pbs_group_for_filename(&e.filename) == group
+                && pbs_repo_string(&e.storage) == repo
+        })
+        // An entry whose schedule has since been deleted contributes nothing.
+        .filter_map(|e| config.schedules.iter().find(|s| s.id == e.schedule_id))
+        .map(|s| s.retention as usize)
+        .chain(std::iter::once(own_retention))
+        .max()
+        .unwrap_or(own_retention)
+}
+
+/// Prune one PBS group down to the `keep` most recent snapshots.
+fn pbs_prune_group(storage: &BackupStorage, group: &str, keep: usize) -> Result<(), String> {
+    let repo = pbs_repo_string(storage);
+    let mut cmd = Command::new("proxmox-backup-client");
+    cmd.arg("prune")
+       .arg(group)
+       .arg("--keep-last").arg(keep.to_string())
+       .arg("--repository").arg(&repo);
+
+    if !storage.pbs_fingerprint.is_empty() {
+        cmd.env("PBS_FINGERPRINT", format_pbs_fingerprint(&storage.pbs_fingerprint));
+    }
+    if !storage.pbs_namespace.is_empty() {
+        cmd.arg("--ns").arg(&storage.pbs_namespace);
+    }
+    let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
+                 else { &storage.pbs_password };
+    if !pbs_pw.is_empty() {
+        cmd.env("PBS_PASSWORD", pbs_pw);
+    }
+
+    let out = cmd.output()
+        .map_err(|e| format!("Failed to run proxmox-backup-client prune: {}", e))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -7930,11 +8163,18 @@ mod prune_tests {
     use super::*;
 
     fn mk(filename: &str, created_at: &str, schedule_id: &str) -> BackupEntry {
+        mk_for(filename, filename, created_at, schedule_id)
+    }
+
+    /// Like `mk`, but pins the TARGET name independently of the entry id so a
+    /// test can build several backups of the SAME target (one retention series)
+    /// or of different targets (separate series).
+    fn mk_for(target: &str, id: &str, created_at: &str, schedule_id: &str) -> BackupEntry {
         BackupEntry {
-            id: filename.to_string(),
-            target: BackupTarget { target_type: BackupTargetType::Lxc, name: filename.into(), ..Default::default() },
+            id: id.to_string(),
+            target: BackupTarget { target_type: BackupTargetType::Lxc, name: target.into(), ..Default::default() },
             storage: BackupStorage::default(),
-            filename: format!("{}.tar.gz", filename),
+            filename: format!("{}.tar.gz", id),
             size_bytes: 0,
             created_at: created_at.to_string(),
             status: BackupStatus::Completed,
@@ -7947,21 +8187,21 @@ mod prune_tests {
         }
     }
 
-    /// 2026-07-05 regression: entries from different targets interleave, so
-    /// timestamp order ≠ index order. The old prune removed by stale indices
-    /// after each shift — panicking ("len is 9 but the index is 9") or
-    /// deleting the WRONG entry. Keep = the `retention` newest; everything
-    /// else (and nothing else) goes.
+    /// 2026-07-05 regression: entries interleave, so timestamp order ≠ index
+    /// order. The old prune removed by stale indices after each shift —
+    /// panicking ("len is 9 but the index is 9") or deleting the WRONG entry.
+    /// All five belong to ONE target so they form a single retention series;
+    /// keep = the `retention` newest.
     #[test]
     fn prune_survives_interleaved_entry_order() {
         let mut config = BackupConfig::default();
         config.entries = vec![
-            mk("a-old",   "2026-07-01T03:00:00Z", "s"),
-            mk("other",   "2026-07-10T03:00:00Z", "different-schedule"),
-            mk("b-new",   "2026-07-05T03:00:00Z", "s"),
-            mk("c-mid",   "2026-07-03T03:00:00Z", "s"),
-            mk("d-newest","2026-07-06T03:00:00Z", "s"),
-            mk("e-oldest","2026-06-30T03:00:00Z", "s"),
+            mk_for("ct1", "a-old",    "2026-07-01T03:00:00Z", "s"),
+            mk_for("ct9", "other",    "2026-07-10T03:00:00Z", "different-schedule"),
+            mk_for("ct1", "b-new",    "2026-07-05T03:00:00Z", "s"),
+            mk_for("ct1", "c-mid",    "2026-07-03T03:00:00Z", "s"),
+            mk_for("ct1", "d-newest", "2026-07-06T03:00:00Z", "s"),
+            mk_for("ct1", "e-oldest", "2026-06-30T03:00:00Z", "s"),
         ];
         prune_schedule_backups(&mut config, "s", 2);
         let names: Vec<&str> = config.entries.iter().map(|e| e.id.as_str()).collect();
@@ -7970,6 +8210,87 @@ mod prune_tests {
         assert!(names.contains(&"b-new"), "second-newest kept: {:?}", names);
         assert!(names.contains(&"other"), "other schedule untouched: {:?}", names);
         assert_eq!(names.len(), 3, "exactly retention + unrelated remain: {:?}", names);
+    }
+
+    /// Retention is PER TARGET. A schedule covering many containers with
+    /// `retention: 2` keeps two of EACH — not two across the whole schedule.
+    /// The old per-schedule behaviour deleted most of a night's backups the
+    /// moment the run finished (live fleet, 2026-08-25: 11 targets, retention
+    /// 7, index held 3 containers from one night and 4 from the night before).
+    #[test]
+    fn retention_is_per_target_not_per_schedule() {
+        let mut config = BackupConfig { entries: vec![
+            mk_for("web1", "web1-d1", "2026-08-01T03:00:00Z", "s"),
+            mk_for("web1", "web1-d2", "2026-08-02T03:00:00Z", "s"),
+            mk_for("web1", "web1-d3", "2026-08-03T03:00:00Z", "s"),
+            mk_for("db1",  "db1-d1",  "2026-08-01T03:00:00Z", "s"),
+            mk_for("db1",  "db1-d2",  "2026-08-02T03:00:00Z", "s"),
+            mk_for("db1",  "db1-d3",  "2026-08-03T03:00:00Z", "s"),
+        ], ..Default::default() };
+        prune_schedule_backups(&mut config, "s", 2);
+        let names: Vec<&str> = config.entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(names.len(), 4, "two per target, not two overall: {:?}", names);
+        for kept in ["web1-d3", "web1-d2", "db1-d3", "db1-d2"] {
+            assert!(names.contains(&kept), "{} kept: {:?}", kept, names);
+        }
+        for gone in ["web1-d1", "db1-d1"] {
+            assert!(!names.contains(&gone), "{} pruned: {:?}", gone, names);
+        }
+    }
+
+    /// Two schedules sharing one PBS group (both backing up `config`, seen
+    /// live on wolfstack-1) must not let the stricter one delete what the
+    /// looser one still keeps. The group keeps the LARGEST retention asked.
+    #[test]
+    fn shared_pbs_group_keeps_the_largest_retention() {
+        let pbs = BackupStorage {
+            storage_type: StorageType::Pbs,
+            pbs_server: "pbs.example".into(),
+            pbs_datastore: "ds".into(),
+            pbs_user: "u@pbs".into(),
+            ..Default::default()
+        };
+        let mk_pbs = |sched: &str, when: &str| {
+            let mut e = mk_for("", "config-wolfstack-1-20260825-020530", when, sched);
+            e.filename = "config-wolfstack-1-20260825-020530.tar.gz".into();
+            e.storage = pbs.clone();
+            e
+        };
+        let mut config = BackupConfig {
+            entries: vec![
+                mk_pbs("short", "2026-08-25T03:00:00Z"),
+                mk_pbs("long",  "2026-08-25T04:00:00Z"),
+            ],
+            ..Default::default()
+        };
+        let sched = |id: &str, retention: u32| -> BackupSchedule {
+            serde_json::from_str(&format!(
+                r#"{{"id":"{}","name":"{}","frequency":"daily","time":"02:00",
+                    "retention":{},"backup_all":false,
+                    "storage":{{"type":"local"}},"enabled":true}}"#,
+                id, id, retention,
+            )).unwrap()
+        };
+        config.schedules = vec![sched("short", 7), sched("long", 30)];
+        let repo = pbs_repo_string(&pbs);
+        let group = pbs_group_for_filename("config-wolfstack-1-20260825-020530.tar.gz");
+        assert_eq!(group, "host/wolfstack-1");
+        // Whichever schedule triggers the prune, the group keeps 30.
+        assert_eq!(pbs_group_keep_count(&config, &repo, &group, 7), 30);
+        assert_eq!(pbs_group_keep_count(&config, &repo, &group, 30), 30);
+        // An unrelated group is unaffected and falls back to the caller's own.
+        assert_eq!(pbs_group_keep_count(&config, &repo, "ct/other", 7), 7);
+    }
+
+    /// A target whose name repeats under a DIFFERENT type is a different
+    /// series — a container "159" and a VM "159" must not prune each other.
+    #[test]
+    fn retention_key_separates_types_with_the_same_name() {
+        let mut ct = mk_for("159", "ct-159", "2026-08-01T03:00:00Z", "s");
+        ct.target.target_type = BackupTargetType::Lxc;
+        let mut vm = mk_for("159", "vm-159", "2026-08-01T03:00:00Z", "s");
+        vm.target.target_type = BackupTargetType::Vm;
+        assert_ne!(retention_target_key(&ct), retention_target_key(&vm));
     }
 
     /// Retention edge: nothing to prune when at/below the cap, including 0
@@ -8624,13 +8945,10 @@ fn retrieve_from_pbs(entry: &BackupEntry, dest: &Path) -> Result<(), String> {
     let repo = pbs_repo_string(storage);
 
     let backup_id = extract_backup_id_from_filename(&entry.filename);
-    let backup_type = if entry.filename.starts_with("vzdump-lxc-") || entry.filename.starts_with("lxc-") {
-        "ct"
-    } else if entry.filename.starts_with("vm-") || entry.filename.starts_with("vzdump-qemu-") {
-        "vm"
-    } else {
-        "host"
-    };
+    // Shared with the store path — these two had drifted, and the missing
+    // `docker-` arm here meant Docker archives were written as "ct" but looked
+    // up as "host" on restore.
+    let backup_type = pbs_backup_type_for_filename(&entry.filename);
 
     let pbs_pw = if !storage.pbs_token_secret.is_empty() { &storage.pbs_token_secret }
                  else { &storage.pbs_password };
