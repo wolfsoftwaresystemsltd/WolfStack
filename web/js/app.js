@@ -29045,6 +29045,7 @@ function lxcCardHtml(c, s) {
                 <button class="btn btn-sm" style="${bs}" onclick="editContainerConfigFile('lxc','${c.name}')" title="Edit Config File"><span class="ws-icon-clean-wrap" data-icon="file-code"></span></button>
                 <button class="btn btn-sm" style="${bs}" onclick="openLxcSettings('${c.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
                 <button class="btn btn-sm" style="${bs}" onclick="openContainerConfigurator('lxc','${c.name}')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>
+                <button class="btn btn-sm" style="${bs}" onclick="openContainerCertificates('lxc','${c.name}')" title="Certificates"><span class="ws-icon-clean-wrap" data-icon="shield"></span></button>
                 <button class="btn btn-sm" style="${bs}" onclick="openContainerUpdates('lxc','${c.name}')" title="Updates"><span class="ws-icon-clean-wrap" data-icon="updates"></span></button>
                 <button class="btn btn-sm" style="${bs}" onclick="openContainerCron('lxc','${c.name}')" title="Cron"><span class="ws-icon-clean-wrap" data-icon="calendar"></span></button>
                 <button class="btn btn-sm" style="${bs}" onclick="cloneLxcContainer('${c.name}')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>
@@ -30448,6 +30449,7 @@ function renderLxcContainers(containers, stats) {
                 <button class="btn btn-sm" style="${btnStyle}" onclick="editContainerConfigFile('lxc', '${c.name}')" title="Edit Config File"><span class="ws-icon-clean-wrap" data-icon="file-code"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openLxcSettings('${c.name}')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerConfigurator('lxc', '${c.name}')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>
+                <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerCertificates('lxc', '${c.name}')" title="Certificates"><span class="ws-icon-clean-wrap" data-icon="shield"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerUpdates('lxc', '${c.name}')" title="Check Updates"><span class="ws-icon-clean-wrap" data-icon="updates"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="openContainerCron('lxc', '${c.name}')" title="Cron Jobs"><span class="ws-icon-clean-wrap" data-icon="calendar"></span></button>
                 <button class="btn btn-sm" style="${btnStyle}" onclick="cloneLxcContainer('${c.name}')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>
@@ -30926,6 +30928,332 @@ async function toggleContainerCronJob(index, currentlyEnabled, schedule, command
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
+}
+
+// ─── Container Certificates (certbot + Apache/WolfServe inside a container) ───
+
+var _containerCertRuntime = '';
+var _containerCertName = '';
+var _containerCertData = null; // last /certs/overview payload — issue/attach helpers index into it
+
+async function openContainerCertificates(runtime, container) {
+    _containerCertRuntime = runtime;
+    _containerCertName = container;
+
+    const modal = document.getElementById('container-detail-modal');
+    const title = document.getElementById('container-detail-title');
+    const body = document.getElementById('container-detail-body');
+
+    title.textContent = `${container} — Certificates`;
+    body.innerHTML = `<p style="color:var(--text-muted);">Detecting web server inside ${escapeHtml(container)}...</p>
+        <div style="text-align:center;padding:20px;"><span style="display:inline-block;width:24px;height:24px;border:3px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span></div>`;
+    modal.classList.add('active');
+
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${runtime}/${encodeURIComponent(container)}/certs/overview`));
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+        _containerCertData = data;
+        renderContainerCertOverview();
+    } catch (e) {
+        body.innerHTML = `<p style="color:#ef4444;">Failed to load certificates: ${escapeHtml(e.message)}</p>
+            <button class="btn btn-sm" onclick="openContainerCertificates('${runtime}', '${container.replace(/'/g, "\\'")}')">Retry</button>`;
+    }
+}
+
+function _containerCertRefreshBtn() {
+    return `<button class="btn btn-sm" onclick="openContainerCertificates('${_containerCertRuntime}', '${_containerCertName.replace(/'/g, "\\'")}')">Refresh</button>`;
+}
+
+function renderContainerCertOverview() {
+    const body = document.getElementById('container-detail-body');
+    const data = _containerCertData;
+
+    // No web server → nothing to manage here. This page issues certs FOR
+    // websites; without Apache2/WolfServe there are no websites.
+    if (!data.web_server) {
+        body.innerHTML = `
+            <div style="text-align:center;padding:40px 20px;">
+                <div style="font-size:18px;font-weight:600;margin-bottom:8px;">Nothing is installed</div>
+                <p style="color:var(--text-muted);font-size:13px;max-width:460px;margin:0 auto 16px;">
+                    No web server was detected in this container. Install <strong>Apache&nbsp;2</strong> or
+                    <strong>WolfServe</strong> inside it first — this page reads their shared virtual-host
+                    configuration to issue and attach Let's Encrypt certificates.
+                </p>
+                ${_containerCertRefreshBtn()}
+            </div>`;
+        return;
+    }
+
+    const ws = data.web_server;
+    const certs = data.certs || [];
+    const sites = data.sites || [];
+    const certByName = {};
+    certs.forEach(c => { certByName[c.name] = c; });
+
+    const wsBadge = `<span style="display:inline-flex;align-items:center;gap:8px;padding:4px 12px;border-radius:8px;font-size:13px;font-weight:600;background:var(--bg-panel);border:1px solid var(--border);">
+        <span class="ws-icon-clean-wrap" data-icon="shield"></span> ${escapeHtml(ws.label)}
+        ${ws.running ? renderStatusPill({ tone: 'ok', label: 'Running' }) : renderStatusPill({ tone: 'danger', label: 'Stopped' })}
+    </span>`;
+    const certbotBadge = data.certbot_installed
+        ? `<span style="font-size:12px;color:var(--text-muted);">certbot: <strong style="color:#10b981;">installed</strong></span>`
+        : `<span style="font-size:12px;color:var(--text-muted);">certbot: <strong style="color:#f59e0b;">not installed</strong></span>
+           <button class="btn btn-sm btn-primary" onclick="containerCertInstallCertbot()">Install certbot</button>`;
+
+    let html = `
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">${wsBadge} ${certbotBadge}</div>
+            ${_containerCertRefreshBtn()}
+        </div>`;
+
+    // ── Websites ──
+    html += `<div class="card" style="margin-bottom:16px;">
+        <div class="card-header"><h3 style="font-size:14px;">Websites</h3></div>
+        <div class="card-body" style="padding:0;">`;
+    if (sites.length === 0) {
+        html += `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">
+            No virtual hosts found in this container. Create one via the <strong>Configure</strong> button
+            (WolfServe / Apache) first, then come back here to add a certificate.</div>`;
+    } else {
+        html += `<table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="border-bottom:2px solid var(--border);">
+                <th style="padding:8px 12px;text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Site</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Domains</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;">HTTPS</th>
+                <th style="padding:8px 12px;text-align:right;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Actions</th>
+            </tr></thead><tbody>`;
+        sites.forEach((s, i) => {
+            const domains = [s.server_name].concat(s.aliases || []).filter(Boolean);
+            const enabledPill = s.enabled
+                ? renderStatusPill({ tone: 'ok', label: 'Enabled' })
+                : renderStatusPill({ tone: 'neutral', label: 'Disabled' });
+            let httpsCell;
+            if (s.cert_name && certByName[s.cert_name]) {
+                const c = certByName[s.cert_name];
+                const colour = c.days_remaining < 7 ? 'var(--danger)' : c.days_remaining < 30 ? '#f59e0b' : '#10b981';
+                const status = c.days_remaining < 0 ? `expired ${-c.days_remaining}d ago` : `${c.days_remaining}d left`;
+                httpsCell = `<code style="font-size:11px;">${escapeHtml(s.cert_name)}</code>
+                    <span style="color:${colour};font-weight:600;font-size:11px;margin-left:6px;">${status}</span>`;
+            } else if (s.has_ssl) {
+                // SSL directives present but the cert path isn't a Let's
+                // Encrypt lineage this page knows — show the raw path.
+                httpsCell = `<span style="font-size:11px;color:var(--text-muted);" title="${escapeAttr(s.ssl_cert_path)}">custom certificate</span>`;
+            } else {
+                httpsCell = `<span style="font-size:11px;color:var(--text-muted);">No certificate</span>`;
+            }
+            let actions = '';
+            if (data.certbot_installed) {
+                actions += `<button class="btn btn-sm btn-primary" onclick="containerCertIssueForm(${i})"
+                    title="Issue a Let's Encrypt certificate for this site's domains and attach it">${s.has_ssl ? 'Re-issue' : 'Issue certificate'}</button> `;
+            }
+            if (certs.length > 0) {
+                const opts = certs.map(c => `<option value="${escapeAttr(c.name)}" ${c.name === s.cert_name ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+                actions += `<select id="ct-cert-attach-${i}" class="form-control" style="display:inline-block;width:auto;font-size:11px;padding:3px 6px;vertical-align:middle;">${opts}</select>
+                    <button class="btn btn-sm" onclick="containerCertAttach(${i})" title="Point this site's vhost at the selected certificate">Attach</button>`;
+            }
+            if (!actions) actions = '<span style="font-size:11px;color:var(--text-muted);">install certbot first</span>';
+            html += `<tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 12px;"><code style="font-size:12px;">${escapeHtml(s.name)}</code><br>${enabledPill}</td>
+                <td style="padding:8px 12px;font-size:12px;">${domains.length ? domains.map(escapeHtml).join('<br>') : '<span style="color:var(--text-muted);">—</span>'}</td>
+                <td style="padding:8px 12px;">${httpsCell}</td>
+                <td style="padding:8px 12px;text-align:right;white-space:nowrap;">${actions}</td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+    }
+    html += '</div></div>';
+
+    // ── Certificates ──
+    html += `<div class="card" style="margin-bottom:16px;">
+        <div class="card-header"><h3 style="font-size:14px;">Certificates in this container</h3></div>
+        <div class="card-body" style="padding:0;">`;
+    if (certs.length === 0) {
+        html += `<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">
+            No Let's Encrypt certificates in this container yet.
+            ${data.certbot_installed && sites.length > 0 ? 'Use <strong>Issue certificate</strong> on a website above.' : ''}</div>`;
+    } else {
+        html += `<table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead><tr style="border-bottom:2px solid var(--border);">
+                <th style="padding:8px 12px;text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Name</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Domains</th>
+                <th style="padding:8px 12px;text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Expiry</th>
+                <th style="padding:8px 12px;text-align:right;color:var(--text-muted);font-size:11px;text-transform:uppercase;">Actions</th>
+            </tr></thead><tbody>`;
+        certs.forEach((c, i) => {
+            const colour = c.days_remaining < 7 ? 'var(--danger)' : c.days_remaining < 30 ? '#f59e0b' : '#10b981';
+            const status = c.days_remaining < 0 ? `Expired ${-c.days_remaining}d ago` : `${c.days_remaining} day${c.days_remaining === 1 ? '' : 's'}`;
+            html += `<tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 12px;"><code style="font-size:12px;">${escapeHtml(c.name)}</code></td>
+                <td style="padding:8px 12px;font-size:12px;">${(c.domains || []).map(escapeHtml).join('<br>')}</td>
+                <td style="padding:8px 12px;"><span style="color:${colour};font-weight:600;">${status}</span><br>
+                    <span style="font-size:11px;color:var(--text-muted);">${escapeHtml(c.expires || '')}</span></td>
+                <td style="padding:8px 12px;text-align:right;white-space:nowrap;">
+                    <button class="btn btn-sm" onclick="containerCertRenew(${i})">Renew</button>
+                    <button class="btn btn-sm btn-danger" onclick="containerCertDelete(${i})">Delete</button>
+                </td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+    }
+    html += '</div></div>';
+
+    html += `<div style="font-size:12px;color:var(--text-muted);">
+        Renewals run inside the container via certbot's own scheduler (systemd timer or cron, installed
+        with the certbot package). Certificates issued from this page carry a deploy hook that reloads
+        ${escapeHtml(ws.label)} after each renewal. HTTP-01 issuance requires port 80 for the domain to
+        reach this container from the internet.</div>`;
+
+    body.innerHTML = html;
+}
+
+async function containerCertInstallCertbot() {
+    if (!(await showConfirm(`Install certbot inside ${_containerCertName} using its package manager?`))) return;
+    const body = document.getElementById('container-detail-body');
+    body.innerHTML = `<p style="color:var(--text-muted);">Installing certbot inside ${escapeHtml(_containerCertName)}...</p>
+        <div style="text-align:center;padding:20px;"><span style="display:inline-block;width:24px;height:24px;border:3px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span></div>
+        <p style="color:var(--text-muted);font-size:12px;text-align:center;">This may take a minute...</p>`;
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${_containerCertRuntime}/${encodeURIComponent(_containerCertName)}/certs/install-certbot`), { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+        showToast(data.message || 'certbot installed', 'success');
+    } catch (e) {
+        showToast('certbot install failed: ' + e.message, 'error', 0);
+    }
+    openContainerCertificates(_containerCertRuntime, _containerCertName);
+}
+
+// ── issue form ──
+
+function containerCertIssueForm(siteIdx) {
+    const body = document.getElementById('container-detail-body');
+    const site = (_containerCertData.sites || [])[siteIdx];
+    if (!site) return;
+    const domains = [site.server_name].concat(site.aliases || []).filter(Boolean);
+    body.innerHTML = `
+        <button class="btn btn-sm" style="margin-bottom:14px;" onclick="renderContainerCertOverview()">← Back</button>
+        <div class="card" style="max-width:560px;">
+            <div class="card-header"><h3 style="font-size:14px;">Issue certificate for <code>${escapeHtml(site.name)}</code></h3></div>
+            <div class="card-body">
+                <div style="margin-bottom:12px;">
+                    <label style="font-size:11px;color:var(--text-muted);">Domains (one per line — from the site's ServerName / ServerAlias)</label>
+                    <textarea id="ct-cert-domains" class="form-control" rows="3" style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(domains.join('\n'))}</textarea>
+                </div>
+                <div style="margin-bottom:12px;">
+                    <label style="font-size:11px;color:var(--text-muted);">Email (Let's Encrypt account — expiry notices)</label>
+                    <input type="email" id="ct-cert-email" class="form-control" style="font-size:12px;" value="${escapeAttr(_containerCertData.default_email || '')}" placeholder="admin@example.com">
+                </div>
+                <div style="margin-bottom:14px;font-size:12px;color:var(--text-muted);">
+                    Validation: <strong>HTTP-01 (webroot)</strong> served from <code>${escapeHtml(site.doc_root || '—')}</code>
+                    through the running web server — no downtime. Each domain must resolve to this container
+                    and be reachable on port 80. Wildcards need DNS-01: use the host Certificates page for those.
+                    Issuing agrees to the Let's Encrypt Terms of Service.
+                </div>
+                ${site.doc_root ? '' : `<div role="alert" style="margin-bottom:14px;padding:10px;border:1px solid var(--danger);border-radius:6px;font-size:12px;color:var(--danger);">
+                    This site has no DocumentRoot, so webroot validation cannot serve the challenge.
+                    Add a DocumentRoot to the vhost first (Configure → WolfServe / Apache).</div>`}
+                <button class="btn btn-primary" id="ct-cert-issue-btn" ${site.doc_root ? '' : 'disabled'}
+                    onclick="containerCertIssue(${siteIdx})">Request certificate</button>
+            </div>
+        </div>`;
+}
+
+async function containerCertIssue(siteIdx) {
+    const site = (_containerCertData.sites || [])[siteIdx];
+    if (!site) return;
+    const domains = (document.getElementById('ct-cert-domains').value || '')
+        .split('\n').map(d => d.trim()).filter(Boolean);
+    const email = (document.getElementById('ct-cert-email').value || '').trim();
+    if (domains.length === 0) { showToast('At least one domain is required', 'error'); return; }
+    if (!email) { showToast('An email address is required', 'error'); return; }
+
+    const body = document.getElementById('container-detail-body');
+    body.innerHTML = `<p style="color:var(--text-muted);">Requesting certificate for ${escapeHtml(domains[0])}${domains.length > 1 ? ` (+${domains.length - 1} more)` : ''}...</p>
+        <div style="text-align:center;padding:20px;"><span style="display:inline-block;width:24px;height:24px;border:3px solid rgba(255,255,255,0.2);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></span></div>
+        <p style="color:var(--text-muted);font-size:12px;text-align:center;">Let's Encrypt is validating the domains — this can take up to a minute...</p>`;
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${_containerCertRuntime}/${encodeURIComponent(_containerCertName)}/certs/issue`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domains: domains, email: email, site: site.name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+        if (data.attached) {
+            showToast(`Certificate issued and attached to ${site.name}`, 'success');
+        } else {
+            // The cert exists — only the vhost rewrite failed. Say so
+            // precisely; a plain "failed" would hide the issued cert.
+            showToast(`Certificate issued, but attaching it to ${site.name} failed: ${data.attach_error}`, 'error', 0);
+        }
+    } catch (e) {
+        showToast('Certificate request failed: ' + e.message, 'error', 0);
+    }
+    openContainerCertificates(_containerCertRuntime, _containerCertName);
+}
+
+// ── attach / renew / delete ──
+
+async function containerCertAttach(siteIdx) {
+    const site = (_containerCertData.sites || [])[siteIdx];
+    const sel = document.getElementById('ct-cert-attach-' + siteIdx);
+    if (!site || !sel || !sel.value) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${_containerCertRuntime}/${encodeURIComponent(_containerCertName)}/certs/attach`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ site: site.name, cert_name: sel.value }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+        showToast(data.message || 'Certificate attached', 'success');
+    } catch (e) {
+        showToast('Attach failed: ' + e.message, 'error', 0);
+    }
+    openContainerCertificates(_containerCertRuntime, _containerCertName);
+}
+
+async function containerCertRenew(certIdx) {
+    const cert = (_containerCertData.certs || [])[certIdx];
+    if (!cert) return;
+    const btns = document.querySelectorAll('#container-detail-body button');
+    btns.forEach(b => b.disabled = true);
+    showToast(`Renewing ${cert.name}...`, 'info');
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${_containerCertRuntime}/${encodeURIComponent(_containerCertName)}/certs/renew`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: cert.name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+        showToast(`${cert.name} renewed`, 'success');
+    } catch (e) {
+        showToast('Renew failed: ' + e.message, 'error', 0);
+    }
+    openContainerCertificates(_containerCertRuntime, _containerCertName);
+}
+
+async function containerCertDelete(certIdx) {
+    const cert = (_containerCertData.certs || [])[certIdx];
+    if (!cert) return;
+    // Warn when a site still points at this cert — deleting it leaves the
+    // vhost referencing files that no longer exist and the next web
+    // server restart will fail.
+    const usedBy = (_containerCertData.sites || []).filter(s => s.cert_name === cert.name).map(s => s.name);
+    const warning = usedBy.length
+        ? `\n\nWARNING: still attached to ${usedBy.join(', ')} — the web server will fail to start once the files are gone.`
+        : '';
+    if (!(await showConfirm(`Delete certificate ${cert.name} from ${_containerCertName}? This removes the certificate files and its renewal config.${warning}`))) return;
+    try {
+        const resp = await fetch(apiUrl(`/api/containers/${_containerCertRuntime}/${encodeURIComponent(_containerCertName)}/certs/${encodeURIComponent(cert.name)}`), { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+        showToast(`${cert.name} deleted`, 'success');
+    } catch (e) {
+        showToast('Delete failed: ' + e.message, 'error', 0);
+    }
+    openContainerCertificates(_containerCertRuntime, _containerCertName);
 }
 
 // ─── LXC Settings Editor (Tabbed) ───
@@ -46827,6 +47155,7 @@ async function loadFleetContainers() {
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');browseContainerFiles(\'lxc\',\'' + eName + '\',\'' + ePath + '\')" title="Browse Files"><span class="ws-icon-clean-wrap" data-icon="folder-open"></span></button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openLxcSettings(\'' + eName + '\')" title="Settings"><span class="ws-icon-clean-wrap" data-icon="settings"></span></button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerConfigurator(\'lxc\',\'' + eName + '\')" title="Configure"><span class="ws-icon-clean-wrap" data-icon="configure"></span></button>';
+        h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');openContainerCertificates(\'lxc\',\'' + eName + '\')" title="Certificates"><span class="ws-icon-clean-wrap" data-icon="shield"></span></button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');cloneLxcContainer(\'' + eName + '\')" title="Clone"><span class="ws-icon-clean-wrap" data-icon="copy"></span></button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');migrateLxcContainer(\'' + eName + '\')" title="Migrate"><span class="ws-icon-clean-wrap" data-icon="migrate"></span></button>';
         h += '<button class="btn btn-sm" style="' + BS + '" onclick="fleetSetContext(\'' + nid + '\');exportLxcContainer(\'' + eName + '\')" title="Export"><span class="ws-icon-clean-wrap" data-icon="export"></span></button>';

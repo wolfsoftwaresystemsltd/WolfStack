@@ -7335,6 +7335,173 @@ pub async fn container_exec(req: HttpRequest, state: web::Data<AppState>, path: 
     }
 }
 
+// ─── Container Certificates (certbot + Apache/WolfServe inside a container) ───
+
+/// Build the ExecTarget for a `/api/containers/{runtime}/{id}/certs/*`
+/// route. Same runtime vocabulary as `parse_exec_target` uses for the
+/// configurator, but sourced from the path instead of query params.
+fn container_cert_target(runtime: &str, container: &str) -> Result<crate::configurator::ExecTarget, HttpResponse> {
+    if container.is_empty() {
+        return Err(HttpResponse::BadRequest().json(serde_json::json!({"error": "container name is required"})));
+    }
+    match runtime {
+        "docker" => Ok(crate::configurator::ExecTarget::Docker(container.to_string())),
+        "lxc" => Ok(crate::configurator::ExecTarget::Lxc(container.to_string())),
+        other => Err(HttpResponse::BadRequest().json(
+            serde_json::json!({"error": format!("Unsupported runtime: '{}'", other)})
+        )),
+    }
+}
+
+/// GET /api/containers/{runtime}/{id}/certs/overview — web server
+/// detection + certbot presence + certs + parsed sites, in one call.
+pub async fn container_certs_overview(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let target = match container_cert_target(&runtime, &container) { Ok(t) => t, Err(r) => return r };
+    // Many exec round-trips into the container — blocking pool, not an
+    // actix worker.
+    match web::block(move || crate::certbot::container::overview(&target)).await {
+        Ok(ov) => HttpResponse::Ok().json(ov),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+/// POST /api/containers/{runtime}/{id}/certs/install-certbot — install
+/// certbot via the container's package manager. Software install →
+/// operator gate, same as updates/apply.
+pub async fn container_certs_install_certbot(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let target = match container_cert_target(&runtime, &container) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::certbot::container::install_certbot(&target)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ContainerCertIssueRequest {
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub email: String,
+    /// Site config file whose DocumentRoot serves the HTTP-01 webroot;
+    /// the issued cert is attached to it afterwards.
+    pub site: String,
+}
+
+/// POST /api/containers/{runtime}/{id}/certs/issue — issue via webroot
+/// inside the container, then attach the new cert to the site. The
+/// attach step is reported separately: the cert exists on disk even if
+/// the vhost rewrite fails, and the UI must not present a
+/// half-succeeded issue as a total failure.
+pub async fn container_certs_issue(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<ContainerCertIssueRequest>) -> HttpResponse {
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let target = match container_cert_target(&runtime, &container) { Ok(t) => t, Err(r) => return r };
+    let reqb = body.into_inner();
+    let result = web::block(move || {
+        // Resolve the webroot from the site's DocumentRoot — issuance is
+        // always for an already-configured website (that's the flow this
+        // page exists for).
+        let sites = crate::certbot::container::list_sites_with_ssl(&target)?;
+        let site = sites.iter().find(|s| s.name == reqb.site)
+            .ok_or_else(|| format!("site '{}' not found", reqb.site))?;
+        if site.doc_root.is_empty() {
+            return Err(format!(
+                "site '{}' has no DocumentRoot — webroot issuance needs one to serve the \
+                 ACME challenge. Add a DocumentRoot to the vhost first.", reqb.site));
+        }
+        // Fall back to the host Cert Manager's saved email so the
+        // operator doesn't retype it — same convention as host issue.
+        let email = if reqb.email.trim().is_empty() {
+            crate::certbot::CertbotConfig::load().email
+        } else {
+            reqb.email.trim().to_string()
+        };
+        let issue_out = crate::certbot::container::issue_in_container(
+            &target, &reqb.domains, &email, &site.doc_root)?;
+        // Locate the lineage certbot just created and attach it.
+        let attach = match crate::certbot::container::find_cert_for_domain(&target, &reqb.domains[0]) {
+            Some(cert) => crate::certbot::container::attach_cert_to_site(&target, &reqb.site, &cert.name),
+            None => Err(format!(
+                "certbot reported success but no certificate for '{}' was found in {} — \
+                 attach it manually once it appears", reqb.domains[0], crate::certbot::LE_LIVE_DIR)),
+        };
+        Ok::<_, String>((issue_out, attach))
+    }).await;
+    match result {
+        Ok(Ok((issue_out, attach))) => {
+            let (attached, attach_error) = match &attach {
+                Ok(_) => (true, String::new()),
+                Err(e) => (false, e.clone()),
+            };
+            HttpResponse::Ok().json(serde_json::json!({
+                "message": "certificate issued",
+                "output": issue_out.trim(),
+                "attached": attached,
+                "attach_error": attach_error,
+            }))
+        }
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ContainerCertNameRequest {
+    pub name: String,
+}
+
+/// POST /api/containers/{runtime}/{id}/certs/renew — force-renew one
+/// cert inside the container and reload its web server.
+pub async fn container_certs_renew(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<ContainerCertNameRequest>) -> HttpResponse {
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let target = match container_cert_target(&runtime, &container) { Ok(t) => t, Err(r) => return r };
+    let name = body.name.clone();
+    match web::block(move || crate::certbot::container::renew_in_container(&target, &name)).await {
+        Ok(Ok(out)) => HttpResponse::Ok().json(serde_json::json!({"message": "certificate renewed", "output": out.trim()})),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ContainerCertAttachRequest {
+    pub site: String,
+    pub cert_name: String,
+}
+
+/// POST /api/containers/{runtime}/{id}/certs/attach — point a site's
+/// vhost at an existing cert (rewrites SSL paths or appends a :443
+/// vhost), config-tested with rollback, then reloads.
+pub async fn container_certs_attach(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<ContainerCertAttachRequest>) -> HttpResponse {
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
+    let (runtime, container) = path.into_inner();
+    let target = match container_cert_target(&runtime, &container) { Ok(t) => t, Err(r) => return r };
+    let (site, cert) = (body.site.clone(), body.cert_name.clone());
+    match web::block(move || crate::certbot::container::attach_cert_to_site(&target, &site, &cert)).await {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(serde_json::json!({"message": msg})),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
+/// DELETE /api/containers/{runtime}/{id}/certs/{name} — certbot delete
+/// inside the container (cleans live/, archive/ and the renewal conf).
+pub async fn container_certs_delete(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String, String)>) -> HttpResponse {
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
+    let (runtime, container, name) = path.into_inner();
+    let target = match container_cert_target(&runtime, &container) { Ok(t) => t, Err(r) => return r };
+    match web::block(move || crate::certbot::container::delete_in_container(&target, &name)).await {
+        Ok(Ok(out)) => HttpResponse::Ok().json(serde_json::json!({"message": "certificate deleted", "output": out.trim()})),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{}", e)})),
+    }
+}
+
 // ─── Certbot API ───
 
 #[derive(Deserialize)]
@@ -46389,6 +46556,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/containers/{runtime}/{id}/updates/check", web::post().to(container_updates_check))
         .route("/api/containers/{runtime}/{id}/updates/apply", web::post().to(container_updates_apply))
         .route("/api/containers/{runtime}/{id}/exec", web::post().to(container_exec))
+        .route("/api/containers/{runtime}/{id}/certs/overview", web::get().to(container_certs_overview))
+        .route("/api/containers/{runtime}/{id}/certs/install-certbot", web::post().to(container_certs_install_certbot))
+        .route("/api/containers/{runtime}/{id}/certs/issue", web::post().to(container_certs_issue))
+        .route("/api/containers/{runtime}/{id}/certs/renew", web::post().to(container_certs_renew))
+        .route("/api/containers/{runtime}/{id}/certs/attach", web::post().to(container_certs_attach))
+        .route("/api/containers/{runtime}/{id}/certs/{name}", web::delete().to(container_certs_delete))
         // Image Watcher (auth required)
         .route("/api/image-watcher/config", web::get().to(image_watcher_config_get))
         .route("/api/image-watcher/config", web::put().to(image_watcher_config_save))

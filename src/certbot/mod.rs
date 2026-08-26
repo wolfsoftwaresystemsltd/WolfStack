@@ -17,6 +17,7 @@
 //! Renewal is handled by a daily tokio task (`certbot renew --quiet`)
 //! with a `--deploy-hook` that reloads WolfProxy on success.
 
+pub mod container;
 pub mod replication;
 
 use serde::{Deserialize, Serialize};
