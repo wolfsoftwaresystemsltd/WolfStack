@@ -2620,6 +2620,148 @@ fn try_lxc_snapshot(lxc_base: &str, name: &str) -> Result<Option<SnapshotGuard>,
     Ok(Some(guard))
 }
 
+// ─── Freezer recovery ───
+//
+// Snapshot backups DO NOT freeze containers any more.
+//
+// 2026-08-26, container `legolas` on wolfstack-3: the backup path used to run
+// `lxc-freeze` around the snapshot instant. On cgroup2 the freezer can sit in
+// FREEZING forever when a task cannot be frozen — the classic case is a
+// container running its own FUSE mount (rclone here): the mount's client
+// tasks can't freeze until the FUSE daemon answers, and the daemon is being
+// frozen with them. `lxc-freeze` waits for FROZEN with no timeout, so the
+// backup thread blocked at `.output()` for 70+ minutes with the container
+// paused, the unfreeze after it never ran, and the service restart left both
+// the frozen container and the hung `lxc-freeze` client behind (systemd's
+// KillMode keeps unit children alive across a restart).
+//
+// The freeze only ever bought write-quiesce for the snapshot instant. A ZFS/
+// btrfs snapshot is atomic and point-in-time WITHOUT it — hot, it is crash-
+// consistent, which is exactly the guarantee the hot-tar fallback below has
+// always accepted. A container staying online outranks quiesced writes, so
+// the freeze is gone entirely; what remains here is recovery machinery that
+// thaws containers an OLDER binary (or anything else) left stuck frozen with
+// a hung lxc-freeze client attached.
+
+/// Bound on lxc-unfreeze/lxc-info during recovery — the cgroup files
+/// involved have already proved capable of wedging a caller forever.
+const LXC_THAW_TIMEOUT_SECS: u64 = 30;
+
+/// Run a short command, killing it if it exceeds `timeout_secs`.
+/// Ok(Some(output)) = it finished; Ok(None) = it hung and was killed.
+fn run_bounded(mut cmd: Command, timeout_secs: u64) -> Result<Option<std::process::Output>, String> {
+    use std::process::Stdio;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {}", e))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait().map_err(|e| format!("wait: {}", e))? {
+            // try_wait() has already reaped the status; wait_with_output()
+            // returns that stored status and drains the pipes.
+            Some(_) => return Ok(Some(child.wait_with_output().map_err(|e| format!("wait: {}", e))?)),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait(); // reap — no zombie
+                return Ok(None);
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
+/// Container state word from `lxc-info -s` (RUNNING / FROZEN / FREEZING /
+/// STOPPED / ...), or empty when lxc-info itself fails.
+fn lxc_state(name: &str) -> String {
+    Command::new("lxc-info")
+        .args(["-n", name, "-s"])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .last()
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// Thaw a container and VERIFY it actually came back — a failed thaw must
+/// never be invisible. Bounded (paranoia: it touches the same cgroup files
+/// that just proved capable of wedging).
+fn thaw_lxc(name: &str) -> bool {
+    for attempt in 1..=2 {
+        let mut cmd = Command::new("lxc-unfreeze");
+        cmd.args(["-n", name]);
+        match run_bounded(cmd, LXC_THAW_TIMEOUT_SECS) {
+            Ok(Some(_)) => {}
+            Ok(None) => warn!("thaw {}: lxc-unfreeze hung and was killed (attempt {})", name, attempt),
+            Err(e) => warn!("thaw {}: lxc-unfreeze failed to run: {} (attempt {})", name, e, attempt),
+        }
+        match lxc_state(name).as_str() {
+            "FROZEN" | "FREEZING" => {} // not thawed yet — retry
+            _ => return true,           // RUNNING (or stopped/gone — nothing frozen)
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    error!("thaw {}: container is STILL FROZEN after lxc-unfreeze — manual `lxc-unfreeze -n {}` needed", name, name);
+    false
+}
+
+/// Containers with a hung `lxc-freeze -n <name>` client currently attached.
+/// argv is matched exactly (basename `lxc-freeze`, then `-n <name>`) — the
+/// invocation the old backup path used. `lxc-freeze` exits the moment a
+/// freeze SUCCEEDS, so a lingering client means the freezer is stuck in
+/// FREEZING — a deliberate operator freeze never looks like this.
+fn stray_lxc_freeze_clients() -> Vec<(u32, String)> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else { return found };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(raw) = fs::read(format!("/proc/{}/cmdline", pid)) else { continue };
+        let argv: Vec<&str> = raw.split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| std::str::from_utf8(s).ok())
+            .collect();
+        if let Some(name) = lxc_freeze_target(&argv) {
+            found.push((pid, name.to_string()));
+        }
+    }
+    found
+}
+
+/// The container a process's argv is freezing, if the process is an
+/// `lxc-freeze -n <name>` invocation (binary may appear as a full path).
+fn lxc_freeze_target<'a>(argv: &[&'a str]) -> Option<&'a str> {
+    if argv.len() == 3
+        && Path::new(argv[0]).file_name().map(|f| f == "lxc-freeze").unwrap_or(false)
+        && argv[1] == "-n"
+    {
+        Some(argv[2])
+    } else {
+        None
+    }
+}
+
+/// Recover containers stuck frozen by a hung `lxc-freeze`: kill the stray
+/// client, thaw the container, verify. Covers state left behind by a
+/// pre-v25.20.x binary across an upgrade (the hung client and the frozen
+/// container both survive a service restart) — and acts as a backstop
+/// should anything ever freeze-and-die again. Runs at boot and hourly.
+pub fn sweep_frozen_orphans() {
+    for (pid, name) in stray_lxc_freeze_clients() {
+        warn!("freeze sweep: killing hung lxc-freeze client (pid {}) for container {}", pid, name);
+        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+        match lxc_state(&name).as_str() {
+            "FROZEN" | "FREEZING" => {
+                warn!("freeze sweep: container {} left frozen by a dead backup — thawing", name);
+                thaw_lxc(&name);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn backup_lxc(name: &str, exclude_mounts: &[String], stop_for_backup: bool) -> Result<(PathBuf, u64), String> {
 
     let staging = ensure_staging_dir()?;
@@ -2676,17 +2818,17 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String], stop_for_backup: bool) 
     }
 
     // Preferred: a point-in-time filesystem snapshot (ZFS/btrfs) —
-    // consistent AND fast. A running container is frozen only for the
-    // snapshot instant (not the whole tar); a stopped-for-backup container
-    // is restarted the moment the snapshot exists, shrinking downtime from
-    // the whole tar duration to seconds. No snapshot support → tar the
-    // live tree directly (crash-consistent hot tar, or the full cold tar
-    // when the operator opted into stop_for_backup).
-    let mut froze = false;
-    if running && !stopped_for_backup {
-        froze = Command::new("lxc-freeze").args(["-n", name]).output()
-            .map(|o| o.status.success()).unwrap_or(false);
-    }
+    // atomic AND fast, taken HOT with no freeze: the container is never
+    // paused, and the snapshot is crash-consistent (the same guarantee as
+    // the hot-tar fallback). The path used to `lxc-freeze` around the
+    // snapshot instant for write-quiesce; that deadlocked the cgroup2
+    // freezer on a container with an internal FUSE mount and left it
+    // paused for hours (legolas, 2026-08-26) — see the freezer-recovery
+    // block above. A stopped-for-backup container is restarted the moment
+    // the snapshot exists, shrinking downtime from the whole tar duration
+    // to seconds. No snapshot support → tar the live tree directly
+    // (crash-consistent hot tar, or the full cold tar when the operator
+    // opted into stop_for_backup).
     let snapshot = match try_lxc_snapshot(&lxc_base, name) {
         Ok(s) => s,
         Err(e) => {
@@ -2694,9 +2836,6 @@ pub fn backup_lxc(name: &str, exclude_mounts: &[String], stop_for_backup: bool) 
             None
         }
     };
-    if froze {
-        let _ = Command::new("lxc-unfreeze").args(["-n", name]).output();
-    }
     if stopped_for_backup && snapshot.is_some() {
         // Snapshot secured — the container doesn't need to stay down
         // while we tar; bring it back now.
@@ -10931,6 +11070,22 @@ mod schedule_day_tests {
             day_of_month: None,
             stop_containers: false,
         }
+    }
+
+    #[test]
+    fn lxc_freeze_target_matches_only_the_exact_freeze_invocation() {
+        // The invocation the pre-v25.20.x backup path spawned, both as the
+        // bare name and the PATH-resolved binary.
+        assert_eq!(lxc_freeze_target(&["lxc-freeze", "-n", "legolas"]), Some("legolas"));
+        assert_eq!(lxc_freeze_target(&["/usr/bin/lxc-freeze", "-n", "legolas"]), Some("legolas"));
+        // Anything else — different tool, extra flags, missing name — is
+        // NOT ours to kill.
+        assert_eq!(lxc_freeze_target(&["lxc-unfreeze", "-n", "legolas"]), None);
+        assert_eq!(lxc_freeze_target(&["lxc-freeze", "-n"]), None);
+        assert_eq!(lxc_freeze_target(&["lxc-freeze", "--name=legolas"]), None);
+        assert_eq!(lxc_freeze_target(&["lxc-freeze", "-n", "legolas", "-q"]), None);
+        assert_eq!(lxc_freeze_target(&["grep", "-n", "lxc-freeze"]), None);
+        assert_eq!(lxc_freeze_target(&[]), None);
     }
 
     #[test]

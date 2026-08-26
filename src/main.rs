@@ -3055,10 +3055,21 @@ async fn main() -> std::io::Result<()> {
         // touches entries older than a day that no running backup owns, so it
         // is safe to run alongside an in-flight job.
         tokio::spawn(async move {
+            // Containers stuck frozen under a hung lxc-freeze (left by a
+            // pre-v25.20.x backup across an upgrade, or anything else) are
+            // thawed IMMEDIATELY at boot — a frozen container is a live
+            // outage (legolas, 2026-08-26), unlike stale staging files
+            // which can wait the 120s below.
+            if let Err(e) = tokio::task::spawn_blocking(backup::sweep_frozen_orphans).await {
+                tracing::error!("backup::sweep_frozen_orphans panicked: {}", e);
+            }
             tokio::time::sleep(Duration::from_secs(120)).await;
             loop {
                 if let Err(e) = tokio::task::spawn_blocking(backup::sweep_staging_orphans).await {
                     tracing::error!("backup::sweep_staging_orphans panicked: {}", e);
+                }
+                if let Err(e) = tokio::task::spawn_blocking(backup::sweep_frozen_orphans).await {
+                    tracing::error!("backup::sweep_frozen_orphans panicked: {}", e);
                 }
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             }
