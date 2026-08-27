@@ -16,6 +16,12 @@
 //! and the cluster-secret store. **This is obfuscation, not encryption.**
 //! The real defence is filesystem permissions on `/etc/wolfstack/`.
 //!
+//! Once a provider has issued a real certificate its credentials also
+//! live as a plain 0600 INI at `/etc/wolfstack/dns-creds/<id>.ini`
+//! (see `PERSIST_CREDS_DIR`) because certbot re-reads that exact path
+//! on every renewal. That is the same trust class as the private keys
+//! in `/etc/letsencrypt/` and is kept in sync by `save()`.
+//!
 //! Plugin names are whitelisted: certbot maps `--<plugin>` to argv flags
 //! and we never want an operator string to influence the certbot command
 //! line.
@@ -25,7 +31,20 @@ use std::path::Path;
 use std::sync::Mutex;
 
 const STORE_PATH: &str = "/etc/wolfstack/dns-providers.json";
+/// Throwaway credentials files — used for dry-runs and for the edge
+/// reconcilers that only need to READ the INI. Unlinked on drop.
 const TMP_CREDS_DIR: &str = "/run/wolfstack/dns-creds";
+/// Persistent credentials files — one per provider that has issued a
+/// real certificate. certbot stores the ABSOLUTE credentials path in
+/// `/etc/letsencrypt/renewal/<name>.conf` and re-reads it on every
+/// `certbot renew` (certbot/plugins/dns_common.py
+/// `_configure_credentials`: "Always stores absolute paths to avoid
+/// issues during renewal"), so the file handed to a real issuance must
+/// outlive the issuance. Pre-fix every provider-issued cert pointed at
+/// a `/run/wolfstack/dns-creds/` file that was unlinked seconds later,
+/// and every renewal — ours AND the distro's certbot.timer — failed
+/// with "File not found".
+pub const PERSIST_CREDS_DIR: &str = "/etc/wolfstack/dns-creds";
 /// Legacy XOR key — kept ONLY for reading pre-v24.4 stored values.
 /// New writes go through `at_rest_crypto::encrypt` (AES-256-GCM keyed
 /// off the per-install cluster secret). The audit module surfaces a
@@ -135,7 +154,75 @@ impl DnsProviderStore {
         let _guard = SAVE_LOCK.lock().map_err(|e| format!("save lock: {e}"))?;
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         crate::paths::write_secure(STORE_PATH, json)
-            .map_err(|e| format!("write {}: {}", STORE_PATH, e))
+            .map_err(|e| format!("write {}: {}", STORE_PATH, e))?;
+        // Every write path (update, remove, peer sync) lands here, so
+        // this is the one place that keeps the renewal-time files in
+        // step with the store.
+        self.reconcile_persistent_creds();
+        Ok(())
+    }
+
+    /// Stable path certbot is given for a real issuance — and therefore
+    /// the path it records in the lineage's renewal config. Keyed on the
+    /// provider id alone (no random suffix) so the path survives
+    /// restarts, reissues and credential rotations.
+    pub fn persistent_creds_path(id: &str) -> String {
+        format!("{}/{}.ini", PERSIST_CREDS_DIR, id)
+    }
+
+    /// Write (or refresh) the persistent 0600 credentials file for a
+    /// provider and return its path. Called before every real
+    /// (non-dry-run) issuance so a rotated token reaches the file that
+    /// renewals read.
+    pub fn persist_for_renewal(&self, id: &str) -> Result<String, String> {
+        let p = self.get(id).ok_or_else(|| format!("provider '{}' not found", id))?;
+        let ini = deobfuscate(&p.credentials_enc);
+        if ini.is_empty() {
+            return Err(format!("provider '{}' has empty credentials", id));
+        }
+        std::fs::create_dir_all(PERSIST_CREDS_DIR)
+            .map_err(|e| format!("create {}: {}", PERSIST_CREDS_DIR, e))?;
+        let _ = set_mode(Path::new(PERSIST_CREDS_DIR), 0o700);
+        let file = Self::persistent_creds_path(id);
+        crate::paths::write_secure(&file, ini.as_bytes())
+            .map_err(|e| format!("write {}: {}", file, e))?;
+        Ok(file)
+    }
+
+    /// Bring `PERSIST_CREDS_DIR` in line with the store: a file whose
+    /// provider was removed is deleted (its renewal config will then
+    /// fail loudly, which is correct — the operator deleted the
+    /// credentials); a file whose provider still exists is rewritten
+    /// when the stored credentials changed. Files are only ever
+    /// CREATED by `persist_for_renewal`, so a provider that never
+    /// issued a real cert never touches disk in plaintext.
+    fn reconcile_persistent_creds(&self) {
+        let entries = match std::fs::read_dir(PERSIST_CREDS_DIR) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let id = match path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".ini")) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            match self.get(&id) {
+                None => {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        log::warn!("dns-providers: remove stale {}: {}", path.display(), e);
+                    }
+                }
+                Some(p) => {
+                    let ini = deobfuscate(&p.credentials_enc);
+                    let current = std::fs::read_to_string(&path).unwrap_or_default();
+                    if !ini.is_empty() && current != ini
+                        && let Err(e) = crate::paths::write_secure(&Self::persistent_creds_path(&id), ini.as_bytes()) {
+                            log::warn!("dns-providers: refresh {}: {}", path.display(), e);
+                        }
+                }
+            }
+        }
     }
 
     pub fn list_redacted(&self) -> Vec<DnsProviderRedacted> {

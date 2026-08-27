@@ -56,7 +56,7 @@ const REPLICA_STATE_PATH: &str = "/etc/wolfstack/cert-replicas.json";
 /// certbot's renewal configs. Presence of `<name>.conf` is what makes a
 /// cert locally OWNED — the single fact that stops us overwriting a
 /// peer's own certbot-managed lineage with a replica.
-const LE_RENEWAL_DIR: &str = "/etc/letsencrypt/renewal";
+pub(super) const LE_RENEWAL_DIR: &str = "/etc/letsencrypt/renewal";
 
 /// The four PEMs certbot puts in a lineage directory. `cert.pem` is
 /// required by `list_certs` (it skips any directory without one), so a
