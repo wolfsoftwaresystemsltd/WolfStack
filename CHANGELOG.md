@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.21.1: a failed certbot.service now tells you why when you click Repair** _(2026-08-27 — [`48fddba4`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/48fddba4ba3d5336f360ca2e180d6f657617af22))_
 - **v25.21.0: LXC containers get a Certificates page — certbot for the web server inside the container** _(2026-08-26 — [`0845cd3e`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/0845cd3e79ca144152b76ced9b8cd3ba1f354fd7))_
 - **v25.20.1: an LXC backup can no longer leave the container frozen** _(2026-08-26 — [`77e10d29`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/77e10d294dff0d6baaa920211e8cdcf2bbcff9ae))_
 - **v25.20.0: backup retention actually prunes a PBS datastore, and a failing backup finally tells you** _(2026-08-25 — [`05a980d6`](https://github.com/wolfsoftwaresystemsltd/WolfStack/commit/05a980d6281e96b1d0908b162d20ad7d03c5aa66))_
