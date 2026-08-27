@@ -667,12 +667,18 @@ pub fn issue(
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Issue a cert using DNS-01 via a stored DNS provider. The provider
-/// credentials are materialised to a 0600 INI file under
-/// `/run/wolfstack/dns-creds/` for the duration of the certbot run, then
-/// unlinked via the `MaterializedCreds` Drop impl — even on error or
-/// panic. This is the wildcard-friendly path; pass `*.zone.tld` in
-/// `domains` and certbot does the rest.
+/// Issue a cert using DNS-01 via a stored DNS provider. This is the
+/// wildcard-friendly path; pass `*.zone.tld` in `domains` and certbot
+/// does the rest.
+///
+/// Credentials file lifetime depends on the mode:
+/// * **real issuance** — a persistent 0600 INI at
+///   `/etc/wolfstack/dns-creds/<provider-id>.ini`. certbot writes that
+///   absolute path into the lineage's renewal config and re-reads it on
+///   every `certbot renew`, so it must still exist months later.
+/// * **dry-run** — a throwaway file under `/run/wolfstack/dns-creds/`
+///   unlinked via the `MaterializedCreds` Drop impl, even on error or
+///   panic. A dry-run creates no lineage, so nothing refers to it after.
 ///
 /// `dry_run = true` hits Let's Encrypt's staging CA — used by the
 /// `/api/dns-providers/{id}/test` button so an operator can sanity-check
@@ -731,10 +737,18 @@ pub fn issue_via_provider(
         ));
     }
 
-    // Materialise creds. The guard unlinks the file when it goes out of
-    // scope — bind it to a local so the file lives for the full
-    // duration of the certbot call below.
-    let creds = store.materialize(provider_id)?;
+    // Real issuance: persistent file (renewals read it later). Dry-run:
+    // ephemeral guard — bind it to a local so the file lives for the
+    // full duration of the certbot call below and is unlinked after.
+    let mut ephemeral: Option<crate::dns_providers::MaterializedCreds> = None;
+    let creds_path = if dry_run {
+        let m = store.materialize(provider_id)?;
+        let p = m.path.clone();
+        ephemeral = Some(m);
+        p
+    } else {
+        store.persist_for_renewal(provider_id)?
+    };
 
     // Resolve certbot via certbot_path() so snap installs at /snap/bin
     // are found — systemd's default PATH doesn't include /snap/bin and
@@ -763,10 +777,12 @@ pub fn issue_via_provider(
     // (dns_providers::KNOWN_PLUGINS), so the string interpolation here
     // can't introduce a new flag.
     cmd.arg("--authenticator").arg(format!("dns-{}", provider.plugin));
-    cmd.arg(format!("--dns-{}-credentials", provider.plugin)).arg(&creds.path);
+    cmd.arg(format!("--dns-{}-credentials", provider.plugin)).arg(&creds_path);
 
     let out = cmd.output().map_err(|e| format!("spawn certbot: {e}"))?;
-    // `creds` drops here on either success or error — file is unlinked.
+    // Dry-run guard drops here on either success or error — file is
+    // unlinked. The persistent file stays for renewals.
+    drop(ephemeral);
     if !out.status.success() {
         return Err(format!(
             "certbot failed:\n{}",
@@ -850,6 +866,10 @@ pub fn renew_due() -> Result<(), String> {
         Some(p) => p,
         None => return Ok(()), // no certbot installed → silently no-op (daily task)
     };
+    // Runs 60s after every start, so an upgrade heals the lineages the
+    // old ephemeral-credentials code left unrenewable before the
+    // distro's own certbot.timer next fires.
+    repair_dns_renewal_configs();
     let _ = Command::new(&certbot_bin)
         .args(["renew", "--non-interactive", "--quiet"])
         .output();
@@ -857,6 +877,124 @@ pub fn renew_due() -> Result<(), String> {
     // rotated without a per-cert deploy-hook dance.
     let _ = reload_proxy(&cfg);
     Ok(())
+}
+
+/// Rewrite any `/etc/letsencrypt/renewal/<name>.conf` whose
+/// `dns_<plugin>_credentials` still points at an ephemeral
+/// `/run/wolfstack/dns-creds/<provider-id>-<8hex>.ini` file (the
+/// pre-fix path, gone the moment issuance finished) to the persistent
+/// `/etc/wolfstack/dns-creds/<provider-id>.ini`, writing that file if
+/// needed. Certbot stores renewal params as `key = value` lines in a
+/// configobj file, and the plugin option's dest name is the flag with
+/// dashes turned to underscores — so the line for `--dns-cloudflare-
+/// credentials` reads `dns_cloudflare_credentials = /path`.
+///
+/// Returns the lineage names repaired. A conf whose provider no longer
+/// exists in the store is left alone and logged — there is nothing to
+/// point it at, and a loud renewal failure is the right outcome.
+pub fn repair_dns_renewal_configs() -> Vec<String> {
+    let mut repaired = Vec::new();
+    let entries = match std::fs::read_dir(replication::LE_RENEWAL_DIR) {
+        Ok(e) => e,
+        Err(_) => return repaired,
+    };
+    let store = crate::dns_providers::DnsProviderStore::load();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(lineage) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".conf")) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let mut changed = false;
+        let mut out = String::with_capacity(text.len());
+        for line in text.lines() {
+            let mut replaced = None;
+            if let Some((key, provider_id)) = stale_ephemeral_creds_line(line) {
+                if store.get(provider_id).is_some() {
+                    match store.persist_for_renewal(provider_id) {
+                        Ok(persistent) => {
+                            replaced = Some(format!("{} = {}", key, persistent));
+                        }
+                        Err(e) => log::warn!(
+                            "certbot: lineage '{}' credentials for provider '{}' could not be persisted: {}",
+                            lineage, provider_id, e
+                        ),
+                    }
+                } else {
+                    log::warn!(
+                        "certbot: lineage '{}' renews via DNS provider '{}' which no longer exists — \
+                         its renewals will fail until it is reissued from Certificates",
+                        lineage, provider_id
+                    );
+                }
+            }
+            match replaced {
+                Some(l) => { out.push_str(&l); changed = true; }
+                None => out.push_str(line),
+            }
+            out.push('\n');
+        }
+        if changed {
+            match std::fs::write(&path, out) {
+                Ok(()) => {
+                    log::info!("certbot: repaired renewal config for '{}' — DNS credentials now persistent", lineage);
+                    repaired.push(lineage.to_string());
+                }
+                Err(e) => log::warn!("certbot: write {}: {}", path.display(), e),
+            }
+        }
+    }
+    repaired
+}
+
+/// If `line` is a renewal-config `dns_<plugin>_credentials = <path>`
+/// entry whose path is a pre-fix ephemeral file, return the trimmed key
+/// and the provider id embedded in the filename. The filename is
+/// `<provider-id>-<8hex>.ini` and the provider id is itself
+/// `dns-<8hex>`, so the id is everything before the LAST dash.
+fn stale_ephemeral_creds_line(line: &str) -> Option<(&str, &str)> {
+    let (key, val) = line.split_once('=')?;
+    let key = key.trim();
+    if !(key.starts_with("dns_") && key.ends_with("_credentials")) {
+        return None;
+    }
+    let stem = val.trim()
+        .strip_prefix("/run/wolfstack/dns-creds/")?
+        .strip_suffix(".ini")?;
+    let (provider_id, _rand) = stem.rsplit_once('-')?;
+    Some((key, provider_id))
+}
+
+#[cfg(test)]
+mod renewal_repair_tests {
+    use super::stale_ephemeral_creds_line;
+
+    #[test]
+    fn matches_the_reported_line() {
+        // Exact shape from the 2026-08-27 field report (mm4.org).
+        let line = "dns_cloudflare_credentials = /run/wolfstack/dns-creds/dns-33e10d73-0cf8844e.ini";
+        assert_eq!(stale_ephemeral_creds_line(line), Some(("dns_cloudflare_credentials", "dns-33e10d73")));
+    }
+
+    #[test]
+    fn community_plugin_and_no_spaces() {
+        let line = "dns_porkbun_credentials=/run/wolfstack/dns-creds/dns-0a1b2c3d-deadbeef.ini";
+        assert_eq!(stale_ephemeral_creds_line(line), Some(("dns_porkbun_credentials", "dns-0a1b2c3d")));
+    }
+
+    #[test]
+    fn leaves_everything_else_alone() {
+        for line in [
+            "dns_cloudflare_credentials = /etc/wolfstack/dns-creds/dns-33e10d73.ini",
+            "dns_cloudflare_credentials = /root/cf.ini",
+            "authenticator = dns-cloudflare",
+            "server = https://acme-v02.api.letsencrypt.org/directory",
+            "[renewalparams]",
+            "",
+        ] {
+            assert_eq!(stale_ephemeral_creds_line(line), None, "{line}");
+        }
+    }
 }
 
 /// Location of the generated WolfProxy snippet that serves the ACME
