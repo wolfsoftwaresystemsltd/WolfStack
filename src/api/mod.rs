@@ -34268,13 +34268,44 @@ fn run_repair(kind: &str, target: &str) -> Result<serde_json::Value, String> {
                     )
                 }
                 "certbot" => {
-                    // Guard the renew like the apt/dnf branches — a snap-only
-                    // or binary-less host must not silently report a blank
-                    // renew step; say so plainly and still clear+restart.
-                    let renew_note = if command_exists("certbot") {
-                        run_shell("certbot renew --quiet 2>&1").unwrap_or_default().trim().to_string()
-                    } else {
-                        "certbot binary not on PATH — skipped renew (snap-only host? run `certbot renew` manually).".to_string()
+                    // Resolve certbot through the same probe the certbot
+                    // module uses. A bare `which` runs under systemd's PATH,
+                    // which carries neither /snap/bin nor pipx/venv installs,
+                    // so a snap host reported "not on PATH" and skipped the
+                    // renew even though certbot was right there.
+                    //
+                    // No --quiet: this run exists to TELL the operator why the
+                    // unit failed, and the distro's own certbot.service already
+                    // runs `certbot -q renew`, whose silence is what sent them
+                    // here. stdout and stderr are both kept, on success and on
+                    // failure alike — the previous `run_shell(..).unwrap_or_default()`
+                    // threw the output away on a non-zero exit, blanking the
+                    // panel in exactly the case worth reading.
+                    let renew_note = match crate::certbot::certbot_path() {
+                        Some(bin) => match std::process::Command::new(&bin)
+                            .args(["renew", "--non-interactive"])
+                            .output()
+                        {
+                            Ok(out) => {
+                                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                                text.push_str(&String::from_utf8_lossy(&out.stderr));
+                                let text = text.trim().to_string();
+                                match (out.status.success(), text.is_empty()) {
+                                    (true, true) => "certbot renew: no certificates were due for renewal.".to_string(),
+                                    (true, false) => text,
+                                    (false, true) => format!(
+                                        "certbot renew failed ({}) with no output — see /var/log/letsencrypt/letsencrypt.log.",
+                                        out.status,
+                                    ),
+                                    (false, false) => format!(
+                                        "certbot renew failed ({}):\n{}\n\nFull detail: /var/log/letsencrypt/letsencrypt.log",
+                                        out.status, text,
+                                    ),
+                                }
+                            }
+                            Err(e) => format!("could not run {}: {}", bin, e),
+                        },
+                        None => crate::certbot::missing_certbot_error(),
                     };
                     let _ = systemctl(&["reset-failed", target]);
                     let (_ok, restart_log) = systemctl(&["restart", target]);
