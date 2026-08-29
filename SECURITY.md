@@ -74,3 +74,13 @@ Some deployment choices materially change your exposure:
 - Set `WOLFSTACK_REJECT_DEFAULT_SECRET=1` to refuse the built-in default
   outright, including between recorded peers, once your whole cluster
   has rotated.
+- **The cluster secret is a cluster-wide credential — guard it like root.**
+  Every node holds the same symmetric secret, so a peer that has it can
+  do what any peer can do. Since 25.9.3 (extended in the release after
+  25.21.2 to the whole exec/console/file surface) a *bare* secret cannot
+  open a shell or touch files: those endpoints demand an operator
+  attribution that only a forwarding node adds. That is containment for
+  accidents and for the published default, not cryptographic proof of
+  identity — a secret-holder who forges the attribution headers is still
+  a peer. Treat a leaked cluster secret as a full-cluster compromise:
+  rotate it immediately from a trusted node.

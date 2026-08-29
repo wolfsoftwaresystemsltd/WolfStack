@@ -20,6 +20,10 @@ async fn ws_post(path: &str, body: &serde_json::Value) -> Result<serde_json::Val
     for url in crate::wolfhost::api::servers::wolfstack_urls(path) {
         match client.post(&url)
             .header("X-WolfStack-Secret", &secret)
+            // Local loopback call on behalf of a portal customer; the
+            // files API is a shell-class sink and requires attribution.
+            .header("X-WolfStack-Proxied", "1")
+            .header("X-WolfStack-Actor", "wolfhost-portal")
             .json(body)
             .send().await
         {
@@ -38,6 +42,10 @@ async fn ws_get_bytes(path: &str) -> Result<Vec<u8>, String> {
     for url in crate::wolfhost::api::servers::wolfstack_urls(path) {
         match client.get(&url)
             .header("X-WolfStack-Secret", &secret)
+            // Local loopback call on behalf of a portal customer; the
+            // files API is a shell-class sink and requires attribution.
+            .header("X-WolfStack-Proxied", "1")
+            .header("X-WolfStack-Actor", "wolfhost-portal")
             .send().await
         {
             Ok(resp) if resp.status().is_success() => {

@@ -1983,6 +1983,11 @@ pub async fn execute_workflow(
     state: &Arc<WolfFlowState>,
     cluster: &Arc<ClusterState>,
     cluster_secret: &str,
+    // Who this run acts for — the operator who pressed Run, or a fixed
+    // "wolfflow-scheduler" / "wolfagent" label for unattended triggers.
+    // Sent to peer nodes as `X-WolfStack-Actor` so their exec endpoints
+    // (`require_operator_auth`) accept the step; must never be "cluster-node".
+    actor: &str,
     workflow: &Workflow,
     trigger: &str,
     ai_config: Option<crate::ai::AiConfig>,
@@ -2123,6 +2128,7 @@ pub async fn execute_workflow(
                     let node_port = *node_port;
                     let is_self = *is_self;
                     let secret = cluster_secret.to_string();
+                    let actor = actor.to_string();
                     let client = http_client.clone();
 
                     step_futures.push(tokio::spawn(async move {
@@ -2132,7 +2138,7 @@ pub async fn execute_workflow(
                         let result = if is_self {
                             execute_action_local(&action).await
                         } else {
-                            execute_action_remote(&client, &node_address, node_port, &secret, &action).await
+                            execute_action_remote(&client, &node_address, node_port, &secret, &actor, &action).await
                         };
 
                         let elapsed = step_start.elapsed().as_millis() as u64;
@@ -2185,6 +2191,7 @@ pub async fn execute_workflow(
                         let step_name = step.name.clone();
                         let ct = ct.clone();
                         let secret = cluster_secret.to_string();
+                        let actor = actor.to_string();
                         let client = http_client.clone();
 
                         // Find the node for this container
@@ -2225,7 +2232,7 @@ pub async fn execute_workflow(
                                 execute_action_in_container(&action, &ct).await
                             } else {
                                 // Remote: call the container-exec proxy
-                                execute_container_remote(&client, &node_address, node_port, &secret, &action, &ct).await
+                                execute_container_remote(&client, &node_address, node_port, &secret, &actor, &action, &ct).await
                             };
 
                             let elapsed = step_start.elapsed().as_millis() as u64;
@@ -2267,6 +2274,7 @@ pub async fn execute_workflow(
                         let node_port = *node_port;
                         let is_self = *is_self;
                         let secret = cluster_secret.to_string();
+                        let actor = actor.to_string();
                         let client = http_client.clone();
 
                         step_futures.push(tokio::spawn(async move {
@@ -2276,7 +2284,7 @@ pub async fn execute_workflow(
                             let result = if is_self {
                                 execute_in_all_local_containers(&action).await
                             } else {
-                                execute_all_containers_remote(&client, &node_address, node_port, &secret, &action).await
+                                execute_all_containers_remote(&client, &node_address, node_port, &secret, &actor, &action).await
                             };
 
                             let elapsed = step_start.elapsed().as_millis() as u64;
@@ -2498,6 +2506,7 @@ async fn execute_container_remote(
     address: &str,
     port: u16,
     secret: &str,
+    actor: &str,
     action: &ActionType,
     ct: &ContainerTarget,
 ) -> Result<StepOutput, String> {
@@ -2516,6 +2525,9 @@ async fn execute_container_remote(
     for url in &urls {
         match client.post(url)
             .header("X-WolfStack-Secret", secret)
+            // Operator attribution demanded by the remote exec gate.
+            .header("X-WolfStack-Proxied", "1")
+            .header("X-WolfStack-Actor", actor)
             .json(&body)
             .send()
             .await
@@ -2546,6 +2558,7 @@ async fn execute_all_containers_remote(
     address: &str,
     port: u16,
     secret: &str,
+    actor: &str,
     action: &ActionType,
 ) -> Result<StepOutput, String> {
     let client = client.as_ref().ok_or_else(|| "HTTP client not available".to_string())?;
@@ -2556,6 +2569,9 @@ async fn execute_all_containers_remote(
     for url in &urls {
         match client.post(url)
             .header("X-WolfStack-Secret", secret)
+            // Operator attribution demanded by the remote exec gate.
+            .header("X-WolfStack-Proxied", "1")
+            .header("X-WolfStack-Actor", actor)
             .json(&body)
             .send()
             .await
@@ -2585,6 +2601,7 @@ async fn execute_action_remote(
     address: &str,
     port: u16,
     secret: &str,
+    actor: &str,
     action: &ActionType,
 ) -> Result<StepOutput, String> {
     let client = client.as_ref().ok_or_else(|| "HTTP client not available".to_string())?;
@@ -2597,6 +2614,9 @@ async fn execute_action_remote(
         match client
             .post(url)
             .header("X-WolfStack-Secret", secret)
+            // Operator attribution demanded by the remote exec gate.
+            .header("X-WolfStack-Proxied", "1")
+            .header("X-WolfStack-Actor", actor)
             .json(&body)
             .send()
             .await

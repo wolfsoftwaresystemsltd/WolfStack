@@ -970,7 +970,7 @@ async fn tool_run_workflow(args: &serde_json::Value, state: &crate::api::AppStat
     // `list_workflows` or use wolfstack_api against /api/wolfflow/runs.
     tokio::spawn(async move {
         crate::wolfflow::execute_workflow(
-            &wf_state, &cluster, &secret, &workflow, "agent", Some(ai_config)
+            &wf_state, &cluster, &secret, "wolfagent", &workflow, "agent", Some(ai_config)
         ).await;
     });
     ToolResult::ok(

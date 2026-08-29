@@ -17393,17 +17393,14 @@ pub async fn ai_action_exec(
     req: HttpRequest, state: web::Data<AppState>,
     body: web::Json<AiExecRequest>,
 ) -> HttpResponse {
-    // Only allow inter-node auth (X-WolfStack-Secret) — not browser sessions.
-    // Centralised three-way check (in-memory, on-disk, optional default).
-    // Pre-fix this endpoint accepted in-memory + default only, missing the
-    // on-disk path that covers the rotation transition window AND missing
-    // the Stage 5 env-flag gate on default acceptance.
-    let secret_header = req.headers().get("X-WolfStack-Secret")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !crate::auth::validate_inter_node_secret_from(secret_header, &state.cluster_secret, peer_ip(&req)) {
-        return HttpResponse::Forbidden().json(serde_json::json!({"error": "Cluster auth required"}));
-    }
+    // This runs `bash -c` on the host, so it is a shell sink and takes the
+    // shell gate: a bare cluster secret is refused, the built-in default is
+    // refused outright, and a peer must carry the operator attribution
+    // (`X-WolfStack-Proxied` + `X-WolfStack-Actor`) that the approving
+    // node's `ai::approve_action` now stamps. Pre-fix this accepted any valid
+    // cluster secret — the `/api/ai/action/exec` row of the 2026-08-29
+    // report by @baeseungwon1010 (incomplete fix for GHSA-r3mw-2wmq-j6jg).
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
 
     match crate::ai::execute_action_command(&body.command) {
         Ok(output) => HttpResponse::Ok().json(serde_json::json!({ "output": output })),
@@ -26725,7 +26722,7 @@ pub async fn files_browse(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
 
     let canonical = match sanitize_file_path(&path) {
@@ -26810,7 +26807,7 @@ pub async fn files_mkdir(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
@@ -26843,7 +26840,7 @@ pub async fn files_delete(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
@@ -26888,7 +26885,7 @@ pub async fn files_rename(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
     let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
     if from.is_empty() || to.is_empty() {
@@ -26927,7 +26924,7 @@ pub async fn files_upload(
     query: web::Query<std::collections::HashMap<String, String>>,
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let dir = query.get("path").cloned().unwrap_or_else(|| "/tmp".into());
 
     let canonical_dir = match sanitize_file_path(&dir) {
@@ -26995,7 +26992,7 @@ pub async fn files_download(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let path = query.get("path").cloned().unwrap_or_default();
     if path.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" }));
@@ -27053,7 +27050,7 @@ pub async fn files_search(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let search_path = query.get("path").cloned().unwrap_or_else(|| "/".into());
     let search_query = query.get("query").cloned().unwrap_or_default();
 
@@ -27139,7 +27136,7 @@ pub async fn files_chmod(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("");
     let paths: Vec<String> = body.get("paths")
         .and_then(|v| v.as_array())
@@ -27186,7 +27183,7 @@ pub async fn files_read(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let path = match query.get("path") {
         Some(p) => p.clone(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
@@ -27224,7 +27221,7 @@ pub async fn files_write(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'path'" })),
@@ -27259,7 +27256,7 @@ pub async fn files_docker_browse(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = query.get("container").cloned().unwrap_or_default();
     let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
 
@@ -27340,7 +27337,7 @@ pub async fn files_docker_mkdir(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if container.is_empty() || path.is_empty() {
@@ -27364,7 +27361,7 @@ pub async fn files_docker_delete(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if container.is_empty() || path.is_empty() {
@@ -27393,7 +27390,7 @@ pub async fn files_docker_rename(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
     let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
     let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
@@ -27418,7 +27415,7 @@ pub async fn files_docker_download(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = query.get("container").cloned().unwrap_or_default();
     let path = query.get("path").cloned().unwrap_or_default();
     if container.is_empty() || path.is_empty() {
@@ -27519,7 +27516,7 @@ pub async fn files_docker_upload(
     query: web::Query<std::collections::HashMap<String, String>>,
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = query.get("container").cloned().unwrap_or_default();
     let dir = query.get("path").cloned().unwrap_or_else(|| "/tmp".into());
     if container.is_empty() {
@@ -27610,7 +27607,7 @@ pub async fn files_docker_read(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = match query.get("container") {
         Some(c) => c.clone(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
@@ -27638,7 +27635,7 @@ pub async fn files_docker_write(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = match body.get("container").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
@@ -27695,7 +27692,7 @@ pub async fn files_lxc_browse(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = query.get("container").cloned().unwrap_or_default();
     let path = query.get("path").cloned().unwrap_or_else(|| "/".into());
 
@@ -27785,7 +27782,7 @@ pub async fn files_lxc_mkdir(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if container.is_empty() || path.is_empty() {
@@ -27807,7 +27804,7 @@ pub async fn files_lxc_delete(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if container.is_empty() || path.is_empty() {
@@ -27834,7 +27831,7 @@ pub async fn files_lxc_rename(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = body.get("container").and_then(|v| v.as_str()).unwrap_or("");
     let from = body.get("from").and_then(|v| v.as_str()).unwrap_or("");
     let to = body.get("to").and_then(|v| v.as_str()).unwrap_or("");
@@ -27857,7 +27854,7 @@ pub async fn files_lxc_download(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = query.get("container").cloned().unwrap_or_default();
     let path = query.get("path").cloned().unwrap_or_default();
     if container.is_empty() || path.is_empty() {
@@ -27906,7 +27903,7 @@ pub async fn files_lxc_upload(
     query: web::Query<std::collections::HashMap<String, String>>,
     mut payload: actix_multipart::Multipart,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = query.get("container").cloned().unwrap_or_default();
     let dir = query.get("path").cloned().unwrap_or_else(|| "/tmp".into());
     if container.is_empty() {
@@ -28014,7 +28011,7 @@ pub async fn files_lxc_read(
     state: web::Data<AppState>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = match query.get("container") {
         Some(c) => c.clone(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
@@ -28042,7 +28039,7 @@ pub async fn files_lxc_write(
     state: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
-    if let Err(e) = require_auth(&req, &state) { return e; }
+    if let Err(e) = require_operator_auth(&req, &state) { return e; }
     let container = match body.get("container").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
         None => return HttpResponse::BadRequest().json(serde_json::json!({ "error": "Missing 'container'" })),
@@ -28902,7 +28899,12 @@ pub async fn wolfflow_delete(req: HttpRequest, state: web::Data<AppState>, path:
 
 /// POST /api/wolfflow/workflows/{id}/run — manually trigger a workflow
 pub async fn wolfflow_trigger(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    // The trigger is not itself a shell sink, but its steps may run
+    // commands on peer nodes, whose exec endpoints demand an operator
+    // attribution — so it takes the operator gate: a real session/API key,
+    // or a node_proxy-forwarded operator ("name (via peer)"). A bare-secret
+    // peer cannot launder a run through here.
+    let actor = match require_operator_auth(&req, &state) { Ok(a) => a, Err(resp) => return resp };
     let id = path.into_inner();
     let workflow = match state.wolfflow.get_workflow(&id) {
         Some(wf) => wf,
@@ -28913,7 +28915,7 @@ pub async fn wolfflow_trigger(req: HttpRequest, state: web::Data<AppState>, path
     let secret = state.cluster_secret.clone();
     let ai_config = state.ai_agent.config.lock().unwrap().clone();
     tokio::spawn(async move {
-        crate::wolfflow::execute_workflow(&wf_state, &cluster, &secret, &workflow, "manual", Some(ai_config)).await;
+        crate::wolfflow::execute_workflow(&wf_state, &cluster, &secret, &actor, &workflow, "manual", Some(ai_config)).await;
     });
     HttpResponse::Ok().json(serde_json::json!({ "ok": true, "message": "Workflow triggered" }))
 }
@@ -29063,7 +29065,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
 
 /// POST /api/wolfflow/exec — execute a single action (used by remote execution)
 pub async fn wolfflow_exec(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
     match serde_json::from_value::<crate::wolfflow::ActionType>(body.into_inner()) {
         Ok(action) => {
             match crate::wolfflow::execute_action_local(&action).await {
@@ -29077,7 +29079,7 @@ pub async fn wolfflow_exec(req: HttpRequest, state: web::Data<AppState>, body: w
 
 /// POST /api/wolfflow/container-exec — execute an action inside a specific container (cluster proxy)
 pub async fn wolfflow_container_exec(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
     let data = body.into_inner();
     let action_val = data.get("action").cloned().unwrap_or(serde_json::Value::Null);
     let ct_val = data.get("container").cloned().unwrap_or(serde_json::Value::Null);
@@ -29099,7 +29101,7 @@ pub async fn wolfflow_container_exec(req: HttpRequest, state: web::Data<AppState
 
 /// POST /api/wolfflow/all-containers-exec — execute an action inside all containers on this node (cluster proxy)
 pub async fn wolfflow_all_containers_exec(req: HttpRequest, state: web::Data<AppState>, body: web::Json<serde_json::Value>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
     match serde_json::from_value::<crate::wolfflow::ActionType>(body.into_inner()) {
         Ok(action) => {
             match crate::wolfflow::execute_in_all_local_containers(&action).await {
@@ -31526,7 +31528,7 @@ pub struct K8sPodExecRequest {
 }
 
 pub async fn k8s_pod_exec(req: HttpRequest, state: web::Data<AppState>, path: web::Path<(String, String)>, body: web::Json<K8sPodExecRequest>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
     let (id, name) = path.into_inner();
     let cluster = match crate::kubernetes::get_cluster(&id) {
         Some(c) => c,
