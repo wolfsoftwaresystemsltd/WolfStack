@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::collections::HashMap;
 use std::time::Duration;
+use crate::node_identity::PeerAuth;
 
 /// Which DB engine. Determines both the driver and the `sqlparser`
 /// dialect used to classify the query.
@@ -871,7 +872,7 @@ async fn execute_proxied(
     let mut last_err = String::new();
     for url in &urls {
         let resp = client.post(url)
-            .header("X-WolfStack-Secret", cluster_secret)
+            .peer_auth(cluster_secret)
             .timeout(total_timeout)
             .json(&body)
             .send().await;

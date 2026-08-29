@@ -29,6 +29,7 @@ use crate::networking::router::http_proxy::{
     ExposureSource, HttpProxy, TlsConfig, Upstream,
 };
 use crate::edge::{EdgeStrategy, ProxyTarget, TargetRuntime};
+use crate::node_identity::PeerAuth;
 
 /// Every exposure proxy id starts with this so operator-created proxies
 /// (which never carry it) are never touched by the exposure reconcile.
@@ -261,7 +262,7 @@ pub async fn resolve_upstream_cluster(
             let resp = client
                 .get(url)
                 .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .send()
                 .await;
             if let Ok(r) = resp

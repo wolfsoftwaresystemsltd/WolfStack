@@ -34,6 +34,7 @@ pub mod replication;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
+use crate::node_identity::PeerAuth;
 
 /// Marker file inside the container dir identifying an HA replica.
 pub const REPLICA_MARKER: &str = ".wolfha-replica";
@@ -1365,7 +1366,7 @@ pub async fn vm_seed_replica(
             }
         }
         match client.post(url)
-            .header("X-WolfStack-Secret", secret.to_string())
+            .peer_auth(secret)
             .timeout(std::time::Duration::from_secs(3600))
             .multipart(form)
             .send().await
@@ -1560,7 +1561,7 @@ async fn negotiate_driver(
     for url in &urls {
         if let Ok(r) = client
             .get(url)
-            .header("X-WolfStack-Secret", secret.to_string())
+            .peer_auth(secret)
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
@@ -1588,7 +1589,7 @@ async fn fetch_signatures(
     for url in &urls {
         match client
             .post(url)
-            .header("X-WolfStack-Secret", secret.to_string())
+            .peer_auth(secret)
             // Signatures mean hashing every byte of the replica's copy of
             // these files, which for tens of gigabytes is not quick.
             .timeout(std::time::Duration::from_secs(900))
@@ -1787,7 +1788,7 @@ async fn sync_one_replica_from(
     let mut last_err = String::new();
     for url in &manifest_urls {
         match client.get(url)
-            .header("X-WolfStack-Secret", secret.to_string())
+            .peer_auth(secret)
             .timeout(std::time::Duration::from_secs(120))
             .send().await
         {
@@ -1958,7 +1959,7 @@ async fn sync_one_replica_from(
             }
         }
         match client.post(url)
-            .header("X-WolfStack-Secret", secret.to_string())
+            .peer_auth(secret)
             .timeout(std::time::Duration::from_secs(1800))
             .multipart(form)
             .send().await
@@ -2361,7 +2362,7 @@ async fn sync_vm_replica_inner(
             }
         }
         match client.post(url)
-            .header("X-WolfStack-Secret", secret.to_string())
+            .peer_auth(secret)
             .timeout(std::time::Duration::from_secs(3600))
             .multipart(form)
             .send().await
@@ -2471,7 +2472,7 @@ pub async fn boot_guard() {
             );
             for url in &urls {
                 match client.get(url)
-                    .header("X-WolfStack-Secret", secret.clone())
+                    .peer_auth(secret.clone())
                     .timeout(std::time::Duration::from_secs(10))
                     .send().await
                 {
@@ -2649,7 +2650,7 @@ async fn peer_status(peer: &HaPeer, container: &str, secret: &str) -> Result<ser
     );
     for url in &urls {
         match client.get(url)
-            .header("X-WolfStack-Secret", secret.to_string())
+            .peer_auth(secret)
             .timeout(std::time::Duration::from_secs(5))
             .send().await
         {

@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{info, warn};
+use crate::node_identity::PeerAuth;
 
 pub mod runtime;
 
@@ -527,7 +528,7 @@ pub async fn broadcast_to_cluster(
         let mut sent = false;
         for url in &urls {
             match client.post(url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .json(&payload)
                 .send().await
             {
@@ -568,7 +569,7 @@ pub async fn pull_from_peers(
         let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/wolffunctions/config");
         for url in &urls {
             match client.get(url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .send().await
             {
                 Ok(resp) if resp.status().is_success() => {

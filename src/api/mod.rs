@@ -19,6 +19,7 @@ use crate::backup;
 use crate::agent::ClusterState;
 use crate::auth::SessionManager;
 use crate::appstore;
+use crate::node_identity::PeerAuth;
 
 
 pub mod pve_console;
@@ -193,6 +194,14 @@ pub fn record_node_wolfnet_ip(address: &str, wolfnet_ip: &str) {
 
 pub fn lookup_node_wolfnet_ip(address: &str) -> Option<String> {
     NODE_WOLFNET_IPS.lock().ok().and_then(|m| m.get(address).cloned())
+}
+
+/// Reverse of `lookup_node_wolfnet_ip`: the node address that owns a
+/// WolfNet IP, so a request sent over the WolfNet fallback URL can still
+/// be signed for the right destination node.
+pub fn lookup_address_by_wolfnet_ip(wolfnet_ip: &str) -> Option<String> {
+    NODE_WOLFNET_IPS.lock().ok().and_then(|m|
+        m.iter().find(|(_, v)| v.as_str() == wolfnet_ip).map(|(k, _)| k.clone()))
 }
 
 /// Build the URLs to try for an inter-node API call, in preference order:
@@ -614,6 +623,54 @@ pub fn peer_ip(req: &HttpRequest) -> Option<std::net::IpAddr> {
     req.peer_addr().map(|a| a.ip())
 }
 
+/// Second half of cluster-secret authentication: the per-node signature
+/// (`node_identity`). Runs only after the secret itself validated.
+///
+/// Returns the verified sender's id when the request was signed by a
+/// pinned key; the operator gate uses it for the manager policy.
+///
+/// * Transition mode (default): an unsigned or badly-signed request is
+///   logged and ACCEPTED — identical to pre-identity behaviour, so an
+///   older peer, a reinstalled node or an operator's own script keeps
+///   working.
+/// * Strict mode (operator opt-in): anything but a valid signature is
+///   refused, except on the join/bootstrap paths that exist to establish
+///   a key in the first place.
+pub fn peer_signature_gate(req: &HttpRequest) -> Result<Option<String>, HttpResponse> {
+    use crate::node_identity::{mode, path_exempt_from_strict, verify_request, Mode, Verified};
+    match verify_request(req) {
+        Verified::Node(id) => Ok(Some(id)),
+        Verified::Unsigned => {
+            if mode() == Mode::Strict && !path_exempt_from_strict(req.path()) {
+                tracing::warn!("node identity: refused unsigned {} {} from {:?} (signatures required)",
+                    req.method(), req.path(), peer_ip(req));
+                return Err(HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "This cluster requires node signatures: a cluster secret alone is not \
+                              accepted. Upgrade the calling node, or turn off 'Require node \
+                              signatures' in Settings → Security (WOLFSTACK_NODE_SIGNATURES=off \
+                              over SSH forces it off)."
+                })));
+            }
+            Ok(None)
+        }
+        Verified::Bad(why) => {
+            if mode() == Mode::Strict {
+                tracing::warn!("node identity: refused {} {} from {:?}: {}",
+                    req.method(), req.path(), peer_ip(req), why);
+                return Err(HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": format!("Node signature rejected: {}", why)
+                })));
+            }
+            // Transition: say so in the log, then behave as before — never
+            // break a cluster over a signature.
+            tracing::warn!("node identity: {} {} from {:?} carried a signature that did not verify ({}); \
+                            accepted on the cluster secret because signatures are not required",
+                req.method(), req.path(), peer_ip(req), why);
+            Ok(None)
+        }
+    }
+}
+
 /// Check if request is authenticated; returns username or error response
 pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<String, HttpResponse> {
     // Accept internal requests from other WolfStack nodes if they provide the cluster secret.
@@ -628,7 +685,7 @@ pub fn require_auth(req: &HttpRequest, state: &web::Data<AppState>) -> Result<St
         if crate::auth::validate_inter_node_secret_from(
             provided, &state.cluster_secret, peer_ip(req))
         {
-            return Ok("cluster-node".to_string());
+            return peer_signature_gate(req).map(|_| "cluster-node".to_string());
         }
         // Invalid secret — do NOT fall through to session auth
         return Err(HttpResponse::Forbidden().json(serde_json::json!({
@@ -746,6 +803,33 @@ pub fn require_operator_auth(
                 "error": "Invalid cluster secret"
             })));
         }
+        // Which node is forwarding? With a verified signature the manager
+        // policy applies: only nodes the operator left as managers may
+        // forward operator actions. In Strict mode a forwarded action
+        // without a verified sender is refused outright — that is the
+        // header-forgery hole of GHSA-r3mw-2wmq-j6jg revision 2 closed.
+        let signer = peer_signature_gate(req)?;
+        match signer.as_deref() {
+            Some(node_id) => {
+                let is_manager = state.cluster.get_all_nodes().into_iter()
+                    .find(|n| n.id == node_id || n.self_id.as_deref() == Some(node_id))
+                    .map(|n| n.manager)
+                    .unwrap_or(false);
+                if !is_manager {
+                    return Err(HttpResponse::Forbidden().json(serde_json::json!({
+                        "error": format!("Node {} is not permitted to forward operator actions \
+                                          (its 'manager' setting is off).", node_id)
+                    })));
+                }
+            }
+            None if crate::node_identity::mode() == crate::node_identity::Mode::Strict => {
+                return Err(HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "This endpoint requires a forwarded operator action signed by a \
+                              manager node; node signatures are required on this cluster."
+                })));
+            }
+            None => {}
+        }
         let proxied = req.headers().get("X-WolfStack-Proxied")
             .and_then(|v| v.to_str().ok()) == Some("1");
         let actor = req.headers().get("X-WolfStack-Actor")
@@ -779,7 +863,7 @@ pub fn require_cluster_auth(req: &HttpRequest, state: &web::Data<AppState>) -> R
             if crate::auth::validate_inter_node_secret_from(
                 provided, &state.cluster_secret, peer_ip(req))
             {
-                Ok(())
+                peer_signature_gate(req).map(|_| ())
             } else {
                 Err(HttpResponse::Forbidden().json(serde_json::json!({
                     "error": "Invalid cluster secret"
@@ -1028,7 +1112,7 @@ pub async fn propagate_kernel_block_to_peers(
         for url in &urls {
             let r = client.post(url)
                 .timeout(std::time::Duration::from_secs(8))
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .json(&payload)
                 .send().await;
             match r {
@@ -1530,7 +1614,7 @@ pub async fn propagate_kernel_unblock_to_peers(
         for url in &urls {
             let r = client.post(url)
                 .timeout(std::time::Duration::from_secs(8))
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .json(&payload)
                 .send().await;
             match r {
@@ -2207,7 +2291,7 @@ async fn ti_install_ipset_on_peers(state: &web::Data<AppState>, target_cluster: 
             for url in &urls {
                 match client.post(url)
                     .timeout(std::time::Duration::from_secs(90))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&body)
                     .send()
                     .await
@@ -2309,7 +2393,7 @@ async fn ti_propagate_config_to_peers(state: &web::Data<AppState>, target_cluste
             for url in &urls {
                 match client.patch(url)
                     .timeout(std::time::Duration::from_secs(30))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&payload)
                     .send()
                     .await
@@ -2795,7 +2879,7 @@ pub async fn threat_intel_cluster_status(req: HttpRequest, state: web::Data<AppS
             for url in &urls {
                 match client.get(url)
                     .timeout(std::time::Duration::from_secs(4))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .send().await
                 {
                     Ok(resp) if resp.status().is_success() => {
@@ -4172,7 +4256,83 @@ pub async fn cluster_secret_status(req: HttpRequest, state: web::Data<AppState>)
     let has_custom = active != crate::auth::default_cluster_secret();
     HttpResponse::Ok().json(serde_json::json!({
         "has_custom_secret": has_custom,
+        "node_identity": crate::node_identity::status(),
     }))
+}
+
+#[derive(Deserialize)]
+pub struct NodeSignaturesBody {
+    pub required: bool,
+}
+
+/// POST /api/cluster/node-signatures — operator opt-in to Strict mode
+/// (`{"required": true}`), or back to Transition. Refused while any peer
+/// has no pinned key, so it can never cut a node off.
+pub async fn cluster_node_signatures_set(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<NodeSignaturesBody>,
+) -> HttpResponse {
+    let caller = match require_operator_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    match crate::node_identity::set_mode(body.required) {
+        Ok(()) => {
+            tracing::warn!("node identity: '{}' set require-signatures = {}", caller, body.required);
+            HttpResponse::Ok().json(serde_json::json!({
+                "ok": true, "node_identity": crate::node_identity::status(),
+            }))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/nodes/{id}/reset-identity — forget a peer's pinned key so the
+/// next status report from it is pinned afresh (a reinstalled node).
+/// Operator-only. Local to this node's view; run it where the mismatch
+/// warning appears, or on every node for a fleet-wide reset.
+pub async fn node_reset_identity(
+    req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>,
+) -> HttpResponse {
+    let caller = match require_operator_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
+    let id = path.into_inner();
+    let found = {
+        let mut nodes = state.cluster.nodes_write();
+        match nodes.get_mut(&id) {
+            Some(n) if !n.is_self => { n.pubkey = None; true }
+            _ => false,
+        }
+    };
+    if !found {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found (or is this node)" }));
+    }
+    state.cluster.save_nodes();
+    tracing::warn!("node identity: '{}' reset the pinned key for node {}", caller, id);
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+pub struct NodePolicyBody {
+    pub node_id: String,
+    pub manager: bool,
+}
+
+/// POST /api/cluster/node-policy — a peer forwards an operator's change to
+/// a node's `manager` flag so every node applies the same policy. Operator
+/// gate: session/API key, or a manager peer forwarding one.
+pub async fn cluster_node_policy_receive(
+    req: HttpRequest, state: web::Data<AppState>, body: web::Json<NodePolicyBody>,
+) -> HttpResponse {
+    if let Err(resp) = require_operator_auth(&req, &state) { return resp; }
+    let changed = {
+        let mut nodes = state.cluster.nodes_write();
+        let mut hit = false;
+        for n in nodes.values_mut() {
+            if n.id == body.node_id || n.self_id.as_deref() == Some(body.node_id.as_str()) {
+                n.manager = body.manager;
+                hit = true;
+            }
+        }
+        hit
+    };
+    if changed { state.cluster.save_nodes(); }
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true, "applied": changed }))
 }
 
 /// POST /api/cluster/secret/generate — generate a new cluster secret and propagate to all nodes
@@ -4217,7 +4377,7 @@ pub async fn cluster_secret_generate(req: HttpRequest, state: web::Data<AppState
             // the cluster has rotated before.
             match client.post(url)
                 .timeout(std::time::Duration::from_secs(10))
-                .header("X-WolfStack-Secret", state.cluster_secret.clone())
+                .peer_auth(state.cluster_secret.clone())
                 .json(&serde_json::json!({ "secret": new_secret }))
                 .send()
                 .await
@@ -4285,7 +4445,7 @@ pub async fn cluster_secret_repush(req: HttpRequest, state: web::Data<AppState>)
             // Stage 5 fix: same as cluster_secret_generate above.
             match client.post(url)
                 .timeout(std::time::Duration::from_secs(10))
-                .header("X-WolfStack-Secret", state.cluster_secret.clone())
+                .peer_auth(state.cluster_secret.clone())
                 .json(&serde_json::json!({ "secret": active }))
                 .send()
                 .await
@@ -4380,7 +4540,7 @@ pub async fn cluster_leave(
         for url in &urls {
             match client.delete(url)
                 .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .send()
                 .await
             {
@@ -4894,7 +5054,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
         for secret in [&cluster_secret, &default_secret.to_string()] {
             if let Ok(resp) = client.get(url)
                 .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", secret)
+                .peer_auth(secret)
                 .send().await
                 && resp.status().is_success() {
                     if let Ok(data) = resp.json::<serde_json::Value>().await {
@@ -5087,7 +5247,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                     // parsing) and revert to "manual restart required".
                     if let Ok(resp) = client.post(url)
                         .timeout(std::time::Duration::from_secs(10))
-                        .header("X-WolfStack-Secret", auth_value)
+                        .peer_auth(auth_value)
                         .json(&serde_json::json!({
                             "secret": secret,
                             "bootstrap": true,
@@ -5153,7 +5313,7 @@ pub async fn add_node(req: HttpRequest, state: web::Data<AppState>, body: web::J
                     for url in &urls {
                         if let Ok(resp) = client.post(url)
                             .timeout(std::time::Duration::from_secs(10))
-                            .header("X-WolfStack-Secret", auth_value)
+                            .peer_auth(auth_value)
                             .json(&payload)
                             .send()
                             .await
@@ -5243,7 +5403,7 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
                 for url in &urls {
                     if let Ok(resp) = client.delete(url)
                         .timeout(std::time::Duration::from_secs(5))
-                        .header("X-WolfStack-Secret", &secret)
+                        .peer_auth(&secret)
                         .send()
                         .await
                     {
@@ -5259,7 +5419,7 @@ pub async fn remove_node(req: HttpRequest, state: web::Data<AppState>, path: web
                     for url in &purls {
                         if let Ok(resp) = client.delete(url)
                             .timeout(std::time::Duration::from_secs(5))
-                            .header("X-WolfStack-Secret", &secret)
+                            .peer_auth(&secret)
                             .header("Content-Type", "application/json")
                             .body(payload.clone())
                             .send()
@@ -5310,10 +5470,15 @@ pub struct UpdateNodeSettings {
     /// settings card so operators can pin migration onto a dedicated NIC.
     #[serde(default)]
     pub migration_address: Option<String>,
+    /// Whether peers accept operator actions forwarded by this node.
+    /// Applied locally and pushed to every peer (see
+    /// `cluster_node_policy_receive`).
+    #[serde(default)]
+    pub manager: Option<bool>,
 }
 
 pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, path: web::Path<String>, body: web::Json<UpdateNodeSettings>) -> HttpResponse {
-    if let Err(resp) = require_auth(&req, &state) { return resp; }
+    let caller = match require_auth(&req, &state) { Ok(u) => u, Err(resp) => return resp };
     let id = path.into_inner();
 
     // Same length cap as the inter-node `set_site` endpoint. Admins
@@ -5356,6 +5521,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         body.site.clone(),
         body.display_name.clone(),
         body.migration_address.clone(),
+        body.manager,
     ) {
         // NOTE: this PATCH edits ONE node only. Changing `cluster_name` here
         // MOVES this single node to a (possibly new) cluster — it does NOT
@@ -5395,7 +5561,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         for url in &urls {
                             if let Ok(resp) = client.post(url)
                                 .timeout(std::time::Duration::from_secs(5))
-                                .header("X-WolfStack-Secret", &secret)
+                                .peer_auth(&secret)
                                 .header("Content-Type", "application/json")
                                 .body(payload.to_string())
                                 .send()
@@ -5419,6 +5585,54 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
         // the master's in-memory view immediately (so tier fan-outs from the
         // control node see it at once), then either persist locally (self) or
         // push to the remote's /api/settings/roles. Unknown tokens are dropped.
+        let mut policy_push_failed: Vec<serde_json::Value> = Vec::new();
+        if let Some(manager) = body.manager {
+            // Policy is about the target node, enforced by every OTHER node —
+            // push it to all of them as this operator's forwarded action.
+            let target_id = state.cluster.get_node(&id)
+                .and_then(|n| n.self_id.clone().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| id.clone());
+            let peers: Vec<(String, u16, String)> = state.cluster.get_all_nodes().into_iter()
+                .filter(|n| !n.is_self && n.node_type == "wolfstack")
+                .map(|n| (n.address.clone(), n.port, n.hostname.clone()))
+                .collect();
+            // Awaited, not spawned: the operator must learn which peers did
+            // NOT take the policy. A node that was itself demoted cannot
+            // re-promote itself (its push is refused as a non-manager) — that
+            // is correct, and the operator has to hear it, not find it in a
+            // log. Change it from a manager node instead.
+            let payload = serde_json::json!({ "node_id": target_id, "manager": manager });
+            for (address, port, hostname) in peers {
+                let mut delivered = false;
+                let mut last = String::new();
+                for url in build_node_urls(&address, port, "/api/cluster/node-policy") {
+                    match API_HTTP_CLIENT.post(&url)
+                        .timeout(std::time::Duration::from_secs(5))
+                        .peer_auth(&state.cluster_secret)
+                        .header("X-WolfStack-Proxied", "1")
+                        .header("X-WolfStack-Actor", &caller)
+                        .json(&payload)
+                        .send().await
+                    {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp.text().await.unwrap_or_default();
+                            if status.is_success() { delivered = true; break; }
+                            last = serde_json::from_str::<serde_json::Value>(&body).ok()
+                                .and_then(|v| v["error"].as_str().map(str::to_string))
+                                .unwrap_or_else(|| format!("HTTP {}", status));
+                            // A refusal is final; only try the next URL on transport failure.
+                            break;
+                        }
+                        Err(e) => { last = e.to_string(); }
+                    }
+                }
+                if !delivered {
+                    tracing::warn!("node policy push (manager={}) to '{}' ({}:{}) failed: {}", manager, hostname, address, port, last);
+                    policy_push_failed.push(serde_json::json!({ "node": hostname, "error": last }));
+                }
+            }
+        }
         if let Some(ref roles_raw) = body.roles {
             let roles: Vec<crate::agent::NodeRole> = roles_raw.iter().copied()
                 .filter(|r| *r != crate::agent::NodeRole::Unknown)
@@ -5452,7 +5666,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         for url in &urls {
                             if let Ok(resp) = client.post(url)
                                 .timeout(std::time::Duration::from_secs(5))
-                                .header("X-WolfStack-Secret", &secret)
+                                .peer_auth(&secret)
                                 .header("Content-Type", "application/json")
                                 .body(payload.to_string())
                                 .send().await
@@ -5486,7 +5700,7 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         for url in &urls {
                             if let Ok(resp) = client.post(url)
                                 .timeout(std::time::Duration::from_secs(5))
-                                .header("X-WolfStack-Secret", &secret)
+                                .peer_auth(&secret)
                                 .header("Content-Type", "application/json")
                                 .body(payload.to_string())
                                 .send()
@@ -5531,7 +5745,10 @@ pub async fn update_node_settings(req: HttpRequest, state: web::Data<AppState>, 
                         let _ = crate::agent::push_identity_to_node(&node, &intent, &secret).await;
                     });
                 }
-        HttpResponse::Ok().json(serde_json::json!({ "updated": true, "queued": queued }))
+        HttpResponse::Ok().json(serde_json::json!({
+            "updated": true, "queued": queued,
+            "policy_push_failed": policy_push_failed,
+        }))
     } else {
         HttpResponse::NotFound().json(serde_json::json!({ "error": "Node not found" }))
     }
@@ -5684,7 +5901,7 @@ pub async fn cluster_rename_handler(
     for node in members {
         state.cluster.update_node_settings(
             &node.id, None, None, None, None, None,
-            Some(new_name.clone()), None, None, None, None, None,
+            Some(new_name.clone()), None, None, None, None, None, None,
         );
         renamed += 1;
         if !node.is_self && node.node_type == "wolfstack" {
@@ -6062,7 +6279,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
             for url in &urls {
                 match client.get(url)
                     .timeout(std::time::Duration::from_secs(10))
-                    .header("X-WolfStack-Secret", &state.cluster_secret)
+                    .peer_auth(&state.cluster_secret)
                     .send().await
                 {
                     Ok(resp) => {
@@ -6171,7 +6388,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                 for url in &urls {
                     match client.post(url)
                         .timeout(std::time::Duration::from_secs(10))
-                        .header("X-WolfStack-Secret", &state.cluster_secret)
+                        .peer_auth(&state.cluster_secret)
                         .header("Content-Type", "application/json")
                         .body(payload.to_string())
                         .send().await
@@ -6246,7 +6463,7 @@ pub async fn wolfnet_sync_cluster(req: HttpRequest, state: web::Data<AppState>, 
                 for url in &urls {
                     match client.delete(url)
                         .timeout(std::time::Duration::from_secs(10))
-                        .header("X-WolfStack-Secret", &state.cluster_secret)
+                        .peer_auth(&state.cluster_secret)
                         .header("Content-Type", "application/json")
                         .body(payload.to_string())
                         .send().await
@@ -6353,7 +6570,7 @@ pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body
             let start = std::time::Instant::now();
             match client.get(url)
                 .timeout(std::time::Duration::from_secs(15))
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .send().await
             {
                 Ok(resp) => {
@@ -6419,7 +6636,7 @@ pub async fn cluster_diagnose(req: HttpRequest, state: web::Data<AppState>, body
             for url in &urls {
                 match client.get(url)
                     .timeout(std::time::Duration::from_secs(10))
-                    .header("X-WolfStack-Secret", &state.cluster_secret)
+                    .peer_auth(&state.cluster_secret)
                     .send().await
                 {
                     Ok(resp) => {
@@ -8255,7 +8472,7 @@ pub async fn node_proxy(
 
         builder = builder.timeout(std::time::Duration::from_secs(timeout_secs));
         builder = builder.header("content-type", &content_type);
-        builder = builder.header("X-WolfStack-Secret", state.cluster_secret.clone());
+        builder = builder.peer_auth(state.cluster_secret.clone());
         // Mark this as a proxied OPERATOR action (a real user request forwarded
         // on their behalf), distinct from a node-to-node propagation. The target
         // node authenticates both via the fleet secret, so handlers that must
@@ -8686,7 +8903,7 @@ pub async fn containers_cluster(req: HttpRequest, state: web::Data<AppState>) ->
                 for url in &docker_urls {
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(5))
-                        .header("X-WolfStack-Secret", &secret).send().await
+                        .peer_auth(&secret).send().await
                         && resp.status().is_success()
                             && let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
                                 return v;
@@ -8698,7 +8915,7 @@ pub async fn containers_cluster(req: HttpRequest, state: web::Data<AppState>) ->
                 for url in &lxc_urls {
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(5))
-                        .header("X-WolfStack-Secret", &secret).send().await
+                        .peer_auth(&secret).send().await
                         && resp.status().is_success()
                             && let Ok(v) = resp.json::<Vec<serde_json::Value>>().await {
                                 return v;
@@ -9079,7 +9296,7 @@ pub async fn remote_storage_list(
     for url in &urls {
         let mut rb = client.get(url).timeout(std::time::Duration::from_secs(10));
         if attach_secret {
-            rb = rb.header("X-WolfStack-Secret", state.cluster_secret.clone());
+            rb = rb.peer_auth(state.cluster_secret.clone());
         }
         match rb.send().await
         {
@@ -9219,7 +9436,7 @@ pub async fn wolfnet_network_status(req: HttpRequest, state: web::Data<AppState>
         for url in &urls {
             if let Ok(resp) = client.get(url)
                 .timeout(std::time::Duration::from_secs(3))
-                .header("X-WolfStack-Secret", state.cluster_secret.clone())
+                .peer_auth(state.cluster_secret.clone())
                 .send().await {
                 if let Ok(ips) = resp.json::<Vec<String>>().await {
                     for ip_str in ips {
@@ -9391,7 +9608,7 @@ pub async fn certs_cluster_list(req: HttpRequest, state: web::Data<AppState>) ->
             let mut last_err = String::new();
             for url in &urls {
                 match client.get(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .timeout(std::time::Duration::from_secs(8))
                     .send().await
                 {
@@ -9668,7 +9885,7 @@ pub async fn reconcile_cert_replication(
         let mut peer_state: Option<crate::certbot::replication::ReplicaState> = None;
         for url in build_node_urls(&node.address, node.port, "/api/certs/replication/state") {
             match client.get(&url)
-                .header("X-WolfStack-Secret", &cluster_secret)
+                .peer_auth(&cluster_secret)
                 .timeout(std::time::Duration::from_secs(10))
                 .send().await
             {
@@ -9711,7 +9928,7 @@ pub async fn reconcile_cert_replication(
             let mut last_err = String::new();
             for url in build_node_urls(&node.address, node.port, "/api/certs/replication/push") {
                 match client.post(&url)
-                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .peer_auth(&cluster_secret)
                     .header("Content-Type", "application/json")
                     .timeout(std::time::Duration::from_secs(20))
                     .body(body.clone())
@@ -9740,7 +9957,7 @@ pub async fn reconcile_cert_replication(
         let prune_body = serde_json::json!({ "source_node_id": self_id, "keep": keep }).to_string();
         for url in build_node_urls(&node.address, node.port, "/api/certs/replication/prune") {
             match client.post(&url)
-                .header("X-WolfStack-Secret", &cluster_secret)
+                .peer_auth(&cluster_secret)
                 .header("Content-Type", "application/json")
                 .timeout(std::time::Duration::from_secs(10))
                 .body(prune_body.clone())
@@ -10102,7 +10319,7 @@ fn replicate_dns_providers_to_cluster(
             let mut last_err = String::new();
             for url in &urls {
                 match client.post(url)
-                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .peer_auth(&cluster_secret)
                     .header("Content-Type", "application/json")
                     .timeout(std::time::Duration::from_secs(10))
                     .body(body.clone())
@@ -10732,7 +10949,7 @@ pub async fn dashboard_sync_push(req: HttpRequest, state: web::Data<AppState>) -
             let mut last_err = String::new();
             for url in &urls {
                 let res = client.post(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .header("Content-Type", "application/json")
                     .timeout(std::time::Duration::from_secs(60))
                     .body(body.clone())
@@ -11019,7 +11236,7 @@ async fn fetch_local_json(state: &web::Data<AppState>, path: &str) -> Option<ser
     for url in crate::ports::self_api_urls(path) {
         let Ok(resp) = client.get(&url)
             .timeout(std::time::Duration::from_secs(5))
-            .header("X-WolfStack-Secret", state.cluster_secret.clone())
+            .peer_auth(state.cluster_secret.clone())
             .send().await
         else {
             continue; // wrong scheme or nothing bound here — try the next
@@ -11048,7 +11265,7 @@ async fn fetch_remote_json(
     let urls = build_node_urls(address, port, path);
     for url in &urls {
         if let Ok(resp) = client.get(url)
-            .header("X-WolfStack-Secret", secret)
+            .peer_auth(secret)
             .timeout(std::time::Duration::from_secs(5))
             .send().await
         {
@@ -11401,7 +11618,7 @@ pub async fn cluster_browser_list(req: HttpRequest, state: web::Data<AppState>) 
         for url in urls {
             match client
                 .get(&url)
-                .header("X-WolfStack-Secret", state.cluster_secret.clone())
+                .peer_auth(state.cluster_secret.clone())
                 .timeout(std::time::Duration::from_secs(3))
                 .send()
                 .await
@@ -11840,7 +12057,7 @@ pub async fn announce_wolfnet_routes_to_peers(
             let r = client
                 .post(url)
                 .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", &cluster_secret)
+                .peer_auth(&cluster_secret)
                 .json(&payload)
                 .send()
                 .await;
@@ -11895,7 +12112,7 @@ pub async fn announce_wolfnet_routes_to_peers(
                         let r = client
                             .post(url)
                             .timeout(std::time::Duration::from_secs(5))
-                            .header("X-WolfStack-Secret", &cluster_secret)
+                            .peer_auth(&cluster_secret)
                             .json(&payload)
                             .send()
                             .await;
@@ -12069,7 +12286,7 @@ pub(crate) async fn wolfnet_ip_active_elsewhere(state: &web::Data<AppState>, ip:
             for url in build_node_urls(&address, p, "/api/wolfnet/active-ips") {
                 let Ok(resp) = client.get(&url)
                     .timeout(std::time::Duration::from_secs(3))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .send().await
                 else { continue };
                 // Drain before leaving — a bare `continue` strands the socket
@@ -12479,6 +12696,8 @@ fn resolve_target_node(
     let port = fallback_port.unwrap_or(8553);
     tracing::info!("Node '{}' not in cluster state, using fallback address {}:{}", target_node_id, addr, port);
     Some(crate::agent::Node {
+        pubkey: None,
+        manager: true,
         id: target_node_id.to_string(),
         address: addr.to_string(),
         migration_address: None,
@@ -12607,7 +12826,7 @@ async fn lxc_remote_clone(
 
         match client.post(import_url)
             .timeout(std::time::Duration::from_secs(600))
-            .header("X-WolfStack-Secret", state.cluster_secret.clone())
+            .peer_auth(state.cluster_secret.clone())
             .multipart(form)
             .send()
             .await
@@ -12890,7 +13109,7 @@ pub async fn lxc_migrate(
 
             match client.post(import_url)
                 .timeout(std::time::Duration::from_secs(3600))
-                .header("X-WolfStack-Secret", cluster_secret.clone())
+                .peer_auth(cluster_secret.clone())
                 .multipart(form)
                 .send()
                 .await
@@ -14124,7 +14343,7 @@ pub async fn wolfha_enable(
                     .text("ha_meta", ha_meta_json.clone())
                     .part("archive", part.file_name("seed.tar.gz"));
                 match client.post(url)
-                    .header("X-WolfStack-Secret", secret.clone())
+                    .peer_auth(secret.clone())
                     .timeout(std::time::Duration::from_secs(3600))
                     .multipart(form)
                     .send().await
@@ -14560,7 +14779,7 @@ pub async fn wolfha_promote(
             let client = &*API_HTTP_CLIENT;
             for url in &urls {
                 match client.post(url)
-                    .header("X-WolfStack-Secret", secret.clone())
+                    .peer_auth(secret.clone())
                     .timeout(std::time::Duration::from_secs(1800))
                     .json(&payload)
                     .send().await
@@ -14704,7 +14923,7 @@ pub async fn wolfha_disable(
             let mut ok = false;
             for url in &urls {
                 match client.post(url)
-                    .header("X-WolfStack-Secret", secret.clone())
+                    .peer_auth(secret.clone())
                     .timeout(std::time::Duration::from_secs(60))
                     .json(&payload)
                     .send().await
@@ -15012,7 +15231,7 @@ async fn remote_lxc_name_taken(
             .get(format!("{}?name={}", url, name))
             .timeout(std::time::Duration::from_secs(10));
         if let Some(s) = secret {
-            rb = rb.header("X-WolfStack-Secret", s.to_string());
+            rb = rb.peer_auth(s);
         }
         if let Some(t) = token {
             rb = rb.header("X-Transfer-Token", t.to_string());
@@ -15247,7 +15466,7 @@ pub async fn lxc_migrate_external(
             let mut rb = preflight_client.get(url)
                 .timeout(std::time::Duration::from_secs(10));
             if attach_secret {
-                rb = rb.header("X-WolfStack-Secret", cluster_secret.clone());
+                rb = rb.peer_auth(cluster_secret.clone());
             }
             match rb.send().await
             {
@@ -15359,7 +15578,7 @@ pub async fn lxc_migrate_external(
                 .timeout(std::time::Duration::from_secs(600))
                 .header("X-Transfer-Token", &target_token);
             if attach_secret {
-                rb = rb.header("X-WolfStack-Secret", cluster_secret.clone());
+                rb = rb.peer_auth(cluster_secret.clone());
             }
             match rb.multipart(form)
                 .send()
@@ -15884,7 +16103,7 @@ pub async fn wolfnet_next_ip(
         for url in &urls {
             if let Ok(resp) = client.get(url)
                 .timeout(std::time::Duration::from_secs(3))
-                .header("X-WolfStack-Secret", state.cluster_secret.clone())
+                .peer_auth(state.cluster_secret.clone())
                 .send().await
             {
                 if let Ok(ips) = resp.json::<Vec<String>>().await {
@@ -16632,7 +16851,7 @@ async fn ai_propagate_config_to_peers(
             for url in &urls {
                 match client.post(url)
                     .timeout(std::time::Duration::from_secs(timeout_secs))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&payload)
                     .send()
                     .await
@@ -18968,7 +19187,7 @@ pub async fn security_rotate_fleet(
                 for url in &urls {
                     let resp = client.post(url)
                         .timeout(std::time::Duration::from_secs(30))
-                        .header("X-WolfStack-Secret", &secret_c)
+                        .peer_auth(&secret_c)
                         .send().await;
                     match resp {
                         Ok(r) if r.status().is_success() => {
@@ -19078,7 +19297,7 @@ where
             // cause on the primary URL (HTTPS) stays hidden.
             let mut errors: Vec<String> = Vec::new();
             for url in &urls {
-                let resp = client.get(url).timeout(std::time::Duration::from_secs(8)).header("X-WolfStack-Secret", &secret_c).send().await;
+                let resp = client.get(url).timeout(std::time::Duration::from_secs(8)).peer_auth(&secret_c).send().await;
                 match resp {
                     Ok(r) if r.status().is_success() => {
                         match r.json::<T>().await {
@@ -19711,7 +19930,7 @@ pub async fn fleet_security_push_lockout_policy(
             for url in &urls {
                 let r = client.post(url)
                     .timeout(std::time::Duration::from_secs(8))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&cfg)
                     .send().await;
                 match r {
@@ -19769,7 +19988,7 @@ pub async fn fleet_security_force_logout_all(
             for url in &urls {
                 let r = client.post(url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .send().await;
                 if let Ok(resp) = r {
                     let success = resp.status().is_success();
@@ -19931,7 +20150,7 @@ pub async fn fleet_security_rotate_cluster_secret(
         for url in &urls {
             let r = client.post(url)
                 .timeout(std::time::Duration::from_secs(8))
-                .header("X-WolfStack-Secret", &old_secret)
+                .peer_auth(&old_secret)
                 .json(&body)
                 .send().await;
             match r {
@@ -20177,7 +20396,7 @@ pub async fn fleet_security_ssh_hardening(
         for url in &urls {
             let r = client.post(url)
                 .timeout(std::time::Duration::from_secs(15))
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .json(&cfg)
                 .send().await;
             match r {
@@ -20327,7 +20546,7 @@ pub async fn fleet_security_push_scan_detector(
             for url in &urls {
                 let r = client.post(url)
                     .timeout(std::time::Duration::from_secs(8))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&cfg)
                     .send().await;
                 match r {
@@ -20484,7 +20703,7 @@ where
             for url in &urls {
                 let resp = client.post(url)
                     .timeout(timeout)
-                    .header("X-WolfStack-Secret", &secret_c)
+                    .peer_auth(&secret_c)
                     .json(&body_c)
                     .send().await;
                 match resp {
@@ -20958,7 +21177,7 @@ pub async fn fleet_antivirus_push_config(
             for url in &urls {
                 let r = client.put(url)
                     .timeout(std::time::Duration::from_secs(10))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&cfg)
                     .send().await;
                 match r {
@@ -21466,7 +21685,7 @@ async fn fetch_peer_ips_in_subnet(
             for url in &urls {
                 if let Ok(resp) = client.get(url)
                     .timeout(std::time::Duration::from_secs(4))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .send()
                     .await
                     && resp.status().is_success()
@@ -22631,7 +22850,7 @@ async fn publish_record_to_dns_tier(
             for url in &urls {
                 if let Ok(resp) = client.post(url)
                     .timeout(std::time::Duration::from_secs(10))
-                    .header("X-WolfStack-Secret", &state.cluster_secret)
+                    .peer_auth(&state.cluster_secret)
                     .header("Content-Type", "application/json")
                     .body(body.to_string())
                     .send().await
@@ -24251,7 +24470,7 @@ pub async fn ceph_join(req: HttpRequest, state: web::Data<AppState>, body: web::
     for url in &urls {
         match client.get(url)
             .timeout(std::time::Duration::from_secs(20))
-            .header("X-WolfStack-Secret", state.cluster_secret.clone())
+            .peer_auth(state.cluster_secret.clone())
             .send().await
         {
             Ok(resp) if resp.status().is_success() => match resp.json::<crate::ceph::CephJoinBundle>().await {
@@ -28156,7 +28375,7 @@ async fn sync_mount_to_cluster(
         let mut last_response = String::from("no attempts");
         for url in &urls {
             match API_HTTP_CLIENT.post(url)
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .json(mount)
                 .timeout(std::time::Duration::from_secs(20)) // apply mounts synchronously
                 .send()
@@ -28985,7 +29204,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
             for url in &urls {
                 if let Ok(resp) = http_client.get(url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .peer_auth(&cluster_secret)
                     .send().await
                     && let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
                         node_data["docker"] = serde_json::json!(containers.iter().map(|c| {
@@ -29001,7 +29220,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
             for url in &urls {
                 if let Ok(resp) = http_client.get(url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .peer_auth(&cluster_secret)
                     .send().await
                     && let Ok(containers) = resp.json::<Vec<serde_json::Value>>().await {
                         node_data["lxc"] = serde_json::json!(containers.iter().map(|c| {
@@ -29017,7 +29236,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
             for url in &urls {
                 if let Ok(resp) = http_client.get(url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .peer_auth(&cluster_secret)
                     .send().await
                     && let Ok(vms) = resp.json::<Vec<serde_json::Value>>().await {
                         node_data["vms"] = serde_json::json!(vms.iter().map(|v| {
@@ -29035,7 +29254,7 @@ pub async fn wolfflow_infrastructure(req: HttpRequest, state: web::Data<AppState
             let pve_url = format!("/api/nodes/{}/pve/resources", node.id);
             if let Ok(resp) = http_client.get(format!("https://{}:{}{}", "127.0.0.1", 8553, pve_url))
                 .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", &cluster_secret)
+                .peer_auth(&cluster_secret)
                 .send().await
                 && let Ok(guests) = resp.json::<Vec<serde_json::Value>>().await {
                     let lxc: Vec<_> = guests.iter()
@@ -29721,7 +29940,7 @@ fn wolfusb_broadcast_sync(state: &web::Data<AppState>) {
         tokio::spawn(async move {
             for url in &urls {
                 if c.post(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&body)
                     .timeout(std::time::Duration::from_secs(5))
                     .send()
@@ -29844,7 +30063,7 @@ pub async fn wolfusb_cluster_devices(
             for url in &urls {
                 match client
                     .get(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .timeout(std::time::Duration::from_secs(5))
                     .send()
                     .await
@@ -29986,7 +30205,7 @@ pub async fn wolfusb_assign(req: HttpRequest, state: web::Data<AppState>, body: 
                     tokio::spawn(async move {
                         for url in &urls {
                             match client.post(url)
-                                .header("X-WolfStack-Secret", &secret)
+                                .peer_auth(&secret)
                                 .json(&body)
                                 .timeout(std::time::Duration::from_secs(30))
                                 .send()
@@ -30092,7 +30311,7 @@ async fn query_source_bus_addr(source_address: &str, busid: &str, secret: &str) 
     for url in &urls {
         if let Ok(resp) = client.post(url)
             .timeout(std::time::Duration::from_secs(10))
-            .header("X-WolfStack-Secret", secret)
+            .peer_auth(secret)
             .json(&body)
             .send().await
         {
@@ -30232,7 +30451,7 @@ pub async fn wolfusb_reattach(
         for url in &urls {
             let res = client.post(url)
                 .timeout(std::time::Duration::from_secs(60))
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .send().await;
             match res {
                 Ok(r) if r.status().is_success() => {
@@ -30332,7 +30551,7 @@ pub async fn wolfusb_reattach(
         for url in &urls {
             if let Ok(resp) = client.post(url)
                 .timeout(std::time::Duration::from_secs(30))
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .json(&body)
                 .send().await
             {
@@ -31180,7 +31399,7 @@ pub async fn k8s_list_clusters(req: HttpRequest, state: web::Data<AppState>) -> 
             for url in &urls {
                 if let Ok(resp) = client.get(url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .send()
                     .await
                 {
@@ -32018,7 +32237,7 @@ async fn run_script_on_remote(address: &str, port: u16, cluster_secret: &str, sc
     for url in &urls {
         match client.post(url)
             .timeout(std::time::Duration::from_secs(300))
-            .header("X-WolfStack-Secret", cluster_secret)
+            .peer_auth(cluster_secret)
             .json(&serde_json::json!({ "script": script }))
             .send()
             .await
@@ -32042,7 +32261,7 @@ async fn fetch_from_remote(address: &str, port: u16, path: &str, cluster_secret:
     for url in &urls {
         match client.get(url)
             .timeout(std::time::Duration::from_secs(10))
-            .header("X-WolfStack-Secret", cluster_secret)
+            .peer_auth(cluster_secret)
             .send()
             .await
         {
@@ -32148,7 +32367,7 @@ pub async fn k8s_provision(req: HttpRequest, state: web::Data<AppState>, body: w
         for url in &urls {
             match client.post(url)
                 .timeout(std::time::Duration::from_secs(30))
-                .header("X-WolfStack-Secret", &cluster_secret)
+                .peer_auth(&cluster_secret)
                 .json(&import_body)
                 .send()
                 .await
@@ -32652,7 +32871,7 @@ async fn push_wolfnet_route_to_cluster(wolfnet_ip: &str, gateway_ip: &str, state
             for url in &urls {
                 if let Ok(resp) = client.post(url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&body)
                     .send()
                     .await
@@ -34764,7 +34983,7 @@ async fn fetch_peer_proposals(
     for url in urls {
         let send = API_HTTP_CLIENT
             .get(url)
-            .header("X-WolfStack-Secret", secret)
+            .peer_auth(secret)
             .send();
         match tokio::time::timeout(crate::predictive::cluster::PEER_FETCH_TIMEOUT, send).await {
             Err(_) => return Err("timeout".to_string()),
@@ -35166,7 +35385,7 @@ async fn forward_proposal_action_to_peers(
         for url in build_node_urls(&peer.address, peer.port, &path) {
             let res = client.post(&url)
                 .timeout(std::time::Duration::from_secs(10))
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .header("content-type", "application/json")
                 .body(body_bytes.clone())
                 .send()
@@ -35695,7 +35914,7 @@ async fn forward_proposal_get_to_peers(
         for url in build_node_urls(&peer.address, peer.port, &path) {
             let res = client.get(&url)
                 .timeout(std::time::Duration::from_secs(8))
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .send().await;
             let Ok(resp) = res else { continue; };
             if resp.status().is_success() {
@@ -35755,7 +35974,7 @@ async fn fetch_proposal_from_peers(
         for url in build_node_urls(&peer.address, peer.port, &path) {
             let res = client.get(&url)
                 .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .send()
                 .await;
             let Ok(resp) = res else { continue };
@@ -36199,7 +36418,7 @@ fn propagate_threat_intel_state(state: &web::Data<AppState>, payload: &ti::Clust
             for url in &urls {
                 match client.post(url)
                     .timeout(std::time::Duration::from_secs(30))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&payload)
                     .send()
                     .await
@@ -37249,7 +37468,7 @@ pub async fn wolfrun_service_action(req: HttpRequest, state: web::Data<AppState>
                 for url in &urls {
                     match client.post(url)
                         .timeout(std::time::Duration::from_secs(30))
-                        .header("X-WolfStack-Secret", &state.cluster_secret)
+                        .peer_auth(&state.cluster_secret)
                         .json(&payload)
                         .send().await {
                         Ok(resp) if resp.status().is_success() => { let _ = resp.bytes().await; success = true; break; }
@@ -38186,7 +38405,7 @@ pub async fn wolffunctions_invocations(
         let path = format!("/api/wolffunctions/{}/invocations-local", id);
         for url in build_node_urls(&node.address, node.port, &path) {
             match client.get(&url)
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .timeout(std::time::Duration::from_secs(5))
                 .send().await
             {
@@ -38264,7 +38483,7 @@ pub async fn wolffunctions_overview(
         let mut fetched = false;
         for url in build_node_urls(&node.address, node.port, "/api/wolffunctions/node-local") {
             match client.get(&url)
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .timeout(std::time::Duration::from_secs(8))
                 .send().await
             {
@@ -41542,7 +41761,7 @@ async fn image_watcher_propagate_config_to_peers(
             for url in &urls {
                 match client.put(url)
                     .timeout(std::time::Duration::from_secs(15))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .json(&payload)
                     .send()
                     .await
@@ -41757,7 +41976,7 @@ pub async fn image_watcher_reconcile_from_peers(
         for url in &urls {
             match API_HTTP_CLIENT.get(url)
                 .timeout(std::time::Duration::from_secs(10))
-                .header("X-WolfStack-Secret", secret)
+                .peer_auth(secret)
                 .send()
                 .await
             {
@@ -43038,7 +43257,7 @@ pub async fn gateways_cluster(req: HttpRequest, state: web::Data<AppState>) -> H
             for url in urls {
                 let res = client.get(&url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .send().await;
                 if let Ok(resp) = res
                     && resp.status().is_success()
@@ -43337,7 +43556,7 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
                 for url in &array_urls {
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(8))
-                        .header("X-WolfStack-Secret", &secret).send().await
+                        .peer_auth(&secret).send().await
                         && resp.status().is_success()
                             && let Ok(v) = resp.json::<serde_json::Value>().await { return Some(v); }
                 }
@@ -43347,7 +43566,7 @@ pub async fn array_cluster(req: HttpRequest, state: web::Data<AppState>) -> Http
                 for url in &ceph_urls {
                     if let Ok(resp) = client.get(url)
                         .timeout(std::time::Duration::from_secs(8))
-                        .header("X-WolfStack-Secret", &secret).send().await
+                        .peer_auth(&secret).send().await
                         && resp.status().is_success()
                             && let Ok(v) = resp.json::<serde_json::Value>().await { return Some(v); }
                 }
@@ -43967,7 +44186,7 @@ async fn push_to_peers(state: &web::Data<AppState>) {
             for url in urls {
                 let res = client.post(&url)
                     .timeout(std::time::Duration::from_secs(5))
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     // Lets the receiver treat us as authoritative for our
                     // own shares, so a delete actually propagates.
                     .header("X-WolfStack-Node-Id", &self_id)
@@ -46108,7 +46327,7 @@ async fn proxy_get_json(node: &crate::agent::Node, secret: &str, path: &str) -> 
         if let Ok(r) = client
             .get(&url)
             .timeout(std::time::Duration::from_secs(30))
-            .header("X-WolfStack-Secret", secret)
+            .peer_auth(secret)
             .send()
             .await
         {
@@ -46291,7 +46510,7 @@ async fn logs_config_put(
                     if let Ok(r) = client
                         .request(reqwest::Method::PUT, &url)
                         .timeout(std::time::Duration::from_secs(15))
-                        .header("X-WolfStack-Secret", &secret)
+                        .peer_auth(&secret)
                         .json(&payload)
                         .send()
                         .await
@@ -46533,6 +46752,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/cluster/recluster-override", web::post().to(arm_recluster_override))
         .route("/api/cluster/recluster-override", web::delete().to(clear_recluster_override))
         .route("/api/cluster/secret-status", web::get().to(cluster_secret_status))
+        .route("/api/cluster/node-signatures", web::post().to(cluster_node_signatures_set))
+        .route("/api/cluster/node-policy", web::post().to(cluster_node_policy_receive))
+        .route("/api/nodes/{id}/reset-identity", web::post().to(node_reset_identity))
         .route("/api/cluster/secret/generate", web::post().to(cluster_secret_generate))
         .route("/api/cluster/secret/repush", web::post().to(cluster_secret_repush))
         .route("/api/cluster/secret/receive", web::post().to(cluster_secret_receive))
@@ -48282,7 +48504,7 @@ pub async fn node_ips_list(
     let client = &*API_HTTP_CLIENT;
     for url in &urls {
         match client.get(url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(std::time::Duration::from_secs(8))
             .send().await
         {
@@ -48503,7 +48725,7 @@ fn replicate_sql_connections_to_cluster(state: web::Data<AppState>) {
             let urls = build_node_urls(&node.address, node.port, "/api/sql-connections/receive");
             for url in &urls {
                 let res = client.post(url)
-                    .header("X-WolfStack-Secret", &cluster_secret)
+                    .peer_auth(&cluster_secret)
                     .header("Content-Type", "application/json")
                     .timeout(std::time::Duration::from_secs(10))
                     .body(body.clone())

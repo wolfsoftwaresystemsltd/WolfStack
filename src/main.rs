@@ -11,6 +11,7 @@
 //! - Handles SSL certificates via Certbot
 //! - Communicates with other WolfStack nodes over WolfNet or direct IP
 
+use crate::node_identity::PeerAuth;
 mod api;
 mod agent;
 mod diagnostics;
@@ -106,6 +107,7 @@ mod local_ca;
 #[allow(dead_code)]
 mod integrations;
 mod cluster_join;
+mod node_identity;
 
 use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
 use clap::{CommandFactory, Parser};
@@ -794,6 +796,12 @@ async fn main() -> std::io::Result<()> {
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
 
+    // Per-node signing key (generated on first start). Failure is not
+    // fatal: the node then runs unsigned, i.e. exactly as before.
+    if let Err(e) = node_identity::init(&node_id) {
+        tracing::error!("node identity: {} — running without a signing key", e);
+    }
+
     info!("");
     // Start the /api/ready uptime clock before anything else can read it.
     api::init_process_start();
@@ -956,6 +964,7 @@ async fn main() -> std::io::Result<()> {
         cli.bind.clone(),
         api_port,
     ));
+    node_identity::register_cluster(cluster.clone());
 
     // Initialize VM manager (cheap — just ensures the config dir exists).
     // autostart_vms moved into the background thread below: on libvirt it
@@ -2439,7 +2448,7 @@ async fn main() -> std::io::Result<()> {
                     for url in &urls {
                         if let Ok(r) = client.post(url)
                             .timeout(std::time::Duration::from_secs(60))
-                            .header("X-WolfStack-Secret", &secret)
+                            .peer_auth(&secret)
                             .send().await
                             && r.status().is_success()
                         {
@@ -2697,6 +2706,7 @@ async fn main() -> std::io::Result<()> {
                     license_key: if crate::compat::platform_ready() {
                         std::fs::read_to_string(crate::compat::dm_path()).ok().map(|s| s.trim().to_string())
                     } else { None },
+                    pubkey: node_identity::self_pubkey(),
                 };
                 if let Ok(json) = serde_json::to_value(&msg)
                     && let Ok(mut cache) = cached_status_bg.write() {
@@ -3478,7 +3488,7 @@ async fn main() -> std::io::Result<()> {
                             let cluster = node.cluster_name.clone().unwrap_or_else(|| "Default".to_string());
                             let url = node_api_url(node, "/api/issues/scan");
                             match http_client.get(&url)
-                                .header("X-WolfStack-Secret", scan_secret.as_str())
+                                .peer_auth(scan_secret.as_str())
                                 .timeout(std::time::Duration::from_secs(30))
                                 .send().await
                             {
@@ -3764,7 +3774,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                 for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_docker) {
                                     let url = node_api_url(node, "/api/containers/docker");
                                     if let Ok(resp) = http_client.get(&url)
-                                        .header("X-WolfStack-Secret", scan_secret.as_str())
+                                        .peer_auth(scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
                                         .send().await
                                         && let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
@@ -3803,7 +3813,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                 for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_lxc) {
                                     let url = node_api_url(node, "/api/containers/lxc");
                                     if let Ok(resp) = http_client.get(&url)
-                                        .header("X-WolfStack-Secret", scan_secret.as_str())
+                                        .peer_auth(scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
                                         .send().await
                                         && let Ok(containers) = resp.json::<Vec<crate::containers::ContainerInfo>>().await {
@@ -3849,7 +3859,7 @@ a{color:#dc2626;text-decoration:none;}a:hover{text-decoration:underline;}
                                 for node in all_nodes.iter().filter(|n| !n.is_self && n.online && n.node_type != "proxmox" && n.has_kvm) {
                                     let url = node_api_url(node, "/api/vms");
                                     if let Ok(resp) = http_client.get(&url)
-                                        .header("X-WolfStack-Secret", scan_secret.as_str())
+                                        .peer_auth(scan_secret.as_str())
                                         .timeout(std::time::Duration::from_secs(15))
                                         .send().await
                                         && let Ok(vms) = resp.json::<Vec<crate::vms::manager::VmConfig>>().await {
@@ -5222,7 +5232,7 @@ async fn gather_reboot_reason_remote(
         for url in &urls {
             let resp = client
                 .post(url)
-                .header("X-WolfStack-Secret", secret)
+                .peer_auth(secret)
                 .json(&serde_json::json!({ "command": *cmd }))
                 .send()
                 .await;

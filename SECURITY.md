@@ -84,3 +84,16 @@ Some deployment choices materially change your exposure:
   identity — a secret-holder who forges the attribution headers is still
   a peer. Treat a leaked cluster secret as a full-cluster compromise:
   rotate it immediately from a trusted node.
+- **Require node signatures once every node runs 25.22 or later.** Each
+  node now holds its own Ed25519 key (`/etc/wolfstack/node-key`) and
+  signs every inter-node request; peers pin the public key from the
+  node's own reports. By default nothing is enforced — an upgrade changes
+  no behaviour. Settings → Security → *Require node signatures* (once it
+  reports every peer has a key) makes a cluster secret worthless on its
+  own: a request must be signed by a pinned node, bound to the receiving
+  node, and only nodes left as *managers* in their node settings may
+  forward operator actions. `WOLFSTACK_NODE_SIGNATURES=off` in the
+  service environment turns it back off over SSH if you lock yourself
+  out. What this still cannot do: a fully compromised *manager* node can
+  act as its operators — no peer-symmetric cluster can prevent that
+  without an external trust anchor.

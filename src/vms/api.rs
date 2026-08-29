@@ -26,6 +26,7 @@ use crate::api::{
 };
 use super::manager::{VmConfig, StorageVolume, UsbDevice, PciDevice};
 use super::passthrough;
+use crate::node_identity::PeerAuth;
 
 /// Format a byte count for human display: "1.4 GB" / "812 MB" / etc.
 fn format_bytes_human(b: u64) -> String {
@@ -1316,7 +1317,7 @@ async fn migrate_preflight_intra(
     let mut name_clash_checked = false;
     for url in &vms_urls {
         match client.get(url)
-            .header("X-WolfStack-Secret", cluster_secret)
+            .peer_auth(cluster_secret)
             .timeout(Duration::from_secs(10))
             .send().await
         {
@@ -1346,7 +1347,7 @@ async fn migrate_preflight_intra(
     let storage_urls = build_node_urls(mig_host, node.port, "/api/storage/list");
     for url in &storage_urls {
         match client.get(url)
-            .header("X-WolfStack-Secret", cluster_secret)
+            .peer_auth(cluster_secret)
             .timeout(Duration::from_secs(10))
             .send().await
         {
@@ -1403,6 +1404,8 @@ async fn vm_migrate(
                 let port = body.target_port.unwrap_or(8553);
                 tracing::info!("VM migrate: node '{}' not in cluster state, using fallback {}:{}", body.target_node, addr, port);
                 crate::agent::Node {
+                    pubkey: None,
+                    manager: true,
                     id: body.target_node.clone(),
                     address: addr.clone(),
                     migration_address: None,
@@ -1614,7 +1617,7 @@ async fn vm_migrate(
             }
 
             match client.post(import_url)
-                .header("X-WolfStack-Secret", state_clone.cluster_secret.clone())
+                .peer_auth(state_clone.cluster_secret.clone())
                 .timeout(Duration::from_secs(3600))
                 .multipart(form)
                 .send()
@@ -1956,7 +1959,7 @@ async fn vm_migrate_external(
         for url in &preflight_urls {
             match preflight_client.get(url)
                 .header("X-Transfer-Token", &target_token)
-                .header("X-WolfStack-Secret", state_clone.cluster_secret.clone())
+                .peer_auth(state_clone.cluster_secret.clone())
                 .timeout(Duration::from_secs(10))
                 .send()
                 .await
@@ -2095,7 +2098,7 @@ async fn vm_migrate_external(
 
             match client.post(import_url)
                 .header("X-Transfer-Token", &target_token)
-                .header("X-WolfStack-Secret", state_clone.cluster_secret.clone())
+                .peer_auth(state_clone.cluster_secret.clone())
                 .timeout(Duration::from_secs(3600))
                 .multipart(form)
                 .send()

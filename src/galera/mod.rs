@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use crate::node_identity::PeerAuth;
 
 const GALERA_CONFIG_PATH: &str = "/etc/wolfstack/galera.json";
 const GALERA_SECRET_PURPOSE: &[u8] = b"galera-cluster-secret-v1";
@@ -924,7 +925,7 @@ fn post_to_peer(ctx: &GaleraOpCtx, urls: &[String], body: &serde_json::Value, ti
         let mut last = format!("could not reach host '{}'", host);
         for url in urls {
             let req = crate::api::API_HTTP_CLIENT.post(url)
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .timeout(std::time::Duration::from_secs(timeout_secs))
                 .json(body)
                 .send();
@@ -1114,7 +1115,7 @@ fn set_gcomm_remote(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, 
         let mut last = format!("could not reach host '{}'", host);
         for url in &urls {
             match crate::api::API_HTTP_CLIENT.post(url)
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .timeout(std::time::Duration::from_secs(20))
                 .json(&body)
                 .send().await
@@ -1684,7 +1685,7 @@ fn remote_op(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &str, op: Nod
         let mut last = format!("could not reach host '{}'", host);
         for url in &urls {
             match crate::api::API_HTTP_CLIENT.post(url)
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .timeout(std::time::Duration::from_secs(op.timeout_secs()))
                 .send().await
             {
@@ -2252,7 +2253,7 @@ fn persist_tuning_remote(ctx: &GaleraOpCtx, host: &str, kind: &str, container: &
         let mut last = format!("could not reach host '{}'", host);
         for url in &urls {
             match crate::api::API_HTTP_CLIENT.post(url)
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .timeout(std::time::Duration::from_secs(20))
                 .json(&body)
                 .send().await

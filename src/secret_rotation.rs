@@ -64,6 +64,7 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::node_identity::PeerAuth;
 
 const PROTOCOL_VERSION: u32 = 1;
 const PENDING_SUFFIX: &str = ".pending";
@@ -816,7 +817,7 @@ pub async fn api_coordinated_rotate(
         let mut got_version: Option<u32> = None;
         for url in &urls {
             let r = client.post(url)
-                .header("X-WolfStack-Secret", &old_secret)
+                .peer_auth(&old_secret)
                 .send().await;
             match r {
                 Ok(resp) if resp.status().is_success() => {
@@ -876,7 +877,7 @@ pub async fn api_coordinated_rotate(
         let mut detail = String::new();
         for url in &urls {
             let r = client.post(url)
-                .header("X-WolfStack-Secret", &old_secret)
+                .peer_auth(&old_secret)
                 .json(&body)
                 .send().await;
             match r {
@@ -904,7 +905,7 @@ pub async fn api_coordinated_rotate(
             });
             for url in &urls {
                 if client.post(url)
-                    .header("X-WolfStack-Secret", &old_secret)
+                    .peer_auth(&old_secret)
                     .json(&body).send().await
                     .map(|r| r.status().is_success())
                     .unwrap_or(false)
@@ -938,7 +939,7 @@ pub async fn api_coordinated_rotate(
             });
             for url in &urls {
                 if client.post(url)
-                    .header("X-WolfStack-Secret", &old_secret)
+                    .peer_auth(&old_secret)
                     .json(&body).send().await
                     .map(|r| r.status().is_success())
                     .unwrap_or(false)
@@ -968,7 +969,7 @@ pub async fn api_coordinated_rotate(
         let mut detail = String::new();
         for url in &urls {
             let r = client.post(url)
-                .header("X-WolfStack-Secret", &old_secret)
+                .peer_auth(&old_secret)
                 .json(&commit_body)
                 .send().await;
             match r {
@@ -996,7 +997,7 @@ pub async fn api_coordinated_rotate(
             });
             for url in &urls {
                 if client.post(url)
-                    .header("X-WolfStack-Secret", &old_secret)
+                    .peer_auth(&old_secret)
                     .json(&body).send().await
                     .map(|r| r.status().is_success())
                     .unwrap_or(false)

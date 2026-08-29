@@ -17,6 +17,7 @@ use chrono::Utc;
 use tracing::{info, warn, error};
 
 use crate::agent::ClusterState;
+use crate::node_identity::PeerAuth;
 
 /// Shared HTTP clients for WolfFlow action execution. Two flavors
 /// because the `HttpRequest` action exposes a `verify_tls` toggle to
@@ -2524,7 +2525,7 @@ async fn execute_container_remote(
 
     for url in &urls {
         match client.post(url)
-            .header("X-WolfStack-Secret", secret)
+            .peer_auth(secret)
             // Operator attribution demanded by the remote exec gate.
             .header("X-WolfStack-Proxied", "1")
             .header("X-WolfStack-Actor", actor)
@@ -2568,7 +2569,7 @@ async fn execute_all_containers_remote(
 
     for url in &urls {
         match client.post(url)
-            .header("X-WolfStack-Secret", secret)
+            .peer_auth(secret)
             // Operator attribution demanded by the remote exec gate.
             .header("X-WolfStack-Proxied", "1")
             .header("X-WolfStack-Actor", actor)
@@ -2613,7 +2614,7 @@ async fn execute_action_remote(
     for url in &urls {
         match client
             .post(url)
-            .header("X-WolfStack-Secret", secret)
+            .peer_auth(secret)
             // Operator attribution demanded by the remote exec gate.
             .header("X-WolfStack-Proxied", "1")
             .header("X-WolfStack-Actor", actor)

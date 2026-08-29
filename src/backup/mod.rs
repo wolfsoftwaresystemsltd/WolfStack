@@ -4442,6 +4442,7 @@ fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(
     // cluster secret (require_auth's X-WolfStack-Secret path) — without this the
     // upload is rejected 401. delete_remote_backup uses the same header.
     let secret = crate::auth::load_cluster_secret();
+    let auth_hdrs = crate::node_identity::curl_headers_padded(&secret, &import_url);
 
     let output = Command::new("curl")
         .args([
@@ -4455,7 +4456,8 @@ fn store_remote(local_path: &Path, remote_url: &str, filename: &str) -> Result<(
             "--speed-time", "60",
             "-X", "POST",
             "-H", "Content-Type: application/octet-stream",
-            "-H", &format!("X-WolfStack-Secret: {}", secret),
+            "-H", &auth_hdrs[0], "-H", &auth_hdrs[1], "-H", &auth_hdrs[2],
+            "-H", &auth_hdrs[3], "-H", &auth_hdrs[4], "-H", &auth_hdrs[5],
             // -T streams; `--data-binary @file` buffers the entire archive in
             // curl's memory and dies with "out of memory" on a big one.
             "-T", &local_path.display().to_string(),
@@ -7731,6 +7733,7 @@ fn delete_remote_backup(remote_url: &str, filename: &str) -> Result<(), String> 
     let url = format!("{}/api/backups/import?filename={}",
         remote_url.trim_end_matches('/'), urlencoding::encode(filename));
     let secret = crate::auth::load_cluster_secret();
+    let auth_hdrs = crate::node_identity::curl_headers_padded(&secret, &url);
 
     let output = Command::new("curl")
         .args([
@@ -7739,7 +7742,8 @@ fn delete_remote_backup(remote_url: &str, filename: &str) -> Result<(), String> 
             "-s", "-S", "-f",
             "--max-time", "60",
             "-X", "DELETE",
-            "-H", &format!("X-WolfStack-Secret: {}", secret),
+            "-H", &auth_hdrs[0], "-H", &auth_hdrs[1], "-H", &auth_hdrs[2],
+            "-H", &auth_hdrs[3], "-H", &auth_hdrs[4], "-H", &auth_hdrs[5],
             &url,
         ])
         .output()

@@ -24,6 +24,7 @@
 
 use crate::pools::{driver_observe_ips, Pool, PoolStore};
 use std::time::Duration;
+use crate::node_identity::PeerAuth;
 
 const TICK: Duration = Duration::from_secs(30);
 const PROVISION_TIMEOUT_SECS: i64 = 30 * 60; // 30 min from `created_at` to leader_up
@@ -137,7 +138,7 @@ async fn drive_pool(pool: &Pool) -> Result<(), String> {
             });
             let url = format!("{}/api/cluster/bootstrap-add", leader_url.trim_end_matches('/'));
             match client.post(&url)
-                .header("X-WolfStack-Secret", &pool_secret)
+                .peer_auth(&pool_secret)
                 .json(&body)
                 .send().await
             {
