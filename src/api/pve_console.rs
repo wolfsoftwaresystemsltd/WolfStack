@@ -34,7 +34,7 @@ pub async fn pve_vnc_ticket(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+    if let Err(resp) = super::require_operator_auth(&req, &state) { return Ok(resp); }
     let vmid_str = path.into_inner();
     let vmid: u64 = match vmid_str.parse() {
         Ok(v) => v,
@@ -127,7 +127,7 @@ pub async fn pve_vnc_ws(
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+    if let Err(resp) = super::require_operator_auth(&req, &state) { return Ok(resp); }
     let vmid_str = path.into_inner();
     let vmid: u64 = match vmid_str.parse() {
         Ok(v) => v,
@@ -260,7 +260,7 @@ pub async fn vm_vnc_ws(
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+    if let Err(resp) = super::require_operator_auth(&req, &state) { return Ok(resp); }
     let vm_name = path.into_inner();
 
     // Pick the connection strategy from the VmConfig. Prefer ws_port
@@ -404,7 +404,7 @@ pub async fn pve_console_ws(
     path: web::Path<(String, String)>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+    if let Err(resp) = super::require_operator_auth(&req, &state) { return Ok(resp); }
 
     let (node_id, vmid_str) = path.into_inner();
 

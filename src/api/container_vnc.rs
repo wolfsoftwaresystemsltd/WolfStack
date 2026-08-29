@@ -1264,7 +1264,7 @@ pub async fn vnc_prepare_install(
     path: web::Path<(String, String)>,
     body: Option<web::Json<PrepareInstallRequest>>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+    if let Err(resp) = super::require_operator_auth(&req, &state) { return Ok(resp); }
     let (runtime, name) = path.into_inner();
     if let Err(resp) = validate_target(&runtime, &name) { return Ok(resp); }
 
@@ -1356,7 +1356,7 @@ pub async fn vnc_uninstall(
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+    if let Err(resp) = super::require_operator_auth(&req, &state) { return Ok(resp); }
     let (runtime, name) = path.into_inner();
     if let Err(resp) = validate_target(&runtime, &name) { return Ok(resp); }
 
@@ -1394,7 +1394,7 @@ pub async fn container_vnc_ws(
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
 ) -> Result<HttpResponse, Error> {
-    if let Err(resp) = super::require_auth(&req, &state) { return Ok(resp); }
+    if let Err(resp) = super::require_operator_auth(&req, &state) { return Ok(resp); }
     let (runtime, name) = path.into_inner();
     if let Err(resp) = validate_target(&runtime, &name) { return Ok(resp); }
 

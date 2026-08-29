@@ -3146,7 +3146,7 @@ async fn main() -> std::io::Result<()> {
                         let sec = wf_secret.clone();
                         let ai_cfg = wf_ai.config.lock().unwrap().clone();
                         tokio::spawn(async move {
-                            wolfflow::execute_workflow(&s, &c, &sec, &workflow, "scheduled", Some(ai_cfg)).await;
+                            wolfflow::execute_workflow(&s, &c, &sec, "wolfflow-scheduler", &workflow, "scheduled", Some(ai_cfg)).await;
                         });
                     }
                 }

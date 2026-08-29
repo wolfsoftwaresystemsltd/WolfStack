@@ -58,6 +58,10 @@ pub async fn wolfstack_api(path: &str) -> Result<serde_json::Value, String> {
         for secret in &secrets {
             match client.get(&url)
                 .header("X-WolfStack-Secret", secret)
+                // Local loopback call on behalf of a portal customer; the
+                // files API is a shell-class sink and requires attribution.
+                .header("X-WolfStack-Proxied", "1")
+                .header("X-WolfStack-Actor", "wolfhost-portal")
                 .send().await
             {
                 Ok(resp) if resp.status().is_success() => {
@@ -79,6 +83,10 @@ async fn wolfstack_post(path: &str, body: &serde_json::Value) -> Result<serde_js
         for secret in &secrets {
             match client.post(&url)
                 .header("X-WolfStack-Secret", secret)
+                // Local loopback call on behalf of a portal customer; the
+                // files API is a shell-class sink and requires attribution.
+                .header("X-WolfStack-Proxied", "1")
+                .header("X-WolfStack-Actor", "wolfhost-portal")
                 .header("Content-Type", "application/json")
                 .json(body)
                 .send().await
