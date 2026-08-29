@@ -18,6 +18,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::Instant;
 use tracing::{error, info, warn};
+use crate::node_identity::PeerAuth;
 
 /// Shared HTTP client for sync_wolfnet_peer_routes. Per-call was a
 /// latent leak source even though the function is currently
@@ -2239,7 +2240,7 @@ pub async fn sync_wolfnet_peer_routes() {
                 for scheme in &["https", "http"] {
                     let url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(hostname), port, path);
                     if let Ok(resp) = client.get(&url)
-                        .header("X-WolfStack-Secret", &cluster_secret)
+                        .peer_auth(&cluster_secret)
                         .send().await
                         && resp.status().is_success()
                             && let Ok(ips) = resp.json::<Vec<String>>().await
@@ -2257,7 +2258,7 @@ pub async fn sync_wolfnet_peer_routes() {
                 for port in &[8553, 8552] {
                     let url = format!("http://{}:{}{}", allowed_ip, port, path);
                     if let Ok(resp) = client.get(&url)
-                        .header("X-WolfStack-Secret", &cluster_secret)
+                        .peer_auth(&cluster_secret)
                         .send().await
                         && resp.status().is_success()
                             && let Ok(ips) = resp.json::<Vec<String>>().await
@@ -14524,6 +14525,7 @@ fn send_runtime_spec(
     );
     let mut last = String::from("no endpoint reachable");
     for url in &urls {
+        let auth_hdrs = crate::node_identity::curl_headers_padded(cluster_secret, url);
         let out = Command::new("curl")
             .args([
                 "-s", "-f", "-k",
@@ -14531,7 +14533,8 @@ fn send_runtime_spec(
                 "--max-time", "30",     // a few KB of JSON; a real ceiling is fine here
                 "-X", "POST",
                 "-H", "Content-Type: application/json",
-                "-H", &format!("X-WolfStack-Secret: {}", cluster_secret),
+                "-H", &auth_hdrs[0], "-H", &auth_hdrs[1], "-H", &auth_hdrs[2],
+                "-H", &auth_hdrs[3], "-H", &auth_hdrs[4], "-H", &auth_hdrs[5],
                 "--data-binary", &body,   // small and in memory already, not a file
                 url,
             ])
@@ -14625,6 +14628,7 @@ fn send_mount_data(
     let mut last = String::from("no endpoint reachable");
     let mut ok = false;
     for url in &urls {
+        let auth_hdrs = crate::node_identity::curl_headers_padded(cluster_secret, url);
         let o = Command::new("curl")
             .args([
                 "-s", "-f", "-k",
@@ -14633,7 +14637,8 @@ fn send_mount_data(
                 "--speed-time", "60",
                 "-X", "POST",
                 "-H", "Content-Type: application/octet-stream",
-                "-H", &format!("X-WolfStack-Secret: {}", cluster_secret),
+                "-H", &auth_hdrs[0], "-H", &auth_hdrs[1], "-H", &auth_hdrs[2],
+                "-H", &auth_hdrs[3], "-H", &auth_hdrs[4], "-H", &auth_hdrs[5],
                 "-T", &tar_path,      // stream — mount data is the big part
                 url,
             ])
@@ -14740,8 +14745,8 @@ pub fn docker_migrate(
     let mut last_response = String::new();
     let mut last_stderr = String::new();
 
-    let secret_header = format!("X-WolfStack-Secret: {}", cluster_secret);
     for import_url in &import_urls {
+        let auth_hdrs = crate::node_identity::curl_headers_padded(cluster_secret, import_url);
         let output = Command::new("curl")
             .args([
                 "-s", "-f", "-k",    // --fail + accept self-signed certs
@@ -14754,7 +14759,8 @@ pub fn docker_migrate(
                 "--speed-time", "60",
                 "-X", "POST",
                 "-H", "Content-Type: application/octet-stream",
-                "-H", &secret_header,
+                "-H", &auth_hdrs[0], "-H", &auth_hdrs[1], "-H", &auth_hdrs[2],
+                "-H", &auth_hdrs[3], "-H", &auth_hdrs[4], "-H", &auth_hdrs[5],
                 // -T streams the file. `--data-binary @file` reads the WHOLE
                 // file into curl's memory first and dies with
                 // "option --data-binary: out of memory" on a large image, even

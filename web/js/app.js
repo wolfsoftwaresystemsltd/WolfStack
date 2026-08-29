@@ -17285,6 +17285,22 @@ function openNodeSettings(nodeId) {
                     </div>
                     <small style="color: var(--text-muted);">Assign this node to one or more HA hosting tiers (DNS, mail, ingress, web host, database). Leave all unchecked for a general-purpose node. WolfHost DNS zones, for example, are written to every node with the <code>DNS</code> role.</small>
                 </div>`}
+                ${isPve ? '' : `
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="node-settings-manager" ${node.manager === false ? '' : 'checked'}>
+                        Manager node — may forward operator actions to other nodes
+                    </label>
+                    <small style="color: var(--text-muted);">Leave on for nodes where operators log in. Turn off for nodes nobody administers from (workers, storage, database): other nodes then refuse shell, console and file actions forwarded by it, even with the cluster secret. Applies once node signatures are required (Settings → Security).</small>
+                </div>
+                <div class="form-group">
+                    <label>Signing key</label>
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                        <code style="font-size:11px;word-break:break-all;">${node.pubkey ? escapeHtml(node.pubkey) : (node.is_self ? 'this node' : 'not pinned yet')}</code>
+                        ${node.is_self || !node.pubkey ? '' : `<button type="button" class="btn btn-sm" onclick="resetNodeIdentity('${escapeAttr(node.id)}', '${escapeAttr(node.hostname || node.id)}')">Reset pinned key</button>`}
+                    </div>
+                    <small style="color: var(--text-muted);">Ed25519 public key pinned from this node's own reports. Reset it only after reinstalling the node.</small>
+                </div>`}
                 <div class="form-group">
                     <label>Update Script</label>
                     <input type="text" class="form-control" id="node-settings-update-script" value="${node.update_script || ''}" placeholder="curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
@@ -17677,6 +17693,13 @@ async function saveNodeSettings() {
         }
     }
 
+    const managerEl = document.getElementById('node-settings-manager');
+    if (managerEl) {
+        const node = allNodes.find(n => n.id === nodeId);
+        const oldManager = node ? node.manager !== false : true;
+        if (managerEl.checked !== oldManager) updates.manager = managerEl.checked;
+    }
+
     if (Object.keys(updates).length === 0) {
         showToast('No changes to save', 'info');
         return;
@@ -17695,6 +17718,14 @@ async function saveNodeSettings() {
             showToast(data.queued
                 ? 'Saved — will apply when the node reconnects'
                 : 'Node settings updated', 'success');
+            // Manager policy is enforced by the OTHER nodes; say which ones
+            // did not take it (a demoted node cannot re-promote itself —
+            // change it from a manager node).
+            if (Array.isArray(data.policy_push_failed) && data.policy_push_failed.length) {
+                showToast('Manager setting saved here but not applied on: '
+                    + data.policy_push_failed.map(f => f.node + ' (' + f.error + ')').join('; ')
+                    + '. Change it from a manager node.', 'error');
+            }
         } else {
             const err = await resp.json().catch(() => ({}));
             showToast(err.error || 'Failed to update settings', 'error');
@@ -53815,6 +53846,78 @@ async function tiLookup() {
 
 // ─── Cluster Secret Management ───
 
+// Per-node signing keys (node_identity.rs). "Transition" = keys exchanged,
+// nothing enforced; "Strict" = a cluster secret alone is refused.
+function renderNodeIdentityStatus(ni) {
+    var st = document.getElementById('node-identity-status');
+    var detail = document.getElementById('node-identity-detail');
+    var btn = document.getElementById('btn-node-signatures');
+    if (!st || !detail || !btn) return;
+    if (!ni) {
+        st.textContent = 'Not available on this node';
+        st.style.color = 'var(--text-muted)';
+        btn.style.display = 'none';
+        detail.textContent = 'This node runs a build without per-node identity.';
+        return;
+    }
+    var missing = Array.isArray(ni.peers_without_key) ? ni.peers_without_key : [];
+    var strict = ni.mode === 'strict';
+    st.textContent = strict ? 'Required (strict)' : 'Exchanging keys (not enforced)';
+    st.style.color = strict ? 'var(--success)' : 'var(--text-muted)';
+    var parts = [];
+    if (!ni.self_has_key) parts.push('This node has no signing key — check the service log for "node identity".');
+    if (missing.length) parts.push('Waiting for a key from: ' + missing.join(', ') + ' (upgrade those nodes; keys are pinned on the next poll).');
+    else parts.push('Every WolfStack peer has a pinned key.');
+    if (ni.last_verified_node) parts.push('Last signed request verified from ' + ni.last_verified_node + '.');
+    if (ni.env_override) parts.push('Overridden by WOLFSTACK_NODE_SIGNATURES=' + ni.env_override + ' in the service environment.');
+    parts.push(strict
+        ? 'A leaked cluster secret cannot act as a node on this cluster.'
+        : 'Turn on "Require node signatures" once every peer has a key: a cluster secret alone will then be refused, and only nodes marked as managers can forward operator actions.');
+    detail.textContent = parts.join(' ');
+    btn.style.display = ni.env_override ? 'none' : '';
+    btn.textContent = strict ? 'Stop requiring node signatures' : 'Require node signatures';
+    btn.disabled = !strict && (missing.length > 0 || !ni.self_has_key);
+    btn.setAttribute('data-required', strict ? '1' : '0');
+}
+
+async function toggleNodeSignatures() {
+    var btn = document.getElementById('btn-node-signatures');
+    if (!btn) return;
+    var turningOn = btn.getAttribute('data-required') !== '1';
+    if (turningOn && !confirm('Require node signatures?\n\nEvery inter-node request will need a valid signature from a pinned node key. Nodes running an older build, and any of your own scripts that use only the cluster secret, will be refused until upgraded.\n\nRecover over SSH with WOLFSTACK_NODE_SIGNATURES=off if needed.')) return;
+    btn.disabled = true;
+    try {
+        var resp = await fetch('/api/cluster/node-signatures', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ required: turningOn })
+        });
+        var data = await resp.json().catch(function () { return {}; });
+        if (!resp.ok) {
+            showToast(data.error || 'Could not change node signature mode', 'error');
+        } else {
+            showToast(turningOn ? 'Node signatures are now required' : 'Node signatures are no longer required', 'success');
+            renderNodeIdentityStatus(data.node_identity);
+        }
+    } catch (e) {
+        showToast('Could not change node signature mode: ' + e, 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function resetNodeIdentity(nodeId, hostname) {
+    if (!confirm('Forget the pinned signing key for ' + hostname + '?\n\nDo this only after reinstalling that node. Its next status report will be pinned as the new key.')) return;
+    try {
+        var resp = await fetch('/api/nodes/' + encodeURIComponent(nodeId) + '/reset-identity', { method: 'POST' });
+        var data = await resp.json().catch(function () { return {}; });
+        if (resp.ok) showToast('Pinned key cleared — re-pinned on the next poll', 'success');
+        else showToast(data.error || 'Could not reset the pinned key', 'error');
+    } catch (e) {
+        showToast('Could not reset the pinned key: ' + e, 'error');
+    }
+}
+
 async function loadClusterSecretStatus() {
     var el = document.getElementById('cluster-secret-status');
     if (!el) return;
@@ -53832,6 +53935,7 @@ async function loadClusterSecretStatus() {
             el.style.color = 'var(--text-muted)';
             if (repushBtn) repushBtn.style.display = 'none';
         }
+        renderNodeIdentityStatus(data.node_identity);
     } catch (e) {
         el.textContent = 'Error';
     }

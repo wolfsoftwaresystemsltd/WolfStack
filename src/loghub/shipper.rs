@@ -28,6 +28,7 @@ use std::time::Duration;
 use crate::agent::ClusterState;
 
 use super::{now_millis, LogEvent, LogHubConfig, LogHubState, LogLevel, LogSource, Redactor};
+use crate::node_identity::PeerAuth;
 
 /// How often the shipper collects + forwards.
 const SHIP_INTERVAL_SECS: u64 = 10;
@@ -464,7 +465,7 @@ fn post_to_hub(address: &str, port: u16, secret: &str, events: &[LogEvent]) -> b
         Err(_) => return false,
     };
     for url in crate::api::build_node_urls(address, port, "/api/logs/ingest") {
-        match client.post(&url).header("X-WolfStack-Secret", secret).json(events).send() {
+        match client.post(&url).peer_auth(secret).json(events).send() {
             Ok(r) if r.status().is_success() => return true,
             // 507 = hub disk full; it wants us to keep spooling. Stop trying
             // other URLs for this round.

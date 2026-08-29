@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tracing::warn;
+use crate::node_identity::PeerAuth;
 
 /// Session token lifetime (8 hours)
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 3600);
@@ -1625,7 +1626,7 @@ pub async fn cli_clear_daemon_lockout(ip: &str) -> Result<(), String> {
         let url = format!("{}://127.0.0.1:{}/api/security/auth-unblock", scheme, port);
         match client
             .post(&url)
-            .header("X-WolfStack-Secret", &secret)
+            .peer_auth(&secret)
             .json(&body)
             .send()
             .await

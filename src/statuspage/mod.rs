@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
+use crate::node_identity::PeerAuth;
 
 /// Consecutive failed checks before a monitor is considered Down (vs
 /// Degraded). Drives both the status computation and the "N consecutive
@@ -546,7 +547,7 @@ pub async fn broadcast_to_cluster(
         let mut sent = false;
         for url in &urls {
             match client.post(url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .json(&filtered)
                 .send().await
             {
@@ -614,7 +615,7 @@ pub async fn pull_from_peers(
         let urls = crate::api::build_node_urls(&peer.address, peer.port, "/api/statuspage/config");
         for url in &urls {
             match client.get(url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .send().await
             {
                 Ok(resp) if resp.status().is_success() => {
@@ -1003,7 +1004,7 @@ async fn run_container_check_routed(
     let mut last_err = String::new();
     for url in &urls {
         match client.get(url)
-            .header("X-WolfStack-Secret", cluster_secret)
+            .peer_auth(cluster_secret)
             .send().await
         {
             Ok(resp) if resp.status().is_success() => {
@@ -1045,7 +1046,7 @@ async fn remote_container_running_fallback(
     let urls = crate::api::build_node_urls(&node.address, node.port, "/api/containers/running");
     let client = &*SP_RPC_CLIENT;
     for url in &urls {
-        if let Ok(resp) = client.get(url).header("X-WolfStack-Secret", cluster_secret).send().await {
+        if let Ok(resp) = client.get(url).peer_auth(cluster_secret).send().await {
             // Drain before leaving — a bare `continue` strands the socket
             // in CLOSE-WAIT (see the drain_response doc comment above).
             if !resp.status().is_success() { drain_response(resp).await; continue; }

@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 use crate::agent::ClusterState;
+use crate::node_identity::PeerAuth;
 
 // ─── Shared HTTP client for cluster RPC ───
 //
@@ -824,7 +825,7 @@ pub async fn broadcast_to_cluster(
             // connection returns to the pool. `Ok(_)` previously dropped
             // the Response unconsumed, which was the leak source.
             match client.post(url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .json(&services)
                 .send().await
             {
@@ -896,7 +897,7 @@ pub async fn broadcast_delete(
         for url in &urls {
             if send_and_drain(
                 client.post(url)
-                    .header("X-WolfStack-Secret", cluster_secret)
+                    .peer_auth(cluster_secret)
                     .json(&payload)
             ).await.is_some() {
                 break;
@@ -1532,7 +1533,7 @@ pub async fn reconcile(
                         let mut fetched: Option<Vec<serde_json::Value>> = None;
                         for url in &urls {
                             match client.get(url)
-                                .header("X-WolfStack-Secret", cluster_secret)
+                                .peer_auth(cluster_secret)
                                 .send().await
                             {
                                 Ok(resp) => {
@@ -1837,7 +1838,7 @@ pub async fn reconcile(
                                 let mut ok = false;
                                 for url in &urls {
                                     if let Ok(resp) = clone_client.post(url)
-                                        .header("X-WolfStack-Secret", cluster_secret)
+                                        .peer_auth(cluster_secret)
                                         .json(&serde_json::json!({ "new_name": clone_name }))
                                         .send().await
                                     {
@@ -1848,7 +1849,7 @@ pub async fn reconcile(
                                             let su = crate::api::build_node_urls(&sn.address, sn.port, &sp);
                                             for u in &su {
                                                 if send_and_drain(
-                                                    clone_client.post(u).header("X-WolfStack-Secret", cluster_secret)
+                                                    clone_client.post(u).peer_auth(cluster_secret)
                                                 ).await.is_some() { break; }
                                             }
                                             ok = true;
@@ -1902,7 +1903,7 @@ pub async fn reconcile(
 
                                 for url in &urls {
                                     match migrate_client.post(url)
-                                        .header("X-WolfStack-Secret", cluster_secret)
+                                        .peer_auth(cluster_secret)
                                         .json(&clone_payload)
                                         .send().await
                                     {
@@ -2044,7 +2045,7 @@ pub async fn reconcile(
                         for url in &urls {
                             if send_and_drain(
                                 client.post(url)
-                                    .header("X-WolfStack-Secret", cluster_secret)
+                                    .peer_auth(cluster_secret)
                                     .header("Content-Type", "application/json")
                                     .body(payload.to_string())
                             ).await.is_some() {
@@ -2099,7 +2100,7 @@ pub async fn reconcile(
                         for url in &urls {
                             if send_and_drain(
                                 client.post(url)
-                                    .header("X-WolfStack-Secret", cluster_secret)
+                                    .peer_auth(cluster_secret)
                                     .json(&stop_payload)
                             ).await.is_some() { break; }
                         }
@@ -2113,7 +2114,7 @@ pub async fn reconcile(
                         for url in &urls {
                             if send_and_drain(
                                 client.post(url)
-                                    .header("X-WolfStack-Secret", cluster_secret)
+                                    .peer_auth(cluster_secret)
                                     .json(&rm_payload)
                             ).await.is_some() { break; }
                         }
@@ -2202,7 +2203,7 @@ async fn deploy_docker(
             // send_and_drain reads the body so the socket is pooled.
             if matches!(send_and_drain(
                 client.post(url)
-                    .header("X-WolfStack-Secret", cluster_secret)
+                    .peer_auth(cluster_secret)
                     .json(&pull_payload)
             ).await, Some(true)) { pulled = true; break; }
         }
@@ -2216,7 +2217,7 @@ async fn deploy_docker(
         let mut created = false;
         for url in &create_urls {
             if let Ok(resp) = client.post(url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .json(&payload)
                 .send().await
             {
@@ -2243,7 +2244,7 @@ async fn deploy_docker(
         for url in &start_urls {
             if matches!(send_and_drain(
                 client.post(url)
-                    .header("X-WolfStack-Secret", cluster_secret)
+                    .peer_auth(cluster_secret)
                     .json(&start_payload)
             ).await, Some(true)) { break; }
         }
@@ -2312,7 +2313,7 @@ async fn deploy_lxc(
         let mut created = false;
         for url in &create_urls {
             if let Ok(resp) = client.post(url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .json(&payload)
                 .send().await
             {
@@ -2338,7 +2339,7 @@ async fn deploy_lxc(
         for url in &start_urls {
             if matches!(send_and_drain(
                 client.post(url)
-                    .header("X-WolfStack-Secret", cluster_secret)
+                    .peer_auth(cluster_secret)
                     .json(&start_payload)
             ).await, Some(true)) { break; }
         }
@@ -2392,7 +2393,7 @@ async fn stop_and_remove(
         for url in &urls {
             if send_and_drain(
                 client.post(url)
-                    .header("X-WolfStack-Secret", cluster_secret)
+                    .peer_auth(cluster_secret)
                     .json(&stop_payload)
             ).await.is_some() {
                 break;
@@ -2409,7 +2410,7 @@ async fn stop_and_remove(
         for url in &urls {
             match send_and_drain(
                 client.post(url)
-                    .header("X-WolfStack-Secret", cluster_secret)
+                    .peer_auth(cluster_secret)
                     .json(&rm_payload)
             ).await {
                 Some(ok) => return ok,
@@ -2529,7 +2530,7 @@ pub async fn manage_standby(
                         let mut pulled = false;
                         for url in &pull_urls {
                             if matches!(send_and_drain(
-                                client.post(url).header("X-WolfStack-Secret", cluster_secret).json(&pull_payload)
+                                client.post(url).peer_auth(cluster_secret).json(&pull_payload)
                             ).await, Some(true)) { pulled = true; break; }
                         }
                         if pulled {
@@ -2544,7 +2545,7 @@ pub async fn manage_standby(
                             let mut ok = false;
                             for url in &create_urls {
                                 match send_and_drain(
-                                    client.post(url).header("X-WolfStack-Secret", cluster_secret).json(&payload)
+                                    client.post(url).peer_auth(cluster_secret).json(&payload)
                                 ).await {
                                     Some(true) => { ok = true; break; }
                                     Some(false) => break,  // HTTP error — don't retry next URL
@@ -2592,7 +2593,7 @@ pub async fn manage_standby(
                     for url in &urls {
                         match send_and_drain(
                             clone_client.post(url)
-                                .header("X-WolfStack-Secret", cluster_secret)
+                                .peer_auth(cluster_secret)
                                 .json(&clone_payload)
                         ).await {
                             Some(true) => { ok = true; break; }
@@ -2708,7 +2709,7 @@ pub async fn check_failover(
                 for url in &urls {
                     match send_and_drain(
                         client.post(url)
-                            .header("X-WolfStack-Secret", cluster_secret)
+                            .peer_auth(cluster_secret)
                             .json(&payload)
                     ).await {
                         Some(true) => { ok = true; break; }

@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use tracing::warn;
 use std::process::Command as StdCommand;
 use std::time::Duration;
+use crate::node_identity::PeerAuth;
 
 pub mod baseline;
 
@@ -1018,7 +1019,7 @@ impl AiAgent {
                             let remote_url = format!("{}/api/ai/exec", base_url);
                             let remote_result = crate::api::API_HTTP_CLIENT
                                 .post(&remote_url)
-                                .header("X-WolfStack-Secret", cluster_secret)
+                                .peer_auth(cluster_secret)
                                 .json(&serde_json::json!({ "command": cmd }))
                                 .timeout(Duration::from_secs(15))
                                 .send()
@@ -1268,7 +1269,7 @@ impl AiAgent {
                     let remote_url = format!("{}/api/ai/action/exec", base_url);
                     match crate::api::API_HTTP_CLIENT
                         .post(&remote_url)
-                        .header("X-WolfStack-Secret", cluster_secret)
+                        .peer_auth(cluster_secret)
                         // The far side is a shell sink behind
                         // require_operator_auth: name the operator who
                         // approved this action.

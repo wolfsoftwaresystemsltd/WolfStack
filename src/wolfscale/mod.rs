@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::mpsc::Sender;
+use crate::node_identity::PeerAuth;
 
 const WS_CONFIG_PATH: &str = "/etc/wolfstack/wolfscale.json";
 const WS_SECRET_PURPOSE: &[u8] = b"wolfscale-cluster-secret-v1";
@@ -717,7 +718,7 @@ fn post_to_peer(ctx: &WolfScaleOpCtx, urls: &[String], body: &serde_json::Value,
         let mut last = format!("could not reach host '{}'", host);
         for url in urls {
             let req = crate::api::API_HTTP_CLIENT.post(url)
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .timeout(std::time::Duration::from_secs(timeout_secs))
                 .json(body)
                 .send();
@@ -820,7 +821,7 @@ fn remote_node_op(ctx: &WolfScaleOpCtx, host: &str, container: &str, op: NodeOp)
         let mut last = format!("could not reach host '{}'", host);
         for url in &urls {
             match crate::api::API_HTTP_CLIENT.post(url)
-                .header("X-WolfStack-Secret", &secret)
+                .peer_auth(&secret)
                 .timeout(std::time::Duration::from_secs(30))
                 .send().await
             {

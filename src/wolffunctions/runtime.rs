@@ -32,6 +32,7 @@ use std::cell::Cell;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use tracing::{error, info, warn};
+use crate::node_identity::PeerAuth;
 
 /// RAII release for a claimed instance. Rust drops a mid-`.await` future
 /// WITHOUT running any match-arm cleanup — an inbound-socket RST while the
@@ -1112,7 +1113,7 @@ pub async fn invoke_routed(
         let path = format!("/api/wolffunctions/{}/invoke-local", func.id);
         for url in crate::api::build_node_urls(&node.address, node.port, &path) {
             match client.post(&url)
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .timeout(std::time::Duration::from_secs(func.timeout_secs.max(1) as u64 + 5))
                 .json(&payload)
                 .send().await

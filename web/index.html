@@ -7240,6 +7240,14 @@
                                     Checking...
                                 </span>
                             </div>
+                            <div id="node-identity-panel" style="margin-bottom:16px;">
+                                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                                    <span style="font-size:13px;font-weight:600;">Node signatures:</span>
+                                    <span id="node-identity-status" style="font-size:13px;padding:4px 10px;border-radius:6px;background:var(--bg-secondary);border:1px solid var(--border);">Checking...</span>
+                                    <button class="btn" id="btn-node-signatures" onclick="toggleNodeSignatures()" style="display:none;"></button>
+                                </div>
+                                <p id="node-identity-detail" style="margin:8px 0 0;font-size:12px;color:var(--text-secondary);" aria-live="polite"></p>
+                            </div>
                             <div style="display:flex;gap:8px;flex-wrap:wrap;">
                                 <button class="btn btn-primary" onclick="generateClusterSecret()" id="btn-generate-secret">
                                     Generate New Cluster Secret

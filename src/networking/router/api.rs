@@ -15,6 +15,7 @@
 use super::*;
 use actix_web::{web, HttpResponse, HttpRequest};
 use serde::Deserialize;
+use crate::node_identity::PeerAuth;
 
 type S = web::Data<crate::api::AppState>;
 
@@ -147,7 +148,7 @@ pub(crate) fn replicate_config_to_cluster(state: S) {
             let mut last_err = String::new();
             for url in &urls {
                 match client.post(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .header("Content-Type", "application/json")
                     .timeout(std::time::Duration::from_secs(10))
                     .body(body.clone())
@@ -218,7 +219,7 @@ async fn proxy_router_get_to_node(
     let mut last_err = String::new();
     for url in &urls {
         let res = client.get(url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(std::time::Duration::from_secs(30))
             .send().await;
         match res {
@@ -277,7 +278,7 @@ async fn proxy_router_post_to_node(
     let mut last_err = String::new();
     for url in &urls {
         let res = client.post(url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .json(&body)
             .timeout(std::time::Duration::from_secs(30))
             .send().await;
@@ -890,7 +891,7 @@ pub async fn get_topology(
                 for attempt in 1..=5 {
                     for url in &urls {
                         match client_c.get(url)
-                            .header("X-WolfStack-Secret", &secret_h)
+                            .peer_auth(&secret_h)
                             .timeout(std::time::Duration::from_secs(5))
                             .send().await
                         {
@@ -2991,7 +2992,7 @@ pub async fn packet_capture(
             let proxy_timeout = std::time::Duration::from_secs(r.timeout_seconds + 10);
             for url in &urls {
                 match client.post(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .timeout(proxy_timeout)
                     .json(&proxy_body)
                     .send().await
@@ -3457,7 +3458,7 @@ pub async fn interface_up(
             let urls = crate::api::build_node_urls(&target_host, target_node.port, "/api/router/interface-up");
             for url in &urls {
                 if let Ok(resp) = client.post(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .timeout(std::time::Duration::from_secs(10))
                     .json(&body_json).send().await
                 {
@@ -5905,7 +5906,7 @@ pub async fn wolfnet_routes_resync(req: HttpRequest, state: S) -> HttpResponse {
         let mut got = false;
         for url in &urls {
             let resp = client.get(url)
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .send().await;
             let resp = match resp {
                 Ok(r) if r.status().is_success() => r,
@@ -6499,7 +6500,7 @@ pub async fn get_cluster_preflight(
         let url = format!("https://127.0.0.1:{}/api/router/preflight", sn.port);
         let secret = state.cluster_secret.clone();
         let res = client.get(&url)
-            .header("X-WolfStack-Secret", &secret)
+            .peer_auth(&secret)
             .timeout(std::time::Duration::from_secs(8))
             .send().await;
         match res {
@@ -6540,7 +6541,7 @@ pub async fn get_cluster_preflight(
             let mut last_err = String::new();
             for url in &urls {
                 let res = client.get(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .timeout(std::time::Duration::from_secs(8))
                     .send().await;
                 match res {
@@ -6674,7 +6675,7 @@ pub async fn get_cluster_validation(
             let mut last_err = String::new();
             for url in &urls {
                 let res = client.get(url)
-                    .header("X-WolfStack-Secret", &secret)
+                    .peer_auth(&secret)
                     .timeout(std::time::Duration::from_secs(4))
                     .send().await;
                 match res {

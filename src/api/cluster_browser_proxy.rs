@@ -27,6 +27,7 @@ use tokio_tungstenite::tungstenite;
 use tracing::{error, warn};
 
 use super::AppState;
+use crate::node_identity::PeerAuth;
 
 /// Shared HTTP client for proxying cluster-browser session traffic.
 /// Previously a fresh Client was built per request — one pool leak
@@ -140,7 +141,7 @@ async fn node_proxy_request(
     }
 
     // Add inter-node auth
-    builder = builder.header("X-WolfStack-Secret", state.cluster_secret.clone());
+    builder = builder.peer_auth(state.cluster_secret.clone());
 
     // Stream the request body through to the remote node rather than buffering
     // it (unbounded buffering would let an authenticated client OOM the daemon).

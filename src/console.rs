@@ -946,8 +946,11 @@ async fn remote_console_bridge(
         // Authenticate with remote node via cluster secret, plus the
         // operator attribution its require_operator_auth demands for a
         // shell. Skip the stamp if our caller was somehow a peer.
-        if let Ok(val) = tungstenite::http::HeaderValue::from_str(&cluster_secret) {
-            ws_request.headers_mut().insert("X-WolfStack-Secret", val);
+        // Secret plus this node's signature for the target (node_identity).
+        for (name, value) in crate::node_identity::raw_headers(&cluster_secret, url) {
+            if let Ok(val) = tungstenite::http::HeaderValue::from_str(&value) {
+                ws_request.headers_mut().insert(name, val);
+            }
         }
         if actor != "cluster-node"
             && let Ok(val) = tungstenite::http::HeaderValue::from_str(&actor)

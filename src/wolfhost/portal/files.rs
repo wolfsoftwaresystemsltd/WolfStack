@@ -2,9 +2,10 @@ use actix_web::{web, HttpRequest, HttpResponse};
 use crate::wolfhost::AppState;
 use serde::Deserialize;
 use std::sync::Arc;
+use crate::node_identity::PeerAuth;
 
-/// All file operations are proxied through WolfStack's LXC file API
-/// which handles both local and remote containers across the cluster.
+// All file operations are proxied through WolfStack's LXC file API
+// which handles both local and remote containers across the cluster.
 
 fn get_cluster_secret() -> String {
     crate::wolfhost::api::servers::get_cluster_secret()
@@ -19,7 +20,7 @@ async fn ws_post(path: &str, body: &serde_json::Value) -> Result<serde_json::Val
     let secret = get_cluster_secret();
     for url in crate::wolfhost::api::servers::wolfstack_urls(path) {
         match client.post(&url)
-            .header("X-WolfStack-Secret", &secret)
+            .peer_auth(&secret)
             // Local loopback call on behalf of a portal customer; the
             // files API is a shell-class sink and requires attribution.
             .header("X-WolfStack-Proxied", "1")
@@ -41,7 +42,7 @@ async fn ws_get_bytes(path: &str) -> Result<Vec<u8>, String> {
     let secret = get_cluster_secret();
     for url in crate::wolfhost::api::servers::wolfstack_urls(path) {
         match client.get(&url)
-            .header("X-WolfStack-Secret", &secret)
+            .peer_auth(&secret)
             // Local loopback call on behalf of a portal customer; the
             // files API is a shell-class sink and requires attribution.
             .header("X-WolfStack-Proxied", "1")

@@ -17,6 +17,7 @@ use tracing::warn;
 
 use crate::monitoring::SystemMetrics;
 use crate::installer::ComponentStatus;
+use crate::node_identity::PeerAuth;
 
 /// Per-file result of `leave_wipe_membership_files`. A `cleared` of
 /// `false` either means the file was already absent (treat as success)
@@ -330,6 +331,17 @@ pub struct Node {
     /// `None` until the first poll succeeds (and forever for self).
     #[serde(default)]
     pub self_id: Option<String>,
+    /// This node's Ed25519 public key (base64), pinned from its OWN status
+    /// report — never copied from another peer's gossip. `None` until the
+    /// node runs a build that signs. See `node_identity`.
+    #[serde(default)]
+    pub pubkey: Option<String>,
+    /// Whether peers accept operator actions forwarded BY this node
+    /// (`X-WolfStack-Proxied` from it). Operator-set, distributed to every
+    /// peer, never self-reported. Defaults to true so an upgrade changes
+    /// nothing; tighten it for nodes where nobody logs in.
+    #[serde(default = "default_true")]
+    pub manager: bool,
     /// Workload subnets (Docker / LXC / VM bridges) on this peer. Shipped
     /// in every StatusReport so the cluster can detect when WolfRouter
     /// subnet_routes are missing for a remote peer's workloads — that's
@@ -391,6 +403,8 @@ impl Node {
         }
     }
 }
+
+fn default_true() -> bool { true }
 
 fn default_node_type() -> String { "wolfstack".to_string() }
 
@@ -798,6 +812,7 @@ impl ClusterState {
             .map(|n| n.roles.clone())
             .filter(|r| !r.is_empty())
             .unwrap_or_else(Self::load_self_roles);
+        let prev_manager = nodes.get(&self.self_id).map(|n| n.manager).unwrap_or(true);
         nodes.insert(self.self_id.clone(), Node {
             id: self.self_id.clone(),
             hostname: metrics.hostname.clone(),
@@ -824,6 +839,8 @@ impl ClusterState {
             pve_cluster_name: None,
             cluster_name,
             join_verified: true, // self is always verified
+            pubkey: crate::node_identity::self_pubkey(),
+            manager: prev_manager,
             has_docker,
             has_lxc,
             has_kvm,
@@ -897,6 +914,8 @@ impl ClusterState {
     /// every 10 seconds on every node.
     fn persistent_peer_fields_changed(old: &Node, new: &Node) -> bool {
         old.hostname != new.hostname
+            || old.pubkey != new.pubkey
+            || old.manager != new.manager
             || old.self_id != new.self_id
             || old.public_ip != new.public_ip
             || old.workload_subnets != new.workload_subnets
@@ -1037,6 +1056,8 @@ impl ClusterState {
         let id = format!("node-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let now = now_unix();
         nodes.insert(id.clone(), Node {
+            pubkey: None,
+            manager: true,
             id: id.clone(),
             hostname: address.clone(),
             address,
@@ -1224,6 +1245,9 @@ impl ClusterState {
             let mut new_node = m.clone();
             new_node.online = false;
             new_node.is_self = false;
+            // Keys are pinned only from the node's own report, never relayed.
+            new_node.pubkey = None;
+            new_node.manager = true;
             self.update_remote(new_node);
             self.save_nodes();
             added_self_ids.insert(m_self_id.to_string());
@@ -1463,9 +1487,10 @@ impl ClusterState {
 
     /// Update node settings (hostname, address, port, token, fingerprint, cluster name, site)
     #[allow(clippy::too_many_arguments)]
-    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>, site: Option<String>, display_name: Option<String>, migration_address: Option<String>) -> bool {
+    pub fn update_node_settings(&self, id: &str, hostname: Option<String>, address: Option<String>, port: Option<u16>, pve_token: Option<String>, pve_fingerprint: Option<Option<String>>, cluster_name: Option<String>, login_disabled: Option<bool>, update_script: Option<String>, site: Option<String>, display_name: Option<String>, migration_address: Option<String>, manager: Option<bool>) -> bool {
         let mut nodes = self.nodes_write();
         if let Some(node) = nodes.get_mut(id) {
+            if let Some(m) = manager { node.manager = m; }
             if let Some(h) = hostname { node.hostname = h; }
             if let Some(a) = address { node.address = a; }
             if let Some(p) = port { node.port = p; }
@@ -1729,6 +1754,9 @@ pub enum AgentMessage {
         /// Enterprise license key — propagated to cluster nodes that don't have one
         #[serde(default)]
         license_key: Option<String>,
+        /// Sender's Ed25519 public key (base64). Older peers omit it.
+        #[serde(default)]
+        pubkey: Option<String>,
     },
     /// "Give me your status"
     StatusRequest,
@@ -1847,7 +1875,7 @@ pub async fn push_identity_to_node(node: &Node, intent: &IdentityIntent, cluster
         for url in &urls {
             if let Ok(resp) = client.post(url)
                 .timeout(std::time::Duration::from_secs(5))
-                .header("X-WolfStack-Secret", cluster_secret)
+                .peer_auth(cluster_secret)
                 .header("Content-Type", "application/json")
                 .body(payload.clone())
                 .send().await
@@ -2134,7 +2162,7 @@ pub async fn sweep_replicate_control_plane(cluster: Arc<ClusterState>, cluster_s
         for url in &urls {
             match client.post(url)
                 .timeout(std::time::Duration::from_secs(8))
-                .header("X-WolfStack-Secret", &cluster_secret)
+                .peer_auth(&cluster_secret)
                 .json(&payload)
                 .send()
                 .await
@@ -2249,7 +2277,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
         let mut poll_ok = false;
         for url in &urls {
             match client.get(url)
-                .header("X-WolfStack-Secret", &cluster_secret)
+                .peer_auth(&cluster_secret)
                 .send().await
             {
                 Ok(resp) => {
@@ -2289,7 +2317,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                         continue;
                     }
                     if let Ok(msg) = resp.json::<AgentMessage>().await
-                        && let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, site: peer_site, display_name: peer_display_name, roles: peer_roles, license_key } = msg {
+                        && let AgentMessage::StatusReport { node_id: peer_self_id, hostname, metrics, components, docker_count, lxc_count, vm_count, compose_count, public_ip, known_nodes, deleted_ids, wolfnet_ips, has_docker, has_lxc, has_kvm, workload_subnets: peer_workload_subnets, site: peer_site, display_name: peer_display_name, roles: peer_roles, license_key, pubkey: peer_pubkey } = msg {
                             let now = now_unix();
                             // Detect TLS by the URL scheme that actually
                             // answered. v23.12 chain is HTTPS → HTTP-over-
@@ -2308,6 +2336,15 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                             // reconciler below without re-locking cluster state.
                             let peer_hostname_for_reconcile = hostname.clone();
                             let peer_public_ip_for_reconcile = public_ip.clone();
+                            // `node` is a snapshot from the start of this poll
+                            // cycle. Operator-set fields (manager policy, a
+                            // pinned-key reset) can change while the poll is in
+                            // flight; read them live at write time or the
+                            // snapshot silently undoes the operator's change
+                            // (seen on the dev cluster 2026-08-29).
+                            let (live_pubkey, live_manager) = cluster.get_node(&node.id)
+                                .map(|n| (n.pubkey, n.manager))
+                                .unwrap_or((node.pubkey.clone(), node.manager));
                             let updated_node = Node {
                                 id: node.id.clone(),
                                 hostname,
@@ -2373,6 +2410,26 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                 // too — trust the self-report. Empty = a
                                 // general-purpose node (or an older peer).
                                 roles: peer_roles,
+                                // Pin the peer's key on first sight (TOFU over
+                                // the same channel the cluster already trusts).
+                                // A DIFFERENT key later is never adopted
+                                // silently: keep the pinned one and say so — a
+                                // reinstalled node is reset by the operator
+                                // (node settings → Reset identity key).
+                                pubkey: match (live_pubkey.as_deref().filter(|k| !k.is_empty()), peer_pubkey.as_deref().filter(|k| !k.is_empty())) {
+                                    (None, Some(k)) => {
+                                        tracing::info!("node identity: pinned public key for {} ({})", node.hostname, node.id);
+                                        Some(k.to_string())
+                                    }
+                                    (Some(old), Some(k)) if old != k => {
+                                        warn!("node identity: {} ({}) now advertises a DIFFERENT key than the one pinned — keeping the pinned key. If the node was reinstalled, reset its identity key from node settings.", node.hostname, node.id);
+                                        Some(old.to_string())
+                                    }
+                                    (old, _) => old.map(str::to_string),
+                                },
+                                // Local operator policy about this peer — never
+                                // taken from the peer's own report.
+                                manager: live_manager,
                             };
                             // `node` is the pre-poll snapshot from
                             // get_all_nodes() at cycle start — compare the
@@ -2601,6 +2658,7 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                             // untouched, so an older peer can't wipe it).
                                             eff_display,
                                             None,  // migration_address is LOCAL per-peer; never set it via gossip
+                                            None,  // manager is operator policy; never set it via gossip
                                         );
                                     }
                                 } else {
@@ -2630,6 +2688,9 @@ pub async fn poll_remote_nodes(cluster: Arc<ClusterState>, cluster_secret: Strin
                                         let mut new_node = known.clone();
                                         new_node.online = false;
                                         new_node.is_self = false;
+                                        // Keys are pinned only from the node's own report, never relayed.
+                                        new_node.pubkey = None;
+                                        new_node.manager = true;
                                         cluster.update_remote(new_node);
                                         cluster.save_nodes();
                                     }

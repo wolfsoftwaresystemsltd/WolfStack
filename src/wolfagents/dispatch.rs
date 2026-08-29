@@ -33,6 +33,7 @@ use std::time::Duration;
 use tracing::warn;
 
 use super::{Agent, safety, tools::{self, AuthDecision, ToolId}};
+use crate::node_identity::PeerAuth;
 
 /// Shared HTTP client for every inter-node dispatch call in this
 /// module. Previously every tool-fan-out site built its own Client
@@ -316,7 +317,7 @@ async fn tool_list_containers(
             ] {
                 let url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(&node.address), node.port, path);
                 let resp = http.get(&url)
-                    .header("X-WolfStack-Secret", &state.cluster_secret)
+                    .peer_auth(&state.cluster_secret)
                     .timeout(std::time::Duration::from_secs(8))
                     .send().await;
                 let Ok(r) = resp else { continue; };
@@ -397,7 +398,7 @@ async fn tool_get_metrics(args: &serde_json::Value, state: &crate::api::AppState
         let scheme = if node.port == 443 || node.port == 8553 { "https" } else { "http" };
         let url = format!("{}://{}:{}/api/metrics", scheme, crate::netaddr::bracket_host(&node.address), node.port);
         let resp = http.get(&url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(std::time::Duration::from_secs(8))
             .send().await;
         let Ok(r) = resp else { continue; };
@@ -502,7 +503,7 @@ async fn tool_read_log(
         ] {
             let url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(&node.address), node.port, path);
             let resp = http.get(&url)
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .timeout(std::time::Duration::from_secs(10))
                 .send().await;
             let Ok(r) = resp else { continue; };
@@ -572,7 +573,7 @@ async fn tool_check_disk_usage(
             ] {
                 let url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(&node.address), node.port, path);
                 let Ok(r) = http.get(&url)
-                    .header("X-WolfStack-Secret", &state.cluster_secret)
+                    .peer_auth(&state.cluster_secret)
                     .timeout(std::time::Duration::from_secs(8))
                     .send().await
                 else { continue; };
@@ -632,7 +633,7 @@ async fn tool_check_disk_usage(
                 scheme, crate::netaddr::bracket_host(&address), port, runtime, name);
             let body = serde_json::json!({ "command": "df -P /" });
             match http.post(&url)
-                .header("X-WolfStack-Secret", &state.cluster_secret)
+                .peer_auth(&state.cluster_secret)
                 .timeout(std::time::Duration::from_secs(8))
                 .json(&body).send().await
             {
@@ -749,7 +750,7 @@ async fn read_file_on_remote(
     let scheme = if node.port == 443 || node.port == 8553 { "https" } else { "http" };
     let url = format!("{}://{}:{}/api/cluster/file/read", scheme, crate::netaddr::bracket_host(&node.address), node.port);
     let resp = http.post(&url)
-        .header("X-WolfStack-Secret", &state.cluster_secret)
+        .peer_auth(&state.cluster_secret)
         .timeout(std::time::Duration::from_secs(15))
         .json(&serde_json::json!({ "path": path }))
         .send().await;
@@ -903,7 +904,7 @@ async fn tool_restart_container(
         let list_path = if runtime == "docker" { "/api/containers/docker" } else { "/api/containers/lxc" };
         let list_url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(&node.address), node.port, list_path);
         let Ok(list_r) = http.get(&list_url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(std::time::Duration::from_secs(15))
             .send().await else { continue; };
         if !list_r.status().is_success() {
@@ -918,7 +919,7 @@ async fn tool_restart_container(
         let action_url = format!("{}://{}:{}/api/containers/{}/{}/action",
             scheme, crate::netaddr::bracket_host(&node.address), node.port, runtime, name);
         let resp = http.post(&action_url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(std::time::Duration::from_secs(15))
             .json(&serde_json::json!({ "action": "restart" }))
             .send().await;
@@ -1133,7 +1134,7 @@ async fn write_file_on_remote(
     let scheme = if node.port == 443 || node.port == 8553 { "https" } else { "http" };
     let url = format!("{}://{}:{}/api/cluster/file/write", scheme, crate::netaddr::bracket_host(&node.address), node.port);
     let resp = http.post(&url)
-        .header("X-WolfStack-Secret", &state.cluster_secret)
+        .peer_auth(&state.cluster_secret)
         .timeout(std::time::Duration::from_secs(30))
         .json(&serde_json::json!({ "path": path, "content": content, "append": append }))
         .send().await;
@@ -1220,7 +1221,7 @@ async fn tool_exec_in_container(
         let list_path = if runtime == "docker" { "/api/containers/docker" } else { "/api/containers/lxc" };
         let list_url = format!("{}://{}:{}{}", scheme, crate::netaddr::bracket_host(&node.address), node.port, list_path);
         let Ok(list_r) = http.get(&list_url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(req_timeout)
             .send().await else { continue; };
         if !list_r.status().is_success() {
@@ -1236,7 +1237,7 @@ async fn tool_exec_in_container(
         let exec_url = format!("{}://{}:{}/api/containers/{}/{}/exec",
             scheme, crate::netaddr::bracket_host(&node.address), node.port, runtime, name);
         let resp = http.post(&exec_url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(req_timeout)
             .json(&serde_json::json!({ "command": command }))
             .send().await;
@@ -1309,7 +1310,7 @@ async fn tool_exec_on_node(
     let scheme = if node.port == 443 || node.port == 8553 { "https" } else { "http" };
     let url = format!("{}://{}:{}/api/ai/exec", scheme, crate::netaddr::bracket_host(&node.address), node.port);
     let resp = http.post(&url)
-        .header("X-WolfStack-Secret", &state.cluster_secret)
+        .peer_auth(&state.cluster_secret)
         .timeout(std::time::Duration::from_secs(timeout_secs + 5))
         .json(&serde_json::json!({ "command": command }))
         .send().await;
@@ -1393,7 +1394,7 @@ async fn tool_delete_file(
     let scheme = if n.port == 443 || n.port == 8553 { "https" } else { "http" };
     let url = format!("{}://{}:{}/api/cluster/file/delete", scheme, crate::netaddr::bracket_host(&n.address), n.port);
     let resp = http.post(&url)
-        .header("X-WolfStack-Secret", &state.cluster_secret)
+        .peer_auth(&state.cluster_secret)
         .timeout(std::time::Duration::from_secs(15))
         .json(&serde_json::json!({ "path": path }))
         .send().await;
@@ -1482,7 +1483,7 @@ async fn tool_wolfstack_api(
         };
         let req_builder = req_builder
             .timeout(Duration::from_secs(30))
-            .header("X-WolfStack-Secret", &state.cluster_secret);
+            .peer_auth(&state.cluster_secret);
         let req_builder = if let Some(b) = body {
             req_builder.header("Content-Type", "application/json").json(b)
         } else {
@@ -2093,7 +2094,7 @@ async fn tool_semantic_search(
         let url = format!("{}://{}:{}/api/cluster/semantic/search",
             scheme, crate::netaddr::bracket_host(&n.address), n.port);
         let resp = http.post(&url)
-            .header("X-WolfStack-Secret", &state.cluster_secret)
+            .peer_auth(&state.cluster_secret)
             .timeout(std::time::Duration::from_secs(15))
             .json(&serde_json::json!({
                 "query": query, "limit": limit * 2, "sources": sources,

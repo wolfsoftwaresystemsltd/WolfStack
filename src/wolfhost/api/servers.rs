@@ -3,6 +3,7 @@ use crate::wolfhost::AppState;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::node_identity::PeerAuth;
 
 /// Proxy a GET request to the local WolfStack API
 pub async fn wolfstack_get(path: &str) -> Result<serde_json::Value, String> {
@@ -57,7 +58,7 @@ pub async fn wolfstack_api(path: &str) -> Result<serde_json::Value, String> {
     for url in wolfstack_urls(path) {
         for secret in &secrets {
             match client.get(&url)
-                .header("X-WolfStack-Secret", secret)
+                .peer_auth(secret)
                 // Local loopback call on behalf of a portal customer; the
                 // files API is a shell-class sink and requires attribution.
                 .header("X-WolfStack-Proxied", "1")
@@ -82,7 +83,7 @@ async fn wolfstack_post(path: &str, body: &serde_json::Value) -> Result<serde_js
     for url in wolfstack_urls(path) {
         for secret in &secrets {
             match client.post(&url)
-                .header("X-WolfStack-Secret", secret)
+                .peer_auth(secret)
                 // Local loopback call on behalf of a portal customer; the
                 // files API is a shell-class sink and requires attribution.
                 .header("X-WolfStack-Proxied", "1")
