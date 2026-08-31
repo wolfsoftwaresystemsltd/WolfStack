@@ -297,6 +297,84 @@ pub fn share_path(gateway_id: &str) -> PathBuf {
     gateway_mount_root().join(gateway_id).join("share")
 }
 
+// ─── ZFS / nested-mount probing (share-wizard hint) ───
+
+/// What the share wizard's ZFS hint shows for a local source path.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct ZfsProbe {
+    /// The path resolves to a ZFS dataset.
+    pub on_zfs: bool,
+    /// That dataset's name (e.g. `tank/media`).
+    pub dataset: Option<String>,
+    /// Mountpoints of filesystems mounted STRICTLY beneath the path
+    /// (ZFS child datasets, nested disks, …) — capped at 8 for the UI;
+    /// `nested_count` carries the full number.
+    pub nested_mounts: Vec<String>,
+    pub nested_count: usize,
+}
+
+/// Probe a local path for the share wizard: is it ZFS, and does it
+/// have filesystems mounted beneath it? Nested mounts are what made
+/// "sharing zfs pools doesn't work" (child datasets showed as empty
+/// dirs before the recursive bind) and are read from /proc/mounts —
+/// the same source of truth `is_mounted` uses — rather than from zfs
+/// child-dataset listings, so the answer covers any nested filesystem
+/// and only counts datasets that are actually mounted.
+pub fn zfs_probe(path: &str) -> ZfsProbe {
+    let path = path.trim_end_matches('/');
+    let mut probe = ZfsProbe::default();
+    if !path.starts_with('/') {
+        return probe;
+    }
+
+    // `zfs list -H -o name <path>` resolves a *path* to its dataset and
+    // exits non-zero when the path is not on ZFS — same call
+    // wolfha/replication::zfs_dataset_for uses.
+    if which_helper("zfs").is_some()
+        && let Ok(out) = Command::new("zfs").args(["list", "-H", "-o", "name", path]).output()
+            && out.status.success() {
+                let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !name.is_empty() {
+                    probe.on_zfs = true;
+                    probe.dataset = Some(name);
+                }
+            }
+
+    if let Ok(content) = std::fs::read_to_string("/proc/mounts") {
+        let mut nested = nested_mounts_in(&content, path);
+        probe.nested_count = nested.len();
+        nested.truncate(8);
+        probe.nested_mounts = nested;
+    }
+    probe
+}
+
+/// Mountpoints in /proc/mounts-format `content` strictly beneath
+/// `path` (no trailing slash), sorted and de-duplicated.
+fn nested_mounts_in(content: &str, path: &str) -> Vec<String> {
+    let prefix = format!("{}/", path);
+    // Unescape BEFORE comparing — /proc/mounts octal-escapes spaces
+    // etc., and the operator's path is unescaped, so a parent path
+    // containing a space would otherwise never match its children.
+    let mut nested: Vec<String> = content.lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .map(unescape_proc_mounts)
+        .filter(|mp| mp.starts_with(&prefix))
+        .collect();
+    nested.sort();
+    nested.dedup();
+    nested
+}
+
+/// proc(5): space, tab, newline and backslash in mount paths appear as
+/// the octal escapes \040 \011 \012 \134.
+fn unescape_proc_mounts(s: &str) -> String {
+    s.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
 /// Mount a source, returning the path that ends up holding its data
 /// (already including any `subpath` selector). Idempotent — calling
 /// twice on a source that's already mounted is a no-op (logged).
@@ -309,8 +387,24 @@ pub fn mount(gateway_id: &str, idx: usize, source: &Source) -> Result<PathBuf, S
             // regardless of what the source happens to be on this
             // host. Bind also lets us keep the same daemon config
             // shape across all source types.
+            //
+            // Recursive (--rbind): a plain --bind copies ONE mount, so
+            // filesystems mounted below the path — ZFS child datasets,
+            // btrfs subvol mounts, nested disks — appeared as EMPTY
+            // directories in the share ("sharing zfs pools doesn't
+            // work", klas 2026-08-31). --make-rslave in the same
+            // invocation (util-linux ≥ 2.23 applies it right after the
+            // bind, mount(8) "one mount call") keeps master→copy
+            // propagation (datasets mounted later still appear) but
+            // stops the reverse: lazy-unmounting a SHARED rbind tree
+            // back-propagates and unmounts the REAL nested datasets
+            // (verified in a mount namespace, 2026-08-31).
+            //
+            // Deliberately Local-only: LxcDir/ContainerVol keep plain
+            // --bind so a container-rootfs share can never recursively
+            // pick up the guest's /proc, /sys or /dev.
             if !is_mounted(&mount_dir) {
-                run_mount(&["mount", "--bind", path, &mount_dir.to_string_lossy()])?;
+                run_mount(&["mount", "--rbind", "--make-rslave", path, &mount_dir.to_string_lossy()])?;
             }
             Ok(mount_dir)
         }
@@ -1007,5 +1101,31 @@ mod tests {
         for s in bad {
             assert!(validate(&s).is_err(), "should reject {:?}", s);
         }
+    }
+
+    #[test]
+    fn nested_mounts_strictly_beneath_path_only() {
+        let mounts = "\
+tank /tank zfs rw,xattr,noacl 0 0
+tank/media /tank/media zfs rw,xattr,noacl 0 0
+tank/media/movies /tank/media/movies zfs rw,xattr,noacl 0 0
+tank/media/tv /tank/media/tv zfs rw,xattr,noacl 0 0
+tank/mediaother /tank/mediaother zfs rw 0 0
+tmpfs /tmp tmpfs rw 0 0
+";
+        let nested = nested_mounts_in(mounts, "/tank/media");
+        // The path's own mount and the sibling '/tank/mediaother' must
+        // both be excluded — only true descendants count.
+        assert_eq!(nested, vec!["/tank/media/movies", "/tank/media/tv"]);
+        assert!(nested_mounts_in(mounts, "/tank/media/movies").is_empty());
+    }
+
+    #[test]
+    fn nested_mounts_unescapes_proc_octal_escapes() {
+        // proc(5): space = \040. Both the parent path and the child
+        // must match unescaped.
+        let mounts = "tank/my\\040media/kids /tank/my\\040media/kids zfs rw 0 0\n";
+        let nested = nested_mounts_in(mounts, "/tank/my media");
+        assert_eq!(nested, vec!["/tank/my media/kids"]);
     }
 }

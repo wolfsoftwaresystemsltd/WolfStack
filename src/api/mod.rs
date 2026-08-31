@@ -42882,6 +42882,19 @@ pub async fn gateways_reload(req: HttpRequest, state: web::Data<AppState>, path:
     let actor = match require_auth(&req, &state) { Ok(a) => a, Err(r) => return r };
     let id = path.into_inner();
     let g = match require_owner(&state, &id) { Ok(g) => g, Err(r) => return r };
+    // Tear down first so reload genuinely RE-mounts, as its contract
+    // says. apply() alone no-ops on an already-mounted share, which
+    // would leave a plain (non-recursive) bind from an older release
+    // in place forever — reload is how an existing share picks up the
+    // recursive bind that publishes ZFS child datasets
+    // (sources::mount). Lazy unmounts keep open client handles alive
+    // on the detached mount; new opens see the fresh one. Validate
+    // BEFORE tearing down: a config apply() would reject must keep
+    // serving as-is and just report the error, not end up torn down
+    // and dead.
+    if !g.disabled && crate::gateway::validate(&g).is_ok() {
+        crate::gateway::orchestrator::teardown(&g);
+    }
     match crate::gateway::orchestrator::apply(&g) {
         Ok(rt) => {
             {
@@ -42978,6 +42991,30 @@ pub async fn gateways_set_password(
     gateway_audit(&state, &actor, "info", "Share password set", &format!("user '{}' on share '{}'", username, g.name));
     match crate::gateway::samba::set_user_password(&username, &body.password) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "ok": true })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// GET /api/gateways/zfs/probe?path=/tank/media — the share wizard's
+/// ZFS hint. Reports whether a local source path is a ZFS dataset and
+/// which filesystems are mounted beneath it (child datasets), so the
+/// wizard can explain nested-dataset publishing and suggest the SMB
+/// wide-links option for symlinked pool layouts (klas, 2026-08-31).
+pub async fn gateways_zfs_probe(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    if let Err(r) = require_auth(&req, &state) { return r; }
+    let Some(path) = query.get("path").map(|p| p.trim().to_string()) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "path query parameter is required" }));
+    };
+    if !path.starts_with('/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": "path must be absolute" }));
+    }
+    // `zfs list` is a blocking Command — keep it off the runtime.
+    match web::block(move || crate::gateway::sources::zfs_probe(&path)).await {
+        Ok(probe) => HttpResponse::Ok().json(probe),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "error": e.to_string() })),
     }
 }
@@ -46959,6 +46996,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/api/gateways/cluster",                           web::get().to(gateways_cluster))
         .route("/api/gateways/status",                            web::get().to(gateways_status))
         .route("/api/gateways/sources/discover",                  web::get().to(gateways_discover_sources))
+        .route("/api/gateways/zfs/probe",                         web::get().to(gateways_zfs_probe))
         .route("/api/gateways/sync",                              web::post().to(gateways_sync))
         .route("/api/gateways/{id}",                              web::get().to(gateways_get))
         .route("/api/gateways/{id}",                              web::put().to(gateways_update))

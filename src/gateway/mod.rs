@@ -235,6 +235,20 @@ pub struct GatewayOptions {
     /// or non-default home networks.
     #[serde(default = "default_workgroup")]
     pub smb_workgroup: String,
+    /// SMB: let clients follow symlinks that resolve OUTSIDE the share
+    /// path. Emits `follow symlinks = yes` + `wide links = yes` on the
+    /// share, and `unix extensions = no` in [global] — smb.conf(5) marks
+    /// `unix extensions` global-only (a synonym for `smb1 unix
+    /// extensions (G)`) and Samba force-disables `wide links` while it
+    /// is on, so a share-section copy of it would be silently ignored.
+    /// Costs nothing here: the aggregator already pins
+    /// `server min protocol = SMB2_10`, so no SMB1 client can connect
+    /// anyway. Requested for ZFS pools whose layouts symlink across
+    /// datasets (klas, 2026-08-31). Security note: a symlink inside the
+    /// share can then expose any host path the connected user's UNIX
+    /// account may read — enable only for trusted shares.
+    #[serde(default)]
+    pub smb_wide_links: bool,
 }
 
 fn default_workgroup() -> String { "WORKGROUP".to_string() }

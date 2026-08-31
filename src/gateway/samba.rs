@@ -184,6 +184,15 @@ fn render_snippet(g: &Gateway, share_path: &Path) -> String {
         out.push_str(&format!("    hosts deny = {}\n", opts.deny_hosts.join(" ")));
     }
 
+    // Symlinks that leave the share (ZFS pools that link across
+    // datasets). Share-level half only — the required
+    // `unix extensions = no` is global-only and lives in the
+    // aggregator's [global] (see any_smb_wide_links).
+    if opts.smb_wide_links {
+        out.push_str("    follow symlinks = yes\n");
+        out.push_str("    wide links = yes\n");
+    }
+
     if let Some(maxc) = opts.max_connections {
         out.push_str(&format!("    max connections = {}\n", maxc));
     }
@@ -235,6 +244,15 @@ fn render_aggregator(active: Option<&Gateway>) -> std::io::Result<String> {
     out.push_str("    panic action = /usr/share/samba/panic-action %d\n");
     out.push_str("    obey pam restrictions = no\n");
     out.push_str("    unix password sync = no\n");
+    // `wide links` on any share is force-disabled by Samba while
+    // `unix extensions` (global-only, default yes) is on — see
+    // smb.conf(5) "wide links (S)" / "smb1 unix extensions (G)". So
+    // whenever any SMB gateway asks for wide links, switch SMB1 unix
+    // extensions off globally. Free: [global] above already pins
+    // `server min protocol = SMB2_10`, so no SMB1 client connects.
+    if any_smb_wide_links(active) {
+        out.push_str("    unix extensions = no\n");
+    }
     out.push('\n');
 
     // Pull in every snippet — alphabetical order so the rendered
@@ -290,6 +308,22 @@ fn max_smb_encrypt() -> SmbEncrypt {
         }
     }
     best
+}
+
+/// True when any SMB gateway wants `wide links`. `active` is the
+/// gateway being written right now — checked in-memory so the first
+/// apply sees it before gateways.json persists (same reasoning as the
+/// workgroup picker in render_aggregator).
+fn any_smb_wide_links(active: Option<&Gateway>) -> bool {
+    if active.is_some_and(gateway_wants_wide_links) {
+        return true;
+    }
+    let store = super::GatewayStore::load();
+    store.gateways.values().any(gateway_wants_wide_links)
+}
+
+fn gateway_wants_wide_links(g: &Gateway) -> bool {
+    g.protocols.contains(&Protocol::Smb) && g.options.smb_wide_links
 }
 
 fn ensure_host_include() -> Result<(), SambaError> {
@@ -624,6 +658,52 @@ mod tests {
         };
         let s = render_snippet(&g, std::path::Path::new("/var/share"));
         assert!(s.contains("available = no"));
+    }
+
+    fn wide_links_gateway(on: bool) -> Gateway {
+        Gateway {
+            id: "abc-123".into(),
+            name: "tank".into(),
+            cluster: String::new(),
+            mode: super::super::GatewayMode::Single,
+            protocols: vec![Protocol::Smb],
+            sources: vec![],
+            origin_node_id: "node-a".into(),
+            serve_nodes: vec![],
+            auth: AuthConfig::Anonymous { writable: false },
+            policy: super::super::ModePolicy::Single,
+            options: GatewayOptions { smb_wide_links: on, ..Default::default() },
+            created_at: String::new(),
+            updated_at: String::new(),
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn render_snippet_wide_links_emits_share_level_pair_only() {
+        let s = render_snippet(&wide_links_gateway(true), std::path::Path::new("/tank"));
+        assert!(s.contains("follow symlinks = yes"));
+        assert!(s.contains("wide links = yes"));
+        // Global-only parameter — must NOT appear in the share section
+        // (smbd ignores it there with a warning).
+        assert!(!s.contains("unix extensions"));
+    }
+
+    #[test]
+    fn render_snippet_default_has_no_symlink_options() {
+        let s = render_snippet(&wide_links_gateway(false), std::path::Path::new("/tank"));
+        assert!(!s.contains("follow symlinks"));
+        assert!(!s.contains("wide links"));
+    }
+
+    #[test]
+    fn aggregator_disables_unix_extensions_when_wide_links_requested() {
+        // Active in-memory gateway short-circuits before the on-disk
+        // store is consulted, so this is deterministic in any test env.
+        let g = wide_links_gateway(true);
+        let body = render_aggregator(Some(&g)).expect("render");
+        assert!(body.contains("    unix extensions = no\n"),
+            "wide links needs the global smb1-unix-extensions kill switch — got:\n{}", body);
     }
 }
 
