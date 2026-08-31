@@ -166,8 +166,16 @@ fn ensure_bind(src: &std::path::Path, dst: &std::path::Path) -> Result<(), Apply
             return Ok(());
         }
     }
+    // Recursive + rslave, mirroring the Local source mount: a plain
+    // --bind drops filesystems mounted below src (ZFS child datasets
+    // arrived at source-0 via its own rbind and must survive this
+    // second hop into share/), and rslave stops a later lazy unmount
+    // of share/ from back-propagating and unmounting the real nested
+    // mounts (see sources::mount). Safe for every source type — for
+    // container-backed sources source-0 is a plain bind, so there is
+    // nothing extra here for --rbind to pick up.
     let out = Command::new("mount")
-        .args(["--bind", &src.to_string_lossy(), &dst.to_string_lossy()])
+        .args(["--rbind", "--make-rslave", &src.to_string_lossy(), &dst.to_string_lossy()])
         .output()?;
     if !out.status.success() {
         return Err(ApplyError::Io(std::io::Error::other(format!(

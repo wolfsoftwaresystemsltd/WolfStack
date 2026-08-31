@@ -158,8 +158,14 @@ fn ensure_friendly_bind(src: &Path, dst: &Path) -> Result<(), NfsError> {
             return Ok(());
         }
     }
+    // Recursive + rslave for the same reasons as the share/ bind it
+    // republishes (see orchestrator::ensure_bind): carry nested mounts
+    // (ZFS child datasets) through to /exports/<name>, and never let
+    // drop_friendly_bind's lazy unmount propagate back to the real
+    // mounts. NFS clients additionally need `crossmnt` (or `nohide`)
+    // in nfs_extra_options to descend into the nested filesystems.
     let out = Command::new("mount")
-        .args(["--bind", &src.to_string_lossy(), &dst.to_string_lossy()])
+        .args(["--rbind", "--make-rslave", &src.to_string_lossy(), &dst.to_string_lossy()])
         .output()?;
     if !out.status.success() {
         return Err(NfsError::WriteFailed(format!(

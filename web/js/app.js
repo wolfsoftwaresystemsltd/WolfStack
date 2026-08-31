@@ -79966,7 +79966,7 @@ function gwOpenWizard() {
         auth_mode: 'anonymous',
         anon_writable: false,
         users: [],
-        options: { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '', nfs_no_root_squash: false },
+        options: { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, smb_wide_links: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '', nfs_no_root_squash: false },
     };
     gwRenderWizard();
 }
@@ -79987,7 +79987,7 @@ function gwOpenEdit(g) {
         anon_writable: !!auth.writable,
         users: (auth.users || []).map(u => ({ username: u.username, writable: !!u.writable })),
         options: Object.assign(
-            { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '', nfs_no_root_squash: false },
+            { readonly: false, guest_ok: true, time_machine: false, recycle_bin: false, smb_wide_links: false, allow_hosts: [], smb_workgroup: 'WORKGROUP', nfs_extra_options: '', nfs_no_root_squash: false },
             g.options || {}
         ),
     };
@@ -80044,6 +80044,47 @@ async function gwRenderWizard() {
             </div>
         </div>
     `;
+    // Options step: probe local paths for ZFS / nested datasets and
+    // fill the hint under the wide-links checkbox. Fire-and-forget —
+    // the wizard is fully usable while (or if never) it resolves.
+    if (_gwWizardStep === 3) gwZfsHintProbe();
+}
+
+/// Ask the node whether the chosen local source path is a ZFS dataset
+/// and whether filesystems are mounted beneath it (child datasets).
+/// Fills #gw-zfs-hint with what that means for the share. Silent on
+/// any failure — the hint is advisory, never load-bearing.
+async function gwZfsHintProbe() {
+    const d = _gwWizardData;
+    const el = document.getElementById('gw-zfs-hint');
+    if (!el || !d || !d.source || d.source.type !== 'local' || !d.source.path) return;
+    let p;
+    try {
+        const r = await fetch(apiUrl('/api/gateways/zfs/probe?path=' + encodeURIComponent(d.source.path)));
+        if (!r.ok) return;
+        p = await r.json();
+    } catch (_) { return; }
+    if (!p || !p.on_zfs) return;
+    // The wizard may have moved on / re-rendered while we fetched.
+    const target = document.getElementById('gw-zfs-hint');
+    if (!target) return;
+    const nested = p.nested_count || 0;
+    let detail;
+    if (nested > 0) {
+        const names = (p.nested_mounts || []).slice(0, 3).map(m => `<code>${escapeHtml(m)}</code>`).join(', ');
+        detail = `It has ${nested} filesystem${nested === 1 ? '' : 's'} mounted beneath it (${names}${nested > 3 ? ', …' : ''})
+            — child datasets are published into the share automatically. If folders that are symlinks into
+            other datasets show up broken over SMB, enable the option above.
+            ${(d.protocols || []).includes('nfs') ? 'For NFS clients to descend into child datasets, add <code>crossmnt</code> to the extra export options below.' : ''}`;
+    } else {
+        detail = `No filesystems are mounted beneath it, so no extra options are needed. If you later create
+            child datasets they are published automatically; symlinked layouts need the option above.`;
+    }
+    target.innerHTML = `
+        <div style="background:var(--bg-secondary);border-left:3px solid #3b82f6;border-radius:6px;padding:8px 10px;margin-left:22px;font-size:11px;color:var(--text-muted);">
+            <strong style="color:var(--text-primary);">ZFS detected:</strong> this path is dataset
+            <code>${escapeHtml(p.dataset || '')}</code>. ${detail}
+        </div>`;
 }
 
 async function gwWizardStep1() {
@@ -80237,9 +80278,21 @@ function gwWizardStep3() {
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;">
             <input type="checkbox" ${d.options.recycle_bin ? 'checked' : ''} onchange="_gwWizardData.options.recycle_bin=this.checked;"> Server-side recycle bin (SMB)
         </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:14px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;">
             <input type="checkbox" ${d.options.time_machine ? 'checked' : ''} onchange="_gwWizardData.options.time_machine=this.checked;"> Apple Time Machine target (SMB / fruit)
         </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:2px;">
+            <input type="checkbox" ${d.options.smb_wide_links ? 'checked' : ''} onchange="_gwWizardData.options.smb_wide_links=this.checked;"> Follow symlinks outside the share (SMB wide links — ZFS pools)
+        </label>
+        <small style="color:var(--text-muted);font-size:11px;display:block;margin:0 0 6px 22px;">
+            Writes <code>follow symlinks = yes</code> + <code>wide links = yes</code> on the share and
+            <code>unix extensions = no</code> globally (an SMB1-only feature — WolfStack already requires SMB2+).
+            Needed when a pool's folder layout uses symlinks that point across datasets. Security note: a
+            symlink inside the share can then expose any host path the connecting user's account may read —
+            enable only for trusted shares. Nested ZFS datasets themselves are always published; this is
+            only for symlinked layouts.
+        </small>
+        <div id="gw-zfs-hint" style="margin:0 0 14px;"></div>
 
         <h4 style="margin:14px 0 8px;">Network restrictions</h4>
         <input class="form-control" style="width:100%;" placeholder="Allowed CIDRs (comma-separated). Empty = anyone on the LAN."
