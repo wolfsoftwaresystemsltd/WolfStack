@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Container restart-loop detection — Item 3 of the predictive plan.

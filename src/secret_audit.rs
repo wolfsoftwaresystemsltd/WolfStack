@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Centralised audit of "committed-default" secrets and weak at-rest

@@ -177,7 +177,7 @@ WolfHost tries HTTPS:8553 then HTTP:8554. Also tries both custom and default clu
 
 ## Video tutorials (YouTube — link users to these)
 
-A short companion tutorial exists for most features, on the Wolf Software Systems Ltd YouTube channel. When a user asks "how do I…", "show me…", or "is there a video for…" about one of these, give the direct link. The same videos are embedded in the in-app **Learn** course lessons and on the matching wolfstack.org doc page. They live on YouTube (external embeds) — nothing is stored inside WolfStack, so links never go stale on upgrade.
+A short companion tutorial exists for most features, on the IntelligentWolf Ltd YouTube channel. When a user asks "how do I…", "show me…", or "is there a video for…" about one of these, give the direct link. The same videos are embedded in the in-app **Learn** course lessons and on the matching wolfstack.org doc page. They live on YouTube (external embeds) — nothing is stored inside WolfStack, so links never go stale on upgrade.
 
 - **Create an LXC Container (Every Option Explained)** — https://youtu.be/ucX3BbcBT0w — Create a Linux container from a template and walk through every field — name, root password, memory, CPU, notes, storage, bind mounts, and all three networking modes. (doc: wolfstack-containers.php)
 - **HA: High Availability for LXC Containers (No Quorum, 2-Node Ready)** — https://youtu.be/irbL3mZvCl0 — Protect a container so it survives a node dying. Set replicas and priority, sync interval, and automatic failover with a witness — keeping the same name, MAC and IP. (doc: wolfstack-ha.php)

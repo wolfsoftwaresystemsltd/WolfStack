@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Control Panel — a single cluster-wide view for every VM, LXC and
 //! Docker container across every node, with user-configurable grouping

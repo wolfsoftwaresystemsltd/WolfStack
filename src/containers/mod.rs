@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Container management — Docker and LXC support for WolfStack
@@ -8704,7 +8704,7 @@ fn lxc_post_start_setup(container: &str) {
     \_/\_/ \___/|_|_| |____/ \__\__,_|\___|_|\_\
 
   Managed by WolfStack — wolf.uk.com
-  Container powered by Wolf Software Systems Ltd
+  Container powered by IntelligentWolf Ltd
 
 "#);
 
@@ -15677,21 +15677,21 @@ pub fn install_component_in_container(
 
     // Validate the component name
     let install_script = match component {
-        "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
+        "wolfnet" => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfnet/setup.sh",
         // WolfProxy is a STANDALONE repo (not in the WolfScale monorepo), and it
         // ships a PREBUILT binary — setup.sh downloads it. The old
         // WolfScale/master/wolfproxy/install.sh URL 404'd (no such path in the
         // monorepo) and, where reachable, compiled from source and failed with
         // "could not find Cargo.toml" (klasSponsor 2026-06). Point at the
         // standalone repo's binary installer.
-        "wolfproxy" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh",
-        "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh",
+        "wolfproxy" => "https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh",
+        "wolfserve" => "https://raw.githubusercontent.com/intelligentwolf/wolfserve/main/setup.sh",
         // WolfScale/main/setup.sh installs WolfScale (DB replication), NOT
         // WolfDisk — using it here installed the wrong thing, so the wolfdisk
         // binary + wolfdisk.service never appeared ("Unit wolfdisk.service not
         // found"). The WolfDisk installer lives at wolfdisk/setup.sh.
-        "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh",
-        "wolfscale" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
+        "wolfdisk" => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfdisk/setup.sh",
+        "wolfscale" => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/setup_lb.sh",
         other => return Err(format!("Unknown Wolf component: '{}'. Available: wolfnet, wolfproxy, wolfserve, wolfdisk, wolfscale", other)),
     };
 

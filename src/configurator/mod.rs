@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Configurator — structured configuration management for Wolf suite components

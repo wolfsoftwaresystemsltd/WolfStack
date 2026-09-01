@@ -84,7 +84,7 @@ This rule overrides "ship it fast" instincts. If the bar isn't met, say so plain
 
 ## Important Conventions
 
-- All Rust source files start with the copyright header (`// Written by Paul Clevett` / `// (C)Copyright Wolf Software Systems Ltd`)
+- All Rust source files start with the copyright header (`// Written by Paul Clevett` / `// (C)Copyright IntelligentWolf Ltd`)
 - The `api/mod.rs` file contains ALL REST endpoints and the route table in `configure()` — new endpoints go here
 - When adding fields to serialized structs, always add `#[serde(default)]` for backward compatibility with existing config files
 - The frontend has no build step — edit `web/js/app.js` directly

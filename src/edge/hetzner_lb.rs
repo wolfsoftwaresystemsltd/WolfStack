@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Hetzner Cloud Load Balancer client. Endpoints + body shapes
 //! verified against hcloud-go (the official Hetzner Cloud Go SDK):

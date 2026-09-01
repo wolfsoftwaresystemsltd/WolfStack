@@ -2,7 +2,7 @@
 name = "wolfstack"
 version = "25.23.0"
 edition = "2024"
-authors = ["Wolf Software Systems Ltd"]
+authors = ["IntelligentWolf Ltd"]
 description = "Server management platform for the Wolf software suite"
 # Dual-licensed: PolyForm Noncommercial 1.0.0 for personal / non-commercial
 # use, with a commercial licence granted automatically by an active paid
@@ -11,7 +11,7 @@ description = "Server management platform for the Wolf software suite"
 # Noncommercial isn't on the SPDX list, so we point at the file directly.
 # Pre-v22.10.0 releases stay MIT-licensed in perpetuity.
 license-file = "LICENSE"
-repository = "https://github.com/wolfsoftwaresystemsltd/WolfStack"
+repository = "https://github.com/intelligentwolf/WolfStack"
 
 [dependencies]
 # Web framework

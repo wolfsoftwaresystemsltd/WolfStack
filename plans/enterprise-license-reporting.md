@@ -2,7 +2,7 @@
 
 ## Summary
 
-When a WolfStack node has an Enterprise license, it should report back to Wolf Software Systems which servers are using that license. This lets you verify the customer is paying for the right number of servers (£79/server/year) and gives you visibility into your Enterprise deployments.
+When a WolfStack node has an Enterprise license, it should report back to IntelligentWolf which servers are using that license. This lets you verify the customer is paying for the right number of servers (£79/server/year) and gives you visibility into your Enterprise deployments.
 
 ## What Gets Reported
 
@@ -94,7 +94,7 @@ Build a simple API that:
 ### 4. WolfStack admin UI
 
 In Settings → License, show:
-- "This license is reporting usage to Wolf Software Systems"
+- "This license is reporting usage to IntelligentWolf"
 - "X servers detected on this license"
 - List of server hostnames in the cluster
 - Last report timestamp
@@ -102,7 +102,7 @@ In Settings → License, show:
 
 ### 5. Privacy & transparency
 
-- Add a note to the Enterprise docs: "Enterprise licenses report server count to Wolf Software Systems for license compliance"
+- Add a note to the Enterprise docs: "Enterprise licenses report server count to IntelligentWolf for license compliance"
 - The reporting is non-blocking — if the server can't reach license.wolf.uk.com, WolfStack continues working normally
 - No kill switch — the license doesn't stop working if reporting fails
 - Customers can see exactly what's reported in the UI

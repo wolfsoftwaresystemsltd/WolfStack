@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! DigitalOcean v2 Load Balancer client. Endpoints + body shapes
 //! verified against the DigitalOcean public OpenAPI spec.

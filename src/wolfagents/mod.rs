@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! WolfAgents — named AI agents with persistent memory and a tool

@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 //
 // WolfScale cluster manager — builds + manages WolfScale replication clusters
@@ -26,7 +26,7 @@ static WS_IO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// (.github/workflows/wolfscale-release.yml). The installer appends
 /// `/wolfscale-<arch>` (x86_64 / aarch64) and falls back to a slow in-container
 /// source build only if the download fails.
-const WS_BINARY_BASE: &str = "https://github.com/wolfsoftwaresystemsltd/WolfScale/releases/download/wolfscale-latest";
+const WS_BINARY_BASE: &str = "https://github.com/intelligentwolf/WolfScale/releases/download/wolfscale-latest";
 
 fn default_cluster_port() -> u16 { 7654 }
 fn default_api_port() -> u16 { 8080 }
@@ -299,7 +299,7 @@ fn wolfscale_install_cmd(distro: &str) -> String {
            {src} && \
            (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y) && \
            . \"$HOME/.cargo/env\" && \
-           rm -rf /opt/wolfscale-src && git clone --depth 1 https://github.com/wolfsoftwaresystemsltd/WolfScale /opt/wolfscale-src && \
+           rm -rf /opt/wolfscale-src && git clone --depth 1 https://github.com/intelligentwolf/WolfScale /opt/wolfscale-src && \
            (cd /opt/wolfscale-src && cargo build --release) && \
            cp /opt/wolfscale-src/target/release/wolfscale /usr/local/bin/wolfscale && \
            (cp /opt/wolfscale-src/target/release/wolfctl /usr/local/bin/wolfctl 2>/dev/null || true) && \

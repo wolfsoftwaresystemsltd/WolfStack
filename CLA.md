@@ -1,7 +1,7 @@
 # WolfStack Contributor Licence Agreement
 
 Thank you for your interest in contributing to WolfStack (the **"Project"**),
-maintained by Wolf Software Systems Ltd (the **"Company"**).
+maintained by IntelligentWolf Ltd (the **"Company"**).
 
 This agreement clarifies the licence under which the Project accepts
 contributions, so the Project can continue to operate under its dual-licensing
@@ -28,7 +28,7 @@ same extent as if they had signed it personally.
 
 ## 2. Licence grant to the Company
 
-You grant Wolf Software Systems Ltd a perpetual, worldwide, non-exclusive,
+You grant IntelligentWolf Ltd a perpetual, worldwide, non-exclusive,
 royalty-free, irrevocable copyright and patent licence to:
 
 (a) use, reproduce, modify, prepare derivative works of, publicly display,
@@ -85,4 +85,4 @@ v22.10.0 release.
 
 ---
 
-*Wolf Software Systems Ltd · Registered in England · Contact: legal@wolf.uk.com*
+*IntelligentWolf Ltd · Registered in England · Contact: legal@wolf.uk.com*

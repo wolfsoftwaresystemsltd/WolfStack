@@ -1,6 +1,6 @@
 #!/bin/bash
 # Written by Paul Clevett
-# (C)Copyright Wolf Software Systems Ltd
+# (C)Copyright IntelligentWolf Ltd
 # https://wolf.uk.com
 #
 #
@@ -13,11 +13,11 @@
 # (cloud-init has no TTY).
 #
 # Usage from cloud-init runcmd:
-#   curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/cloud-setup.sh \
+#   curl -fsSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/cloud-setup.sh \
 #     | sudo bash -s -- --hostname mynode-01
 #
 # Usage interactively on a fresh VM (will prompt for hostname):
-#   curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/cloud-setup.sh \
+#   curl -fsSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/cloud-setup.sh \
 #     | sudo bash
 #
 # Behaviour:
@@ -45,7 +45,7 @@ set -euo pipefail
 
 # ─── Constants ──────────────────────────────────────────────────────────────
 # Pinned at file scope so they're easy to find/audit.
-SETUP_REPO="wolfsoftwaresystemsltd/WolfStack"
+SETUP_REPO="intelligentwolf/WolfStack"
 HOSTNAME_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'
 
 # ─── Help text (rendered the same whether the script is run from a file ─────
@@ -72,11 +72,11 @@ Any flag not recognised here is passed through to setup.sh untouched.
 
 Examples:
   # From cloud-init runcmd (non-interactive):
-  curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/cloud-setup.sh \
+  curl -fsSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/cloud-setup.sh \
     | sudo bash -s -- --hostname web-01
 
   # Interactive on a fresh VM (prompts for hostname):
-  curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/cloud-setup.sh \
+  curl -fsSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/cloud-setup.sh \
     | sudo bash
 
 After install, retrieve the cluster join token with:

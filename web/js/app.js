@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 // WolfStack Dashboard — app.js
@@ -16301,7 +16301,7 @@ async function toggleCronJob(index, currentlyEnabled, schedule, command, comment
 }
 
 var PREMADE_CRON_JOBS = {
-    'wolfstack-update': { schedule: '0 3 * * *', command: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash', comment: 'Auto-update WolfStack (daily 3AM)' },
+    'wolfstack-update': { schedule: '0 3 * * *', command: 'curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh | bash', comment: 'Auto-update WolfStack (daily 3AM)' },
     'docker-prune': { schedule: '0 4 * * 0', command: 'docker image prune -af 2>/dev/null; docker system prune -f 2>/dev/null', comment: 'Clean Docker images (weekly)' },
     'apt-update': { schedule: '0 2 * * 1', command: 'apt-get update -qq && apt-get upgrade -y -qq', comment: 'System updates (weekly Mon 2AM)' },
     'certbot-renew': { schedule: '0 5 * * *', command: 'certbot renew --quiet', comment: 'Renew SSL certificates' },
@@ -17303,7 +17303,7 @@ function openNodeSettings(nodeId) {
                 </div>`}
                 <div class="form-group">
                     <label>Update Script</label>
-                    <input type="text" class="form-control" id="node-settings-update-script" value="${node.update_script || ''}" placeholder="curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
+                    <input type="text" class="form-control" id="node-settings-update-script" value="${node.update_script || ''}" placeholder="curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh | sudo bash" style="font-family:'JetBrains Mono',monospace;font-size:12px;">
                     <small style="color: var(--text-muted);">Command to run when upgrading this node. Leave blank for the default setup script.</small>
                 </div>
                 ${isPve ? `
@@ -36823,11 +36823,11 @@ async function showVmStartCommand(name) {
 }
 
 const installCmds = {
-    wolfnet: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh | sudo bash',
-    wolfproxy: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh | sudo bash',
-    wolfserve: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh | sudo bash',
-    wolfdisk: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh | sudo bash',
-    wolfscale: 'curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh | sudo bash',
+    wolfnet: 'curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfnet/setup.sh | sudo bash',
+    wolfproxy: 'curl -sSL https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh | sudo bash',
+    wolfserve: 'curl -sSL https://raw.githubusercontent.com/intelligentwolf/wolfserve/main/setup.sh | sudo bash',
+    wolfdisk: 'curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfdisk/setup.sh | sudo bash',
+    wolfscale: 'curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/setup_lb.sh | sudo bash',
 };
 
 function copyInstallCmd(component) {
@@ -42139,7 +42139,7 @@ async function pullPbsFromNode(nodeId) {
 // release that can't be downloaded yet.
 async function fetchLatestWolfStackVersion() {
     try {
-        var r = await fetch('https://api.github.com/repos/wolfsoftwaresystemsltd/WolfStack/releases/latest', {
+        var r = await fetch('https://api.github.com/repos/intelligentwolf/WolfStack/releases/latest', {
             headers: { 'Accept': 'application/vnd.github+json' }
         });
         if (!r.ok) return null;
@@ -45742,7 +45742,7 @@ function renderGithubSponsorToggle(statusData) {
         : 'I support via GitHub Sponsors';
     existing.title = isSponsor
         ? 'You are marked as a GitHub Sponsor. Click to unmark.'
-        : 'Click if you support WolfStack development via GitHub Sponsors at github.com/sponsors/wolfsoftwaresystemsltd.';
+        : 'Click if you support WolfStack development via GitHub Sponsors at github.com/sponsors/intelligentwolf.';
 }
 
 async function toggleGithubSponsor() {
@@ -45763,7 +45763,7 @@ async function toggleGithubSponsor() {
             'This unlocks beta channel access. WolfStack has no way to verify ' +
             'sponsorships against GitHub\'s API (the org\'s side requires our auth, ' +
             'which we don\'t embed), so this is an honour-system toggle. ' +
-            'If you DO support development at github.com/sponsors/wolfsoftwaresystemsltd, ' +
+            'If you DO support development at github.com/sponsors/intelligentwolf, ' +
             'click OK — thank you!',
             'GitHub Sponsor', { okText: 'Yes, I sponsor' }
         )) return;
@@ -57547,7 +57547,7 @@ async function wdScanCluster(background) {
 
     // Fetch latest WolfDisk version from GitHub (in parallel with node scans)
     if (!wdLatestVersion) {
-        fetch('https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/Cargo.toml')
+        fetch('https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfdisk/Cargo.toml')
             .then(r => r.ok ? r.text() : '')
             .then(text => {
                 var m = text.match(/^version\s*=\s*"([^"]+)"/m);
@@ -67423,7 +67423,7 @@ async function loadWolfUsbPage() {
                 + '<div style="font-size:2.5rem;margin-bottom:12px;"></div>'
                 + '<h3 style="margin-bottom:8px;">WolfUSB not installed</h3>'
                 + '<p style="color:var(--text-secondary);margin-bottom:12px;max-width:500px;margin-left:auto;margin-right:auto;">WolfUSB is installed automatically with WolfStack. Run the WolfStack installer or update to install it on this node.</p>'
-                + '<p style="color:var(--text-muted);font-size:11px;">Manual: <code>curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash</code></p>'
+                + '<p style="color:var(--text-muted);font-size:11px;">Manual: <code>curl -fsSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh | sudo bash</code></p>'
                 + '</div></div>';
             el.innerHTML = html;
             return;

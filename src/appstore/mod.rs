@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! App Store — browse and install popular applications with one click
@@ -3862,7 +3862,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh | bash".into(),
                     "systemctl enable wolfproxy".into(),
                 ],
             }),
@@ -3870,7 +3870,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh | bash".into(),
                 ],
                 service: Some("wolfproxy".into()),
             }),
@@ -4992,14 +4992,14 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                     // "Unit wolfdisk.service not found" whenever setup.sh failed
                     // before the service block — masking the real error. Let
                     // setup.sh own the whole install.
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfdisk/setup.sh | bash".into(),
                 ],
             }),
             bare_metal: Some(BareMetalTarget {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfdisk/setup.sh | bash".into(),
                 ],
                 service: Some("wolfdisk".into()),
             }),
@@ -5021,7 +5021,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfscale".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/setup.sh | bash -s -- --component wolfscale".into(),
                     "systemctl enable wolfscale".into(),
                 ],
             }),
@@ -5029,7 +5029,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup.sh | bash -s -- --component wolfscale".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/setup.sh | bash -s -- --component wolfscale".into(),
                 ],
                 service: Some("wolfscale".into()),
             }),
@@ -5051,7 +5051,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 architecture: crate::containers::host_container_arch().into(),
                 setup_commands: vec![
                     "apt-get update && apt-get install -y curl".into(),
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/wolfserve/main/setup.sh | bash".into(),
                     "systemctl enable wolfserve".into(),
                 ],
             }),
@@ -5059,7 +5059,7 @@ pub fn built_in_catalogue() -> Vec<AppManifest> {
                 packages_debian: vec![],
                 packages_redhat: vec![],
                 post_install: vec![
-                    "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh | bash".into(),
+                    "curl -sSL https://raw.githubusercontent.com/intelligentwolf/wolfserve/main/setup.sh | bash".into(),
                 ],
                 service: Some("wolfserve".into()),
             }),

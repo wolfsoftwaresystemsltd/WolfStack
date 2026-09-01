@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Thin Cloudflare API client — just the DNS-record CRUD the edge
 //! reconciler needs. Not a full SDK; we hit four endpoints:

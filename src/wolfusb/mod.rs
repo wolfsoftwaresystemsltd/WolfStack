@@ -1,10 +1,10 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! WolfUSB Integration — USB device sharing across the cluster
 //!
-//! Uses the standalone `wolfusb` binary (https://github.com/wolfsoftwaresystemsltd/wolfusb)
+//! Uses the standalone `wolfusb` binary (https://github.com/intelligentwolf/wolfusb)
 //! which provides USB-over-IP via libusb with its own authenticated protocol.
 //!
 //! Architecture:
@@ -1242,7 +1242,7 @@ fi
 
 # ─── Download and install latest wolfusb ───
 echo "Downloading latest wolfusb..."
-curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfusb/main/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/intelligentwolf/wolfusb/main/setup.sh | bash
 
 # ─── Show new version ───
 if command -v wolfusb >/dev/null 2>&1; then

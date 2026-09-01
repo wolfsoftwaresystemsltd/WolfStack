@@ -1,6 +1,6 @@
 #!/bin/bash
 # Written by Paul Clevett
-# (C)Copyright Wolf Software Systems Ltd
+# (C)Copyright IntelligentWolf Ltd
 # https://wolf.uk.com
 #
 #
@@ -10,11 +10,11 @@
 #            Unraid (auto-detected — installs the static-binary agent, no package manager needed)
 #
 # Usage (as root — Proxmox root login):
-#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash
-#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/beta/setup.sh | bash -s -- --beta
+#        curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh | bash
+#        curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/beta/setup.sh | bash -s -- --beta
 #        bash setup.sh --install-dir /mnt/usb           # build & install from external drive
 # Usage (sudoer — Ubuntu/Debian):
-#        curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash
+#        curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh | sudo bash
 #        sudo bash setup.sh
 #
 
@@ -362,7 +362,7 @@ if [ -f /etc/unraid-version ]; then
     # reach github.com: nothing was left running and nothing new was started
     # (PineappleGod, Unraid, 2026-07-03 — GUI update killed the node while the
     # same update over ssh worked).
-    if ! download_prebuilt "wolfsoftwaresystemsltd/WolfStack" "wolfstack" "$WS_APPDATA/wolfstack"; then
+    if ! download_prebuilt "intelligentwolf/WolfStack" "wolfstack" "$WS_APPDATA/wolfstack"; then
         echo "✗ Could not download the prebuilt WolfStack binary for $BINARY_ARCH."
         echo "  Check this server's internet access to github.com and re-run."
         echo "  The running agent (if any) has NOT been touched."
@@ -1683,7 +1683,7 @@ fi
 # and the caller falls back to the source build. So this is never worse than
 # the compile path, only faster when it works. aarch64 only (32-bit armv6/7
 # Pis fall straight through to the source build).
-PBS_ARM_RELEASE_URL="https://github.com/wolfsoftwaresystemsltd/WolfStack/releases/download/arm-tools-v1"
+PBS_ARM_RELEASE_URL="https://github.com/intelligentwolf/WolfStack/releases/download/arm-tools-v1"
 pbs_install_prebuilt_arm64() {
     [ "$HOST_ARCH" = "aarch64" ] || return 1
     local tmp; tmp=$(mktemp -d)
@@ -2248,8 +2248,8 @@ build_or_download_wolfnet() {
     WN_DEST="${WOLFNET_STAGE_DIR:-/usr/local/bin}"
 
     # Try prebuilt first
-    if download_prebuilt "wolfsoftwaresystemsltd/WolfNet" "wolfnet" "$WN_DEST/wolfnet"; then
-        download_prebuilt "wolfsoftwaresystemsltd/WolfNet" "wolfnetctl" "$WN_DEST/wolfnetctl" || true
+    if download_prebuilt "intelligentwolf/WolfNet" "wolfnet" "$WN_DEST/wolfnet"; then
+        download_prebuilt "intelligentwolf/WolfNet" "wolfnetctl" "$WN_DEST/wolfnetctl" || true
         WOLFNET_BUILT=true
         return 0
     fi
@@ -2325,7 +2325,7 @@ if command -v wolfnet >/dev/null 2>&1 && systemctl is-active --quiet wolfnet 2>/
     WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
     if [ ! -d "$WOLFNET_SRC_DIR" ]; then
         echo "  WolfNet source not found — cloning..."
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/intelligentwolf/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
     fi
 
@@ -2339,7 +2339,7 @@ if command -v wolfnet >/dev/null 2>&1 && systemctl is-active --quiet wolfnet 2>/
     if [ -f "$WOLFNET_SRC_DIR/Cargo.toml" ] && ! grep -q 'name = "wolfnet"' "$WOLFNET_SRC_DIR/Cargo.toml"; then
         echo "  Replacing old WolfScale clone with standalone WolfNet repo..."
         rm -rf "$WOLFNET_SRC_DIR"
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/intelligentwolf/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
     fi
 
@@ -2387,7 +2387,7 @@ elif command -v wolfnet >/dev/null 2>&1 && [ -f "/etc/systemd/system/wolfnet.ser
     WOLFNET_SRC_DIR="${CUSTOM_INSTALL_DIR:-/opt}/wolfnet-src"
     if [ ! -d "$WOLFNET_SRC_DIR" ]; then
         echo "  WolfNet source not found — cloning..."
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/intelligentwolf/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
     fi
 
@@ -2401,7 +2401,7 @@ elif command -v wolfnet >/dev/null 2>&1 && [ -f "/etc/systemd/system/wolfnet.ser
     if [ -f "$WOLFNET_SRC_DIR/Cargo.toml" ] && ! grep -q 'name = "wolfnet"' "$WOLFNET_SRC_DIR/Cargo.toml"; then
         echo "  Replacing old WolfScale clone with standalone WolfNet repo..."
         rm -rf "$WOLFNET_SRC_DIR"
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/intelligentwolf/WolfNet.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
     fi
 
@@ -2472,7 +2472,7 @@ else
             git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
             cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
         else
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfNet.git "$WOLFNET_SRC_DIR"
+            git clone https://github.com/intelligentwolf/WolfNet.git "$WOLFNET_SRC_DIR"
             git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
             cd "$WOLFNET_SRC_DIR"
         fi
@@ -2624,14 +2624,14 @@ echo ""
 echo "Checking WolfProxy (reverse proxy)..."
 if command -v wolfproxy >/dev/null 2>&1 || [ -f /etc/systemd/system/wolfproxy.service ]; then
     WP_INSTALLED="$(wolfproxy --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")"
-    WP_LATEST="$(curl -fsSL https://api.github.com/repos/wolfsoftwaresystemsltd/wolfproxy/releases/latest 2>/dev/null \
+    WP_LATEST="$(curl -fsSL https://api.github.com/repos/intelligentwolf/wolfproxy/releases/latest 2>/dev/null \
         | grep -oE '"tag_name"[^"]*"v?[0-9]+\.[0-9]+\.[0-9]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")"
     if [ -n "$WP_LATEST" ] && [ "$WP_INSTALLED" != "$WP_LATEST" ]; then
         echo "  WolfProxy ${WP_INSTALLED:-unknown} → ${WP_LATEST} available — upgrading..."
-        if curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh | bash; then
+        if curl -fsSL https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh | bash; then
             echo "  ✓ WolfProxy upgraded to ${WP_LATEST}"
         else
-            echo "  ⚠ WolfProxy upgrade failed — re-run manually: curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh | sudo bash"
+            echo "  ⚠ WolfProxy upgrade failed — re-run manually: curl -fsSL https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh | sudo bash"
         fi
     elif [ -n "$WP_INSTALLED" ]; then
         echo "  ✓ WolfProxy up to date (${WP_INSTALLED})"
@@ -2705,14 +2705,14 @@ if [ -d "$INSTALL_DIR" ]; then
         echo "  ⚠ Git repo corrupted — re-cloning..."
         cd /
         rm -rf "$INSTALL_DIR"
-        git clone -b $BRANCH https://github.com/wolfsoftwaresystemsltd/WolfStack.git "$INSTALL_DIR"
+        git clone -b $BRANCH https://github.com/intelligentwolf/WolfStack.git "$INSTALL_DIR"
         cd "$INSTALL_DIR"
     else
         git checkout -B $BRANCH origin/$BRANCH
         git reset --hard origin/$BRANCH
     fi
 else
-    git clone -b $BRANCH https://github.com/wolfsoftwaresystemsltd/WolfStack.git "$INSTALL_DIR"
+    git clone -b $BRANCH https://github.com/intelligentwolf/WolfStack.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
@@ -2741,7 +2741,7 @@ fi
 
 # Try prebuilt binary first — saves disk space, memory, and build time
 WOLFSTACK_PREBUILT=false
-if download_prebuilt "wolfsoftwaresystemsltd/WolfStack" "wolfstack" "/usr/local/bin/wolfstack"; then
+if download_prebuilt "intelligentwolf/WolfStack" "wolfstack" "/usr/local/bin/wolfstack"; then
     WOLFSTACK_PREBUILT=true
 elif [ "$IS_UPGRADE" = true ]; then
     # Never compile on an upgrade. The binaries are built by GitHub Actions;
@@ -2881,7 +2881,7 @@ fi
 # offline. We fetch from the same branch this setup.sh came from. If the
 # fetch fails we still write a minimal stub so the user has *something*.
 WS_UNINSTALL_DEST="/usr/local/bin/wolfstack-uninstall"
-WS_UNINSTALL_URL="https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/${BRANCH}/uninstall.sh"
+WS_UNINSTALL_URL="https://raw.githubusercontent.com/intelligentwolf/WolfStack/${BRANCH}/uninstall.sh"
 WS_UNINSTALL_FETCHED=false
 if command -v curl >/dev/null 2>&1; then
     if curl -fsSL --connect-timeout 10 --max-time 60 -o "${WS_UNINSTALL_DEST}.new" "$WS_UNINSTALL_URL" 2>/dev/null; then
@@ -2929,7 +2929,7 @@ if [ "$PURGE" = true ]; then
     echo "Purged /etc/wolfstack and /var/log/wolfstack."
 fi
 echo "Stub uninstall complete. For a full uninstall (WolfNet/WolfProxy/etc.)"
-echo "fetch the full script: curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/uninstall.sh | sudo bash"
+echo "fetch the full script: curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/uninstall.sh | sudo bash"
 WSUNINSTALL_STUB
     chmod 0755 "$WS_UNINSTALL_DEST"
     echo "⚠ Could not fetch full uninstall.sh — wrote offline stub to $WS_UNINSTALL_DEST"
@@ -2957,7 +2957,7 @@ fi
 systemctl stop wolfusb 2>/dev/null || true
 
 # Install/update wolfusb binary via its official setup.sh (handles platform detection)
-if curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfusb/main/setup.sh | bash; then
+if curl -fsSL https://raw.githubusercontent.com/intelligentwolf/wolfusb/main/setup.sh | bash; then
     echo "  ✓ WolfUSB binary installed"
 else
     echo "  ⚠ WolfUSB install failed (non-critical)"

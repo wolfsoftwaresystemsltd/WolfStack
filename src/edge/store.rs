@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Cloud-provider credentials store. Holds infrastructure-side API
 //! tokens (Cloudflare, Hetzner, etc.) — distinct from

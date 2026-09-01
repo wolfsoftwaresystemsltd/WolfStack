@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Cluster Browser — a real Firefox running in a Docker container on a
 //! WolfStack node, accessed via the in-image KasmVNC web UI.

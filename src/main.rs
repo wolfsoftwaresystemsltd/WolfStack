@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! WolfStack — Server Management Platform for the Wolf Software Suite
@@ -116,7 +116,7 @@ use tokio::sync::RwLock;
 use std::time::Duration;
 use tracing::{info, warn};
 
-/// WolfStack — Wolf Software Management Platform
+/// WolfStack — IntelligentWolf Management Platform
 #[derive(Parser)]
 #[command(name = "wolfstack", version, about = "Server management for the Wolf software suite")]
 struct Cli {
@@ -814,7 +814,7 @@ async fn main() -> std::io::Result<()> {
     // default since v23.11 (self-signed generated when nothing is found);
     // plain http only when the operator passed --no-tls.
     info!("  Dashboard:  {}://{}", if cli.no_tls { "http" } else { "https" }, netaddr::host_port(&cli.bind, api_port));
-    info!("  (C)Copyright Wolf Software Systems Ltd — https://wolf.uk.com");
+    info!("  (C)Copyright IntelligentWolf Ltd — https://wolf.uk.com");
     info!("  By Paul Clevett and my mate Claude - I have Autism");
     // Seed LXC storage paths from any mounted storage that has LXC containers
     if let Ok(entries) = std::fs::read_dir(&paths::get().storage_mount_base) {
@@ -3180,7 +3180,7 @@ async fn main() -> std::io::Result<()> {
         });
 
         // Background: Enterprise license heartbeat (once daily)
-        // Reports server hostname, version, and cluster name to Wolf Software Systems
+        // Reports server hostname, version, and cluster name to IntelligentWolf
         // for license compliance. Fire-and-forget — never blocks the server.
         {
             let hb_cluster = cluster.clone();

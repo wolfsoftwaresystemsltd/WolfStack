@@ -1,5 +1,5 @@
 /* WolfHost — Admin Panel Plugin for WolfStack */
-/* (C) Wolf Software Systems Ltd */
+/* (C) IntelligentWolf Ltd */
 
 (function() {
     'use strict';

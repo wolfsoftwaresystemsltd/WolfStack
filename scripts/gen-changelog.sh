@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/wolfsoftwaresystemsltd/WolfStack"
+REPO_URL="https://github.com/intelligentwolf/WolfStack"
 OUT="${1:-CHANGELOG.md}"
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then

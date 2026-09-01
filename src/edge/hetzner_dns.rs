@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Thin Hetzner DNS API client. Endpoints + auth header verified
 //! against the lego (Go ACME) project's legacy Hetzner DNS client at

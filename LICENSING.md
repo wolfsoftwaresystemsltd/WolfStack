@@ -88,7 +88,7 @@ there's one coherent ladder:
 > **Action required (one-time, on GitHub):** GitHub Sponsors tiers are
 > configured in the GitHub Sponsors dashboard, not in this repo. Create the
 > three tiers above at
-> <https://github.com/sponsors/wolfsoftwaresystemsltd/dashboard> so they line
+> <https://github.com/sponsors/intelligentwolf/dashboard> so they line
 > up with the Patreon tiers (`$3` Basic, `$25` Advanced, `$95` Platinum) that
 > `src/patreon.rs` already recognises.
 
@@ -112,5 +112,5 @@ the dual licence described above.
 ## Trademarks
 
 WolfStack™, WolfRouter™, WolfAgents™, WolfNet™, WolfFlow™, WolfRun™, WolfUSB™
-and WolfDisk™ are trademarks of Wolf Software Systems Ltd. The licence covers
+and WolfDisk™ are trademarks of IntelligentWolf Ltd. The licence covers
 the source code, not the trademarks.

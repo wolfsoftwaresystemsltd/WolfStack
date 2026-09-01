@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! WebSocket console handler — provides interactive terminal sessions
@@ -291,7 +291,7 @@ async fn console_session(
             // root, so no sudo needed (and proxmox minimal installs
             // don't ship sudo — see system_upgrade in api/mod.rs).
             let script = update_script.as_deref().unwrap_or(
-                "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | bash"
+                "curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh | bash"
             );
             cmd.arg(script);
         }
@@ -304,11 +304,11 @@ async fn console_session(
             };
 
             let install_script = match component {
-                "wolfnet" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
+                "wolfnet" => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfnet/setup.sh",
                 "wolfproxy" => "__inline_wolfproxy__",
-                "wolfserve" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh",
-                "wolfdisk" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh",
-                "wolfscale" => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
+                "wolfserve" => "https://raw.githubusercontent.com/intelligentwolf/wolfserve/main/setup.sh",
+                "wolfdisk" => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfdisk/setup.sh",
+                "wolfscale" => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/setup_lb.sh",
                 "mariadb" => "__inline_mariadb__",
                 "postgresql" => "__inline_postgresql__",
                 "certbot" => "__inline_certbot__",
@@ -344,7 +344,7 @@ async fn console_session(
                 zypper install -y certbot; \
                 else echo 'Unsupported package manager' && exit 1; fi";
             let wolfproxy_inline = "\
-                curl -fsSL 'https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh' | bash && \
+                curl -fsSL 'https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh' | bash && \
                 mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled && \
                 if [ ! -f /etc/nginx/sites-available/default ]; then \
                     printf 'server {\\n    listen 80 default_server;\\n    listen [::]:80 default_server;\\n    server_name _;\\n\\n    root /var/www/html;\\n    index index.html index.htm;\\n\\n    location / {\\n        try_files $uri $uri/ =404;\\n    }\\n}\\n' > /etc/nginx/sites-available/default && \

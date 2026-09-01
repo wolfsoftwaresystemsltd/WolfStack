@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! DigitalOcean v2 DNS API client. Endpoints + shapes verified
 //! against the DigitalOcean public OpenAPI spec (downloaded from

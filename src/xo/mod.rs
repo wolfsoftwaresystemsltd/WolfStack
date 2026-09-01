@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Xen Orchestra 6 / XCP-ng integration.
@@ -781,7 +781,7 @@ pub mod cloud_init {
 
         // Canonical install URL — confirmed in setup.sh comments
         // (`curl -sSL https://raw.githubusercontent.com/...master/setup.sh`).
-        let github_url = "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh";
+        let github_url = "https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh";
 
         // Path B: try SP first, fall back to GitHub. The whole
         // download-then-execute chain uses `&&` so we never run

@@ -42,7 +42,7 @@ docker run -d --name wolfnet --network host \
   -v wolfnet-config:/etc/wolfnet \
   -v /run/wolfnet:/var/run/wolfnet \
   -e WOLFNET_JOIN_TOKEN=<token> \
-  ghcr.io/wolfsoftwaresystemsltd/wolfnet:latest
+  ghcr.io/intelligentwolf/wolfnet:latest
 ```
 
 - `--network host` — TUN interface must be on host namespace
@@ -101,7 +101,7 @@ docker run -d --name wolfdisk --privileged \
   -v /mnt/wolfdisk:/mnt/wolfdisk:rshared \
   -e WOLFDISK_ROLE=client \
   -e WOLFDISK_PEERS=10.0.10.1:8550 \
-  ghcr.io/wolfsoftwaresystemsltd/wolfdisk:latest
+  ghcr.io/intelligentwolf/wolfdisk:latest
 ```
 
 - `--privileged` — needed for reliable FUSE (SYS_ADMIN cap minimum, but NAS platforms often need full privileged)
@@ -159,7 +159,7 @@ Can be built as a new crate in the wolfscale workspace or as a feature-gated bui
 ```yaml
 services:
   wolfnet:
-    image: ghcr.io/wolfsoftwaresystemsltd/wolfnet:latest
+    image: ghcr.io/intelligentwolf/wolfnet:latest
     restart: unless-stopped
     network_mode: host
     cap_add: [NET_ADMIN]
@@ -178,7 +178,7 @@ volumes:
 ```yaml
 services:
   wolfnet:
-    image: ghcr.io/wolfsoftwaresystemsltd/wolfnet:latest
+    image: ghcr.io/intelligentwolf/wolfnet:latest
     restart: unless-stopped
     network_mode: host
     cap_add: [NET_ADMIN]
@@ -187,7 +187,7 @@ services:
     environment: [WOLFNET_JOIN_TOKEN=${WOLFNET_JOIN_TOKEN}]
 
   wolfdisk:
-    image: ghcr.io/wolfsoftwaresystemsltd/wolfdisk:latest
+    image: ghcr.io/intelligentwolf/wolfdisk:latest
     restart: unless-stopped
     privileged: true
     network_mode: host
@@ -197,7 +197,7 @@ services:
     depends_on: [wolfnet]
 
   satellite-agent:
-    image: ghcr.io/wolfsoftwaresystemsltd/wolfstack-agent:latest
+    image: ghcr.io/intelligentwolf/wolfstack-agent:latest
     restart: unless-stopped
     network_mode: host
     volumes: [/run/wolfnet:/var/run/wolfnet:ro, agent-config:/etc/wolfstack-agent]
@@ -234,7 +234,7 @@ FROM debian:bookworm-slim
 
 - Trigger on pushes to `main` that change `src/**` or `docker/**`
 - Multi-arch: `linux/amd64` + `linux/arm64` via QEMU
-- Push to `ghcr.io/wolfsoftwaresystemsltd/wolfnet:latest` + version tags
+- Push to `ghcr.io/intelligentwolf/wolfnet:latest` + version tags
 - Workflows: `wolfnet/.github/workflows/docker.yml`, `.github/workflows/wolfdisk-docker.yml`
 
 ---
@@ -256,7 +256,7 @@ FROM debian:bookworm-slim
 ```xml
 <Container version="2">
   <Name>WolfNet</Name>
-  <Repository>ghcr.io/wolfsoftwaresystemsltd/wolfnet:latest</Repository>
+  <Repository>ghcr.io/intelligentwolf/wolfnet:latest</Repository>
   <Network>host</Network>
   <Privileged>false</Privileged>
   <Overview>Secure mesh VPN for your WolfStack cluster</Overview>

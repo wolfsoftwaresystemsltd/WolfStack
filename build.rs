@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Build-time KB generator. Scrapes `.route("/api/…", web::method()…)`
 //! lines from the API source files plus doc comments above the matching
@@ -98,7 +98,7 @@ fn main() {
     out.push_str(&format!("\n*{} endpoints registered.*\n", all_routes.len()));
 
     // ── Sibling product docs ────────────────────────────────────
-    // WolfStack is one tool in the Wolf Software Systems suite;
+    // WolfStack is one tool in the IntelligentWolf suite;
     // operators regularly ask the AI about WolfNet (private mesh),
     // WolfScale (DB replication + load-balancer), and WolfDisk
     // (distributed filesystem) because they run alongside each
@@ -112,8 +112,8 @@ fn main() {
     // We cap each doc at 60 KB — enough for every product's
     // README / CLAUDE / DOCUMENTATION while keeping the full KB
     // well inside Claude/Gemini/GPT context windows.
-    out.push_str("\n# Sibling products (Wolf Software Systems suite)\n\n");
-    out.push_str("WolfStack is one of several Wolf Software products operators commonly run side-by-side. Use the content below when answering questions about these tools — do not guess feature lists or commands.\n\n");
+    out.push_str("\n# Sibling products (IntelligentWolf suite)\n\n");
+    out.push_str("WolfStack is one of several IntelligentWolf products operators commonly run side-by-side. Use the content below when answering questions about these tools — do not guess feature lists or commands.\n\n");
     // CLAUDE.md files are intentionally NOT included — they're
     // instructions for the Claude Code assistant, not user-facing
     // product documentation; feeding them to the runtime AI is

@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Installer — manages installation and status of Wolf suite components
@@ -682,14 +682,14 @@ fn install_certbot(distro: DistroFamily) -> Result<String, String> {
 
 fn install_wolf_component(component: Component, _distro: DistroFamily) -> Result<String, String> {
     let install_url = match component {
-        Component::WolfNet => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfnet/setup.sh",
-        Component::WolfProxy => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfproxy/main/setup.sh",
+        Component::WolfNet => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfnet/setup.sh",
+        Component::WolfProxy => "https://raw.githubusercontent.com/intelligentwolf/wolfproxy/main/setup.sh",
         // wolfserve lives in its own repo since the monorepo split — the old
         // WolfScale/master/wolfserve/install.sh URL 404s (and was a from-source
         // build anyway). setup.sh downloads the latest release binary.
-        Component::WolfServe => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfserve/main/setup.sh",
-        Component::WolfDisk => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/wolfdisk/setup.sh",
-        Component::WolfScale => "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfScale/main/setup_lb.sh",
+        Component::WolfServe => "https://raw.githubusercontent.com/intelligentwolf/wolfserve/main/setup.sh",
+        Component::WolfDisk => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/wolfdisk/setup.sh",
+        Component::WolfScale => "https://raw.githubusercontent.com/intelligentwolf/WolfScale/main/setup_lb.sh",
         _ => return Err("Unknown component".to_string()),
     };
 

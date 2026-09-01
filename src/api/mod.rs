@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! REST API for WolfStack dashboard and agent communication
@@ -24252,7 +24252,7 @@ pub async fn wolfram_install(
 
     match web::block(|| {
         let output = Command::new("sh")
-            .args(["-c", "curl -fsSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/wolfram/master/install.sh | sh"])
+            .args(["-c", "curl -fsSL https://raw.githubusercontent.com/intelligentwolf/wolfram/master/install.sh | sh"])
             .output();
         match output {
             Ok(o) => {
@@ -28907,7 +28907,7 @@ pub async fn system_upgrade(
     // with "sudo: command not found"). Pipe straight to bash — we're
     // already root.
     let cmd = format!(
-        "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/{}/setup.sh | bash -s --{}",
+        "curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/{}/setup.sh | bash -s --{}",
         branch, flag
     );
 
@@ -40934,7 +40934,7 @@ pub async fn plugins_reload(req: HttpRequest, state: web::Data<AppState>) -> Htt
     HttpResponse::Ok().json(serde_json::json!({ "message": "Plugins reloaded" }))
 }
 
-const PLUGIN_INDEX_URL: &str = "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/pkg/index.json";
+const PLUGIN_INDEX_URL: &str = "https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/pkg/index.json";
 
 /// GET /api/plugins/store — fetch available plugins from the plugin store (Pro+ only)
 pub async fn plugins_store(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
@@ -45512,7 +45512,7 @@ pub async fn federation_tokens_create(req: HttpRequest, state: web::Data<AppStat
 // requiring auth would defeat the point of cloud-init pulling
 // without credentials.
 
-const SETUP_SH_UPSTREAM: &str = "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh";
+const SETUP_SH_UPSTREAM: &str = "https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh";
 
 static SETUP_SH_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(String, std::time::Instant)>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
