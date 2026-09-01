@@ -1,7 +1,7 @@
 WolfStack Software Licence
 ===========================
 
-Copyright (C) 2024-2026 Wolf Software Systems Ltd
+Copyright (C) 2024-2026 IntelligentWolf Ltd
 Copyright (C) 2024-2026 Paul Clevett
 
 WolfStack is dual-licensed. Use of the Software requires you to accept
@@ -33,7 +33,7 @@ Noncommercial Licence 1.0.0, the full text of which appears as Section 5
 below.
 
 The PolyForm Noncommercial Licence permits the following uses without
-any payment to Wolf Software Systems Ltd:
+any payment to IntelligentWolf Ltd:
 
   * Personal use on your home network or homelab
   * Education, research, and academic study
@@ -53,7 +53,7 @@ without a separate commercial licence (see Section 3):
 
 
 ==========================================================================
-3. COMMERCIAL USE — Wolf Software Systems Commercial Licence
+3. COMMERCIAL USE — IntelligentWolf Commercial Licence
 ==========================================================================
 
 Commercial use of WolfStack requires an active subscription to one of
@@ -97,7 +97,7 @@ pull request, patch, or any other channel), you agree that:
   (a) The contribution is your original work, or you have the right to
       submit it under the terms of this licence; and
 
-  (b) You grant Wolf Software Systems Ltd a perpetual, worldwide, non-
+  (b) You grant IntelligentWolf Ltd a perpetual, worldwide, non-
       exclusive, royalty-free licence to use, modify, publish, and
       sublicense your contribution under both Section 2 (PolyForm
       Noncommercial) and Section 3 (commercial licence) above.
@@ -147,7 +147,7 @@ URL for them above, as well as copies of any plain-text lines
 beginning with `Required Notice:` that the licensor provided
 with the software. For example:
 
-> Required Notice: Copyright Wolf Software Systems Ltd (https://wolfstack.org)
+> Required Notice: Copyright IntelligentWolf Ltd (https://wolfstack.org)
 
 ## Changes and New Works License
 
@@ -262,5 +262,5 @@ warranty in those subscription terms.
 
 
 ==========================================================================
-Required Notice: Copyright Wolf Software Systems Ltd (https://wolfstack.org)
+Required Notice: Copyright IntelligentWolf Ltd (https://wolfstack.org)
 ==========================================================================

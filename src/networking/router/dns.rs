@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! DNS helpers for WolfRouter. The heavy lifting is done by dnsmasq
 //! via dhcp.rs (same process serves DHCP + DNS per LAN). This module

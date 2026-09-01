@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! WolfFlow — Workflow Automation Engine for WolfStack
@@ -986,7 +986,7 @@ pub async fn execute_action_local(action: &ActionType) -> Result<StepOutput, Str
 
         ActionType::UpdateWolfstack { channel } => {
             let script = format!(
-                "curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/{}/setup.sh | bash",
+                "curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/{}/setup.sh | bash",
                 channel
             );
             run_command("bash", &["-c", &script], 600).await.map(plain_output)

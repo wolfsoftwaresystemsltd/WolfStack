@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Cloudflare Tunnel API client. Endpoints verified against the
 //! Cloudflare developer docs ("Create a Tunnel via API" guide at

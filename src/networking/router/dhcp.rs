@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Per-LAN dnsmasq lifecycle. One dnsmasq instance per LanSegment,
 //! bound to the segment's interface with its own config file, pid file,

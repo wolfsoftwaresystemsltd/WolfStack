@@ -1,5 +1,5 @@
 /* WolfHost Customer Portal */
-/* (C) Wolf Software Systems Ltd */
+/* (C) IntelligentWolf Ltd */
 
 (function() {
     'use strict';

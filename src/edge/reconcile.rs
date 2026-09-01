@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Reconcile loop — bring DNS / LB state in line with what
 //! peer-health observations say is actually alive.

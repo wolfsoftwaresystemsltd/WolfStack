@@ -1,5 +1,5 @@
 // WolfRouter frontend — table views + rack view.
-// Written by Paul Clevett / Wolf Software Systems Ltd
+// Written by Paul Clevett / IntelligentWolf Ltd
 
 (function () {
     'use strict';
@@ -9765,9 +9765,9 @@
             '</div>' +
             '<p style="font-size:13px;color:var(--text-muted);margin:0 0 16px;">Both consume identical nginx-format configs — pick on operational grounds.</p>' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">' +
-                hpInstallCard({ which: 'wolfproxy', name: 'WolfProxy', tagline: 'Wolf Software\'s Rust-based reverse proxy.',
+                hpInstallCard({ which: 'wolfproxy', name: 'WolfProxy', tagline: 'IntelligentWolf\'s Rust-based reverse proxy.',
                     bullets: ['Drop-in nginx replacement.', 'Built-in TLS-abuse firewall.', 'Monitoring dashboard on :5001.'],
-                    install_note: 'Downloads precompiled binary from github.com/wolfsoftwaresystemsltd/wolfproxy.' }) +
+                    install_note: 'Downloads precompiled binary from github.com/intelligentwolf/wolfproxy.' }) +
                 hpInstallCard({ which: 'nginx', name: 'nginx', tagline: 'The reference reverse proxy.',
                     bullets: ['Industry-standard, well-documented.', 'From your distro\'s package manager.', 'Mature ecosystem.'],
                     install_note: 'Installs via apt / dnf / pacman / zypper.' }) +

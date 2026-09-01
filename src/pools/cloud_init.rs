@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Cloud-init payload generator for WolfStack Pools.
@@ -92,7 +92,7 @@ fn shell_quote(s: &str) -> String {
 /// Render the cloud-config YAML for one VM.
 pub fn build(b: &Bootstrap) -> String {
     let hostname = safe_hostname(&b.hostname);
-    let github_url = "https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh";
+    let github_url = "https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh";
 
     // ── write_files: pre-create /etc/wolfstack/* before setup.sh ──
     //

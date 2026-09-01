@@ -4,10 +4,10 @@
     "name": "WolfCustom",
     "version": "1.0.0",
     "description": "White-label branding — replace the WolfStack logo, product name, colours, favicon, and copyright with your own company identity.",
-    "author": "Wolf Software Systems Ltd",
+    "author": "IntelligentWolf Ltd",
     "icon": "🎨",
     "enterprise_only": true,
-    "download_url": "https://github.com/wolfsoftwaresystemsltd/WolfStack/releases/download/plugins/wolfcustom.tar.gz",
+    "download_url": "https://github.com/intelligentwolf/WolfStack/releases/download/plugins/wolfcustom.tar.gz",
     "category": "branding",
     "tags": [
       "branding",

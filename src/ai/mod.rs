@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! AI Agent — LLM-powered monitoring and chat assistant
@@ -2489,7 +2489,7 @@ fn build_system_prompt(knowledge: &str, server_context: &str) -> String {
          - After creating, confirm to the user what was saved\n\
          - Only use this tag when the user explicitly asks to create/save a note\n\n\
          ## Current Server State\n{}\n\n\
-         ## Wolf Software Knowledge Base\n\
+         ## IntelligentWolf Knowledge Base\n\
          Below is comprehensive documentation about the Wolf software suite:\n{}",
         server_context, knowledge
     )

@@ -6,7 +6,7 @@
 
 Use GitHub's private vulnerability reporting:
 
-1. Go to the [Security tab](https://github.com/wolfsoftwaresystemsltd/WolfStack/security)
+1. Go to the [Security tab](https://github.com/intelligentwolf/WolfStack/security)
 2. Click **Report a vulnerability**
 
 > **Note for reporters:** the `/security/advisories/new` URL is the

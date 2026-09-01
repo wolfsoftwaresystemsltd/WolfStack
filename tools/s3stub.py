@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Written by Paul Clevett
-# (C)Copyright Wolf Software Systems Ltd
+# (C)Copyright IntelligentWolf Ltd
 # https://wolf.uk.com
 #
 # Stub S3 server for exercising the connection test's bucket-scoped-key

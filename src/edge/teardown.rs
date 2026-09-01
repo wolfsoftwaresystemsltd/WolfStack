@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! Edge teardown — when an HTTP proxy is deleted, or its edge strategy
 //! changes, we delete the cloud resources that the previous strategy

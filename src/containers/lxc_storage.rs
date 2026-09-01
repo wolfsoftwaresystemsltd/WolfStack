@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! LXC storage operations: detect backend, resize the rootfs, migrate
 //! between storage paths. Native (lxc-* + ZFS / LVM / dir) and Proxmox

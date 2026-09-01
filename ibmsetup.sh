@@ -1,6 +1,6 @@
 #!/bin/bash
 # Written by Paul Clevett
-# (C)Copyright Wolf Software Systems Ltd
+# (C)Copyright IntelligentWolf Ltd
 # https://wolf.uk.com
 #
 #
@@ -15,7 +15,7 @@
 #   - Rust toolchain
 #   - WolfStack build, install & systemd service
 #
-# Usage: curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/ibmsetup.sh | sudo bash
+# Usage: curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/ibmsetup.sh | sudo bash
 #        sudo bash ibmsetup.sh
 #        sudo bash ibmsetup.sh --beta
 #        sudo bash ibmsetup.sh --skip-tuning
@@ -648,7 +648,7 @@ if command -v wolfnet &> /dev/null && systemctl is-active --quiet wolfnet 2>/dev
             echo "  wolfnet subdirectory missing — re-cloning..."
             cd /tmp
             rm -rf "$WOLFNET_SRC_DIR"
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+            git clone https://github.com/intelligentwolf/WolfScale.git "$WOLFNET_SRC_DIR"
             git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
             cd "$WOLFNET_SRC_DIR"
         fi
@@ -691,7 +691,7 @@ elif command -v wolfnet &> /dev/null; then
         if [ ! -d "$WOLFNET_SRC_DIR/wolfnet" ]; then
             cd /tmp
             rm -rf "$WOLFNET_SRC_DIR"
-            git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+            git clone https://github.com/intelligentwolf/WolfScale.git "$WOLFNET_SRC_DIR"
             git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
             cd "$WOLFNET_SRC_DIR"
         fi
@@ -770,7 +770,7 @@ else
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR" && git fetch origin && git reset --hard origin/main
     else
-        git clone https://github.com/wolfsoftwaresystemsltd/WolfScale.git "$WOLFNET_SRC_DIR"
+        git clone https://github.com/intelligentwolf/WolfScale.git "$WOLFNET_SRC_DIR"
         git config --global --add safe.directory "$WOLFNET_SRC_DIR" 2>/dev/null || true
         cd "$WOLFNET_SRC_DIR"
     fi
@@ -972,7 +972,7 @@ if [ -d "$INSTALL_DIR" ]; then
     git checkout -B $BRANCH origin/$BRANCH
     git reset --hard origin/$BRANCH
 else
-    git clone -b $BRANCH https://github.com/wolfsoftwaresystemsltd/WolfStack.git "$INSTALL_DIR"
+    git clone -b $BRANCH https://github.com/intelligentwolf/WolfStack.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 

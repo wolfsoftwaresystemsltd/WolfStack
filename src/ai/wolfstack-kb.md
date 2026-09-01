@@ -99,14 +99,14 @@
 - Does NOT use WireGuard kernel modules — only needs /dev/net/tun
 - LAN auto-discovery on port 9601, tunnel traffic on port 9600
 - Join flow: `wolfnet invite` on existing node → token → `wolfnet join <token>` on new node
-- Docker image published to `ghcr.io/wolfsoftwaresystemsltd/wolfnet:latest` (multi-arch: linux/amd64 + linux/arm64)
+- Docker image published to `ghcr.io/intelligentwolf/wolfnet:latest` (multi-arch: linux/amd64 + linux/arm64)
 - For NAS platforms (Unraid, Synology, TrueNAS), use the satellite compose file at docker/docker-compose.satellite.yml in the WolfStack repo — bundles WolfNet + WolfDisk
 - Gateway mode: NAT traffic through a WolfNet peer
 - Docker containers carry WolfNet IPs via a `wolfnet.ip` container label; LXC via registered storage paths. Stale container→WolfNet DNAT rules are cleaned by `containers::cleanup_stale_wolfnet_routes`
 
 ## WolfDisk (Distributed Filesystem)
 - Rust FUSE-based replicated/shared storage across nodes; roles Leader/Follower/Client/Auto; Shared vs Replicated mode; content-addressed SHA256 dedup; optional S3 gateway
-- Native systemd service on Linux hosts (binary `wolfdisk`, config `/etc/wolfdisk/config.toml`) — installed from the Components page or setup script; Docker image `ghcr.io/wolfsoftwaresystemsltd/wolfdisk:latest` for NAS boxes
+- Native systemd service on Linux hosts (binary `wolfdisk`, config `/etc/wolfdisk/config.toml`) — installed from the Components page or setup script; Docker image `ghcr.io/intelligentwolf/wolfdisk:latest` for NAS boxes
 - Default bind port 8550 — conflicts with WolfStack's status page when both are on the same host; WolfStack's status-port auto-fallback resolves this
 - **Wire-version handshake (WDHS, wolfdisk v2.11.8+)**: peers exchange magic `WDHS` + wire version + software version before any frame. **Mixed wolfdisk versions CANNOT sync** — a version-skewed peer gets a clear log error ("peer runs pre-2.11.8 wolfdisk. Mixed versions cannot sync; upgrade all nodes together"). Fix: stop all → upgrade all → start all.
 - Daemon rewrites `cluster_status.json` every ~1s with index_version, file_count, peer freshness, and (v2.11.8+) its software version
@@ -302,7 +302,7 @@ Node-ROLES keystone for HA shared hosting. Each node carries `roles: Vec<NodeRol
 - Port-80 collision: bind-probe before certbot; busy → 409 `port_80_busy` → frontend flips the radio to DNS-01
 
 ## Installer (setup.sh)
-- Curl-piped: `curl -sSL https://raw.githubusercontent.com/wolfsoftwaresystemsltd/WolfStack/master/setup.sh | sudo bash`
+- Curl-piped: `curl -sSL https://raw.githubusercontent.com/intelligentwolf/WolfStack/master/setup.sh | sudo bash`
 - Flags: `--beta` (beta branch), `--yes`/`-y`, `--agent` (agent-only install), `--install-dir <path>` (redirect build dir for low-disk hosts)
 - Pre-flight checks: DNS-on-:53 conflicts (Technitium/Pi-hole/AdGuard/BIND/Unbound/dnsmasq; systemd-resolved handled automatically), port conflicts on 8553/8554/8550, reverse proxies on 80/443 (info), existing `/etc/wolfstack/` → upgrade warning (custom-cluster-secret footgun called out), ufw/firewalld hint with exact allow command, architecture warning for non-x86_64/aarch64 (source build ~10-30 min, ~3 GB)
 - Install manifest at `/var/log/wolfstack/install-<timestamp>.log` (package diff, used by uninstaller)
@@ -752,7 +752,7 @@ Routing: "how do I take a backup?" → Getting Started backup lessons. "restore 
 
 ## Video tutorials (YouTube — link users to these)
 
-A short companion tutorial exists for most features, on the Wolf Software Systems Ltd YouTube channel. When a user asks "how do I…", "show me…", or "is there a video for…" about one of these, give the direct link. The same videos are embedded in the in-app **Learn** course lessons and on the matching wolfstack.org doc page. They live on YouTube (external embeds) — nothing is stored inside WolfStack, so links never go stale on upgrade.
+A short companion tutorial exists for most features, on the IntelligentWolf Ltd YouTube channel. When a user asks "how do I…", "show me…", or "is there a video for…" about one of these, give the direct link. The same videos are embedded in the in-app **Learn** course lessons and on the matching wolfstack.org doc page. They live on YouTube (external embeds) — nothing is stored inside WolfStack, so links never go stale on upgrade.
 
 - **Create an LXC Container (Every Option Explained)** — https://youtu.be/ucX3BbcBT0w — Create a Linux container from a template and walk through every field — name, root password, memory, CPU, notes, storage, bind mounts, and all three networking modes. (doc: wolfstack-containers.php)
 - **HA: High Availability for LXC Containers (No Quorum, 2-Node Ready)** — https://youtu.be/irbL3mZvCl0 — Protect a container so it survives a node dying. Set replicas and priority, sync interval, and automatic failover with a witness — keeping the same name, MAC and IP. (doc: wolfstack-ha.php)

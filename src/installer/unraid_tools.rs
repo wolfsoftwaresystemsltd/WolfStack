@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Unraid tool bootstrapper — Unraid is a RAM-based Slackware with no
@@ -36,7 +36,7 @@ const TOOLS: &[(&str, &str)] = &[
 ];
 
 const RELEASE_BASE: &str =
-    "https://github.com/wolfsoftwaresystemsltd/WolfStack/releases/download/unraid-tools-v1";
+    "https://github.com/intelligentwolf/WolfStack/releases/download/unraid-tools-v1";
 
 /// WolfNet ships its own prebuilt static binaries on the WolfNet repo's
 /// latest release — the same assets setup.sh downloads on every other
@@ -46,7 +46,7 @@ const RELEASE_BASE: &str =
 /// the agent bundles WolfNet the same way it bundles the other tools
 /// (klas, 2026-08-11: "wolfnet could be bundled into the agent").
 const WOLFNET_RELEASE_BASE: &str =
-    "https://github.com/wolfsoftwaresystemsltd/WolfNet/releases/latest/download";
+    "https://github.com/intelligentwolf/WolfNet/releases/latest/download";
 const WOLFNET_TOOLS: &[(&str, &str)] = &[
     ("wolfnet", "wolfnet-x86_64"),
     ("wolfnetctl", "wolfnetctl-x86_64"),

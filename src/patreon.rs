@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Patreon OAuth integration — links a WolfStack installation to a Patreon account
@@ -105,7 +105,7 @@ pub struct PatreonConfig {
     #[serde(default)]
     pub linked: bool,
     /// Operator self-attests they support development via GitHub
-    /// Sponsors at <https://github.com/sponsors/wolfsoftwaresystemsltd>.
+    /// Sponsors at <https://github.com/sponsors/intelligentwolf>.
     /// Honour-system — no OAuth verification (GitHub's Sponsors API
     /// requires the org's auth to enumerate sponsors, and the public
     /// sponsor listing is opt-in per sponsor). Beta access is granted

@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 // https://wolf.uk.com
 
 //! Platform compatibility layer — runtime calibration, access token management,
@@ -275,7 +275,7 @@ fn cd(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-/// Report license usage to Wolf Software Systems. Called once daily by a
+/// Report license usage to IntelligentWolf. Called once daily by a
 /// background task. Fire-and-forget — never blocks or breaks the server.
 pub async fn report_license_heartbeat(cluster: &crate::agent::ClusterState) {
     let _dm = match load_dm() {

@@ -1,5 +1,5 @@
 // Written by Paul Clevett
-// (C)Copyright Wolf Software Systems Ltd
+// (C)Copyright IntelligentWolf Ltd
 
 //! GlusterFS trusted-storage-pool management — the Gluster analogue of
 //! `src/ceph/mod.rs`. Manages peers, volumes, bricks and self-heal by shelling

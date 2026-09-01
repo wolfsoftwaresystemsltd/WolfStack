@@ -1,6 +1,6 @@
 #!/bin/bash
 # Written by Paul Clevett
-# (C)Copyright Wolf Software Systems Ltd
+# (C)Copyright IntelligentWolf Ltd
 #
 # build-iso.sh — Build a WolfStack Live USB ISO based on Debian Live XFCE
 #
@@ -117,7 +117,7 @@ elif [ "$FROM_SOURCE" = true ]; then
     cp "$PROJECT_DIR/target/release/wolfstack" "$BUILD_DIR/squashfs-root/usr/local/bin/wolfstack"
 else
     echo "  Downloading latest release binary..."
-    RELEASE_URL="https://github.com/wolfsoftwaresystemsltd/WolfStack/releases/latest/download/wolfstack-linux-amd64"
+    RELEASE_URL="https://github.com/intelligentwolf/WolfStack/releases/latest/download/wolfstack-linux-amd64"
     if ! wget -q --show-progress -O "$BUILD_DIR/squashfs-root/usr/local/bin/wolfstack" "$RELEASE_URL" 2>/dev/null; then
         echo "  No release binary found. Building from source..."
         cd "$PROJECT_DIR"
@@ -528,7 +528,7 @@ cat > "$FS/opt/wolfstack/landing/index.html" << 'LANDING'
     Services typically take 30-60 seconds to start.
   </p>
 </div>
-<div class="footer">&copy; 2026 <a href="https://wolf.uk.com/">Wolf Software Systems Ltd</a></div>
+<div class="footer">&copy; 2026 <a href="https://wolf.uk.com/">IntelligentWolf Ltd</a></div>
 </body>
 </html>
 LANDING

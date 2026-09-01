@@ -277,14 +277,14 @@ jobs:
           ```
           cosign verify-blob \
             --bundle wolfstack-x86_64.cosign.bundle \
-            --certificate-identity-regexp 'https://github.com/wolfsoftwaresystemsltd/WolfStack/\.github/workflows/release\.yml@.*' \
+            --certificate-identity-regexp 'https://github.com/intelligentwolf/WolfStack/\.github/workflows/release\.yml@.*' \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             wolfstack-x86_64
           ```
 
           **Verify the build provenance:**
           ```
-          gh attestation verify wolfstack-x86_64 --repo wolfsoftwaresystemsltd/WolfStack
+          gh attestation verify wolfstack-x86_64 --repo intelligentwolf/WolfStack
           ```
 
           **Verify the SHA-256 checksum:**
@@ -298,7 +298,7 @@ jobs:
           - `wolfstack-<arch>.cosign.bundle` — cosign signature bundle (cert + signature + Rekor entry).
           - `SHA256SUMS` — checksums for both binaries.
 
-          For per-version history see [CHANGELOG.md](https://github.com/wolfsoftwaresystemsltd/WolfStack/blob/master/CHANGELOG.md).
+          For per-version history see [CHANGELOG.md](https://github.com/intelligentwolf/WolfStack/blob/master/CHANGELOG.md).
           EOF
           } > release-notes.md
 
