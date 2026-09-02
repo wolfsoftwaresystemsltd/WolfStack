@@ -37938,8 +37938,9 @@ pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>)
     let config = state.statuspage.config.read().unwrap();
     let pages: Vec<serde_json::Value> = config.pages.iter().map(|p| {
         let overall = state.statuspage.page_overall_status(p);
-        // Calculate 30-day uptime across all monitors on this page
-        let uptime_30d: Option<f64> = if p.monitor_ids.is_empty() {
+        // Mean uptime across the page's monitors over the same window the
+        // bars cover (crate::statuspage::UPTIME_BAR_DAYS).
+        let uptime_90d: Option<f64> = if p.monitor_ids.is_empty() {
             None
         } else {
             let uptimes: Vec<f32> = p.monitor_ids.iter()
@@ -37970,7 +37971,7 @@ pub async fn statuspage_pages_list(req: HttpRequest, state: web::Data<AppState>)
             },
             "overall_status": overall,
             "overall_label": overall.label(),
-            "uptime_30d": uptime_30d,
+            "uptime_90d": uptime_90d,
         })
     }).collect();
     HttpResponse::Ok().json(serde_json::json!({ "pages": pages }))

@@ -1609,26 +1609,45 @@ fn not_enabled_html() -> String {
     r#"<!DOCTYPE html><html><head><title>Status</title></head><body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#0f172a;color:#fff;"><p>Status page is not enabled.</p></body></html>"#.to_string()
 }
 
-fn build_uptime_bars(daily: &[DailyUptime], bar_empty: &str) -> String {
-    let mut bars = String::new();
-    let target: usize = 90;
-    let pad_count = target.saturating_sub(daily.len());
+/// Number of daily bars drawn on the uptime strip. The admin UI's monitor
+/// cards draw the same window (`renderUptimeBar` in web/js/app.js) so the
+/// two views cannot disagree.
+pub const UPTIME_BAR_DAYS: i64 = 90;
 
-    for _ in 0..pad_count {
-        bars.push_str(&format!(r#"<div class="uptime-bar" style="background:{};" title="No data"></div>"#, bar_empty));
+/// Colour for a single day's uptime. Mirrored in `renderUptimeBar`
+/// (web/js/app.js) — change both together.
+fn uptime_bar_color(uptime_percent: f32) -> &'static str {
+    if uptime_percent >= 99.5 {
+        "#22c55e"
+    } else if uptime_percent >= 95.0 {
+        "#eab308"
+    } else {
+        "#ef4444"
     }
-    for day in daily {
-        let color = if day.uptime_percent >= 99.5 {
-            "#22c55e"
-        } else if day.uptime_percent >= 95.0 {
-            "#eab308"
-        } else {
-            "#ef4444"
-        };
-        bars.push_str(&format!(
-            r#"<div class="uptime-bar" style="background:{};" title="{}: {:.1}% uptime"></div>"#,
-            color, day.date, day.uptime_percent
-        ));
+}
+
+fn build_uptime_bars(daily: &[DailyUptime], bar_empty: &str) -> String {
+    // Anchor every bar to a calendar date rather than walking the stored
+    // entries in order. Days with no checks at all (monitor paused, node
+    // down) write no entry, so index-walking would silently slide older
+    // days rightwards and make "Today" a bar from some earlier date.
+    let by_date: HashMap<&str, &DailyUptime> =
+        daily.iter().map(|d| (d.date.as_str(), d)).collect();
+    let today = chrono::Utc::now().date_naive();
+    let mut bars = String::new();
+
+    for offset in (0..UPTIME_BAR_DAYS).rev() {
+        let date = (today - chrono::Duration::days(offset)).format("%Y-%m-%d").to_string();
+        match by_date.get(date.as_str()) {
+            Some(day) => bars.push_str(&format!(
+                r#"<div class="uptime-bar" style="background:{};" title="{}: {:.1}% uptime"></div>"#,
+                uptime_bar_color(day.uptime_percent), day.date, day.uptime_percent
+            )),
+            None => bars.push_str(&format!(
+                r#"<div class="uptime-bar" style="background:{};" title="{}: no data"></div>"#,
+                bar_empty, date
+            )),
+        }
     }
     bars
 }
