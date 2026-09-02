@@ -58792,7 +58792,7 @@ function renderStatusPages(pages) {
             ? `<span style="font-size:10px; padding:2px 8px; background:#ef4444; color:#fff; border-radius:10px; margin-left:8px;">${activeIncidents.length} active</span>`
             : '';
 
-        const uptime = p.uptime_30d != null ? `${p.uptime_30d.toFixed(2)}%` : '—';
+        const uptime = p.uptime_90d != null ? `${p.uptime_90d.toFixed(2)}%` : '—';
         const pageUrl = spPublicUrl(p.page.slug, p.page.cluster);
 
         return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:12px; padding:20px;">
@@ -58810,7 +58810,7 @@ function renderStatusPages(pages) {
                 </div>
                 <div style="text-align:right;">
                     <div style="font-size:20px; font-weight:700; color:${colors[st]};">${labels[st]}</div>
-                    <div style="font-size:11px; color:var(--text-muted);">${uptime} uptime (30d)</div>
+                    <div style="font-size:11px; color:var(--text-muted);">${uptime} uptime (90d)</div>
                 </div>
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center; padding-top:12px; border-top:1px solid var(--border);">
@@ -58852,7 +58852,7 @@ function renderStatusMonitors(monitors) {
         const typeLabel = mon.check?.type || '?';
         const uptime = (m.uptime_percent || 100).toFixed(2);
 
-        const uptimeHistory = renderUptimeBar(m.history || [], 30);
+        const uptimeHistory = renderUptimeBar(m.history || [], 90);
 
         return `<div style="background:var(--bg-input); border:1px solid var(--border); border-radius:10px; padding:16px;">
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
@@ -58868,7 +58868,7 @@ function renderStatusMonitors(monitors) {
                 <div style="display:flex; align-items:center; gap:8px;">
                     <div style="text-align:right;">
                         <div style="font-size:18px; font-weight:700; color:${colors[st]};">${uptime}%</div>
-                        <div style="font-size:10px; color:var(--text-muted);">30-day uptime</div>
+                        <div style="font-size:10px; color:var(--text-muted);">90-day uptime</div>
                     </div>
                     <div style="display:flex; gap:4px; margin-left:12px;">
                         <button class="btn btn-sm" onclick="showMonitorDetails('${mon.id}')" style="font-size:11px;" title="View Details"><span class="ws-icon-clean-wrap" data-icon="eye"></span></button>
@@ -58877,39 +58877,46 @@ function renderStatusMonitors(monitors) {
                     </div>
                 </div>
             </div>
-            <div style="display:flex; gap:1px; height:24px; background:var(--bg-tertiary); border-radius:4px; overflow:hidden;" title="30-day uptime history">
+            <div style="display:flex; gap:1px; height:24px; background:var(--bg-tertiary); border-radius:4px; overflow:hidden;" title="90-day uptime history">
                 ${uptimeHistory}
             </div>
             <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:10px; color:var(--text-muted);">
-                <span>30 days ago</span>
+                <span>90 days ago</span>
                 <span>Today</span>
             </div>
         </div>`;
     }).join('');
 }
 
+// Twin of build_uptime_bars() in src/statuspage/mod.rs — the monitor card and
+// the public status page draw the same window, keyed by the same calendar
+// dates, with the same thresholds. Anything that diverges here shows up as
+// "the status page disagrees with the monitor".
+//
+// `history` is the server's daily_uptime list, oldest first, one entry per day
+// that actually recorded a check — days with no checks are simply absent, so
+// bars are placed by date, never by array index.
 function renderUptimeBar(history, days) {
     const bars = [];
     const colors = { up: '#22c55e', degraded: '#eab308', down: '#ef4444', unknown: '#374151' };
+    const byDate = new Map((history || []).map(d => [d.date, d]));
+    const nowMs = Date.now();
 
-    for (let i = 0; i < days; i++) {
-        const dayData = history[i];
-        let color = colors.unknown;
-        let tooltip = 'No data';
+    for (let offset = days - 1; offset >= 0; offset--) {
+        // Server stamps dates in UTC (chrono::Utc); toISOString is UTC too.
+        const date = new Date(nowMs - offset * 86400000).toISOString().slice(0, 10);
+        const dayData = byDate.get(date);
 
-        if (dayData) {
-            const pct = dayData.uptime_percent || 0;
-            if (pct >= 99.5) {
-                color = colors.up;
-            } else if (pct >= 95) {
-                color = colors.degraded;
-            } else if (pct > 0) {
-                color = colors.down;
-            }
-            tooltip = `${pct.toFixed(2)}% uptime`;
+        if (!dayData) {
+            bars.push(`<div style="flex:1; background:${colors.unknown};" title="${date}: no data"></div>`);
+            continue;
         }
-
-        bars.push(`<div style="flex:1; background:${color}; transition:background 0.2s;" title="${tooltip}"></div>`);
+        const pct = dayData.uptime_percent || 0;
+        // A 0% day is a full outage — red. It used to fall through to
+        // "unknown" grey, which read as "no data" on the admin card while the
+        // public page showed the same day red.
+        const color = pct >= 99.5 ? colors.up : (pct >= 95 ? colors.degraded : colors.down);
+        bars.push(`<div style="flex:1; background:${color}; transition:background 0.2s;" title="${date}: ${pct.toFixed(2)}% uptime"></div>`);
     }
 
     return bars.join('');
@@ -58974,7 +58981,7 @@ async function showMonitorDetails(monitorId) {
                         <div style="font-size:16px; font-weight:600; color:${colors[st]};">${m.status_label}</div>
                     </div>
                     <div>
-                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">Uptime (30 days)</div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">Uptime (90 days)</div>
                         <div style="font-size:16px; font-weight:600;">${(m.uptime_percent || 100).toFixed(2)}%</div>
                     </div>
                     <div>
