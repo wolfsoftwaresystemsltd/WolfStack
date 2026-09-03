@@ -8797,31 +8797,27 @@ pub fn list_available_targets() -> Vec<BackupTarget> {
                 }
             }
     } else {
-        // Native LXC: use lxc-ls -f for state + hostname from config
-        if let Ok(output) = Command::new("lxc-ls")
-            .args(["-f", "-F", "NAME,STATE"])
-            .output()
-        {
-            for line in String::from_utf8_lossy(&output.stdout).lines().skip(1) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let name = match parts.first() {
-                    Some(n) if !n.is_empty() => n.to_string(),
-                    _ => continue,
-                };
-                let state = parts.get(1).map(|s| s.to_lowercase());
-
-                // Try to read hostname from LXC config
-                let hostname = lxc_config_hostname(&name);
-
-                targets.push(BackupTarget {
-                    target_type: BackupTargetType::Lxc,
-                    name,
-                    hostname,
-                    state,
-                    specs: None,
-                    ..Default::default()
-                });
-            }
+        // Native LXC. Enumerated through `containers::lxc_list_all()` rather
+        // than a bare `lxc-ls -f`, which only sees the default lxcpath and so
+        // never offered containers living on any other registered storage
+        // path. `backup_all` reads the same source, so what a scheduled "back
+        // up everything" run actually archives and what this picker offers
+        // cannot drift apart.
+        for container in crate::containers::lxc_list_all() {
+            if container.name.is_empty() { continue; }
+            let hostname = if container.hostname.is_empty() {
+                lxc_config_hostname(&container.name)
+            } else {
+                Some(container.hostname.clone())
+            };
+            targets.push(BackupTarget {
+                target_type: BackupTargetType::Lxc,
+                name: container.name.clone(),
+                hostname,
+                state: Some(container.state.to_lowercase()),
+                specs: None,
+                ..Default::default()
+            });
         }
     }
 

@@ -7932,16 +7932,23 @@ fn pid_started_at(pid: u32) -> Option<u64> {
 /// — UPID, a saved flag, then an OPTIONAL endtime and status. A line carrying
 /// no endtime is a task PVE still believes is running.
 ///
-/// The index alone is NOT enough. A worker killed outright never gets its
-/// endtime written and its line lingers indefinitely — wolf1's index held 9
-/// such `vncshell` entries, the oldest from January. PVE resolves this the
-/// same way we do: PVE::ProcFSTools::check_process_running (ProcFSTools.pm:358)
-/// requires the pid to still exist AND its start time to equal the recorded
-/// `pstart`.
+/// The index alone is NOT enough: a worker killed outright never gets an
+/// endtime written, so its line stays open forever. PVE does not trust the
+/// index on its own either — PVE::ProcFSTools::check_process_running
+/// (ProcFSTools.pm:358) requires the pid to still exist AND its start time to
+/// equal the recorded `pstart`, which is also what rules out a recycled pid.
+/// We apply the same pair.
+///
+/// The liveness half is not theoretical padding: wolf1's index carries 9
+/// entries with no endtime, and checking them against /proc showed all 9 are
+/// genuinely still-running console sessions (8 `vncshell`, 1 `vncproxy`), the
+/// oldest open since January. Without the pid check we could not tell those
+/// apart from abandoned ones — and with only the index we would call every
+/// one of them a live owner.
 ///
 /// A CLI `vzdump` registers here just like an API-launched one — verified on
 /// wolf1 against the UPIDs of a scheduled run (2026-09-03).
-fn pve_task_running_for_guest(vmid: &str) -> bool {
+fn pve_task_running_for_lxc(vmid: &str) -> bool {
     let Ok(raw) = std::fs::read_to_string("/var/log/pve/tasks/active") else {
         return false;
     };
@@ -7983,7 +7990,12 @@ fn open_tasks_for_guest(active: &str, vmid: &str) -> Vec<PveUpid> {
 /// backup had.
 ///
 /// Runs at boot and hourly alongside the staging and freeze sweeps.
-pub fn sweep_stale_guest_locks() {
+///
+/// LXC only, deliberately: `pct unlock` is the container command, and a stuck
+/// lock on a QEMU guest is a separate job (`/etc/pve/qemu-server`, `qm unlock`,
+/// and its own lock enum) that nothing here ever handled. Named for what it
+/// does rather than "guest", which in Proxmox terms would promise VMs too.
+pub fn sweep_stale_lxc_locks() {
     if !is_proxmox() {
         return;
     }
@@ -8007,7 +8019,7 @@ pub fn sweep_stale_guest_locks() {
         if !RECLAIMABLE_LXC_LOCKS.contains(&lock.as_str()) {
             continue;
         }
-        if pve_task_running_for_guest(vmid) {
+        if pve_task_running_for_lxc(vmid) {
             continue; // owner is alive — the lock is doing its job
         }
         // No race against a backup that starts between the check and the
@@ -8061,7 +8073,7 @@ fn pct_list_all() -> Vec<ContainerInfo> {
             // 100 has stale 'backup' lock — auto-unlocking" logged 48s into a
             // 88s vzdump). That lock is what stops a second vzdump, a migrate
             // or a destroy starting on top of a live backup. Recovery of a
-            // genuinely abandoned lock now lives in `sweep_stale_guest_locks`,
+            // genuinely abandoned lock now lives in `sweep_stale_lxc_locks`,
             // which checks whether the owning task is still alive first.
             let pct_name = if PVE_LXC_LOCKS.contains(&lock.as_str()) {
                 parts.get(3..).map(|p| p.join(" ")).unwrap_or_default()
