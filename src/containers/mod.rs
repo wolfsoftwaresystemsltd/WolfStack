@@ -7932,12 +7932,19 @@ fn pid_started_at(pid: u32) -> Option<u64> {
 /// — UPID, a saved flag, then an OPTIONAL endtime and status. A line carrying
 /// no endtime is a task PVE still believes is running.
 ///
-/// The index alone is NOT enough. A worker killed outright never gets its
-/// endtime written and its line lingers indefinitely — wolf1's index held 9
-/// such `vncshell` entries, the oldest from January. PVE resolves this the
-/// same way we do: PVE::ProcFSTools::check_process_running (ProcFSTools.pm:358)
-/// requires the pid to still exist AND its start time to equal the recorded
-/// `pstart`.
+/// The index alone is NOT enough: a worker killed outright never gets an
+/// endtime written, so its line stays open forever. PVE does not trust the
+/// index on its own either — PVE::ProcFSTools::check_process_running
+/// (ProcFSTools.pm:358) requires the pid to still exist AND its start time to
+/// equal the recorded `pstart`, which is also what rules out a recycled pid.
+/// We apply the same pair.
+///
+/// The liveness half is not theoretical padding: wolf1's index carries 9
+/// entries with no endtime, and checking them against /proc showed all 9 are
+/// genuinely still-running console sessions (8 `vncshell`, 1 `vncproxy`), the
+/// oldest open since January. Without the pid check we could not tell those
+/// apart from abandoned ones — and with only the index we would call every
+/// one of them a live owner.
 ///
 /// A CLI `vzdump` registers here just like an API-launched one — verified on
 /// wolf1 against the UPIDs of a scheduled run (2026-09-03).
