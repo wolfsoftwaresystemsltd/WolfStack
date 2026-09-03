@@ -7948,7 +7948,7 @@ fn pid_started_at(pid: u32) -> Option<u64> {
 ///
 /// A CLI `vzdump` registers here just like an API-launched one — verified on
 /// wolf1 against the UPIDs of a scheduled run (2026-09-03).
-fn pve_task_running_for_guest(vmid: &str) -> bool {
+fn pve_task_running_for_lxc(vmid: &str) -> bool {
     let Ok(raw) = std::fs::read_to_string("/var/log/pve/tasks/active") else {
         return false;
     };
@@ -7990,7 +7990,12 @@ fn open_tasks_for_guest(active: &str, vmid: &str) -> Vec<PveUpid> {
 /// backup had.
 ///
 /// Runs at boot and hourly alongside the staging and freeze sweeps.
-pub fn sweep_stale_guest_locks() {
+///
+/// LXC only, deliberately: `pct unlock` is the container command, and a stuck
+/// lock on a QEMU guest is a separate job (`/etc/pve/qemu-server`, `qm unlock`,
+/// and its own lock enum) that nothing here ever handled. Named for what it
+/// does rather than "guest", which in Proxmox terms would promise VMs too.
+pub fn sweep_stale_lxc_locks() {
     if !is_proxmox() {
         return;
     }
@@ -8014,7 +8019,7 @@ pub fn sweep_stale_guest_locks() {
         if !RECLAIMABLE_LXC_LOCKS.contains(&lock.as_str()) {
             continue;
         }
-        if pve_task_running_for_guest(vmid) {
+        if pve_task_running_for_lxc(vmid) {
             continue; // owner is alive — the lock is doing its job
         }
         // No race against a backup that starts between the check and the
@@ -8068,7 +8073,7 @@ fn pct_list_all() -> Vec<ContainerInfo> {
             // 100 has stale 'backup' lock — auto-unlocking" logged 48s into a
             // 88s vzdump). That lock is what stops a second vzdump, a migrate
             // or a destroy starting on top of a live backup. Recovery of a
-            // genuinely abandoned lock now lives in `sweep_stale_guest_locks`,
+            // genuinely abandoned lock now lives in `sweep_stale_lxc_locks`,
             // which checks whether the owning task is still alive first.
             let pct_name = if PVE_LXC_LOCKS.contains(&lock.as_str()) {
                 parts.get(3..).map(|p| p.join(" ")).unwrap_or_default()
