@@ -8,6 +8,7 @@ _Regenerated from git history by `scripts/gen-changelog.sh`. Do not
 edit this file by hand — your changes will be overwritten on the next
 release._
 
+- **v25.23.3: a container's backup lock survives its own backup, and "back up all" only backs up guests this node owns** _(2026-09-03 — [`2367221e`](https://github.com/intelligentwolf/WolfStack/commit/2367221ef0d2a78cb7ad9f295cc49d49a3ff7260))_
 - **v25.23.2: the status page and the monitor card no longer disagree about uptime** _(2026-09-02 — [`136fcc3a`](https://github.com/intelligentwolf/WolfStack/commit/136fcc3aece9c7ca0d63f2a91f97a349175c8aa5))_
 - **v25.23.1: the company is now IntelligentWolf Ltd, and the GitHub org is intelligentwolf** _(2026-09-01 — [`70e56073`](https://github.com/intelligentwolf/WolfStack/commit/70e5607357e19b6bafefc92838feb9e7de5a51a5))_
 - **v25.23.0: zfs pool shares publish child datasets, and a wide-links option for symlinked pool layouts** _(2026-08-31 — [`27579ba3`](https://github.com/intelligentwolf/WolfStack/commit/27579ba3c461f9657f38e2c40c89d3130459d747))_
