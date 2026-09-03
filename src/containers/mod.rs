@@ -7852,6 +7852,188 @@ fn host_df_for_lxc(vmids: &[String])
     map
 }
 
+/// Every value PVE allows in an LXC config's `lock:` property.
+///
+/// Source: PVE::LXC::Config, /usr/share/perl5/PVE/LXC/Config.pm:514-518 —
+///   `enum => [qw(backup create destroyed disk fstrim migrate mounted rollback
+///                snapshot snapshot-delete)]`
+///
+/// `pct list` prints the lock in a column between Status and Name, and only
+/// for a guest that holds one, so the parser has to recognise the value to
+/// know whether the third field is a lock or the first word of the name. The
+/// hand-written list this replaces was missing `destroyed`, `disk`, `fstrim`
+/// and `snapshot-delete` — a guest holding one of those reported its lock
+/// string as its name.
+const PVE_LXC_LOCKS: &[&str] = &[
+    "backup", "create", "destroyed", "disk", "fstrim", "migrate", "mounted",
+    "rollback", "snapshot", "snapshot-delete",
+];
+
+/// Locks worth reclaiming automatically once nothing owns them any more.
+///
+/// Deliberately a subset: `create`/`destroyed`/`migrate` guard a half-finished
+/// guest that must stay untouchable until a human looks at it, and clearing
+/// `disk`/`fstrim` buys nothing. These two are the pair the old listing-path
+/// sweep already cleared — the fix is the gate in front of them, not a wider
+/// reach.
+const RECLAIMABLE_LXC_LOCKS: &[&str] = &["backup", "snapshot"];
+
+/// One decoded Proxmox task id.
+#[derive(Debug, PartialEq)]
+struct PveUpid {
+    pid: u32,
+    /// Start time of `pid` in clock ticks since boot, as recorded when the
+    /// task began. Pairing it with the pid is what makes a recycled pid fail.
+    pstart: u64,
+    /// The guest the task is operating on — empty for node-wide tasks.
+    vmid: String,
+}
+
+/// Decode a Proxmox UPID.
+///
+/// Source: PVE::UPID::decode, /usr/share/perl5/PVE/UPID.pm:32-58 —
+///   `UPID:$node:$pid:$pstart:$starttime:$dtype:$id:$user:`
+/// with pid, pstart and starttime in hex and a trailing colon, so splitting on
+/// ':' yields 9 parts with an empty last one.
+fn decode_upid(upid: &str) -> Option<PveUpid> {
+    let f: Vec<&str> = upid.split(':').collect();
+    if f.len() != 9 || f[0] != "UPID" {
+        return None;
+    }
+    Some(PveUpid {
+        pid: u32::from_str_radix(f[2], 16).ok()?,
+        pstart: u64::from_str_radix(f[3], 16).ok()?,
+        vmid: f[6].to_string(),
+    })
+}
+
+/// Field 22 (`starttime`) of `/proc/<pid>/stat`, in clock ticks since boot.
+///
+/// Source: PVE::ProcFSTools::read_proc_pid_stat,
+/// /usr/share/perl5/PVE/ProcFSTools.pm:335-353 — its regex consumes
+/// `pid (comm) `, then captures state (field 3) and ppid (4), skips 9 unnamed
+/// fields (5-13), captures utime (14), stime (15), cutime (16), cstime (17),
+/// skips 3 more (18-20) and the literal `0` at 21, and captures the next
+/// number as `starttime` — field 22, which is what proc(5) documents.
+fn pid_started_at(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    // `comm` sits in parentheses and may itself contain spaces or a ')', so
+    // the fields only become splittable after the LAST ')'. The first token
+    // after it is field 3, putting field 22 at index 19.
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Is a Proxmox worker task still running for guest `vmid`?
+///
+/// PVE's own active-task index is the source of truth. Grammar, from
+/// PVE::INotify::read_active_workers (/usr/share/perl5/PVE/INotify.pm:685-711):
+///   `^(\S+)\s(0|1)(\s([0-9A-Za-z]{8})(\s(\s*\S.*))?)?$`
+/// — UPID, a saved flag, then an OPTIONAL endtime and status. A line carrying
+/// no endtime is a task PVE still believes is running.
+///
+/// The index alone is NOT enough. A worker killed outright never gets its
+/// endtime written and its line lingers indefinitely — wolf1's index held 9
+/// such `vncshell` entries, the oldest from January. PVE resolves this the
+/// same way we do: PVE::ProcFSTools::check_process_running (ProcFSTools.pm:358)
+/// requires the pid to still exist AND its start time to equal the recorded
+/// `pstart`.
+///
+/// A CLI `vzdump` registers here just like an API-launched one — verified on
+/// wolf1 against the UPIDs of a scheduled run (2026-09-03).
+fn pve_task_running_for_guest(vmid: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string("/var/log/pve/tasks/active") else {
+        return false;
+    };
+    open_tasks_for_guest(&raw, vmid)
+        .iter()
+        .any(|t| pid_started_at(t.pid) == Some(t.pstart))
+}
+
+/// The still-open entries of an active-index body that belong to `vmid`.
+///
+/// "Still open" only means PVE has not written an endtime for the line — the
+/// caller must confirm the process is actually alive, because a worker that
+/// was killed never gets one written and its line stays here forever.
+fn open_tasks_for_guest(active: &str, vmid: &str) -> Vec<PveUpid> {
+    active
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let upid = fields.next()?;
+            fields.next()?; // the saved flag
+            if fields.next().is_some() {
+                return None; // carries an endtime — finished
+            }
+            let task = decode_upid(upid)?;
+            (task.vmid == vmid).then_some(task)
+        })
+        .collect()
+}
+
+/// Release a `backup`/`snapshot` lock left on a Proxmox container by a task
+/// that died without clearing it.
+///
+/// This is the gated replacement for the unlock that used to sit inside
+/// `pct_list_all`. That one fired from a read-only listing on every UI poll
+/// and applied no staleness test at all, so it stripped the lock off each
+/// container in the middle of its own scheduled `vzdump` (wolf1 nightly). The
+/// lock is what stops a second vzdump, a migrate or a destroy starting on top
+/// of a live backup, so tearing it off mid-run removed the only guard the
+/// backup had.
+///
+/// Runs at boot and hourly alongside the staging and freeze sweeps.
+pub fn sweep_stale_guest_locks() {
+    if !is_proxmox() {
+        return;
+    }
+    // `/etc/pve/lxc` is this node's own directory in pmxcfs, so a container
+    // that lives on another cluster node is not listed here.
+    let Ok(dir) = std::fs::read_dir("/etc/pve/lxc") else { return };
+    for entry in dir.flatten() {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let Some(vmid) = file_name.strip_suffix(".conf") else { continue };
+        let Ok(conf) = std::fs::read_to_string(entry.path()) else { continue };
+        // Live section only — a `[snapshot_*]` block carries its own recorded
+        // `lock:` value, which says nothing about the container right now.
+        let Some(lock) = conf
+            .lines()
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .find_map(|l| l.trim().strip_prefix("lock:"))
+            .map(|v| v.trim().to_string())
+        else {
+            continue;
+        };
+        if !RECLAIMABLE_LXC_LOCKS.contains(&lock.as_str()) {
+            continue;
+        }
+        if pve_task_running_for_guest(vmid) {
+            continue; // owner is alive — the lock is doing its job
+        }
+        // No race against a backup that starts between the check and the
+        // unlock: a task registers its UPID in the active index BEFORE it
+        // touches the guest, so a lock can never exist without its task
+        // already being visible above. wolf1's journal shows the order
+        // plainly — "starting task UPID:...:vzdump:100:" is logged first,
+        // "Starting Backup of VM 100 (lxc)" (which is what sets the lock)
+        // after it. A lock with no live task in the index is therefore
+        // abandoned, not about to be claimed.
+        warn!(
+            "lock sweep: container {} holds a '{}' lock but no Proxmox task owns it — releasing",
+            vmid, lock
+        );
+        match Command::new("pct").args(["unlock", vmid]).output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => warn!(
+                "lock sweep: `pct unlock {}` failed: {}",
+                vmid,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => warn!("lock sweep: could not run `pct unlock {}`: {}", vmid, e),
+        }
+    }
+}
+
 fn pct_list_all() -> Vec<ContainerInfo> {
     let output = match Command::new("pct").arg("list").output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -7870,13 +8052,18 @@ fn pct_list_all() -> Vec<ContainerInfo> {
             // Detect lock field — if present it sits between status and name
             // e.g. "138    running    backup     myhost"
             let lock = parts.get(2).unwrap_or(&"").to_string();
-            let pct_name = if lock == "backup" || lock == "snapshot" || lock == "migrate"
-                || lock == "rollback" || lock == "create" || lock == "mounted" {
-                // Auto-unlock stale backup/snapshot locks
-                if lock == "backup" || lock == "snapshot" {
-                    warn!("Container {} has stale '{}' lock — auto-unlocking", vmid, lock);
-                    let _ = Command::new("pct").args(["unlock", &vmid]).output();
-                }
+            // Listing is a READ. It used to `pct unlock` any container it saw
+            // holding a backup/snapshot lock, calling it "stale" with no
+            // staleness test whatsoever — and this runs on every Containers
+            // page poll. A container being backed up right now legitimately
+            // holds `lock: backup`, so the sweep tore the lock off each guest
+            // in the middle of its OWN vzdump (wolf1, every night: "Container
+            // 100 has stale 'backup' lock — auto-unlocking" logged 48s into a
+            // 88s vzdump). That lock is what stops a second vzdump, a migrate
+            // or a destroy starting on top of a live backup. Recovery of a
+            // genuinely abandoned lock now lives in `sweep_stale_guest_locks`,
+            // which checks whether the owning task is still alive first.
+            let pct_name = if PVE_LXC_LOCKS.contains(&lock.as_str()) {
                 parts.get(3..).map(|p| p.join(" ")).unwrap_or_default()
             } else {
                 parts.get(2..).map(|p| p.join(" ")).unwrap_or_default()
@@ -17339,5 +17526,119 @@ mod bind_restore_tests {
         assert!(e.contains("tar"), "should have reached the tar step, got: {}", e);
         assert!(!e.contains("not empty"), "{}", e);
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod pve_task_lock_tests {
+    use super::*;
+
+    /// Real UPIDs taken from wolf1's `/var/log/pve/tasks/active` (2026-09-03).
+    const VZDUMP_100: &str = "UPID:wolf1:0037A50B:94A55AE3:6A98D4B1:vzdump:100:root@pam:";
+    const VNCSHELL: &str = "UPID:wolf1:002BE675:2B6FA99A:698B7E70:vncshell::root@pam:";
+
+    #[test]
+    fn decodes_a_real_upid() {
+        let t = decode_upid(VZDUMP_100).expect("should decode");
+        assert_eq!(t.pid, 0x0037A50B);
+        assert_eq!(t.pstart, 0x94A55AE3);
+        assert_eq!(t.vmid, "100");
+    }
+
+    #[test]
+    fn node_wide_tasks_decode_with_an_empty_vmid() {
+        let t = decode_upid(VNCSHELL).expect("should decode");
+        assert_eq!(t.vmid, "");
+    }
+
+    #[test]
+    fn rejects_upids_that_are_not_upids() {
+        assert!(decode_upid("").is_none());
+        assert!(decode_upid("not-a-upid").is_none());
+        // Missing the trailing colon, so only 8 parts.
+        assert!(decode_upid("UPID:wolf1:0037A50B:94A55AE3:6A98D4B1:vzdump:100:root@pam").is_none());
+        // pid is not hex.
+        assert!(decode_upid("UPID:wolf1:zzzzzzzz:94A55AE3:6A98D4B1:vzdump:100:root@pam:").is_none());
+    }
+
+    /// A line with an endtime is a FINISHED task and must never keep a lock
+    /// alive; one without an endtime is still open. Both shapes are taken
+    /// verbatim from wolf1's index.
+    #[test]
+    fn only_lines_without_an_endtime_count_as_open() {
+        let active = format!(
+            "{} 1 6A9783A4 OK\n{} 0\n",
+            VZDUMP_100, VZDUMP_100
+        );
+        let open = open_tasks_for_guest(&active, "100");
+        assert_eq!(open.len(), 1, "the finished line must be ignored");
+        assert_eq!(open[0].pid, 0x0037A50B);
+    }
+
+    #[test]
+    fn open_tasks_are_matched_by_guest() {
+        let active = format!("{} 0\n{} 0\n", VZDUMP_100, VNCSHELL);
+        assert_eq!(open_tasks_for_guest(&active, "100").len(), 1);
+        assert!(open_tasks_for_guest(&active, "103").is_empty());
+        // The node-wide vncshell task has an empty vmid and must not be
+        // mistaken for a task on a container.
+        assert_eq!(open_tasks_for_guest(&active, "").len(), 1);
+    }
+
+    #[test]
+    fn garbage_lines_are_skipped_not_fatal() {
+        let active = format!("\n junk \n{} 0\nUPID:broken 0\n", VZDUMP_100);
+        assert_eq!(open_tasks_for_guest(&active, "100").len(), 1);
+    }
+
+    /// `pid_started_at` must read field 22 of /proc/<pid>/stat. Checked against
+    /// this very process: the value is non-zero, stable across reads, and a
+    /// pid that cannot exist yields None.
+    #[test]
+    fn reads_our_own_start_time() {
+        let me = std::process::id();
+        let first = pid_started_at(me).expect("own /proc/<pid>/stat must be readable");
+        assert!(first > 0, "start time should be non-zero, got {}", first);
+        assert_eq!(Some(first), pid_started_at(me), "must be stable across reads");
+        // /proc/sys/kernel/pid_max is at most 2^22 on Linux, so this pid
+        // cannot be allocated and has no /proc entry.
+        assert_eq!(pid_started_at(u32::MAX), None);
+    }
+
+    /// The comm field can contain spaces and parentheses; the parse must key
+    /// off the LAST ')' or every field after it shifts.
+    #[test]
+    fn start_time_survives_a_hostile_comm() {
+        // Field 1 pid, 2 comm, 3 state, then fields 4..=21, then 22 = 4242.
+        let fields: Vec<String> = (4..=21).map(|n| n.to_string()).collect();
+        let stat = format!("7 ((weird) proc name) S {} 4242 rest\n", fields.join(" "));
+        let dir = std::env::temp_dir().join(format!("wolfstack-stat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("stat");
+        std::fs::write(&f, &stat).unwrap();
+        // Mirror the parse against the file we just wrote.
+        let raw = std::fs::read_to_string(&f).unwrap();
+        let rest = &raw[raw.rfind(')').unwrap() + 1..];
+        let got: u64 = rest.split_whitespace().nth(19).unwrap().parse().unwrap();
+        assert_eq!(got, 4242, "field 22 must be found after the LAST ')'");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lock_tables_match_pve_and_stay_a_subset() {
+        // PVE::LXC::Config.pm:514-518.
+        assert_eq!(PVE_LXC_LOCKS.len(), 10);
+        for l in ["backup", "create", "destroyed", "disk", "fstrim", "migrate",
+                  "mounted", "rollback", "snapshot", "snapshot-delete"] {
+            assert!(PVE_LXC_LOCKS.contains(&l), "PVE lock '{}' missing", l);
+        }
+        // Anything we auto-release must be a lock PVE can actually set.
+        for l in RECLAIMABLE_LXC_LOCKS {
+            assert!(PVE_LXC_LOCKS.contains(l), "'{}' is not a PVE lock", l);
+        }
+        // A half-created or migrating guest is never auto-unlocked.
+        for l in ["create", "destroyed", "migrate"] {
+            assert!(!RECLAIMABLE_LXC_LOCKS.contains(&l), "'{}' must not be reclaimed", l);
+        }
     }
 }

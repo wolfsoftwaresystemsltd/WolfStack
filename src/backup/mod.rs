@@ -3909,24 +3909,41 @@ pub fn backup_all(storage: &BackupStorage, stop_containers: bool) -> Vec<BackupE
         }
     }
 
-    // Backup all LXC containers
-    if let Ok(output) = Command::new("lxc-ls").output() {
-        let names: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .filter(|l| !l.is_empty())
-            .map(|l| l.to_string())
-            .collect();
-        for name in names {
-            entries.push(create_backup_entry(
-                BackupTarget {
-                    target_type: BackupTargetType::Lxc,
-                    name: name.clone(),
-                    stop_for_backup: stop_containers,
-                    ..Default::default()
-                },
-                storage,
-            ));
-        }
+    // Backup all LXC containers.
+    //
+    // Enumerated through `containers::lxc_list_all()` — the same source of
+    // truth the Containers page uses — NOT a bare `lxc-ls`. `lxc-ls` reports
+    // whatever holds a config under the default lxcpath, which is wrong on
+    // both platforms:
+    //
+    //   * On Proxmox it lists leftover `/var/lib/lxc/<vmid>` directories for
+    //     containers that were migrated to another node or destroyed. wolf1
+    //     carried a phantom CT 104 that way: `lxc-ls` listed it, `pct list`
+    //     did not, and every nightly run spent a target on a `vzdump 104`
+    //     that could not produce an archive — one guaranteed
+    //     "Backup failed for Lxc" in the log every night (2026-09-03).
+    //     `lxc_list_all()` goes through `pct list`, so only containers
+    //     Proxmox actually owns on THIS node are enumerated.
+    //   * On native LXC it MISSES containers on any non-default storage path,
+    //     which `lxc_list_all()` scans (`lxc_storage_paths()`) and which
+    //     `backup_lxc` then resolves via `lxc_base_dir()`. Those were
+    //     silently absent from every "back up everything" run.
+    //
+    // `ContainerInfo::name` is exactly the identifier `backup_lxc` wants on
+    // each platform: the VMID on Proxmox (what `vzdump` takes) and the
+    // container name natively.
+    for container in crate::containers::lxc_list_all() {
+        if container.name.is_empty() { continue; }
+        entries.push(create_backup_entry(
+            BackupTarget {
+                target_type: BackupTargetType::Lxc,
+                name: container.name.clone(),
+                hostname: if container.hostname.is_empty() { None } else { Some(container.hostname.clone()) },
+                stop_for_backup: stop_containers,
+                ..Default::default()
+            },
+            storage,
+        ));
     }
 
     // Backup all VMs — native WolfStack VMs only at this stage.
@@ -4061,6 +4078,26 @@ fn backup_comments_with_cluster(target: &BackupTarget, cluster: &str) -> String 
     format!("[{}] {}", cluster, detail)
 }
 
+/// What to call a target in a log line.
+///
+/// `BackupTargetType::Config` carries a deliberately empty `name` (there is
+/// only ever one of it), and `SystemPath` can too. Interpolating `target.name`
+/// straight into the log then produced `Backup  → PBS: ...` with a hole where
+/// the subject should be — the last line of every scheduled run on wolf1, and
+/// indistinguishable from a target whose name had gone missing.
+fn target_log_label(target: &BackupTarget) -> String {
+    if !target.name.is_empty() {
+        return target.name.clone();
+    }
+    match &target.target_type {
+        BackupTargetType::Config => "WolfStack config".to_string(),
+        BackupTargetType::SystemPath if !target.system_path.is_empty() => {
+            target.system_path.clone()
+        }
+        other => format!("{:?}", other),
+    }
+}
+
 /// Create a single backup entry — performs the backup and stores it
 fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupEntry {
     // Bake the concrete Local directory into the entry up front so the stored
@@ -4072,7 +4109,7 @@ fn create_backup_entry(target: BackupTarget, storage: &BackupStorage) -> BackupE
     let mut comments = backup_comments(&target);
     // Scheduled path has no live log, so record the format reason via tracing —
     // parity with the streaming path's on-screen explainer (wabil 2026-06-21).
-    info!("Backup {} → {}: {}", target.name, storage_label(storage),
+    info!("Backup {} → {}: {}", target_log_label(&target), storage_label(storage),
         backup_format_explainer(&target, storage));
     // Make a file-level→tarball fallback (e.g. Proxmox LXC → vzdump) visible.
     if let Some(note) = pbs_file_level_skip_note(&target, storage) {
@@ -11335,5 +11372,49 @@ mod large_mount_tests {
         // A path that is not there is reported as absent — not as an
         // unmeasurable mount, which would warn about nothing.
         assert_eq!(measure_mount_size("/nonexistent-wolfstack-test-path"), (0, "missing", 0));
+    }
+}
+
+#[cfg(test)]
+mod target_label_tests {
+    use super::*;
+
+    fn target(t: BackupTargetType, name: &str) -> BackupTarget {
+        BackupTarget { target_type: t, name: name.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_named_target_logs_its_name() {
+        assert_eq!(target_log_label(&target(BackupTargetType::Lxc, "100")), "100");
+        assert_eq!(target_log_label(&target(BackupTargetType::Docker, "web")), "web");
+    }
+
+    /// The config target carries no name by design, and the scheduled-run log
+    /// used to render it as `Backup  → PBS` — a blank subject on the last line
+    /// of every nightly run.
+    #[test]
+    fn the_config_target_is_never_blank() {
+        let label = target_log_label(&target(BackupTargetType::Config, ""));
+        assert!(!label.trim().is_empty());
+        assert_eq!(label, "WolfStack config");
+    }
+
+    #[test]
+    fn an_unnamed_system_path_falls_back_to_its_path() {
+        let mut t = target(BackupTargetType::SystemPath, "");
+        t.system_path = "/srv/data".to_string();
+        assert_eq!(target_log_label(&t), "/srv/data");
+        // Nothing to fall back to — still not blank.
+        let bare = target(BackupTargetType::SystemPath, "");
+        assert!(!target_log_label(&bare).trim().is_empty());
+    }
+
+    #[test]
+    fn no_target_type_ever_renders_blank() {
+        for t in [BackupTargetType::Docker, BackupTargetType::Lxc, BackupTargetType::Vm,
+                  BackupTargetType::Config, BackupTargetType::SystemPath] {
+            let label = target_log_label(&target(t.clone(), ""));
+            assert!(!label.trim().is_empty(), "{:?} rendered blank", t);
+        }
     }
 }

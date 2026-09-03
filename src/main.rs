@@ -3073,6 +3073,12 @@ async fn main() -> std::io::Result<()> {
             if let Err(e) = tokio::task::spawn_blocking(backup::sweep_frozen_orphans).await {
                 tracing::error!("backup::sweep_frozen_orphans panicked: {}", e);
             }
+            // A container left holding a `backup`/`snapshot` lock by a task
+            // that died is unoperable until the lock goes — same urgency as a
+            // frozen one, so it is also cleared immediately at boot.
+            if let Err(e) = tokio::task::spawn_blocking(containers::sweep_stale_guest_locks).await {
+                tracing::error!("containers::sweep_stale_guest_locks panicked: {}", e);
+            }
             tokio::time::sleep(Duration::from_secs(120)).await;
             loop {
                 if let Err(e) = tokio::task::spawn_blocking(backup::sweep_staging_orphans).await {
@@ -3080,6 +3086,9 @@ async fn main() -> std::io::Result<()> {
                 }
                 if let Err(e) = tokio::task::spawn_blocking(backup::sweep_frozen_orphans).await {
                     tracing::error!("backup::sweep_frozen_orphans panicked: {}", e);
+                }
+                if let Err(e) = tokio::task::spawn_blocking(containers::sweep_stale_guest_locks).await {
+                    tracing::error!("containers::sweep_stale_guest_locks panicked: {}", e);
                 }
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             }
